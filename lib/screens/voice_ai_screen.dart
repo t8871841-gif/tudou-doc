@@ -330,10 +330,11 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       _edgeVoice = edgeVoice;
       _ttsRate = rate;
       _ttsPitch = pitch;
-      if (voiceName == null || voiceName.isEmpty) {
+      final vn = voiceName;
+      if (vn == null || vn.isEmpty) {
         await _storage.delete(key: 'voice_ai_tts_voice');
       } else {
-        await _storage.write(key: 'voice_ai_tts_voice', value: voiceName);
+        await _storage.write(key: 'voice_ai_tts_voice', value: vn);
       }
       await _storage.write(key: 'voice_ai_tts_engine', value: engine);
       await _storage.write(key: 'voice_ai_edge_voice', value: edgeVoice);
