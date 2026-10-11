@@ -40,7 +40,7 @@ class NiHaishaApp extends StatelessWidget {
         return MaterialApp(
           title: '汉方唐鉴',
           debugShowCheckedModeBanner: false,
-          themeMode: ThemeMode.dark,
+          themeMode: settings.themeMode,
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
               seedColor: const Color(0xFF8B4513),
