@@ -75,6 +75,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   Color get _userBorder => _isDark ? const Color(0xFF8D7C43) : const Color(0xFFD4C49A);
   Color get _mutedText => _isDark ? Colors.white54 : Colors.black54;
   Color get _faintText => _isDark ? Colors.white38 : Colors.black38;
+  /// 金色文字在浅色下的可读替代（深金棕）
+  Color get _accentText => _isDark ? _gold : const Color(0xFF8B6914);
   String _recognized = '';
   String _offlineKnowledge = '';
   String _baseUrl = 'https://apihub.agnes-ai.com/v1';
@@ -213,7 +215,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
           final voiceValid = voiceName != null && _ttsVoices.any((v) => v['name'] == voiceName);
           return AlertDialog(
             backgroundColor: _cardBg,
-            title: const Text('模型服务设置', style: TextStyle(color: _gold)),
+            title: Text('模型服务设置', style: TextStyle(color: _accentText)),
             content: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 TextField(controller: base, decoration: const InputDecoration(labelText: 'API Base URL', hintText: 'https://apihub.agnes-ai.com/v1')),
@@ -224,7 +226,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
                 const Divider(height: 28),
                 const Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('语音播报设置', style: TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 15)),
+                  child: Text('语音播报设置', style: TextStyle(color: _accentText, fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
@@ -499,7 +501,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       appBar: AppBar(
         title: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('汉方唐鉴 · 语音 AI', style: TextStyle(fontWeight: FontWeight.w700)),
-          Text('典籍检索 · 语音问答', style: TextStyle(fontSize: 11, color: Color(0xFFC9B77A))),
+          Text('典籍检索 · 语音问答', style: TextStyle(fontSize: 11, color: _accentText)),
         ]),
         actions: [
           IconButton(tooltip: _speakReplies ? '关闭语音回复' : '开启语音回复', onPressed: () => setState(() => _speakReplies = !_speakReplies), icon: Icon(_speakReplies ? Icons.volume_up : Icons.volume_off)),
@@ -511,14 +513,14 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(color: _cardBg, border: Border(bottom: BorderSide(color: _border))),
-          child: Row(children: [const Icon(Icons.auto_awesome, color: _gold, size: 18), const SizedBox(width: 8), Expanded(child: Text(_baseUrl, style: const TextStyle(color: Color(0xFFC9B77A), fontSize: 12), overflow: TextOverflow.ellipsis)), Text(_offlineKnowledge.isEmpty ? '索引加载中' : '离线典籍已就绪', style: const TextStyle(color: _gold, fontSize: 11))]),
+          child: Row(children: [Icon(Icons.auto_awesome, color: _accentText, size: 18), const SizedBox(width: 8), Expanded(child: Text(_baseUrl, style: TextStyle(color: _accentText, fontSize: 12), overflow: TextOverflow.ellipsis)), Text(_offlineKnowledge.isEmpty ? '索引加载中' : '离线典籍已就绪', style: TextStyle(color: _accentText, fontSize: 11))]),
         ),
         Expanded(child: ListView.builder(
           controller: _scroll,
           padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
           itemCount: _messages.length + (_busy ? 1 : 0),
           itemBuilder: (context, index) {
-            if (_busy && index == _messages.length) return const Align(alignment: Alignment.centerLeft, child: Padding(padding: EdgeInsets.all(12), child: Row(mainAxisSize: MainAxisSize.min, children: [SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: _gold)), SizedBox(width: 10), Text('正在整理典籍与生成回答…')])));
+            if (_busy && index == _messages.length) return Align(alignment: Alignment.centerLeft, child: Padding(padding: const EdgeInsets.all(12), child: Row(mainAxisSize: MainAxisSize.min, children: [SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: _accentText)), const SizedBox(width: 10), const Text('正在整理典籍与生成回答…')])));
             final message = _messages[index];
             final user = message.role == 'user';
             return Align(alignment: user ? Alignment.centerRight : Alignment.centerLeft, child: Container(
@@ -526,9 +528,9 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
               margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(13),
               decoration: BoxDecoration(color: user ? _userBubbleBg : _cardBg, borderRadius: BorderRadius.circular(14), border: Border.all(color: user ? _userBorder : _border)),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(user ? '你' : '汉方唐鉴', style: const TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 12)),
+                Text(user ? '你' : '汉方唐鉴', style: TextStyle(color: _accentText, fontWeight: FontWeight.bold, fontSize: 12)),
                 const SizedBox(height: 6), SelectableText(message.text, style: const TextStyle(height: 1.5)),
-                if (!user) Align(alignment: Alignment.centerRight, child: IconButton(visualDensity: VisualDensity.compact, tooltip: '朗读回答', onPressed: () => _speak(message.text), icon: const Icon(Icons.volume_up_outlined, size: 19, color: _gold))),
+                if (!user) Align(alignment: Alignment.centerRight, child: IconButton(visualDensity: VisualDensity.compact, tooltip: '朗读回答', onPressed: () => _speak(message.text), icon: Icon(Icons.volume_up_outlined, size: 19, color: _accentText))),
               ]),
             ));
           },
@@ -537,9 +539,9 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
           decoration: BoxDecoration(color: _barBg, border: Border(top: BorderSide(color: _border))),
           child: Column(children: [
-            if (_listening) Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [const Icon(Icons.graphic_eq, color: _gold), const SizedBox(width: 8), Expanded(child: Text(_recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized, style: const TextStyle(color: _gold))), Text('点击麦克风结束', style: TextStyle(fontSize: 11, color: _mutedText))])),
+            if (_listening) Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [Icon(Icons.graphic_eq, color: _accentText), const SizedBox(width: 8), Expanded(child: Text(_recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized, style: TextStyle(color: _accentText))), Text('点击麦克风结束', style: TextStyle(fontSize: 11, color: _mutedText))])),
             Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              IconButton.filled(onPressed: _busy ? null : _toggleListening, style: IconButton.styleFrom(backgroundColor: _listening ? const Color(0xFF7B2424) : _userBubbleBg, foregroundColor: _gold), icon: Icon(_listening ? Icons.stop : Icons.mic, size: 26)),
+              IconButton.filled(onPressed: _busy ? null : _toggleListening, style: IconButton.styleFrom(backgroundColor: _listening ? const Color(0xFF7B2424) : _userBubbleBg, foregroundColor: _accentText), icon: Icon(_listening ? Icons.stop : Icons.mic, size: 26)),
               const SizedBox(width: 8),
               Expanded(child: TextField(controller: _input, minLines: 1, maxLines: 4, textInputAction: TextInputAction.send, onSubmitted: (_) => _send(), decoration: InputDecoration(hintText: _listening ? '正在识别语音…' : '输入问题，或点击麦克风说话', filled: true, fillColor: _cardBg, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: _border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: _border)), contentPadding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12)))),
               const SizedBox(width: 8),
