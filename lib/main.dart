@@ -47,7 +47,8 @@ class NiHaishaApp extends StatelessWidget {
               brightness: Brightness.light,
             ),
             useMaterial3: true,
-            scaffoldBackgroundColor: hasCustomBg ? Colors.transparent : null,
+            scaffoldBackgroundColor:
+                hasCustomBg ? Colors.transparent : const Color(0xFFF1F3F6),
             // ⛔ 关闭 Zoom 转场快照：快照机制会在设备动画缩放异常/手势取消时
             // 把进场页冻结在半透明帧（子午流注屏「打开模糊一大片」根因）。
             pageTransitionsTheme: const PageTransitionsTheme(
