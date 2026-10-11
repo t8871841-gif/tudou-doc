@@ -82,14 +82,14 @@ class EdgeTtsService {
           'X-Timestamp:${date}Z\r\n'
           'Path:ssml\r\n\r\n'
           '${_ssml(text, voice, rate, pitch)}');
-      final audio = BytesBuilder();
+      // 先收齐所有二进制负载，结束后再统一解析，避免音频头被拆到两个包导致越界
+      final binAll = BytesBuilder();
       var gotAudio = false;
       while (true) {
         final (opcode, payload) = await conn.readFrame();
         if (opcode == 0x2) {
-          final idx = _indexOf(payload, utf8.encode('Path:audio\r\n'));
-          if (idx >= 0) {
-            audio.add(payload.sublist(idx + 13));
+          if (payload.isNotEmpty) {
+            binAll.add(payload);
             gotAudio = true;
           }
         } else if (opcode == 0x1) {
@@ -99,11 +99,41 @@ class EdgeTtsService {
           break;
         }
       }
-      if (!gotAudio) throw StateError('Edge 语音未返回音频');
-      return audio.toBytes();
+      final audio = _extractAudio(binAll.toBytes());
+      if (!gotAudio || audio.isEmpty) throw StateError('Edge 语音未返回音频');
+      return audio;
     } finally {
       conn.close();
     }
+  }
+
+  /// 从累积的二进制负载中提取音频：按 Path:audio 头切分，取每段头之后到下一个头之前的数据
+  static Uint8List _extractAudio(Uint8List data) {
+    final hdr = utf8.encode('Path:audio\r\n');
+    final out = BytesBuilder();
+    var pos = 0;
+    while (true) {
+      final h = _indexOfFrom(data, hdr, pos);
+      if (h < 0) break;
+      final segStart = h + hdr.length;
+      final nextH = _indexOfFrom(data, hdr, segStart);
+      final segEnd = nextH >= 0 ? nextH : data.length;
+      if (segEnd > segStart) out.add(data.sublist(segStart, segEnd));
+      if (nextH < 0) break;
+      pos = segStart;
+    }
+    return out.toBytes();
+  }
+
+  static int _indexOfFrom(Uint8List haystack, List<int> needle, int from) {
+    outer:
+    for (var i = from; i <= haystack.length - needle.length; i++) {
+      for (var j = 0; j < needle.length; j++) {
+        if (haystack[i + j] != needle[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
   }
 
   static String _ssml(String text, String voice, double rate, double pitch) {

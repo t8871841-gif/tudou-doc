@@ -129,8 +129,9 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
         );
         await _player.play(BytesSource(mp3));
         return;
-      } catch (_) {
-        _notice('Edge 语音连接失败，已用系统语音播报');
+      } catch (e) {
+        final msg = e.toString();
+        _notice('Edge 语音失败，已用系统语音播报（${msg.length > 80 ? '${msg.substring(0, 80)}…' : msg}）');
       }
     }
     await _tts.speak(clean);
