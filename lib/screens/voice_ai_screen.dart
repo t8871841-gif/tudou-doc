@@ -232,7 +232,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       } else {
         final uri = Uri.parse('$_baseUrl/chat/completions');
         final history = _messages.take(_messages.length - 1).toList().reversed.take(8).toList().reversed.map((m) => {'role': m.role, 'content': m.text}).toList();
-        final system = '你是汉方唐鉴的中医典籍学习助手。以中文回答，优先区分经典原文、传统理论与现代医学证据，不将传统理论包装成已证实疗效。不得仅凭聊天作出确定诊断，不建议用户自行停用处方药。遇到急症提醒立即就医。以下是本地知识库检索片段，若无关请明确说明，不要编造引用：\n${references.join('\n\n---\n\n')}';
+        final system = '你是汉方唐鉴的中医典籍学习助手。以中文回答，回答使用纯文本，不要使用 Markdown 格式符号（如 **、#）。优先区分经典原文、传统理论与现代医学证据，不将传统理论包装成已证实疗效。不得仅凭聊天作出确定诊断，不建议用户自行停用处方药。遇到急症提醒立即就医。以下是本地知识库检索片段，若无关请明确说明，不要编造引用：\n${references.join('\n\n---\n\n')}';
         final response = await http.post(
           uri,
           headers: {'Authorization': 'Bearer $key', 'Content-Type': 'application/json'},
@@ -246,7 +246,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
           throw Exception('服务返回 HTTP ${response.statusCode}：${_short(response.body, 240)}');
         }
         final data = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-        answer = (((data['choices'] as List).first as Map)['message'] as Map)['content']?.toString().trim() ?? '模型未返回文字内容。';
+        answer = _plainText((((data['choices'] as List).first as Map)['message'] as Map)['content']?.toString().trim() ?? '模型未返回文字内容。');
       }
       if (!mounted) return;
       setState(() => _messages.add(_VoiceMessage(role: 'assistant', text: answer)));
@@ -263,6 +263,12 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   }
 
   String _short(String value, int max) => value.length <= max ? value : '${value.substring(0, max)}…';
+
+  /// 去掉模型回答中的 Markdown 格式符号（界面为纯文本显示）
+  String _plainText(String value) => value
+      .replaceAll('**', '')
+      .replaceAll(RegExp(r'^#{1,6}\s?', multiLine: true), '')
+      .replaceAll(RegExp(r'^[-*]\s+', multiLine: true), '· ');
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
