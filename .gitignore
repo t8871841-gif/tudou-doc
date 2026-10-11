@@ -1,0 +1,84 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Local APK builds and temp files
+*.apk
+*_check*.txt
+*_result*.txt
+*_unmatched*.txt
+*_names_list*.txt
+
+# Local temp / scratch / backup artifacts (do not commit)
+_writetest.txt
+*.bak
+*.new
+android/build/
+
+# CloudStudio deploy output (index.html + apk) and build log
+deploy_v*/
+build_apk*.log
+
+# AreaCity 行政区划数据临时目录（含 166MB 原始 ok_geo.csv，不入库）
+.areacity_tmp/
+
+# WorkBuddy / Flutter 工具产物（非 app 代码，不入库）
+.workbuddy/
+.flutter_tool_state
+
+# 伤寒论/金匮要略 拆分用源稿与旧章文件备份（工作文件，不入库）
+# 交付物是 assets/shanghan、assets/jingui 下的条文资源
+shanghan_src_backup/
+jingui_src_backup/
+docs/source/
+
+# codegraph 语义索引（本地工具产物）
+.codegraph/
+
+# 应用商店上架素材包（本地工作文件）
+apkpure_submission/
+
+# Python 字节码缓存
+__pycache__/

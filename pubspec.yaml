@@ -1,0 +1,69 @@
+name: nihaisha_app
+description: "汉唐中医 - 倪海厦六经辨证中医诊断助手"
+publish_to: 'none'
+version: 1.12.0+4100
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_markdown: ^0.7.0
+  sqflite: ^2.4.2
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  share_plus: ^10.1.4
+  http: ^1.2.0
+  package_info_plus: ^8.0.0
+  ziwei_core: ^0.13.0
+  sxwnl_spa_dart: ^0.18.5
+  open_filex: ^4.7.0
+  lucide_icons: ^0.257.0
+  bazi_core: ^0.6.7
+  crypto: ^3.0.0
+  flutter_secure_storage: ^9.2.4
+  speech_to_text: ^7.0.0
+  flutter_tts: ^4.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  mocktail: ^1.0.4
+  sqflite_common_ffi: ^2.3.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/SKILL.md
+    - assets/data/formulas.json
+    - assets/data/formula_oral_hints.json
+    - assets/data/herbs.json
+    - assets/data/acupuncture.json
+    - assets/data/acupoints.json
+    - assets/data/changelog.json
+    - assets/data/prescriptions.json
+    - assets/data/ziwei_rules.json
+    - assets/data/china_cities.json
+    - assets/data/world_cities.json
+    - assets/data/chenggu_bone_weight.json
+    - assets/data/wudou_shousheng_debt.json
+    - assets/data/luku_shousheng_debt.json
+    - assets/data/huangdi_siji_ge.json
+    - assets/data/solar_term_knowledge.json
+    - assets/images/huangdi_siji_diagram.jpg
+    - assets/images/gua/
+    - assets/ziwei/
+    - assets/yijing/
+    - assets/yijing_minggua/
+    - assets/critical_illness/
+    - assets/medical_cases/
+    - assets/neijing/
+    - assets/shanghan/
+    - assets/jingui/
+    - assets/design/
+    - assets/offline_knowledge/

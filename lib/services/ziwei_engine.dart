@@ -1,0 +1,887 @@
+import 'package:ziwei_core/ziwei_core.dart';
+
+const List<String> _zTiangan = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+const List<String> _zDizhi = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
+String _lunarYearGanZhi(int year) {
+  var i = (year - 4) % 60;
+  if (i < 0) i += 60;
+  return _zTiangan[i % 10] + _zDizhi[i % 12];
+}
+
+/// 紫微斗数排盘引擎封装层。
+///
+/// 把 [ziwei_core] 的底层对象（[ZiWeiPlate] / [Palace] / [Star]）抽取成与 UI 无关、
+/// 纯中文标注的 app 数据模型，供排盘界面直接使用。
+///
+/// 引擎说明：纯 Dart、离线、无 GetX 依赖（与本项目 MaterialApp 架构兼容）。
+/// 排盘结果属“民俗文化参考”，非医疗诊断。
+
+// ---------------------------------------------------------------------------
+// 星曜 key → 中文名 映射表（ziwei_core 仅以英文 key 标识星曜，不提供中文标签）
+// 覆盖默认规则集内的全部主星 / 辅星 / 煞星 / 杂曜 / 长生十二神。
+// ---------------------------------------------------------------------------
+const Map<String, String> _starLabelMap = {
+  // 十四主星
+  'ziwei': '紫微',
+  'tianji': '天机',
+  'taiyang': '太阳',
+  'wuqu': '武曲',
+  'tiantong': '天同',
+  'lianzhen': '廉贞',
+  'tianfu': '天府',
+  'taiyin': '太阴',
+  'tanlang': '贪狼',
+  'jumen': '巨门',
+  'tianxiang': '天相',
+  'tianliang': '天梁',
+  'qisha': '七杀',
+  'pojun': '破军',
+  // 六吉星
+  'zuofu': '左辅',
+  'youbi': '右弼',
+  'wenchang': '文昌',
+  'wenqu': '文曲',
+  'tiankui': '天魁',
+  'tianyue': '天钺',
+  // 六煞星
+  'qingyang': '擎羊',
+  'tuoluo': '陀罗',
+  'huoxing': '火星',
+  'lingxing': '铃星',
+  'dikong': '地空',
+  'dijie': '地劫',
+  // 其他辅曜 / 杂曜
+  'lucun': '禄存',
+  'tianma': '天马',
+  'hongluan': '红鸾',
+  'tianxi': '天喜',
+  'tianyao': '天姚',
+  'tianxing': '天刑',
+  'xianchi': '咸池',
+  'santai': '三台',
+  'bazuo': '八座',
+  'enguang': '恩光',
+  'tiangui': '天贵',
+  'taifu': '台辅',
+  'fenggao': '封诰',
+  'tiancai': '天才',
+  'tianshou': '天寿',
+  'longchi': '龙池',
+  'fengge': '凤阁',
+  'guchen': '孤辰',
+  'guasu': '寡宿',
+  'xunkong': '旬空',
+  'fuxun': '副旬',
+  'jiekong': '劫空',
+  'fujie': '副劫',
+  'tiankong': '天空',
+  'tianshang': '天伤',
+  'tianshi': '天使',
+  'tianku': '天哭',
+  'tianxu': '天虚',
+  'tianguan': '天官',
+  'tianfu_minor': '天福',
+  'yinsha': '阴煞',
+  'tianwu': '天巫',
+  'tianyue_minor': '天月',
+  'posui': '破碎',
+  'feilian': '蜚廉',
+  'tianchu': '天厨',
+  'jieshen': '解神',
+  'nianjie': '年解',
+  'tiande': '天德',
+  'yuede': '月德',
+  'dahao': '大耗',
+  // 长生十二神
+  'changsheng': '长生',
+  'muyu': '沐浴',
+  'guandai': '冠带',
+  'linguan': '临官',
+  'diwang': '帝旺',
+  'shuai': '衰',
+  'bing': '病',
+  'si': '死',
+  'mu': '墓',
+  'jue': '绝',
+  'tai': '胎',
+  'yang': '养',
+  // 流曜（动态盘使用，原局不出现）
+  'flow_lucun': '流禄存',
+  'flow_tiankui': '流天魁',
+  'flow_tianyue': '流天钺',
+  'flow_wenchang': '流文昌',
+  'flow_wenqu': '流文曲',
+  'flow_qingyang': '流擎羊',
+  'flow_tuoluo': '流陀罗',
+  'flow_tianma': '流天马',
+  // 博士十二神（随禄存，顺时针）
+  'boshi_boshi12': '博士',
+  'lishi_boshi12': '力士',
+  'qinglong_boshi12': '青龙',
+  'xiaohao_boshi12': '小耗',
+  'jiangjun_boshi12': '将军',
+  'zoushu_boshi12': '奏书',
+  'feilian_boshi12': '飞廉',
+  'xishen_boshi12': '喜神',
+  'bingfu_boshi12': '病符',
+  'dahao_boshi12': '大耗',
+  'fubing_boshi12': '伏兵',
+  'guanfu_boshi12': '官府',
+  // 岁建十二神（随太岁）
+  'suijian_suijian12': '岁建',
+  'huiqi_suijian12': '晦气',
+  'sangmen_suijian12': '丧门',
+  'guansuo_suijian12': '贯索',
+  'guanfu_suijian12': '官符',
+  'xiaohao_suijian12': '小耗',
+  'suipo_suijian12': '岁破',
+  'dahao_suijian12': '大耗',
+  'longde_suijian12': '龙德',
+  'baihu_suijian12': '白虎',
+  'tiande_suijian12': '天德',
+  'diaoke_suijian12': '吊客',
+  'bingfu_suijian12': '病符',
+  // 将前十二神（随年支三合）
+  'jiangxing_jiangqian12': '将星',
+  'panan_jiangqian12': '攀鞍',
+  'suiyi_jiangqian12': '岁驿',
+  'wangshen_jiangqian12': '亡神',
+  'huagai_jiangqian12': '华盖',
+  'jiesha_jiangqian12': '劫煞',
+  'zaisha_jiangqian12': '灾煞',
+  'tiansha_jiangqian12': '天煞',
+  'zhibei_jiangqian12': '指背',
+  'xianchi_jiangqian12': '咸池',
+  'yuesha_jiangqian12': '月煞',
+  'xishen_jiangqian12': '息神',
+};
+
+String starLabel(String key) => _starLabelMap[key] ?? key;
+
+/// 亮度数值 → 中文（6 庙 / 5 旺 / 4 得 / 3 利 / 2 平 / 1 不 / 0 陷 / -1 无）。
+String? brightnessLabel(int index) {
+  switch (index) {
+    case 6:
+      return '庙';
+    case 5:
+      return '旺';
+    case 4:
+      return '得';
+    case 3:
+      return '利';
+    case 2:
+      return '平';
+    case 1:
+      return '不';
+    case 0:
+      return '陷';
+    default:
+      return null;
+  }
+}
+
+/// 晚子时规则：将「用户录入的实际出生时辰（年/月/日/时/分）」解析为
+/// 传给 [calculateZiweiChart] 的公历 [DateTime]。
+///
+/// 紫微斗数对 23:00–23:59 的「晚子时」归属存在流派分歧：
+/// - 一派主张「晚子时归次日子时」（日柱顺延一日）；
+/// - 一派主张「当日早子时」（日柱不顺延）。
+/// 为尊重用户选择，本函数增加 [enabled] 开关：
+/// - [enabled] = true：晚子时（23:00–23:59）滚动到次日 00:00 子时
+///   （排盘以次日子时论命，日柱归入次日）。为兼容引擎 noSplit 模式
+///   （hour>=23 时会再 +1 天导致跨两日），此处把时辰固化为次日 00:00–00:59
+///   的早子时，等价得到「次日日柱 + 子时」，与晚子时论法一致。
+/// - [enabled] = false（默认）：晚子时按「当日早子时」处理——固化到
+///   当日 00:00–00:59 子时，日柱不顺延。永不向引擎传入 hour==23，
+///   避免引擎 noSplit 模式二次滚动造成跨两日。
+/// - 实际时间 00:00–00:59（早子时）：子时，保持当日（两种口径一致）。
+/// - 其余时刻：按录入原样。
+///
+/// 真太阳时仍由 [calculateZiweiChart] 在传入 DateTime 之上叠加，不受影响。
+DateTime resolveBirthSolar({
+  required int year,
+  required int month,
+  required int day,
+  required int hour,
+  required int minute,
+  bool enabled = false,
+}) {
+  if (hour == 23) {
+    if (enabled) {
+      final next = DateTime(year, month, day).add(const Duration(days: 1));
+      return DateTime(next.year, next.month, next.day, 0, minute);
+    }
+    // 默认关闭：当晚子时按「当日早子时」处理，日柱不顺延。
+    return DateTime(year, month, day, 0, minute);
+  }
+  return DateTime(year, month, day, hour, minute);
+}
+
+/// 四化类型 → 中文后缀。
+String sihuaLabel(SiHuaType type) {
+  switch (type) {
+    case SiHuaType.lu:
+      return '禄';
+    case SiHuaType.quan:
+      return '权';
+    case SiHuaType.ke:
+      return '科';
+    case SiHuaType.ji:
+      return '忌';
+  }
+}
+
+/// 单颗星曜的展示模型。
+class ZiweiStar {
+  final String key;
+  final String label;
+  final StarType type;
+  final String? brightness;
+  final SiHuaType? sihua;
+
+  ZiweiStar({
+    required this.key,
+    required this.label,
+    required this.type,
+    this.brightness,
+    this.sihua,
+  });
+
+  bool get isMajor => type == StarType.major;
+  bool get isLucky => type == StarType.lucky;
+  bool get isBad => type == StarType.bad;
+  bool get isMinor =>
+      type == StarType.minor || type == StarType.other;
+
+  String get sihuaText => sihua != null ? sihuaLabel(sihua!) : '';
+}
+
+/// 单宫的展示模型。
+class ZiweiPalace {
+  final int index; // 0-11，固定地支物理索引（0=子 … 11=亥）
+  final PalaceRole role;
+  final DiZhi branch;
+  final TianGan? stem;
+  final String ganzhiLabel;
+  final List<ZiweiStar> stars;
+  final bool isLife; // 命宫
+  final bool isBody; // 身宫
+
+  ZiweiPalace({
+    required this.index,
+    required this.role,
+    required this.branch,
+    required this.stem,
+    required this.ganzhiLabel,
+    required this.stars,
+    required this.isLife,
+    required this.isBody,
+  });
+
+  String get roleLabel => role.debugLabel;
+  String get branchLabel => branch.label;
+  String get stemLabel => stem?.label ?? '';
+
+  List<ZiweiStar> get majors => stars.where((s) => s.isMajor).toList();
+  List<ZiweiStar> get luckies => stars.where((s) => s.isLucky).toList();
+  List<ZiweiStar> get bads => stars.where((s) => s.isBad).toList();
+  List<ZiweiStar> get minors => stars.where((s) => s.isMinor).toList();
+}
+
+/// 生年四化条目。
+class ZiweiSihua {
+  final SiHuaType type;
+  final String starLabelName;
+  final String starKey;
+
+  ZiweiSihua({
+    required this.type,
+    required this.starLabelName,
+    required this.starKey,
+  });
+
+  String get typeLabel => sihuaLabel(type);
+}
+
+/// 大限（十年运）条目。
+class ZiweiDecade {
+  final int index; // 1-based：第几大限
+  final int startTime; // 起始虚岁
+  final int endTime; // 结束虚岁
+  final String roleLabel; // 大限所在宫位名
+  final String ganzhiLabel; // 大限宫位干支
+
+  ZiweiDecade({
+    required this.index,
+    required this.startTime,
+    required this.endTime,
+    required this.roleLabel,
+    required this.ganzhiLabel,
+  });
+
+  String get rangeLabel => '$startTime–$endTime 岁';
+}
+
+/// 完整命盘展示模型。
+class ZiweiChart {
+  final String baziYear;
+  final String baziMonth;
+  final String baziDay;
+  final String baziTime;
+  final String lunarText;
+  final int lunarMonth; // 农历（物理）月 1-12
+  final bool lunarIsLeap; // 出生时农历月是否为闰月
+  final String genderLabel;
+  final String elementBureauLabel;
+  final String? mingZhuLabel;
+  final String? shenZhuLabel;
+  final int originMingIndex;
+  final int bodyPalaceIndex;
+  final List<ZiweiPalace> palaces; // 12 宫，按物理地支索引 0-11 排序
+  final List<ZiweiSihua> sihua; // 生年四化（禄/权/科/忌 各一）
+  final List<ZiweiDecade> decades; // 十二大限
+  final ZiWeiPlate basePlate; // 底层命盘（供流月/流日推演复用，零额外依赖）
+
+  ZiweiChart({
+    required this.baziYear,
+    required this.baziMonth,
+    required this.baziDay,
+    required this.baziTime,
+    required this.lunarText,
+    required this.lunarMonth,
+    required this.lunarIsLeap,
+    required this.genderLabel,
+    required this.elementBureauLabel,
+    required this.mingZhuLabel,
+    required this.shenZhuLabel,
+    required this.originMingIndex,
+    required this.bodyPalaceIndex,
+    required this.palaces,
+    required this.sihua,
+    required this.decades,
+    required this.basePlate,
+  });
+
+  String get baziFull =>
+      '$baziYear $baziMonth $baziDay $baziTime';
+
+  /// 出生农历月显示：「闰X月」或「X月」。仅用于展示，不改变排盘正确性。
+  String get lunarMonthDisplay =>
+      lunarIsLeap ? '闰$lunarMonth月' : '$lunarMonth月';
+
+  ZiweiChart copyWith({
+    String? baziYear,
+    String? baziMonth,
+    String? baziDay,
+    String? baziTime,
+    String? lunarText,
+    int? lunarMonth,
+    bool? lunarIsLeap,
+    String? genderLabel,
+    String? elementBureauLabel,
+    String? mingZhuLabel,
+    String? shenZhuLabel,
+    int? originMingIndex,
+    int? bodyPalaceIndex,
+    List<ZiweiPalace>? palaces,
+    List<ZiweiSihua>? sihua,
+    List<ZiweiDecade>? decades,
+    ZiWeiPlate? basePlate,
+  }) {
+    return ZiweiChart(
+      baziYear: baziYear ?? this.baziYear,
+      baziMonth: baziMonth ?? this.baziMonth,
+      baziDay: baziDay ?? this.baziDay,
+      baziTime: baziTime ?? this.baziTime,
+      lunarText: lunarText ?? this.lunarText,
+      lunarMonth: lunarMonth ?? this.lunarMonth,
+      lunarIsLeap: lunarIsLeap ?? this.lunarIsLeap,
+      genderLabel: genderLabel ?? this.genderLabel,
+      elementBureauLabel: elementBureauLabel ?? this.elementBureauLabel,
+      mingZhuLabel: mingZhuLabel ?? this.mingZhuLabel,
+      shenZhuLabel: shenZhuLabel ?? this.shenZhuLabel,
+      originMingIndex: originMingIndex ?? this.originMingIndex,
+      bodyPalaceIndex: bodyPalaceIndex ?? this.bodyPalaceIndex,
+      palaces: palaces ?? this.palaces,
+      sihua: sihua ?? this.sihua,
+      decades: decades ?? this.decades,
+      basePlate: basePlate ?? this.basePlate,
+    );
+  }
+}
+
+/// 计算紫微斗数命盘。
+///
+/// - [solar] 公历出生时间（仅需年月日时，秒可忽略）
+/// - [gender] 性别（影响大限顺逆）
+/// - [location] 出生地经纬度；为 `null` 时引擎默认使用 `Location(120, 30)`。
+/// - [useTrueSolarTime] 是否使用真太阳时（默认 `true`，与文墨天机等专业软件
+///   一致）；设为 `false` 则使用平太阳时，与 iztro / MingLi-Bench 参考集一致。
+///
+/// 返回与 UI 解耦的中文标注命盘模型。
+ZiweiChart calculateZiweiChart({
+  required DateTime solar,
+  required Gender gender,
+  Location? location,
+  bool useTrueSolarTime = true,
+  bool ratHourMode = false,
+}) {
+  // 紫微盘统一以「todayGan（子时归自然日）」为底层排盘基准：
+  // 晚子时（校正后 23:00–24:00）日柱取校正当日、时柱再覆盖为次日子时；
+  // 其余（含早子时 00:00–01:00）即 todayGan，日柱取校正当日、不顺延次日。
+  // 不能用规则集默认（默认是 noSplit），否则 23–24 点会被整体顺延到次日，盘式全错。
+  // 必须自建规则集并把同一 calendarOptions 实例交给 date 与 calculate，
+  // 否则 ZiweiEngine 会报 options 与 ruleset.calendarOptions 不一致。
+  final baseRuleset = ConfigLoader.getDefault();
+  final ruleset = ZiweiRuleset(
+    stars: baseRuleset.stars,
+    flowDefinitions: baseRuleset.flowDefinitions,
+    brightnessLabels: baseRuleset.brightnessLabels,
+    siHuaRules: baseRuleset.siHuaRules,
+    calendarOptions: CalendarOptions(
+      ratHourMode: RatHourMode.todayGan,
+      leapRule: baseRuleset.calendarOptions.leapRule,
+      wuHuDunBasedOn: baseRuleset.calendarOptions.wuHuDunBasedOn,
+      siHuaBasedOn: baseRuleset.calendarOptions.siHuaBasedOn,
+      childhoodRule: baseRuleset.calendarOptions.childhoodRule,
+      flowLimitBasedOn: baseRuleset.calendarOptions.flowLimitBasedOn,
+      enableHistorical: baseRuleset.calendarOptions.enableHistorical,
+    ),
+    mingZhuRule: baseRuleset.mingZhuRule,
+    shenZhuRule: baseRuleset.shenZhuRule,
+  );
+  // 开早晚子时：日柱 / 农历一律锚定「校正后（真太阳时）当日」（todayGan 口径）：
+  // 晚子时（校正后 23:00–24:00）仅把时柱覆盖为次日子时；
+  // 早子时（00:00–01:00）不特殊处理（本就属当日之子时），与关闭开关且无跨日校正时一致。
+  // 全程使用规则集默认（todayGan），既符合紫微流派口径，又避免 date.options 与
+  // ruleset.calendarOptions 不一致报错；早晚子时的差异仅由「时柱覆盖」实现，不另造 options。
+  // 校正逻辑执行位置（约束 A/B）：原始 solar 只读，永远不把偏移后的日期直接喂内核。
+  // 内核统一以「原始 solar + todayGan 规则集」排盘，得到基础盘（命宫 / 十二宫 /
+  // 农历均对应真实公历输入）；晚子时的时柱在下方通过 copyWith 覆盖，不污染其它派生字段。
+  // 不开早晚子时（子时归自然日）：真太阳时照常校正；但**仅当校正后落在子时**
+  // （≥23 或 <1）时，该子时归「出生时钟日（自然日）」——整盘（含命宫）以出生日排。
+  // 校正后为非子时（如 22:xx 亥时）则仍按校正后当日，与开一致（见 bazi_service 同口径）。
+  bool snapBackToBirthDay = false;
+  if (!ratHourMode && useTrueSolarTime) {
+    final probe = ZiweiDate.fromSolar(
+      AstroDateTime(solar.year, solar.month, solar.day, solar.hour, solar.minute),
+      gender: gender,
+      options: ruleset.calendarOptions,
+      location: location,
+      useTrueSolarTime: true,
+    );
+    final pv = probe.trueSolarTime;
+    if (pv != null && (pv.hour >= 23 || pv.hour < 1)) snapBackToBirthDay = true;
+  }
+  final bool baseUseTst = snapBackToBirthDay ? false : useTrueSolarTime;
+  final date = ZiweiDate.fromSolar(
+    AstroDateTime(solar.year, solar.month, solar.day, solar.hour, solar.minute),
+    gender: gender,
+    options: ruleset.calendarOptions,
+    location: location,
+    useTrueSolarTime: baseUseTst,
+  );
+  final plate = ZiweiEngine.calculate(date, ruleset);
+
+  // 十二宫（按物理地支索引 0-11）
+  final List<ZiweiPalace> palaces = [];
+  for (int i = 0; i < 12; i++) {
+    final p = plate.palaces[i];
+    final role = plate.getRole(ZiweiScope.origin, i);
+
+    final List<ZiweiStar> stars = [];
+    p.stars.forEach((type, list) {
+      for (final s in list) {
+        String? brightness;
+        SiHuaType? sihua;
+        if (s is StaticStar) {
+          brightness = brightnessLabel(s.getBrightness(p.branch));
+          sihua = s.siHuaBuff[ZiweiScope.origin];
+        }
+        stars.add(
+          ZiweiStar(
+            key: s.key,
+            label: starLabel(s.key),
+            type: type,
+            brightness: brightness,
+            sihua: sihua,
+          ),
+        );
+      }
+    });
+    // 宫内排序：主星 → 吉 → 煞 → 杂
+    stars.sort((a, b) => _starTypePriority(a.type)
+        .compareTo(_starTypePriority(b.type)));
+
+    palaces.add(
+      ZiweiPalace(
+        index: i,
+        role: role,
+        branch: p.branch,
+        stem: p.stem,
+        ganzhiLabel: p.stem != null
+            ? '${p.stem!.label}${p.branch.label}'
+            : p.branch.label,
+        stars: stars,
+        isLife: i == plate.originMingIndex,
+        isBody: i == plate.bodyPalaceIndex,
+      ),
+    );
+  }
+
+  // 生年四化
+  final List<ZiweiSihua> sihuaList = [];
+  for (final palace in palaces) {
+    for (final star in palace.stars) {
+      if (star.sihua != null) {
+        sihuaList.add(
+          ZiweiSihua(
+            type: star.sihua!,
+            starLabelName: star.label,
+            starKey: star.key,
+          ),
+        );
+      }
+    }
+  }
+
+  // 十二大限
+  final List<ZiweiDecade> decades = [];
+  for (int d = 1; d <= 12; d++) {
+    final dec = Decade.fromIndex(d, plate);
+    decades.add(
+      ZiweiDecade(
+        index: d,
+        startTime: dec.startTime,
+        endTime: dec.endTime,
+        roleLabel: dec.role.debugLabel,
+        ganzhiLabel: '${dec.ganzhi.gan.label}${dec.ganzhi.zhi.label}',
+      ),
+    );
+  }
+
+  // 八字
+  final bz = date.bazi;
+  final baziYear = '${bz.year.gan.label}${bz.year.zhi.label}';
+  final baziMonth = '${bz.month.gan.label}${bz.month.zhi.label}';
+  final baziDay = '${bz.day.gan.label}${bz.day.zhi.label}';
+  final baziTime = '${bz.time.gan.label}${bz.time.zhi.label}';
+
+  // 出生农历基准日 = 校正后（真太阳时）当日；若未开真太阳时或已回拨出生日（子时归自然日）
+  // 则取出生日。均按「日历日正午」取，与八字屏 / 关煞屏同口径（见 bazi_service）。
+  final zTst = date.trueSolarTime;
+  final bool viaTst = baseUseTst && zTst != null;
+  final int lunarY = viaTst ? zTst.year : solar.year;
+  final int lunarM = viaTst ? zTst.month : solar.month;
+  final int lunarD = viaTst ? zTst.day : solar.day;
+  final lunar = LunarDate.fromSolar(AstroDateTime(lunarY, lunarM, lunarD, 12, 0, 0));
+
+  ZiweiChart chart = ZiweiChart(
+    baziYear: baziYear,
+    baziMonth: baziMonth,
+    baziDay: baziDay,
+    baziTime: baziTime,
+    lunarText:
+        '${_lunarYearGanZhi(lunar.lunarYear)}（$lunarY）年${lunar.monthNameStr}月${lunar.dayName}',
+    lunarMonth: lunar.month,
+    lunarIsLeap: lunar.isLeap,
+    genderLabel: gender == Gender.male ? '男' : '女',
+    elementBureauLabel: plate.elementBureau.label,
+    mingZhuLabel:
+        plate.mingZhu != null ? starLabel(plate.mingZhu!) : null,
+    shenZhuLabel:
+        plate.shenZhu != null ? starLabel(plate.shenZhu!) : null,
+    originMingIndex: plate.originMingIndex,
+    bodyPalaceIndex: plate.bodyPalaceIndex,
+    palaces: palaces,
+    sihua: sihuaList,
+    decades: decades,
+    basePlate: plate,
+  );
+  // 早晚子时以「真太阳时校正后」的小时判定（与 bazi_service 同口径）：真太阳时
+  // 校正在 ZiweiDate 内部完成，若用原始小时先判子时会出现顺序颠倒
+  //（先 +1 天再被校正回前一天 → 日柱差一天、时柱落到亥时）。
+  final effHour =
+      (useTrueSolarTime && zTst != null) ? zTst.hour : solar.hour;
+  // 晚子时（23:00 ≤ t < 24:00）：日柱 / 农历已按「校正后当日」计（见上），
+  // 仅时柱取「次日子时」与八字口径一致；早子时（00:00–01:00）本就属当日之子时，
+  // 不再顺延次日（顺延会重复 +1 天）。
+  if (ratHourMode && effHour >= 23) {
+    final nextTime = calcZiweiBaZi(
+      DateTime(solar.year, solar.month, solar.day, solar.hour, solar.minute),
+      location: location,
+      useTrueSolarTime: useTrueSolarTime,
+      gender: gender,
+      ratHourMode: RatHourMode.noSplit,
+    );
+    chart = chart.copyWith(baziTime: nextTime.time);
+  }
+  return chart;
+}
+
+/// 四柱干支（年 / 月 / 日 / 时）。
+///
+/// 与 [ZiweiChart] 的 `baziXxx` 字段同源（[ZiweiDate.bazi]），
+/// 供只需干支、不需要排紫微盘的场景（如每日黄历）轻量取用。
+///
+/// 命名加 `Ziwei` 前缀：避开 `sxwnl_spa_dart` 已导出的同名 `BaZi`，
+/// 防止同时 import 两个包时产生符号歧义。
+class ZiweiBaZi {
+  final String year;
+  final String month;
+  final String day;
+  final String time;
+
+  const ZiweiBaZi({
+    required this.year,
+    required this.month,
+    required this.day,
+    required this.time,
+  });
+}
+
+/// 轻量取四柱干支：只构造 [ZiweiDate] 读 `bazi`，**不执行排盘**
+/// （不调用 [ZiweiEngine.calculate]），因此开销极小且与命盘/三盘合参同口径。
+///
+/// - [solar] 公历时刻；仅需年柱月柱日柱时传正午基准（如 `DateTime(y, m, d, 12)`）
+///   即可避开子时换日歧义。
+/// - [location] 经纬度；`null` 时引擎默认 `Location(120, 30)`。
+/// - [useTrueSolarTime] 真太阳时开关，与 [calculateZiweiChart] 语义一致。
+/// - [gender] 不影响四柱，仅为构造 [ZiweiDate] 所需。
+/// - [ratHourMode] 早晚子时口径覆盖：不传（null）则用规则集默认（晚子时 / noSplit）；
+///   传 [RatHourMode.todayGan] 即“早子时”（23:00–24:00 算当日，日柱不变）；
+///   八字排盘页的开关即驱动此参数，黄历等其它调用保持默认。
+ZiweiBaZi calcZiweiBaZi(
+  DateTime solar, {
+  Location? location,
+  bool useTrueSolarTime = false,
+  Gender gender = Gender.male,
+  RatHourMode? ratHourMode,
+}) {
+  final ruleset = ConfigLoader.getDefault();
+  final base = ruleset.calendarOptions;
+  final options = ratHourMode == null
+      ? base
+      : CalendarOptions(
+          ratHourMode: ratHourMode,
+          leapRule: base.leapRule,
+          wuHuDunBasedOn: base.wuHuDunBasedOn,
+          siHuaBasedOn: base.siHuaBasedOn,
+          childhoodRule: base.childhoodRule,
+          flowLimitBasedOn: base.flowLimitBasedOn,
+          enableHistorical: base.enableHistorical,
+        );
+  final date = ZiweiDate.fromSolar(
+    AstroDateTime(solar.year, solar.month, solar.day, solar.hour, solar.minute),
+    gender: gender,
+    options: options,
+    location: location,
+    useTrueSolarTime: useTrueSolarTime,
+  );
+  final bz = date.bazi;
+  return ZiweiBaZi(
+    year: '${bz.year.gan.label}${bz.year.zhi.label}',
+    month: '${bz.month.gan.label}${bz.month.zhi.label}',
+    day: '${bz.day.gan.label}${bz.day.zhi.label}',
+    time: '${bz.time.gan.label}${bz.time.zhi.label}',
+  );
+}
+
+int _starTypePriority(StarType type) {
+  switch (type) {
+    case StarType.major:
+      return 0;
+    case StarType.lucky:
+      return 1;
+    case StarType.bad:
+      return 2;
+    case StarType.minor:
+    case StarType.other:
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 流年盘（大限/流年/流月 基础 + 流曜落宫）
+// 流曜定位表源自 ziwei_core 0.13.0 默认规则集（MIT），按流年干支查表。
+// ---------------------------------------------------------------------------
+
+/// 流年流曜落宫标记（叠加在原局盘上展示）。
+class FlowYearMark {
+  final int year;
+  final String ganzhi; // 流年干支（如 丙午）
+  final int mingIndex; // 流年命宫地支索引 0-11
+  final int taiSuiIndex; // 流年太岁（流年地支）所在宫索引
+  final Map<int, List<String>> flowStars; // 宫索引 -> 流曜中文名列表
+
+  const FlowYearMark({
+    required this.year,
+    required this.ganzhi,
+    required this.mingIndex,
+    required this.taiSuiIndex,
+    required this.flowStars,
+  });
+}
+
+/// 流年天干（0=甲..9=癸）：`(year + 6) % 10`（与 FlowYear.createByYear 一致）。
+int _flowYearStemIndex(int year) => ((year + 6) % 10 + 10) % 10;
+
+/// 流年地支索引（0=子..11=亥）：`(year + 8) % 12`。
+int _flowYearBranchIndex(int year) => ((year + 8) % 12 + 12) % 12;
+
+/// 8 颗流曜按流年天干查表（地支索引 0=子..11=亥）。
+/// 数据源自 ziwei_core 0.13.0 `default_jsons.dart` 流曜规则（lookup 表）。
+const Map<String, List<int>> _flowStarStemTable = {
+  '流禄存': [2, 3, 5, 6, 5, 6, 8, 9, 11, 0],
+  '流天魁': [1, 0, 11, 11, 1, 0, 1, 6, 3, 3],
+  '流天钺': [7, 8, 9, 9, 7, 8, 7, 2, 5, 5],
+  '流文昌': [5, 6, 8, 9, 8, 9, 11, 0, 2, 3],
+  '流文曲': [9, 8, 6, 5, 6, 5, 3, 2, 0, 11],
+  '流擎羊': [3, 4, 6, 7, 6, 7, 9, 10, 0, 1],
+  '流陀罗': [1, 2, 4, 5, 4, 5, 7, 8, 10, 11],
+};
+
+/// 流天马按流年地支三合局查表：{子辰申→寅, 寅午戌→申, 巳酉丑→亥, 亥卯未→巳}。
+int _flowTianmaIndex(int branchIndex) {
+  const sanHe = {
+    // 子, 辰, 申 → 寅(2)
+    0: 2, 4: 2, 8: 2,
+    // 寅, 午, 戌 → 申(8)
+    2: 8, 6: 8, 10: 8,
+    // 巳, 酉, 丑 → 亥(11)
+    5: 11, 9: 11, 1: 11,
+    // 亥, 卯, 未 → 巳(5)
+    11: 5, 3: 5, 7: 5,
+  };
+  return sanHe[branchIndex]!;
+}
+
+/// 计算指定流年的流曜落宫（用于原局盘叠加流年信息）。
+///
+/// - [year] 流年公历年份
+/// 返回：流年干支、流年命宫/太岁宫位、8 颗流曜分布。
+FlowYearMark calculateFlowYearMark({required int year}) {
+  final stemIdx = _flowYearStemIndex(year);
+  final branchIdx = _flowYearBranchIndex(year);
+
+  const ganNames = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+  const zhiNames = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
+
+  // 流年命宫：FlowYear.createByYear 的 placeIndex = (year + 8) % 12
+  final mingIndex = branchIdx;
+  final taiSuiIndex = branchIdx;
+
+  final flowStars = <int, List<String>>{};
+  void add(int idx, String name) {
+    flowStars.putIfAbsent(idx, () => []).add(name);
+  }
+
+  _flowStarStemTable.forEach((name, table) {
+    add(table[stemIdx], name);
+  });
+  add(_flowTianmaIndex(branchIdx), '流天马');
+
+  return FlowYearMark(
+    year: year,
+    ganzhi: '${ganNames[stemIdx]}${zhiNames[branchIdx]}',
+    mingIndex: mingIndex,
+    taiSuiIndex: taiSuiIndex,
+    flowStars: flowStars,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 流月 / 流日盘（基于 ziwei_core 0.13.0 ZiweiLimitManager，零新增依赖）
+//
+// 引擎 0.13.0 的 [ZiweiLimitManager] 已原生支持 流月/流日/流时：
+// `setPhysicalDate(DateTime)` 会按原盘历法配置（节气/农历边界、真太阳时、
+// 经纬度）自动重建 year→month→day→hour 完整流运上下文；[dynamicPlate] /
+// [limitContext] 给出当前流层的命宫索引与混合干支。
+//
+// 这里只取「命宫地支索引 + 混合干支 + 宫位职能」，再由 ziwei_interpretation
+// 层做纯文案解读，引擎逻辑不在此层重复实现。
+// ---------------------------------------------------------------------------
+
+/// 流月盘标记（叠加在原局盘上展示）。
+class FlowMonthMark {
+  final DateTime date; // 触发该流月的公历日期（取所在农历月）
+  final int year; // 流年公历年份
+  final int month; // 农历逻辑月（1-12）
+  final bool isLeap; // 是否闰月
+  final String ganzhi; // 流月混合干支，如「丙申」
+  final int mingIndex; // 流月命宫地支索引 0-11
+  final int illnessIndex; // 流月疾厄宫 = (mingIndex + 5) % 12
+  final String roleLabel; // 流月命宫宫位名
+
+  const FlowMonthMark({
+    required this.date,
+    required this.year,
+    required this.month,
+    required this.isLeap,
+    required this.ganzhi,
+    required this.mingIndex,
+    required this.illnessIndex,
+    required this.roleLabel,
+  });
+}
+
+/// 流日盘标记（叠加在原局盘上展示）。
+class FlowDayMark {
+  final DateTime date; // 触发该流日的公历日期
+  final String ganzhi; // 流日混合干支，如「甲子」
+  final int mingIndex; // 流日命宫地支索引 0-11
+  final int illnessIndex; // 流日疾厄宫 = (mingIndex + 5) % 12
+  final String roleLabel; // 流日命宫宫位名
+
+  const FlowDayMark({
+    required this.date,
+    required this.ganzhi,
+    required this.mingIndex,
+    required this.illnessIndex,
+    required this.roleLabel,
+  });
+}
+
+/// 计算指定公历日期所处「流月」的盘标记。
+///
+/// [chart] 须由 [calculateZiweiChart] 生成（内部持有底层命盘）。
+/// 返回：流月农历月、混合干支、流月命宫/疾厄宫索引、宫位名。
+FlowMonthMark calculateFlowMonthMark(ZiweiChart chart, DateTime date) {
+  final mgr = ZiweiLimitManager(chart.basePlate);
+  mgr.setPhysicalDate(date);
+  final fm = mgr.limitContext.month!;
+  final mingIndex = fm.index; // 宫位地支 = 流月命宫
+  final illnessIndex = (mingIndex + 5) % 12;
+  final ganzhi = '${fm.ganzhi.gan.label}${fm.ganzhi.zhi.label}';
+  return FlowMonthMark(
+    date: date,
+    year: date.year,
+    month: fm.month,
+    isLeap: fm.isLeap,
+    ganzhi: ganzhi,
+    mingIndex: mingIndex,
+    illnessIndex: illnessIndex,
+    roleLabel: fm.role.debugLabel,
+  );
+}
+
+/// 计算指定公历日期「流日」的盘标记。
+///
+/// 返回：流日混合干支、流日命宫/疾厄宫索引、宫位名。
+FlowDayMark calculateFlowDayMark(ZiweiChart chart, DateTime date) {
+  final mgr = ZiweiLimitManager(chart.basePlate);
+  mgr.setPhysicalDate(date);
+  final fd = mgr.limitContext.day!;
+  final mingIndex = fd.index; // 宫位地支 = 流日命宫
+  final illnessIndex = (mingIndex + 5) % 12;
+  final ganzhi = '${fd.ganzhi.gan.label}${fd.ganzhi.zhi.label}';
+  return FlowDayMark(
+    date: date,
+    ganzhi: ganzhi,
+    mingIndex: mingIndex,
+    illnessIndex: illnessIndex,
+    roleLabel: fd.role.debugLabel,
+  );
+}
