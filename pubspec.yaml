@@ -28,6 +28,7 @@ dependencies:
   flutter_secure_storage: ^9.2.4
   speech_to_text: ^7.0.0
   flutter_tts: ^4.2.2
+  audioplayers: ^6.1.0
 
 dev_dependencies:
   flutter_test:

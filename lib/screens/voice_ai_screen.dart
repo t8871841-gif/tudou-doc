@@ -1,11 +1,14 @@
 import 'dart:convert';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+
+import '../services/edge_tts_service.dart';
 
 /// Voice-first Chinese medicine reference assistant.
 /// API credentials are stored in Android Keystore-backed secure storage.
@@ -50,6 +53,9 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   final _scroll = ScrollController();
   final _speech = stt.SpeechToText();
   final _tts = FlutterTts();
+  final _player = AudioPlayer();
+  String _ttsEngine = 'edge'; // edge | system
+  String _edgeVoice = EdgeTtsService.defaultVoice;
   final List<_VoiceMessage> _messages = [
     _VoiceMessage(
       role: 'assistant',
@@ -100,10 +106,34 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       _ttsVoices = list;
     } catch (_) {}
     _ttsVoiceName = await _storage.read(key: 'voice_ai_tts_voice');
+    _ttsEngine = await _storage.read(key: 'voice_ai_tts_engine') ?? 'edge';
+    _edgeVoice = await _storage.read(key: 'voice_ai_edge_voice') ?? EdgeTtsService.defaultVoice;
     _ttsRate = double.tryParse(await _storage.read(key: 'voice_ai_tts_rate') ?? '') ?? 0.48;
     _ttsPitch = double.tryParse(await _storage.read(key: 'voice_ai_tts_pitch') ?? '') ?? 1.0;
     await _applyTtsSettings();
     if (mounted) setState(() {});
+  }
+
+  /// 统一播报入口：按所选引擎播报，Edge 失败时回退到系统语音。
+  Future<void> _speak(String text) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    if (_ttsEngine == 'edge') {
+      try {
+        await _player.stop();
+        final mp3 = await EdgeTtsService.synthesize(
+          clean,
+          voice: _edgeVoice,
+          rate: _ttsRate,
+          pitch: _ttsPitch,
+        );
+        await _player.play(BytesSource(mp3));
+        return;
+      } catch (_) {
+        _notice('Edge 语音连接失败，已用系统语音播报');
+      }
+    }
+    await _tts.speak(clean);
   }
 
   Future<void> _applyTtsSettings() async {
@@ -148,6 +178,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
     _scroll.dispose();
     _speech.stop();
     _tts.stop();
+    _player.dispose();
     super.dispose();
   }
 
@@ -158,6 +189,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       text: await _storage.read(key: 'voice_ai_api_key') ?? '',
     );
     if (_ttsVoices.isEmpty) await _loadTtsConfig();
+    String engine = _ttsEngine;
+    String edgeVoice = _edgeVoice;
     String? voiceName = _ttsVoiceName;
     double rate = _ttsRate;
     double pitch = _ttsPitch;
@@ -183,7 +216,31 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
                   child: Text('语音播报设置', style: TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
                 const SizedBox(height: 8),
-                if (_ttsVoices.isEmpty)
+                DropdownButtonFormField<String>(
+                  value: engine,
+                  decoration: const InputDecoration(labelText: '播报引擎'),
+                  isExpanded: true,
+                  items: const [
+                    DropdownMenuItem(value: 'edge', child: Text('Edge 神经网络语音（推荐·免费）', style: TextStyle(fontSize: 13))),
+                    DropdownMenuItem(value: 'system', child: Text('系统语音', style: TextStyle(fontSize: 13))),
+                  ],
+                  onChanged: (nv) => setDialogState(() => engine = nv ?? 'edge'),
+                ),
+                const SizedBox(height: 8),
+                if (engine == 'edge')
+                  DropdownButtonFormField<String>(
+                    value: EdgeTtsService.voices.any((v) => v['id'] == edgeVoice) ? edgeVoice : EdgeTtsService.defaultVoice,
+                    decoration: const InputDecoration(labelText: '播报音色', hintText: '晓晓'),
+                    isExpanded: true,
+                    items: EdgeTtsService.voices
+                        .map((v) => DropdownMenuItem<String>(
+                              value: v['id'],
+                              child: Text(v['label']!, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+                            ))
+                        .toList(),
+                    onChanged: (nv) => setDialogState(() => edgeVoice = nv ?? EdgeTtsService.defaultVoice),
+                  )
+                else if (_ttsVoices.isEmpty)
                   const Align(
                     alignment: Alignment.centerLeft,
                     child: Text('未读取到系统语音，请检查系统文字转语音设置。', style: TextStyle(fontSize: 12)),
@@ -218,7 +275,22 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
                   alignment: Alignment.centerRight,
                   child: TextButton(
                     onPressed: () async {
-                      // 试听：临时应用当前选择
+                      // 试听：按对话框当前选择试播
+                      if (engine == 'edge') {
+                        try {
+                          final mp3 = await EdgeTtsService.synthesize(
+                            '你好，我是汉方唐鉴语音助手。',
+                            voice: edgeVoice,
+                            rate: rate,
+                            pitch: pitch,
+                          );
+                          await _player.stop();
+                          await _player.play(BytesSource(mp3));
+                        } catch (e) {
+                          _notice('Edge 语音试听失败：$e');
+                        }
+                        return;
+                      }
                       await _tts.setSpeechRate(rate);
                       await _tts.setPitch(pitch);
                       if (voiceName != null) {
@@ -254,6 +326,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
         await _storage.delete(key: 'voice_ai_api_key');
       }
       _ttsVoiceName = voiceName;
+      _ttsEngine = engine;
+      _edgeVoice = edgeVoice;
       _ttsRate = rate;
       _ttsPitch = pitch;
       if (voiceName == null || voiceName.isEmpty) {
@@ -261,6 +335,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       } else {
         await _storage.write(key: 'voice_ai_tts_voice', value: voiceName);
       }
+      await _storage.write(key: 'voice_ai_tts_engine', value: engine);
+      await _storage.write(key: 'voice_ai_edge_voice', value: edgeVoice);
       await _storage.write(key: 'voice_ai_tts_rate', value: rate.toString());
       await _storage.write(key: 'voice_ai_tts_pitch', value: pitch.toString());
       await _applyTtsSettings();
@@ -374,7 +450,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       if (!mounted) return;
       setState(() => _messages.add(_VoiceMessage(role: 'assistant', text: answer)));
       _scrollToBottom();
-      if (_speakReplies) await _tts.speak(answer);
+      if (_speakReplies) await _speak(answer);
     } catch (e) {
       if (mounted) {
         setState(() => _messages.add(_VoiceMessage(role: 'assistant', text: '连接失败：$e\n\n请检查 API Base URL、模型名称、Key、网络连接及服务商是否支持 /chat/completions。')));
@@ -387,11 +463,12 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
 
   String _short(String value, int max) => value.length <= max ? value : '${value.substring(0, max)}…';
 
-  /// 去掉模型回答中的 Markdown 格式符号（界面为纯文本显示）
+  /// 去掉模型回答中的 Markdown 格式符号（界面为纯文本显示，播报不念符号）
   String _plainText(String value) => value
       .replaceAll('**', '')
       .replaceAll(RegExp(r'^#{1,6}\s?', multiLine: true), '')
-      .replaceAll(RegExp(r'^[-*]\s+', multiLine: true), '· ');
+      .replaceAll(RegExp(r'^[-*]\s+', multiLine: true), '· ')
+      .replaceAll('*', '');
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -439,7 +516,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(user ? '你' : '汉方唐鉴', style: const TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 12)),
                 const SizedBox(height: 6), SelectableText(message.text, style: const TextStyle(height: 1.5)),
-                if (!user) Align(alignment: Alignment.centerRight, child: IconButton(visualDensity: VisualDensity.compact, tooltip: '朗读回答', onPressed: () => _tts.speak(message.text), icon: const Icon(Icons.volume_up_outlined, size: 19, color: _gold))),
+                if (!user) Align(alignment: Alignment.centerRight, child: IconButton(visualDensity: VisualDensity.compact, tooltip: '朗读回答', onPressed: () => _speak(message.text), icon: const Icon(Icons.volume_up_outlined, size: 19, color: _gold))),
               ]),
             ));
           },
