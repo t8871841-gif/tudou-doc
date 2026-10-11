@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../data/settings_repository.dart';
 import '../services/update_service.dart';
@@ -39,6 +43,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _sectionTitle('外观'),
             _themeModeTile(),
             _fontScaleTile(),
+            _backgroundTile(),
             const Divider(height: 24),
             _sectionTitle('诊断'),
             _genderTile(cs),
@@ -116,6 +121,91 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       );
+
+  Widget _backgroundTile() {
+    final path = _settings.backgroundImagePath;
+    final file = path != null ? File(path) : null;
+    final hasCustom = file != null && file.existsSync();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 12),
+        const Text('背景图片', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Theme.of(context).dividerColor),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: hasCustom
+                  ? Image.file(file!, fit: BoxFit.cover)
+                  : const Icon(Icons.image_outlined, size: 32),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(hasCustom ? '已使用自定义背景' : '默认主题背景',
+                      style: const TextStyle(fontSize: 13)),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: _pickBackground,
+                        icon: const Icon(Icons.photo_library_outlined, size: 18),
+                        label: const Text('选择图片'),
+                      ),
+                      if (hasCustom) ...[
+                        const SizedBox(width: 8),
+                        TextButton(
+                          onPressed: () => _settings.setBackgroundImagePath(null),
+                          child: const Text('恢复默认'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Future<void> _pickBackground() async {
+    try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+      if (picked == null) return;
+      final dir = await getApplicationDocumentsDirectory();
+      final dest = File(
+          '${dir.path}/bg_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await File(picked.path).copy(dest.path);
+      // 删除旧背景图，避免越积越多
+      final old = _settings.backgroundImagePath;
+      await _settings.setBackgroundImagePath(dest.path);
+      if (old != null && old != dest.path) {
+        try {
+          await File(old).delete();
+        } catch (_) {}
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('背景图片已更换')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('选择图片失败：$e')));
+      }
+    }
+  }
 
   Widget _genderTile(ColorScheme cs) => ListTile(
         leading: const Icon(Icons.person),

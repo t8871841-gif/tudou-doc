@@ -10,6 +10,7 @@ import 'data/settings_repository.dart';
 import 'data/ziwei_rules_repository.dart';
 import 'screens/home_screen.dart';
 import 'theme/app_colors.dart';
+import 'widgets/app_background.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +35,8 @@ class NiHaishaApp extends StatelessWidget {
       listenable: SettingsRepository.instance,
       builder: (context, _) {
         final settings = SettingsRepository.instance;
+        // 自定义背景图片启用时，脚手架背景透明以露出全局背景图
+        final hasCustomBg = settings.backgroundImagePath != null;
         return MaterialApp(
           title: '汉方唐鉴',
           debugShowCheckedModeBanner: false,
@@ -44,6 +47,7 @@ class NiHaishaApp extends StatelessWidget {
               brightness: Brightness.light,
             ),
             useMaterial3: true,
+            scaffoldBackgroundColor: hasCustomBg ? Colors.transparent : null,
             // ⛔ 关闭 Zoom 转场快照：快照机制会在设备动画缩放异常/手势取消时
             // 把进场页冻结在半透明帧（子午流注屏「打开模糊一大片」根因）。
             pageTransitionsTheme: const PageTransitionsTheme(
@@ -62,7 +66,8 @@ class NiHaishaApp extends StatelessWidget {
               brightness: Brightness.dark,
             ),
             useMaterial3: true,
-            scaffoldBackgroundColor: const Color(0xFF0D0D0B),
+            scaffoldBackgroundColor:
+                hasCustomBg ? Colors.transparent : const Color(0xFF0D0D0B),
             appBarTheme: const AppBarTheme(
               backgroundColor: Color(0xFF11110D),
               foregroundColor: Color(0xFFE2C36B),
@@ -92,6 +97,8 @@ class NiHaishaApp extends StatelessWidget {
             ),
             child: HomeScreen(textScaleFactor: settings.textScaleFactor),
           ),
+          // 全局自定义背景：包裹所有路由，图片由 AppBackground 按设置显示
+          builder: (context, child) => AppBackground(child: child),
           localizationsDelegates: const [
             GlobalMaterialLocalizations.delegate,
             GlobalWidgetsLocalizations.delegate,

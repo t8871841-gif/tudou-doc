@@ -25,6 +25,9 @@ class SettingsRepository extends ChangeNotifier {
   double? _lastLng;
   double? _lastLat;
 
+  // ---- 自定义背景图片（null=默认主题背景）----
+  String? _backgroundImagePath;
+
   ThemeMode get themeMode => _themeMode;
   double get textScaleFactor => _textScaleFactor;
   String get defaultGender => _defaultGender;
@@ -39,6 +42,7 @@ class SettingsRepository extends ChangeNotifier {
   String? get lastCityName => _lastCityName;
   double? get lastLng => _lastLng;
   double? get lastLat => _lastLat;
+  String? get backgroundImagePath => _backgroundImagePath;
 
   Future<void> load() async {
     final db = await DatabaseHelper.instance.database;
@@ -88,6 +92,9 @@ class SettingsRepository extends ChangeNotifier {
           break;
         case 'last_lat':
           _lastLat = double.tryParse(value);
+          break;
+        case 'background_image_path':
+          _backgroundImagePath = value.isEmpty ? null : value;
           break;
       }
     }
@@ -164,6 +171,13 @@ class SettingsRepository extends ChangeNotifier {
     await _save('last_city_name', _lastCityName ?? '');
     await _save('last_lng', (lng ?? 120).toStringAsFixed(4));
     await _save('last_lat', (lat ?? 30).toStringAsFixed(4));
+  }
+
+  /// 设置自定义背景图片路径（null=恢复默认主题背景）
+  Future<void> setBackgroundImagePath(String? path) async {
+    _backgroundImagePath = (path == null || path.isEmpty) ? null : path;
+    notifyListeners();
+    await _save('background_image_path', _backgroundImagePath ?? '');
   }
 
   Future<void> _save(String key, String value) async {
