@@ -53,7 +53,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   final List<_VoiceMessage> _messages = [
     _VoiceMessage(
       role: 'assistant',
-      text: '欢迎来到汉唐本草语音助手。你可以点击麦克风提问，也可以输入文字。\n\n首次使用联网问答，请先在右上角设置兼容 OpenAI API 的服务地址、模型名称和 API Key。离线典籍检索无需配置。',
+      text: '欢迎来到冰心岐黄语音助手。你可以点击麦克风提问，也可以输入文字。\n\n首次使用联网问答，请先在右上角设置兼容 OpenAI API 的服务地址、模型名称和 API Key。离线典籍检索无需配置。',
     ),
   ];
   bool _listening = false;
@@ -232,7 +232,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       } else {
         final uri = Uri.parse('$_baseUrl/chat/completions');
         final history = _messages.take(_messages.length - 1).toList().reversed.take(8).toList().reversed.map((m) => {'role': m.role, 'content': m.text}).toList();
-        final system = '你是汉唐本草的中医典籍学习助手。以中文回答，优先区分经典原文、传统理论与现代医学证据，不将传统理论包装成已证实疗效。不得仅凭聊天作出确定诊断，不建议用户自行停用处方药。遇到急症提醒立即就医。以下是本地知识库检索片段，若无关请明确说明，不要编造引用：\n${references.join('\n\n---\n\n')}';
+        final system = '你是冰心岐黄的中医典籍学习助手。以中文回答，优先区分经典原文、传统理论与现代医学证据，不将传统理论包装成已证实疗效。不得仅凭聊天作出确定诊断，不建议用户自行停用处方药。遇到急症提醒立即就医。以下是本地知识库检索片段，若无关请明确说明，不要编造引用：\n${references.join('\n\n---\n\n')}';
         final response = await http.post(
           uri,
           headers: {'Authorization': 'Bearer $key', 'Content-Type': 'application/json'},
@@ -280,7 +280,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('汉唐本草 · 语音 AI', style: TextStyle(fontWeight: FontWeight.w700)),
+          Text('冰心岐黄 · 语音 AI', style: TextStyle(fontWeight: FontWeight.w700)),
           Text('典籍检索 · 语音问答', style: TextStyle(fontSize: 11, color: Color(0xFFC9B77A))),
         ]),
         actions: [
@@ -308,7 +308,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
               margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(13),
               decoration: BoxDecoration(color: user ? const Color(0xFF3D3217) : const Color(0xFF171611), borderRadius: BorderRadius.circular(14), border: Border.all(color: user ? const Color(0xFF8D7C43) : const Color(0xFF494126))),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(user ? '你' : '汉唐本草', style: const TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 12)),
+                Text(user ? '你' : '冰心岐黄', style: const TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 12)),
                 const SizedBox(height: 6), SelectableText(message.text, style: const TextStyle(height: 1.5)),
                 if (!user) Align(alignment: Alignment.centerRight, child: IconButton(visualDensity: VisualDensity.compact, tooltip: '朗读回答', onPressed: () => _tts.speak(message.text), icon: const Icon(Icons.volume_up_outlined, size: 19, color: _gold))),
               ]),

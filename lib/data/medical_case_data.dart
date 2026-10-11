@@ -334,7 +334,7 @@ class MedicalCase {
     section('结果', result);
     section('观点', view);
     buf.writeln('\n─────────────────');
-    buf.write('汉唐中医 · 倪海厦六经辨证（传统文化参考，非医疗建议）');
+    buf.write('冰心岐黄 · 倪海厦六经辨证（传统文化参考，非医疗建议）');
     return buf.toString();
   }
 }

@@ -1,4 +1,4 @@
-# 汉唐中医 App · 全量针灸穴位板块 实证核查报告
+# 冰心岐黄 App · 全量针灸穴位板块 实证核查报告
 
 > 方法论：**达尔文 skill 纪律** —— 脚本实抽（Python 解析文档与 JSON）+ 源码二次核验（`acupoint_repository.dart` / `acupoint_detail_screen.dart` / `acupuncture.json`），不凭印象；计数推断部分显式标注「待文档段落确认」。
 > 审计日期：2026-08-16 ｜ 当前版本：v1.10.0+7 ｜ 数据源：《人纪·针灸·倪海厦》（8029 行 / 417K 字）+ `assets/data/acupoints.json`(379) / `acupuncture.json`

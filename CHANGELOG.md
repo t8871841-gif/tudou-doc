@@ -1,4 +1,4 @@
-# 汉唐中医 App 更新日志（Changelog）
+# 冰心岐黄 App 更新日志（Changelog）
 
 > **维护约定**：本文件为项目根目录的官方变更记录。**每次发布 / 打包更新项目，必须在此追加对应版本条目**（版本号 + 变更要点 + 验证结果 + 发布信息）。
 >
@@ -792,7 +792,7 @@
 - 验证：`flutter test` 174/174 全过；`formula_repository_test` 30/30；analyze 0 error。
 - 打包：`flutter build apk --release` 成功（54.2MB，Gradle assembleRelease 681.8s）；aapt2 校验 versionCode=7 / versionName=1.10.0。
 - 部署：新建 `release/` + `release/download-page/`（index.html 下载页 + app-release.apk）；CloudStudio 部署下载页（分享链接私下提供，不进 GitHub）。
-- 邮件：已发 taobaoshop@139.com。交付：`汉唐中医_v1.10.0+7.apk` + `汉唐中医_v1.10.0+7_发布说明.md` + `release/download-page/index.html`。
+- 邮件：已发 taobaoshop@139.com。交付：`冰心岐黄_v1.10.0+7.apk` + `冰心岐黄_v1.10.0+7_发布说明.md` + `release/download-page/index.html`。
 
 ---
 
@@ -812,7 +812,7 @@
 
 ### 验证 / 发布
 - 验证：analyze 0 error；flutter test 174/174 全过；aapt2 versionCode=6/versionName=1.10.0。
-- 打包：1.10.0+5 → 1.10.0+6；APK 54.1MB；复制到 `release/汉唐中医_v1.10.0+6.apk`。
+- 打包：1.10.0+5 → 1.10.0+6；APK 54.1MB；复制到 `release/冰心岐黄_v1.10.0+6.apk`。
 - 部署：CloudStudio 沿用沙箱，链接不变指向 +6。邮件：已发 taobaoshop@139.com。
 - 累计三轮修正 5 处（狐惑主方/蚀于下部/杏子汤/桃红四物汤→桂枝茯苓丸/牡蛎汤标签+4 条文号）；App 全部「病证→方」关联经三轮核查无误。
 
@@ -882,4 +882,4 @@
 ### 验证 / 发布
 - 验证：引擎 **226/226 可达（100%）**；flutter test 174/174（17 测试适配）；analyze 0。
 - 打包：1.5.0+1 → 1.9.1+2（首次执行版本号规则）；`flutter build apk --release` 成功（54MB，6m42s）；aapt2 versionName=1.9.1/versionCode=2。
-- 交付：汉唐中医_v1.9.1.apk（含 F1-F10 全部引擎修复）。
+- 交付：冰心岐黄_v1.9.1.apk（含 F1-F10 全部引擎修复）。

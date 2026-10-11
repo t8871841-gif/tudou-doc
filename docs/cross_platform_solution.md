@@ -1,4 +1,4 @@
-# 汉唐中医 App 跨平台（iOS + Android）解决方案
+# 冰心岐黄 App 跨平台（iOS + Android）解决方案
 
 > 设计者：掌中灵（Mobile App Builder）｜基于现有 `nihaisha_app` Flutter 项目
 > 目标：一套代码库同时交付 iOS 与 Android，并通过双端应用商店上架

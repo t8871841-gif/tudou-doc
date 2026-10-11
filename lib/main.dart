@@ -35,7 +35,7 @@ class NiHaishaApp extends StatelessWidget {
       builder: (context, _) {
         final settings = SettingsRepository.instance;
         return MaterialApp(
-          title: '汉唐中医',
+          title: '冰心岐黄',
           debugShowCheckedModeBanner: false,
           themeMode: ThemeMode.dark,
           theme: ThemeData(

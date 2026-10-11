@@ -162,7 +162,7 @@ class _BaZiPaipanScreenState extends State<BaZiPaipanScreen> {
           '起运：${f.startAge.toStringAsFixed(1)} 岁（${f.qiYunTime.year} 年交运）');
       b.writeln('大运：${f.decades.map((d) => d.ganZhi).join(' → ')}');
     }
-    b.writeln('—— 来自汉唐中医（民俗文化参考，非医疗建议）');
+    b.writeln('—— 来自冰心岐黄（民俗文化参考，非医疗建议）');
     return b.toString();
   }
 
