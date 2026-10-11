@@ -63,15 +63,61 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   String _offlineKnowledge = '';
   String _baseUrl = 'https://api.openai.com/v1';
   String _model = 'gpt-4o-mini';
+  List<Map<String, String>> _ttsVoices = [];
+  String? _ttsVoiceName;
+  double _ttsRate = 0.48;
+  double _ttsPitch = 1.0;
 
   @override
   void initState() {
     super.initState();
     _loadKnowledge();
     _loadConfig();
-    _tts.setLanguage('zh-CN');
-    _tts.setSpeechRate(0.48);
-    _tts.setPitch(1.0);
+    _loadTtsConfig();
+  }
+
+  /// 加载可用播报音色与已保存的语音设置
+  Future<void> _loadTtsConfig() async {
+    try {
+      final voices = await _tts.getVoices;
+      final list = <Map<String, String>>[];
+      if (voices is List) {
+        for (final v in voices) {
+          if (v is Map) {
+            final name = v['name']?.toString() ?? '';
+            if (name.isNotEmpty) {
+              list.add({'name': name, 'locale': v['locale']?.toString() ?? ''});
+            }
+          }
+        }
+      }
+      // 中文音色排前面
+      list.sort((a, b) {
+        final azh = a['locale']!.toLowerCase().startsWith('zh') ? 0 : 1;
+        final bzh = b['locale']!.toLowerCase().startsWith('zh') ? 0 : 1;
+        return azh.compareTo(bzh);
+      });
+      _ttsVoices = list;
+    } catch (_) {}
+    _ttsVoiceName = await _storage.read(key: 'voice_ai_tts_voice');
+    _ttsRate = double.tryParse(await _storage.read(key: 'voice_ai_tts_rate') ?? '') ?? 0.48;
+    _ttsPitch = double.tryParse(await _storage.read(key: 'voice_ai_tts_pitch') ?? '') ?? 1.0;
+    await _applyTtsSettings();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _applyTtsSettings() async {
+    await _tts.setLanguage('zh-CN');
+    await _tts.setSpeechRate(_ttsRate);
+    await _tts.setPitch(_ttsPitch);
+    if (_ttsVoiceName != null && _ttsVoiceName!.isNotEmpty) {
+      for (final v in _ttsVoices) {
+        if (v['name'] == _ttsVoiceName) {
+          await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
+          break;
+        }
+      }
+    }
   }
 
   Future<void> _loadKnowledge() async {
@@ -111,25 +157,91 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
     final key = TextEditingController(
       text: await _storage.read(key: 'voice_ai_api_key') ?? '',
     );
+    if (_ttsVoices.isEmpty) await _loadTtsConfig();
+    String? voiceName = _ttsVoiceName;
+    double rate = _ttsRate;
+    double pitch = _ttsPitch;
     if (!mounted) return;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF171611),
-        title: const Text('模型服务设置', style: TextStyle(color: _gold)),
-        content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(controller: base, decoration: const InputDecoration(labelText: 'API Base URL', hintText: 'https://api.openai.com/v1')),
-            const SizedBox(height: 10),
-            TextField(controller: model, decoration: const InputDecoration(labelText: '模型名称', hintText: 'gpt-4o-mini')),
-            const SizedBox(height: 10),
-            TextField(controller: key, obscureText: true, decoration: const InputDecoration(labelText: 'API Key', helperText: '仅保存在本机安全存储中，不要提交到代码仓库。')),
-          ]),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
-        ],
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final voiceValid = voiceName != null && _ttsVoices.any((v) => v['name'] == voiceName);
+          return AlertDialog(
+            backgroundColor: const Color(0xFF171611),
+            title: const Text('模型服务设置', style: TextStyle(color: _gold)),
+            content: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(controller: base, decoration: const InputDecoration(labelText: 'API Base URL', hintText: 'https://api.openai.com/v1')),
+                const SizedBox(height: 10),
+                TextField(controller: model, decoration: const InputDecoration(labelText: '模型名称', hintText: 'gpt-4o-mini')),
+                const SizedBox(height: 10),
+                TextField(controller: key, obscureText: true, decoration: const InputDecoration(labelText: 'API Key', helperText: '仅保存在本机安全存储中，不要提交到代码仓库。')),
+                const Divider(height: 28),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('语音播报设置', style: TextStyle(color: _gold, fontWeight: FontWeight.bold, fontSize: 15)),
+                ),
+                const SizedBox(height: 8),
+                if (_ttsVoices.isEmpty)
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('未读取到系统语音，请检查系统文字转语音设置。', style: TextStyle(fontSize: 12)),
+                  )
+                else
+                  DropdownButtonFormField<String>(
+                    value: voiceValid ? voiceName : null,
+                    decoration: const InputDecoration(labelText: '播报音色', hintText: '系统默认'),
+                    isExpanded: true,
+                    items: _ttsVoices
+                        .map((v) => DropdownMenuItem<String>(
+                              value: v['name'],
+                              child: Text('${v['name']} (${v['locale']})', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+                            ))
+                        .toList(),
+                    onChanged: (nv) => setDialogState(() => voiceName = nv),
+                  ),
+                const SizedBox(height: 6),
+                Row(children: [
+                  const SizedBox(width: 72, child: Text('语速', style: TextStyle(fontSize: 13))),
+                  Expanded(
+                    child: Slider(value: rate, min: 0.1, max: 1.0, divisions: 18, label: rate.toStringAsFixed(2), onChanged: (nv) => setDialogState(() => rate = nv)),
+                  ),
+                ]),
+                Row(children: [
+                  const SizedBox(width: 72, child: Text('音调', style: TextStyle(fontSize: 13))),
+                  Expanded(
+                    child: Slider(value: pitch, min: 0.5, max: 2.0, divisions: 15, label: pitch.toStringAsFixed(2), onChanged: (nv) => setDialogState(() => pitch = nv)),
+                  ),
+                ]),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () async {
+                      // 试听：临时应用当前选择
+                      await _tts.setSpeechRate(rate);
+                      await _tts.setPitch(pitch);
+                      if (voiceName != null) {
+                        for (final v in _ttsVoices) {
+                          if (v['name'] == voiceName) {
+                            await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
+                            break;
+                          }
+                        }
+                      }
+                      await _tts.speak('你好，我是汉方唐鉴语音助手。');
+                    },
+                    child: const Text('试听语音'),
+                  ),
+                ),
+              ]),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
+            ],
+          );
+        },
       ),
     );
     if (ok == true) {
@@ -141,6 +253,17 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       } else {
         await _storage.delete(key: 'voice_ai_api_key');
       }
+      _ttsVoiceName = voiceName;
+      _ttsRate = rate;
+      _ttsPitch = pitch;
+      if (voiceName == null || voiceName.isEmpty) {
+        await _storage.delete(key: 'voice_ai_tts_voice');
+      } else {
+        await _storage.write(key: 'voice_ai_tts_voice', value: voiceName);
+      }
+      await _storage.write(key: 'voice_ai_tts_rate', value: rate.toString());
+      await _storage.write(key: 'voice_ai_tts_pitch', value: pitch.toString());
+      await _applyTtsSettings();
       await _loadConfig();
       if (mounted) _notice('设置已安全保存');
     }
