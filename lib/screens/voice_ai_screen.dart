@@ -224,7 +224,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
                 const SizedBox(height: 10),
                 TextField(controller: key, obscureText: true, decoration: const InputDecoration(labelText: 'API Key', helperText: '仅保存在本机安全存储中，不要提交到代码仓库。')),
                 const Divider(height: 28),
-                const Align(
+                Align(
                   alignment: Alignment.centerLeft,
                   child: Text('语音播报设置', style: TextStyle(color: _accentText, fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
@@ -499,8 +499,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('汉方唐鉴 · 语音 AI', style: TextStyle(fontWeight: FontWeight.w700)),
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('汉方唐鉴 · 语音 AI', style: TextStyle(fontWeight: FontWeight.w700)),
           Text('典籍检索 · 语音问答', style: TextStyle(fontSize: 11, color: _accentText)),
         ]),
         actions: [
