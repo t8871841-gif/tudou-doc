@@ -61,8 +61,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   bool _speakReplies = true;
   String _recognized = '';
   String _offlineKnowledge = '';
-  String _baseUrl = 'https://api.openai.com/v1';
-  String _model = 'gpt-4o-mini';
+  String _baseUrl = 'https://apihub.agnes-ai.com/v1';
+  String _model = 'agnes-3.0-flash';
   List<Map<String, String>> _ttsVoices = [];
   String? _ttsVoiceName;
   double _ttsRate = 0.48;
@@ -172,9 +172,9 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
             title: const Text('模型服务设置', style: TextStyle(color: _gold)),
             content: SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
-                TextField(controller: base, decoration: const InputDecoration(labelText: 'API Base URL', hintText: 'https://api.openai.com/v1')),
+                TextField(controller: base, decoration: const InputDecoration(labelText: 'API Base URL', hintText: 'https://apihub.agnes-ai.com/v1')),
                 const SizedBox(height: 10),
-                TextField(controller: model, decoration: const InputDecoration(labelText: '模型名称', hintText: 'gpt-4o-mini')),
+                TextField(controller: model, decoration: const InputDecoration(labelText: '模型名称', hintText: 'agnes-3.0-flash')),
                 const SizedBox(height: 10),
                 TextField(controller: key, obscureText: true, decoration: const InputDecoration(labelText: 'API Key', helperText: '仅保存在本机安全存储中，不要提交到代码仓库。')),
                 const Divider(height: 28),
