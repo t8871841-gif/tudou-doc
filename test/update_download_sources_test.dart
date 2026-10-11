@@ -97,7 +97,7 @@ void main() {
   const hexB =
       '74059c79909d4d5e94b38a422af905b0f15d84db1363eb8fada124032dd055b5';
 
-  final sampleBody = '# 冰心岐黄 v1.11.23 发布说明\n\n'
+  final sampleBody = '# 汉方唐鉴 v1.11.23 发布说明\n\n'
       '正文里可能出现 64 位十六进制串 $hexA 但后面没跟文件名，不应被当成配对。\n\n'
       '---\n\n## 安装包 SHA-256（供 App 内更新校验）\n\n'
       '```\n'

@@ -1,4 +1,4 @@
-# 冰心岐黄 · 发布说明与更新日志（Release Notes & Changelog）
+# 汉方唐鉴 · 发布说明与更新日志（Release Notes & Changelog）
 
 > 本文件为项目对外发布的规范发布说明（Release Notes）与完整更新日志（Changelog）。
 > 版本号遵循语义化版本规范 `主版本.次版本.修订号`（如 `1.11.8`），内部 `build` 号 `+N` 作为 Android `versionCode` 单调递增。

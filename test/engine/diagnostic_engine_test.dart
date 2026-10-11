@@ -24,7 +24,7 @@ void main() {
     test('getInitialGreeting 应包含 Q1 寒热问诊引导', () {
       final engine = DiagnosticEngine();
       final greeting = engine.getInitialGreeting();
-      expect(greeting, contains('冰心岐黄'));
+      expect(greeting, contains('汉方唐鉴'));
       expect(greeting, contains('Q1'));
       expect(greeting, contains('寒热'));
     });

@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
-        android:label="冰心岐黄"
+        android:label="汉方唐鉴"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
