@@ -5,6 +5,10 @@
     <!-- Device actions: open app list + system alarm -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
     <uses-permission android:name="android.permission.SET_ALARM"/>
+    <!-- Device actions: call / message by contact name -->
+    <uses-permission android:name="android.permission.READ_CONTACTS"/>
+    <!-- Device actions: read SMS inbox -->
+    <uses-permission android:name="android.permission.READ_SMS"/>
     <application
         android:label="Jarvis"
         android:name="${applicationName}"
