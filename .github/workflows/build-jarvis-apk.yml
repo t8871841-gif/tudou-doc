@@ -33,8 +33,9 @@ jobs:
       - run: cd jarvis_app && flutter pub get
       - name: Boost Gradle memory
         run: |
-          sed -i 's/-Xmx1024M/-Xmx4g/; s/org.gradle.workers.max=1/org.gradle.workers.max=4/' jarvis_app/android/gradle.properties
+          sed -i 's/-Xmx1024M/-Xmx4g/; s/org.gradle.workers.max=1/org.gradle.workers.max=1/' jarvis_app/android/gradle.properties
           echo "org.gradle.daemon=false" >> jarvis_app/android/gradle.properties
+          echo "android.aapt2.daemon=false" >> jarvis_app/android/gradle.properties
       - run: cd jarvis_app && flutter build apk --release --target-platform android-arm64 --verbose
         timeout-minutes: 30
       - uses: actions/upload-artifact@v4
