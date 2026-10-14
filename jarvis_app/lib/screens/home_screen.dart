@@ -48,7 +48,8 @@ class _HomeScreenState extends State<HomeScreen>
   String _statusLine = '正在初始化核心…';
   final List<_Msg> _messages = [];
   final List<String> _dataStream = [];
-  final _spherePoints = makeSpherePoints(280, 42);
+  final _spherePoints = makeSpherePoints(450, 42);
+  final _dust = makeDustPoints(64, 99);
   final _rnd = math.Random(7);
 
   @override
@@ -65,7 +66,7 @@ class _HomeScreenState extends State<HomeScreen>
             _state = JarvisState.idle;
             _statusLine = '核心已上线，随时可以开始。';
             _messages.add(const _Msg('assistant',
-                '您好，我是 Jarvis。您可以直接说话、点麦克风，或者打字提问。我可以回答各种各样的问题，还能打电话、发消息、设闹钟、开 App。')); 
+                '您好，我是 Jarvis。您可以直接说话、点麦克风，或者打字提问。我可以回答各种各样的问题，还能打电话、发消息、读短信、设闹钟、开 App。')); 
           } else if (_boot > 0.7) {
             _statusLine = '神经链接建立中…';
           } else if (_boot > 0.35) {
@@ -343,6 +344,43 @@ class _HomeScreenState extends State<HomeScreen>
     if (mounted) setState(() {});
   }
 
+  /// State accent color: cyan idle, green listening, orange thinking.
+  Color _accent() {
+    if (_muted) return Colors.white38;
+    switch (_state) {
+      case JarvisState.listening:
+        return const Color(0xFF2EFF8A);
+      case JarvisState.thinking:
+        return const Color(0xFFFF9E2E);
+      case JarvisState.speaking:
+        return const Color(0xFFEAFBFF);
+      default:
+        return hudCyan;
+    }
+  }
+
+  Color _statusDot() {
+    if (_muted) return Colors.white38;
+    switch (_state) {
+      case JarvisState.listening:
+        return const Color(0xFF2EFF8A);
+      case JarvisState.thinking:
+        return const Color(0xFFFF9E2E);
+      case JarvisState.speaking:
+        return Colors.white;
+      default:
+        return hudCyan;
+    }
+  }
+
+  Widget _bootLog(String label) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Text('> $label  …  OK',
+          style: const TextStyle(color: Color(0xFF2EFF8A), fontSize: 12)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_state == JarvisState.booting) return _bootScreen();
@@ -350,40 +388,49 @@ class _HomeScreenState extends State<HomeScreen>
     final wide = w > 640;
     return Scaffold(
       backgroundColor: hudDeep,
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.topCenter,
-            radius: 1.4,
-            colors: [Color(0xFF06233A), hudDeep],
-          ),
-        ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              _topBar(),
-              Expanded(
-                child: wide
-                    ? Row(
-                        children: [
-                          Expanded(child: _leftPanel()),
-                          Expanded(flex: 2, child: _centerColumn()),
-                          Expanded(child: _rightPanel()),
-                        ],
-                      )
-                    : ListView(
-                        children: [
-                          SizedBox(height: 300, child: _centerColumn()),
-                          _leftPanel(),
-                          _rightPanel(),
-                        ],
-                      ),
+      body: Stack(
+        children: [
+          Container(
+            decoration: const BoxDecoration(
+              gradient: RadialGradient(
+                center: Alignment.topCenter,
+                radius: 1.4,
+                colors: [Color(0xFF041A2E), hudDeep],
               ),
-              _chatArea(),
-              _inputBar(),
-            ],
+            ),
           ),
-        ),
+          Positioned.fill(
+            child: CustomPaint(
+                painter:
+                    HudBackgroundPainter(tick: _tick, dust: _dust)),
+          ),
+          SafeArea(
+            child: Column(
+              children: [
+                _topBar(),
+                Expanded(
+                  child: wide
+                      ? Row(
+                          children: [
+                            Expanded(child: _leftPanel()),
+                            Expanded(flex: 2, child: _centerColumn()),
+                            Expanded(child: _rightPanel()),
+                          ],
+                        )
+                      : ListView(
+                          children: [
+                            SizedBox(height: 360, child: _centerColumn()),
+                            _leftPanel(),
+                            _rightPanel(),
+                          ],
+                        ),
+                ),
+                _chatArea(),
+                _inputBar(),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -396,8 +443,8 @@ class _HomeScreenState extends State<HomeScreen>
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             SizedBox(
-              width: 220,
-              height: 220,
+              width: 250,
+              height: 250,
               child: CustomPaint(
                   painter: ReactorPainter(
                       progress: _boot, tick: _tick, thinking: true)),
@@ -408,18 +455,53 @@ class _HomeScreenState extends State<HomeScreen>
                     color: hudCyan,
                     fontSize: 34,
                     fontWeight: FontWeight.w900,
-                    letterSpacing: 10)),
+                    letterSpacing: 10,
+                    shadows: [
+                      Shadow(color: hudCyan, blurRadius: 18),
+                    ])),
             const SizedBox(height: 8),
             Text('核心启动中  ${(_boot * 100).toInt()}%',
                 style: const TextStyle(color: Colors.white70)),
             const SizedBox(height: 12),
             Text(_statusLine,
                 style: const TextStyle(color: hudCyan, fontSize: 13)),
-            const SizedBox(height: 20),
-            const SizedBox(
-                width: 200,
-                child: LinearProgressIndicator(
-                    color: hudCyan, backgroundColor: Colors.white12)),
+            const SizedBox(height: 16),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_boot > 0.15) _bootLog('核心上线'),
+                if (_boot > 0.45) _bootLog('神经链接建立'),
+                if (_boot > 0.75) _bootLog('全息面板展开'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: 200,
+              height: 6,
+              child: Container(
+                decoration: BoxDecoration(
+                    color: Colors.white12,
+                    borderRadius: BorderRadius.circular(3)),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: FractionallySizedBox(
+                    widthFactor: _boot.clamp(0.0, 1.0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                            colors: [hudBlue, hudCyan]),
+                        borderRadius: BorderRadius.circular(3),
+                        boxShadow: [
+                          BoxShadow(
+                              color: hudCyan.withOpacity(0.7),
+                              blurRadius: 8),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -441,24 +523,47 @@ class _HomeScreenState extends State<HomeScreen>
                   color: Colors.white,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 4,
-                  fontSize: 18)),
+                  fontSize: 18,
+                  shadows: [
+                    Shadow(color: hudCyan, blurRadius: 12),
+                  ])),
           const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
                 border: Border.all(color: hudCyan.withOpacity(0.5)),
                 borderRadius: BorderRadius.circular(10)),
-            child: Text(
-                _muted
-                    ? '已静音'
-                    : _state == JarvisState.listening
-                        ? '聆听中'
-                        : _state == JarvisState.thinking
-                            ? '思考中'
-                            : _state == JarvisState.speaking
-                                ? '播报中'
-                                : '待命',
-                style: const TextStyle(color: hudCyan, fontSize: 11)),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _statusDot().withOpacity(
+                        0.5 + 0.5 * (0.5 + 0.5 * math.sin(_tick * 4))),
+                    boxShadow: [
+                      BoxShadow(
+                          color: _statusDot().withOpacity(0.8),
+                          blurRadius: 6),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                    _muted
+                        ? '已静音'
+                        : _state == JarvisState.listening
+                            ? '聆听中'
+                            : _state == JarvisState.thinking
+                                ? '思考中'
+                                : _state == JarvisState.speaking
+                                    ? '播报中'
+                                    : '待命',
+                    style: const TextStyle(color: hudCyan, fontSize: 11)),
+              ],
+            ),
           ),
           const Spacer(),
           Text(time,
@@ -475,27 +580,63 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _hudBox({required String title, required Widget child}) {
     return Container(
       margin: const EdgeInsets.all(8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF041525).withOpacity(0.82),
-        border: Border.all(color: hudCyan.withOpacity(0.35)),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Stack(
         children: [
-          Row(children: [
-            const Icon(Icons.crop_free, color: hudCyan, size: 14),
-            const SizedBox(width: 6),
-            Text(title,
-                style: const TextStyle(
-                    color: hudCyan,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 2,
-                    fontSize: 12)),
-          ]),
-          const SizedBox(height: 10),
-          child,
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF041525).withOpacity(0.82),
+              border: Border.all(color: hudCyan.withOpacity(0.35)),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: hudCyan.withOpacity(
+                          0.4 + 0.6 * (0.5 + 0.5 * math.sin(_tick * 3))),
+                      boxShadow: [
+                        BoxShadow(
+                            color: hudCyan.withOpacity(0.9), blurRadius: 6),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(title,
+                      style: const TextStyle(
+                          color: hudCyan,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2,
+                          fontSize: 12)),
+                ]),
+                const SizedBox(height: 10),
+                child,
+              ],
+            ),
+          ),
+          const Positioned.fill(
+            child: CustomPaint(painter: HudCornersPainter()),
+          ),
+          Positioned(
+            top: 0,
+            left: 12,
+            right: 12,
+            height: 2,
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: [
+                  Colors.transparent,
+                  hudCyan.withOpacity(0.4 + 0.3 * math.sin(_tick * 2)),
+                  Colors.transparent,
+                ]),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -531,9 +672,24 @@ class _HomeScreenState extends State<HomeScreen>
           const SizedBox(height: 8),
           ..._dataStream.map((l) => Padding(
                 padding: const EdgeInsets.only(bottom: 5),
-                child: Text(l,
-                    style:
-                        const TextStyle(color: Colors.white70, fontSize: 11)),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      margin: const EdgeInsets.only(top: 5),
+                      width: 4,
+                      height: 4,
+                      decoration: const BoxDecoration(
+                          shape: BoxShape.circle, color: hudCyan),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(l,
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 11)),
+                    ),
+                  ],
+                ),
               )),
           if (_dataStream.isEmpty)
             const Text('数据流初始化中…',
@@ -552,10 +708,30 @@ class _HomeScreenState extends State<HomeScreen>
             child: Text(label,
                 style: const TextStyle(color: Colors.white70, fontSize: 12))),
         Expanded(
-            child: LinearProgressIndicator(
-                value: v.clamp(0.0, 1.0),
-                color: hudCyan,
-                backgroundColor: Colors.white12)),
+          child: Container(
+            height: 8,
+            decoration: BoxDecoration(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(4)),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FractionallySizedBox(
+                widthFactor: v.clamp(0.0, 1.0),
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                        colors: [hudBlue, hudCyan]),
+                    borderRadius: BorderRadius.circular(4),
+                    boxShadow: [
+                      BoxShadow(
+                          color: hudCyan.withOpacity(0.6), blurRadius: 6),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
         const SizedBox(width: 8),
         Text('${(v * 100).toInt()}%',
             style: const TextStyle(color: hudCyan, fontSize: 11)),
@@ -586,26 +762,28 @@ class _HomeScreenState extends State<HomeScreen>
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             SizedBox(
-              height: 210,
+              height: 230,
               child: Stack(
                 alignment: Alignment.center,
                 children: [
                   if (_settings.particles)
                     CustomPaint(
-                        size: const Size(300, 210),
+                        size: const Size(340, 230),
                         painter: ParticleSpherePainter(
                             tick: _tick,
                             active: listening || speaking,
                             points: _spherePoints)),
                   SizedBox(
-                    width: 170,
-                    height: 170,
+                    width: 200,
+                    height: 200,
                     child: CustomPaint(
                         painter: ReactorPainter(
                             progress: 1,
                             tick: _tick,
                             speaking: speaking || listening,
-                            thinking: thinking)),
+                            thinking: thinking,
+                            accent: _accent(),
+                            ripple: speaking || listening)),
                   ),
                   if (thinking)
                     const Positioned(
@@ -617,8 +795,8 @@ class _HomeScreenState extends State<HomeScreen>
             ),
             const SizedBox(height: 6),
             SizedBox(
-              height: 36,
-              width: 300,
+              height: 52,
+              width: 320,
               child: CustomPaint(
                   painter: WaveformPainter(
                       tick: _tick,
@@ -710,11 +888,19 @@ class _HomeScreenState extends State<HomeScreen>
                 margin: const EdgeInsets.only(bottom: 10),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: user
-                      ? const Color(0xFF0A3A52)
-                      : const Color(0xFF0B2236),
+                  gradient: LinearGradient(
+                    colors: user
+                        ? const [Color(0xFF0E4A66), Color(0xFF0A3A52)]
+                        : const [Color(0xFF0E2A44), Color(0xFF0B2236)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: hudCyan.withOpacity(0.25)),
+                  boxShadow: [
+                    BoxShadow(
+                        color: hudCyan.withOpacity(0.08), blurRadius: 12),
+                  ],
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -749,6 +935,63 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _micButton() {
+    final listening = _state == JarvisState.listening;
+    final ripples = <Widget>[];
+    if (listening) {
+      for (var i = 0; i < 3; i++) {
+        final phase = (_tick * 0.7 + i / 3) % 1;
+        ripples.add(Container(
+          width: 56 + 20 * phase,
+          height: 56 + 20 * phase,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+                color: Colors.redAccent.withOpacity(0.55 * (1 - phase)),
+                width: 1.5),
+          ),
+        ));
+      }
+    }
+    return SizedBox(
+      width: 76,
+      height: 76,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          ...ripples,
+          GestureDetector(
+            onTap: _toggleMic,
+            child: Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  colors: listening
+                      ? const [Color(0xFFFF6B6B), Color(0xFF7B2424)]
+                      : const [Color(0xFF1FB6E8), Color(0xFF0A3A52)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                      color: (listening ? Colors.redAccent : hudCyan)
+                          .withOpacity(0.55),
+                      blurRadius: 16,
+                      spreadRadius: 1),
+                ],
+              ),
+              child: CustomPaint(
+                  painter: MicGlyphPainter(
+                      listening: listening, tick: _tick)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _inputBar() {
     return SafeArea(
       top: false,
@@ -778,17 +1021,7 @@ class _HomeScreenState extends State<HomeScreen>
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                IconButton.filled(
-                  onPressed: _toggleMic,
-                  style: IconButton.styleFrom(
-                      backgroundColor: _state == JarvisState.listening
-                          ? const Color(0xFF7B2424)
-                          : const Color(0xFF0A3A52),
-                      foregroundColor: hudCyan),
-                  icon: Icon(
-                      _state == JarvisState.listening ? Icons.stop : Icons.mic,
-                      size: 26),
-                ),
+                _micButton(),
                 const SizedBox(width: 8),
                 Expanded(
                   child: TextField(
@@ -817,11 +1050,29 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ),
                 const SizedBox(width: 8),
-                IconButton.filled(
-                  onPressed: _state == JarvisState.thinking ? null : () => _send(),
-                  style: IconButton.styleFrom(
-                      backgroundColor: hudCyan, foregroundColor: Colors.black),
-                  icon: const Icon(Icons.arrow_upward),
+                GestureDetector(
+                  onTap:
+                      _state == JarvisState.thinking ? null : () => _send(),
+                  child: Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF35D3FF), Color(0xFF0A7DB8)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                            color: hudCyan.withOpacity(0.55),
+                            blurRadius: 14,
+                            spreadRadius: 1),
+                      ],
+                    ),
+                    child: const Icon(Icons.arrow_upward,
+                        color: Colors.white, size: 22),
+                  ),
                 ),
               ],
             ),
@@ -841,10 +1092,24 @@ class _ScanPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final y = size.height * t;
-    final p = Paint()
-      ..color = hudCyan.withOpacity(0.5)
+    const bandH = 70.0;
+    final top = (y - bandH / 2).clamp(0.0, size.height);
+    final rect = Rect.fromLTWH(0, top, size.width, bandH);
+    final grad = LinearGradient(
+      colors: [
+        hudCyan.withOpacity(0),
+        hudCyan.withOpacity(0.16),
+        hudCyan.withOpacity(0),
+      ],
+      stops: const [0.0, 0.5, 1.0],
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+    );
+    canvas.drawRect(rect, Paint()..shader = grad.createShader(rect));
+    final line = Paint()
+      ..color = hudCyan.withOpacity(0.6)
       ..strokeWidth = 2;
-    canvas.drawLine(Offset(0, y), Offset(size.width, y), p);
+    canvas.drawLine(Offset(0, y), Offset(size.width, y), line);
   }
 
   @override
