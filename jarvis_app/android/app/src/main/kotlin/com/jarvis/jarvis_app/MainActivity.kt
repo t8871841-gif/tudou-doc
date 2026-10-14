@@ -1,5 +1,6 @@
 package com.jarvis.jarvis_app
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Telephony
@@ -10,6 +11,7 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val channel = "jarvis/sms"
+    private val launcherChannel = "jarvis/launcher"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -23,6 +25,28 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, launcherChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "openApp" -> {
+                        val pkg = call.argument<String>("package") ?: ""
+                        result.success(openApp(pkg))
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun openApp(pkg: String): Boolean {
+        if (pkg.isEmpty()) return false
+        val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return false
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun getInboxSms(limit: Int): List<Map<String, Any>> {
