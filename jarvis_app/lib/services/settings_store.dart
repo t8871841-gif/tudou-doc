@@ -13,6 +13,13 @@ class JarvisSettings {
   static const defaultSpeakReplies = true;
   static const defaultParticles = true;
 
+  // Default persona prompt (HTML settings "人设提示词"). Kept identical
+  // to the previously hard-coded system prompt in LlmService.
+  static const defaultSystemPrompt =
+      '你是 Jarvis，一位中文智能语音助手。说话简洁、直接、有礼貌，用中文回答。'
+      '你可以回答各种各样的问题：知识、日常、学习、工作、技术、生活等。'
+      '不知道就直说不知道，不要编造。回答不要使用 Markdown 格式符号（如 **、#），用纯文本，方便语音播报。';
+
   String baseUrl = defaultBaseUrl;
   String model = defaultModel;
   String apiKey = ''; // empty by default; user fills in Settings
@@ -21,6 +28,7 @@ class JarvisSettings {
   double pitch = defaultPitch;
   bool speakReplies = defaultSpeakReplies;
   bool particles = defaultParticles;
+  String systemPrompt = defaultSystemPrompt;
 
   Future<void> load() async {
     baseUrl =
@@ -38,6 +46,8 @@ class JarvisSettings {
     speakReplies =
         (await _storage.read(key: 'jarvis_speak_replies')) != 'false';
     particles = (await _storage.read(key: 'jarvis_particles')) != 'false';
+    systemPrompt = await _storage.read(key: 'jarvis_system_prompt') ??
+        defaultSystemPrompt;
   }
 
   Future<void> save() async {
@@ -58,6 +68,7 @@ class JarvisSettings {
         key: 'jarvis_speak_replies', value: speakReplies ? 'true' : 'false');
     await _storage.write(
         key: 'jarvis_particles', value: particles ? 'true' : 'false');
+    await _storage.write(key: 'jarvis_system_prompt', value: systemPrompt);
   }
 
   bool get configured => apiKey.trim().isNotEmpty;

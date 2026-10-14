@@ -18,10 +18,10 @@ class LlmService {
     }
     final base = settings.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$base/chat/completions');
-    final system =
-        '你是 Jarvis，一位中文智能语音助手。说话简洁、直接、有礼貌，用中文回答。'
-        '你可以回答各种各样的问题：知识、日常、学习、工作、技术、生活等。'
-        '不知道就直说不知道，不要编造。回答不要使用 Markdown 格式符号（如 **、#），用纯文本，方便语音播报。';
+    // Persona prompt from Settings (HTML "人设提示词"); empty = default.
+    final system = settings.systemPrompt.trim().isEmpty
+        ? JarvisSettings.defaultSystemPrompt
+        : settings.systemPrompt.trim();
     final messages = <Map<String, String>>[
       {'role': 'system', 'content': system},
       ...history,

@@ -351,12 +351,12 @@ class DeviceActions {
         (m) {
       final numPart = m.group(0)!.replaceAll(RegExp(r'\s*[点时]$'), '');
       final n = _parseCnNumber(numPart);
-      return n == null ? m.group(0)! : '${n}点';
+      return n == null ? m.group(0)! : '$n点';
     });
     out = out.replaceAllMapped(RegExp(r'[零一二两三四五六七八九十]+\s*分'), (m) {
       final numPart = m.group(0)!.replaceAll(RegExp(r'\s*分$'), '');
       final n = _parseCnNumber(numPart);
-      return n == null ? m.group(0)! : '${n}分';
+      return n == null ? m.group(0)! : '$n分';
     });
     out = out
         .replaceAll('点半', '点30分')
@@ -437,7 +437,11 @@ class DeviceActions {
   // ---------- Open app ----------
 
   static Future<String?> _tryOpenApp(String t) async {
-    if (!t.contains('打开') && !t.contains('启动') && !t.contains('开一下')) {
+    // Bare "开" also counts: "开微信" must trigger, not just 打开/启动/开一下.
+    if (!t.contains('打开') &&
+        !t.contains('启动') &&
+        !t.contains('开一下') &&
+        !t.contains('开')) {
       return null;
     }
     // Longest app name first: "微信读书" must beat "微信",
