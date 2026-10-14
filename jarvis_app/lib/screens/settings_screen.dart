@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../services/edge_tts_service.dart';
 import '../services/settings_store.dart';
 
-/// Settings: base URL, model, API key, voice, rate, pitch.
+/// Settings: base URL, model, API key, persona prompt, voice, rate, pitch.
 /// The API key field starts empty; nothing is hard-coded.
+/// Styled after the HTML settings card (#set .card): dark #00121a card,
+/// #000d14 inputs, cyan accent borders.
 class SettingsScreen extends StatefulWidget {
   final JarvisSettings settings;
   const SettingsScreen({super.key, required this.settings});
@@ -19,17 +21,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: widget.settings.model);
   late final TextEditingController _key =
       TextEditingController(text: widget.settings.apiKey);
+  late final TextEditingController _sys =
+      TextEditingController(text: widget.settings.systemPrompt);
   late String _voice = widget.settings.edgeVoice;
   late double _rate = widget.settings.rate;
   late double _pitch = widget.settings.pitch;
   late bool _speak = widget.settings.speakReplies;
   late bool _particles = widget.settings.particles;
 
+  static const _accent = Color(0xFF33DDFF);
+  static const _card = Color(0xFF00121A);
+  static const _inputBg = Color(0xFF000D14);
+
   @override
   void dispose() {
     _base.dispose();
     _model.dispose();
     _key.dispose();
+    _sys.dispose();
     super.dispose();
   }
 
@@ -37,6 +46,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.settings.baseUrl = _base.text.trim();
     widget.settings.model = _model.text.trim();
     widget.settings.apiKey = _key.text.trim();
+    widget.settings.systemPrompt = _sys.text.trim();
     widget.settings.edgeVoice = _voice;
     widget.settings.rate = _rate;
     widget.settings.pitch = _pitch;
@@ -49,13 +59,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Navigator.pop(context);
   }
 
+  InputDecoration _dec(String label, {String? hint, String? helper}) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      helperText: helper,
+      filled: true,
+      fillColor: _inputBg,
+      labelStyle: const TextStyle(color: Colors.white70),
+      hintStyle: const TextStyle(color: Colors.white30),
+      helperStyle: const TextStyle(color: Colors.white38),
+      enabledBorder: const OutlineInputBorder(
+          borderSide: BorderSide(color: Colors.white24)),
+      focusedBorder: const OutlineInputBorder(
+          borderSide: BorderSide(color: _accent)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF020A14),
+      backgroundColor: const Color(0xFF00060B),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF041525),
-        title: const Text('Jarvis 设置',
+        backgroundColor: _card,
+        title: const Text('大脑设置',
             style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
@@ -69,63 +96,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children: [
           const Text('大模型服务',
               style: TextStyle(
-                  color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)),
+                  color: _accent, fontWeight: FontWeight.bold)),
           const SizedBox(height: 10),
           TextField(
               controller: _base,
               style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                  labelText: '接口地址',
-                  hintText: 'https://apihub.agnes-ai.com/v1',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  hintStyle: TextStyle(color: Colors.white30),
-                  enabledBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Colors.white24)),
-                  focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Color(0xFF00E5FF))))),
+              decoration: _dec('接口地址',
+                  hint: 'https://apihub.agnes-ai.com/v1')),
           const SizedBox(height: 12),
           TextField(
               controller: _model,
               style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                  labelText: '模型名称',
-                  hintText: 'agnes-3.0-flash',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  hintStyle: TextStyle(color: Colors.white30),
-                  enabledBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Colors.white24)),
-                  focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Color(0xFF00E5FF))))),
+              decoration:
+                  _dec('模型名称', hint: 'agnes-3.0-flash')),
           const SizedBox(height: 12),
           TextField(
               controller: _key,
               obscureText: true,
               style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                  labelText: 'API Key',
-                  helperText: '仅保存在本机安全存储，不会写进代码。留空则无法联网问答。',
-                  helperStyle: TextStyle(color: Colors.white38),
-                  labelStyle: TextStyle(color: Colors.white70),
-                  enabledBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Colors.white24)),
-                  focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Color(0xFF00E5FF))))),
+              decoration: _dec('API Key',
+                  helper: '仅保存在本机安全存储，不会写进代码。留空则无法联网问答。')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: _sys,
+              maxLines: 4,
+              style: const TextStyle(color: Colors.white),
+              decoration: _dec('人设提示词',
+                  hint: '你是钢铁侠的AI管家贾维斯……')),
           const SizedBox(height: 24),
           const Text('微软 Edge 语音',
               style: TextStyle(
-                  color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)),
+                  color: _accent, fontWeight: FontWeight.bold)),
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(
-            value: EdgeTtsService.voices.any((v) => v['id'] == _voice)
+            initialValue: EdgeTtsService.voices.any((v) => v['id'] == _voice)
                 ? _voice
                 : EdgeTtsService.defaultVoice,
             dropdownColor: const Color(0xFF0B2236),
             style: const TextStyle(color: Colors.white),
-            decoration: const InputDecoration(
-                labelText: '播报声音',
-                labelStyle: TextStyle(color: Colors.white70),
-                enabledBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white24))),
+            decoration: _dec('播报声音'),
             items: EdgeTtsService.voices
                 .map((v) => DropdownMenuItem<String>(
                     value: v['id'], child: Text(v['label']!)))
