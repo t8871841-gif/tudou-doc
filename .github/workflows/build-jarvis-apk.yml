@@ -24,8 +24,10 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      - name: Remove stale local.properties
+        run: rm -f jarvis_app/android/local.properties
       - run: cd jarvis_app && flutter pub get
-      - run: cd jarvis_app && flutter build apk --release
+      - run: cd jarvis_app && flutter build apk --release --target-platform android-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-apk
