@@ -30,6 +30,7 @@ jobs:
 
       - name: Install NDK
         run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses || true
           sdkmanager "ndk;${{ env.NDK_VERSION }}"
 
