@@ -19,6 +19,10 @@ dependencies:
   audioplayers: ^6.1.0
   crypto: ^3.0.0
   path_provider: ^2.1.5
+  url_launcher: ^6.3.0
+  android_intent_plus: ^5.0.2
+  device_apps: ^2.2.0
+  permission_handler: ^11.3.1
 
 dev_dependencies:
   flutter_test:
