@@ -12,7 +12,11 @@ import 'package:crypto/crypto.dart';
 /// service answers the upgrade with `Connection: close`, which strict
 /// WebSocket clients reject even though the upgrade itself succeeds (101).
 class EdgeTtsService {
-  static const _host = 'speech.platform.bing.com';
+  // New endpoint (Oct 2026): Microsoft moved Read Aloud off
+  // speech.platform.bing.com, whose v1 handshake now 403s in many
+  // regions. The new host accepts the existing Sec-MS-GEC token/version
+  // when the token is passed as Ocp-Apim-Subscription-Key (Readest fix).
+  static const _host = 'api.msedgeservices.com';
   // Public client token shipped with the open-source edge-tts project.
   static const _token = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
   static const _chromiumMajor = '143';
@@ -205,8 +209,8 @@ class _EdgeConnection {
     final gec = EdgeTtsService._secMsGec();
     final key = base64Encode(
         List<int>.generate(16, (_) => Random.secure().nextInt(256)));
-    final path = '/consumer/speech/synthesize/readaloud/edge/v1'
-        '?TrustedClientToken=${EdgeTtsService._token}'
+    final path = '/tts/cognitiveservices/websocket/v1'
+        '?Ocp-Apim-Subscription-Key=${EdgeTtsService._token}'
         '&ConnectionId=${EdgeTtsService._hexId()}'
         '&Sec-MS-GEC=$gec'
         '&Sec-MS-GEC-Version=1-${EdgeTtsService._chromiumMajor}.0.3650.75';
