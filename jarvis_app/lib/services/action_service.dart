@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 class DeviceActions {
   static final _phoneReg = RegExp(r'1[3-9]\d{9}');
   static const _smsChannel = MethodChannel('jarvis/sms');
+  static const _launcherChannel = MethodChannel('jarvis/launcher');
 
   // Chinese app name -> candidate package names, tried in order.
   // System apps: AOSP name first, then Flyme/Meizu equivalents
@@ -461,13 +462,11 @@ class DeviceActions {
     }
     for (final pkg in _appPackages[name]!) {
       try {
-        final intent = AndroidIntent(
-          action: 'android.intent.action.MAIN',
-          package: pkg,
-          category: 'android.intent.category.LAUNCHER',
+        final ok = await _launcherChannel.invokeMethod<bool>(
+          'openApp',
+          {'package': pkg},
         );
-        await intent.launch();
-        return '已打开 $name。';
+        if (ok == true) return '已打开 $name。';
       } catch (_) {
         // Try the next candidate package.
       }
