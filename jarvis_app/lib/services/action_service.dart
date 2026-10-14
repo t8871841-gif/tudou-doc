@@ -1,5 +1,4 @@
 import 'package:android_intent_plus/android_intent.dart';
-import 'package:device_apps/device_apps.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -263,12 +262,16 @@ class DeviceActions {
     }
     final pkg = _appPackages[name]!;
     try {
-      final installed = await DeviceApps.isAppInstalled(pkg);
-      if (installed) {
-        await DeviceApps.openApp(pkg);
-        return '已打开 $name。';
-      }
-      // Fallback: Play store search.
+      // No device_apps (AGP 9 incompatible): launch by package via Intent.
+      final intent = AndroidIntent(
+        action: 'android.intent.action.MAIN',
+        package: pkg,
+        category: 'android.intent.category.LAUNCHER',
+      );
+      await intent.launch();
+      return '已打开 $name。';
+    } catch (_) {
+      // Not installed or cannot launch: fall back to store search.
       final uri = Uri.parse(
           'https://play.google.com/store/search?q=${Uri.encodeComponent(name)}&c=apps');
       if (await canLaunchUrl(uri)) {
@@ -276,8 +279,6 @@ class DeviceActions {
         return '$name 似乎没安装，已打开应用商店搜索页。';
       }
       return '$name 似乎没安装。';
-    } catch (_) {
-      return '打开 $name 失败，请确认已安装。';
     }
   }
 }
