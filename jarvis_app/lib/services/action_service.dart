@@ -183,8 +183,7 @@ class DeviceActions {
       }
       return '要打电话请带上号码或通讯录里的名字，例如：打电话给张三，或打电话给 13812345678。';
     }
-    try {
-      final uri = Uri(scheme: 'tel', path: phone);
+    final uri = Uri(scheme: 'tel', path: phone);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
       final who = target.name != null ? '${target.name} $phone' : phone;
