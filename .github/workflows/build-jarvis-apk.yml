@@ -1,0 +1,32 @@
+name: Build Jarvis APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: '3.47.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: cd jarvis_app && flutter pub get
+      - run: cd jarvis_app && flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-apk
+          path: jarvis_app/build/app/outputs/flutter-apk/app-release.apk
