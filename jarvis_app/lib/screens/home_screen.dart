@@ -158,10 +158,15 @@ class _HomeScreenState extends State<HomeScreen>
       await _player.onPlayerComplete.first
           .timeout(Duration(seconds: (clean.length / 8).clamp(3, 30).toInt()));
     } catch (_) {
+      // Edge failed: fall back to system TTS, but still honour the
+      // selected voice as far as the device allows — previously the
+      // fallback never set a voice at all, so changing the Edge voice
+      // had no audible effect whenever Edge was unreachable.
       try {
         await _tts.setLanguage('zh-CN');
         await _tts.setSpeechRate(_settings.rate);
         await _tts.setPitch(_settings.pitch);
+        await _applySystemVoiceFallback();
         await _tts.speak(clean);
       } catch (_) {}
     } finally {
@@ -169,6 +174,44 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() => _state = JarvisState.idle);
       }
     }
+  }
+
+  /// Best-effort voice match for the system-TTS fallback.
+  /// Edge voices are Yun* (male) / Xiao* (female). System voices vary
+  /// by device, so match on locale + a gender hint in the name, and
+  /// silently keep the device default when nothing matches.
+  Future<void> _applySystemVoiceFallback() async {
+    try {
+      final voices = await _tts.getVoices;
+      if (voices is! List || voices.isEmpty) return;
+      final wantFemale = _settings.edgeVoice.contains('Xiao');
+      Map? best;
+      for (final v in voices) {
+        if (v is! Map) continue;
+        final locale = (v['locale'] ?? '').toString();
+        if (!locale.toLowerCase().startsWith('zh')) continue;
+        final name = (v['name'] ?? '').toString().toLowerCase();
+        final looksFemale = name.contains('female') ||
+            name.contains('女') ||
+            name.contains('xiaoxiao') ||
+            name.contains('xiao');
+        final looksMale = name.contains('male') ||
+            name.contains('男') ||
+            name.contains('yunyang') ||
+            name.contains('yun');
+        if (wantFemale ? looksFemale : looksMale) {
+          best = v;
+          break;
+        }
+        best ??= v;
+      }
+      if (best != null) {
+        await _tts.setVoice({
+          'name': best['name'].toString(),
+          'locale': best['locale'].toString(),
+        });
+      }
+    } catch (_) {}
   }
 
   Future<bool> _ensureSpeech() async {
@@ -388,12 +431,18 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _openSettings() async {
-    await Navigator.push(
+    final saved = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
             builder: (_) => SettingsScreen(settings: _settings)));
     await _settings.load();
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {});
+      // Settings pops with true only after a real save, so this
+      // confirmation is shown on Home (a SnackBar shown in Settings
+      // would vanish instantly on pop).
+      if (saved == true) _notice('设置已保存，声音已切换。');
+    }
   }
 
   // ---------- Boot (HTML: tap to wake) ----------
