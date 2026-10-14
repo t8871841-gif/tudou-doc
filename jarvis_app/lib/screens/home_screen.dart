@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
+import '../services/action_service.dart';
 import '../services/edge_tts_service.dart';
 import '../services/llm_service.dart';
 import '../services/settings_store.dart';
@@ -64,7 +65,7 @@ class _HomeScreenState extends State<HomeScreen>
             _state = JarvisState.idle;
             _statusLine = '核心已上线，随时可以开始。';
             _messages.add(const _Msg('assistant',
-                '您好，我是 Jarvis。您可以直接说话、点麦克风，或者打字提问。我可以回答各种各样的问题。'));
+                '您好，我是 Jarvis。您可以直接说话、点麦克风，或者打字提问。我可以回答各种各样的问题，还能打电话、发消息、设闹钟、开 App。')); 
           } else if (_boot > 0.7) {
             _statusLine = '神经链接建立中…';
           } else if (_boot > 0.35) {
@@ -259,6 +260,31 @@ class _HomeScreenState extends State<HomeScreen>
       _statusLine = '正在思考…';
     });
     _scrollDown();
+    // Device actions first (call / message / alarm / open app).
+    // Returns null when the text is not an action command.
+    try {
+      final actionReply = await DeviceActions.tryHandle(q);
+      if (actionReply != null) {
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_Msg('assistant', actionReply));
+          _state = JarvisState.idle;
+          _statusLine = '已执行设备指令。';
+        });
+        _scrollDown();
+        await _speak(actionReply);
+        return;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_Msg('assistant', '设备指令执行失败：$e'));
+        _state = JarvisState.idle;
+        _statusLine = '设备指令失败。';
+      });
+      _scrollDown();
+      return;
+    }
     try {
       final history = _messages
           .where((m) => m.role != 'system')
