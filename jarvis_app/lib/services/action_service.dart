@@ -398,7 +398,8 @@ class DeviceActions {
     if ((period == '下午' ||
             period == '晚上' ||
             period == '今晚' ||
-            period == '夜里') &&
+            period == '夜里' ||
+            period == '中午') &&
         hour < 12) {
       hour += 12;
     }
@@ -462,6 +463,13 @@ class DeviceActions {
     }
     for (final pkg in _appPackages[name]!) {
       try {
+        // Launch via the native getLaunchIntentForPackage channel.
+        // Do NOT use AndroidIntent(ACTION_MAIN + CATEGORY_LAUNCHER +
+        // package): android_intent_plus strips the package when
+        // resolveActivity(MATCH_DEFAULT_ONLY) fails (launcher
+        // activities don't declare CATEGORY_DEFAULT), which turns
+        // the launch into an implicit intent and pops a system
+        // "打开方式" chooser instead of opening the app.
         final ok = await _launcherChannel.invokeMethod<bool>(
           'openApp',
           {'package': pkg},
