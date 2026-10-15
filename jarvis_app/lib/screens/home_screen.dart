@@ -4,12 +4,10 @@ import 'dart:math' as math;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/action_service.dart';
 import '../services/edge_tts_service.dart';
-import '../services/kokoro_tts_service.dart';
 import '../services/llm_service.dart';
 import '../services/settings_store.dart';
 import '../widgets/hud_painters.dart';
@@ -40,7 +38,6 @@ class _HomeScreenState extends State<HomeScreen>
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _speech = stt.SpeechToText();
-  final _tts = FlutterTts();
   final _player = AudioPlayer();
 
   JarvisState _state = JarvisState.booting;
@@ -135,7 +132,6 @@ class _HomeScreenState extends State<HomeScreen>
     _input.dispose();
     _scroll.dispose();
     _speech.stop();
-    _tts.stop();
     _player.dispose();
     super.dispose();
   }
@@ -150,16 +146,11 @@ class _HomeScreenState extends State<HomeScreen>
       await _player.stop();
       final short =
           clean.length > 1200 ? '${clean.substring(0, 1200)}…' : clean;
-      final spoken = await _speakByEngine(short);
-      if (!spoken) {
-        // Last resort: system TTS, honouring the selected voice as far
-        // as the device allows.
-        await _speakSystem(clean);
-      }
+      // Edge only: no system-TTS fallback. If Edge fails (e.g. no
+      // network), the reply stays silent but visible in chat.
+      await _speakByEngine(short);
     } catch (_) {
-      try {
-        await _speakSystem(clean);
-      } catch (_) {}
+      // Swallow: Edge failure must never crash the chat flow.
     } finally {
       if (mounted && _state == JarvisState.speaking) {
         setState(() => _state = JarvisState.idle);
@@ -167,99 +158,25 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  /// Tries the configured engine first, then the other online/offline
-  /// engine. Order: Kokoro (offline) -> Edge (online) -> system TTS.
-  /// Returns true when audio was played. System TTS is handled
-  /// by the caller as the final fallback, so it is not tried here.
+  /// Edge (online) only. Returns true when audio was played.
   Future<bool> _speakByEngine(String text) async {
-    final engine = _settings.ttsEngine;
-    if (engine == JarvisSettings.engineSystem) return false;
-    final firstKokoro = engine != JarvisSettings.engineEdge;
-    final attempts = firstKokoro
-        ? ['kokoro', 'edge']
-        : ['edge', 'kokoro'];
-    for (final e in attempts) {
+    try {
+      final mp3 = await EdgeTtsService.synthesize(
+        text,
+        voice: _settings.edgeVoice,
+        rate: _settings.rate,
+        pitch: _settings.pitch,
+      );
+      await _player.play(BytesSource(mp3));
+      await _player.onPlayerComplete.first.timeout(
+          Duration(seconds: (text.length / 8).clamp(3, 30).toInt()));
+      return true;
+    } catch (_) {
       try {
-        if (e == 'kokoro') {
-          final wav = await KokoroTtsService.synthesize(
-            text,
-            voiceId: _settings.kokoroVoice,
-            rate: _settings.rate,
-            pitch: _settings.pitch,
-          );
-          await _player.play(BytesSource(wav));
-          await _player.onPlayerComplete.first.timeout(
-              Duration(seconds: (text.length / 8).clamp(3, 30).toInt()));
-          return true;
-        } else {
-          final mp3 = await EdgeTtsService.synthesize(
-            text,
-            voice: _settings.edgeVoice,
-            rate: _settings.rate,
-            pitch: _settings.pitch,
-          );
-          await _player.play(BytesSource(mp3));
-          await _player.onPlayerComplete.first.timeout(
-              Duration(seconds: (text.length / 8).clamp(3, 30).toInt()));
-          return true;
-        }
-      } catch (_) {
-        // Try the next engine.
-        try {
-          await _player.stop();
-        } catch (_) {}
-      }
+        await _player.stop();
+      } catch (_) {}
     }
     return false;
-  }
-
-  Future<void> _speakSystem(String clean) async {
-    await _tts.setLanguage('zh-CN');
-    await _tts.setSpeechRate(_settings.rate);
-    await _tts.setPitch(_settings.pitch);
-    await _applySystemVoiceFallback();
-    await _tts.speak(clean);
-  }
-
-  /// Best-effort voice match for the system-TTS fallback.
-  /// Gender comes from the selected voice of the active engine
-  /// (Kokoro zf_* = female, Edge Xiao* = female). System voices vary
-  /// by device, so match on locale + a gender hint in the name, and
-  /// silently keep the device default when nothing matches.
-  Future<void> _applySystemVoiceFallback() async {
-    try {
-      final voices = await _tts.getVoices;
-      if (voices is! List || voices.isEmpty) return;
-      final wantFemale = _settings.ttsEngine == JarvisSettings.engineKokoro
-          ? _settings.kokoroVoice.startsWith('zf_')
-          : _settings.edgeVoice.contains('Xiao');
-      Map? best;
-      for (final v in voices) {
-        if (v is! Map) continue;
-        final locale = (v['locale'] ?? '').toString();
-        if (!locale.toLowerCase().startsWith('zh')) continue;
-        final name = (v['name'] ?? '').toString().toLowerCase();
-        final looksFemale = name.contains('female') ||
-            name.contains('女') ||
-            name.contains('xiaoxiao') ||
-            name.contains('xiao');
-        final looksMale = name.contains('male') ||
-            name.contains('男') ||
-            name.contains('yunyang') ||
-            name.contains('yun');
-        if (wantFemale ? looksFemale : looksMale) {
-          best = v;
-          break;
-        }
-        best ??= v;
-      }
-      if (best != null) {
-        await _tts.setVoice({
-          'name': best['name'].toString(),
-          'locale': best['locale'].toString(),
-        });
-      }
-    } catch (_) {}
   }
 
   Future<bool> _ensureSpeech() async {
@@ -383,7 +300,6 @@ class _HomeScreenState extends State<HomeScreen>
     if (_muted) {
       _speech.stop();
       _player.stop();
-      _tts.stop();
       _state = JarvisState.idle;
       _notice('已静音。静音时语音唤醒不生效，请点麦克风恢复。');
     }
