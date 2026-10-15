@@ -17,6 +17,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Offline ASR models are NOT committed to the repo (the release
+      # tarball is ~500MB). Download the sherpa-onnx streaming
+      # zipformer bilingual model from the official release and
+      # stage the 4 files the app expects under assets/asr/.
+      - name: Download sherpa-onnx ASR models
+        run: |
+          curl -sL -o asr-model.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2
+          mkdir -p asr-model jarvis_app/assets/asr
+          tar -xjf asr-model.tar.bz2 -C asr-model
+          # Only the 4 files the app needs (the tarball also ships fp32
+          # duplicates, test wavs and bpe files we must NOT bundle).
+          find asr-model -name 'encoder-epoch-99-avg-1.int8.onnx' -exec cp {} jarvis_app/assets/asr/ \;
+          find asr-model -name 'decoder-epoch-99-avg-1.onnx' -exec cp {} jarvis_app/assets/asr/ \;
+          find asr-model -name 'joiner-epoch-99-avg-1.int8.onnx' -exec cp {} jarvis_app/assets/asr/ \;
+          find asr-model -name 'tokens.txt' -exec cp {} jarvis_app/assets/asr/ \;
+          ls -la jarvis_app/assets/asr/
+          test -f jarvis_app/assets/asr/encoder-epoch-99-avg-1.int8.onnx && test -f jarvis_app/assets/asr/decoder-epoch-99-avg-1.onnx && test -f jarvis_app/assets/asr/joiner-epoch-99-avg-1.int8.onnx && test -f jarvis_app/assets/asr/tokens.txt
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
