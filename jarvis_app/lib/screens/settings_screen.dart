@@ -69,7 +69,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.settings.pitch = _pitch;
     widget.settings.speakReplies = _speak;
     widget.settings.particles = _particles;
-    await widget.settings.save();
+    try {
+      await widget.settings.save();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存失败：$e')));
+      return;
+    }
     if (!mounted) return;
     // Pop with true; Home shows the confirmation SnackBar. Showing one
     // here would vanish instantly on pop.
