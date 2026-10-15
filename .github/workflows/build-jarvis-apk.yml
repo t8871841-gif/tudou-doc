@@ -34,6 +34,10 @@ jobs:
           find asr-model -name 'tokens.txt' -exec cp {} jarvis_app/assets/asr/ \;
           ls -la jarvis_app/assets/asr/
           test -f jarvis_app/assets/asr/encoder-epoch-99-avg-1.int8.onnx && test -f jarvis_app/assets/asr/decoder-epoch-99-avg-1.onnx && test -f jarvis_app/assets/asr/joiner-epoch-99-avg-1.int8.onnx && test -f jarvis_app/assets/asr/tokens.txt
+          # Free the ~1.5GB tarball + extracted tree: the runner ran out
+          # of disk on the last build at the final APK copy.
+          rm -rf asr-model asr-model.tar.bz2
+          df -h .
 
       - uses: actions/setup-java@v4
         with:
