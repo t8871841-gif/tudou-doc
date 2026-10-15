@@ -1,9 +1,7 @@
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 
 import '../services/edge_tts_service.dart';
-import '../services/kokoro_tts_service.dart';
 import '../services/settings_store.dart';
 
 /// Settings: base URL, model, API key, persona prompt, voice, rate, pitch.
@@ -31,11 +29,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: widget.settings.apiKey);
   late final TextEditingController _sys =
       TextEditingController(text: widget.settings.systemPrompt);
-  late String _engine = widget.settings.ttsEngine;
-  late String _kokoroVoice = KokoroTtsService.voices
-          .any((v) => v['id'] == widget.settings.kokoroVoice)
-      ? widget.settings.kokoroVoice
-      : KokoroTtsService.defaultVoice;
   late String _voice = EdgeTtsService.voices
           .any((v) => v['id'] == widget.settings.edgeVoice)
       ? widget.settings.edgeVoice
@@ -46,7 +39,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _particles = widget.settings.particles;
 
   final _player = AudioPlayer();
-  final _systemTts = FlutterTts();
   bool _previewing = false;
 
   // Lifted-contrast dark palette (still dark, no longer flat black).
@@ -63,7 +55,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _key.dispose();
     _sys.dispose();
     _player.dispose();
-    _systemTts.stop();
     super.dispose();
   }
 
@@ -72,8 +63,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.settings.model = _model.text.trim();
     widget.settings.apiKey = _key.text.trim();
     widget.settings.systemPrompt = _sys.text.trim();
-    widget.settings.ttsEngine = _engine;
-    widget.settings.kokoroVoice = _kokoroVoice;
+    widget.settings.ttsEngine = JarvisSettings.engineEdge;
     widget.settings.edgeVoice = _voice;
     widget.settings.rate = _rate;
     widget.settings.pitch = _pitch;
@@ -86,50 +76,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Navigator.pop(context, true);
   }
 
-  /// Preview the currently selected engine / voice / rate in place.
-  /// Failures show the real error (e.g. "Kokoro 初始化失败：…") instead
-  /// of a generic "check network", so a broken engine can be diagnosed.
+  /// Preview the selected Edge voice / rate / pitch in place.
+  /// Failures show the real error instead of a generic "check
+  /// network", so a broken engine can be diagnosed.
   Future<void> _previewVoice() async {
     if (_previewing) {
       await _player.stop();
-      await _systemTts.stop();
       if (mounted) setState(() => _previewing = false);
       return;
     }
     setState(() => _previewing = true);
     try {
       await _player.stop();
-      await _systemTts.stop();
-      if (_engine == JarvisSettings.engineKokoro) {
-        final label = KokoroTtsService.labelFor(_kokoroVoice);
-        final wav = await KokoroTtsService.synthesize(
-          '您好，我是 Jarvis，这是$label，现在的声音就是这样。',
-          voiceId: _kokoroVoice,
-          rate: _rate,
-          pitch: _pitch,
-        );
-        await _player.play(BytesSource(wav));
-        await _player.onPlayerComplete.first
-            .timeout(const Duration(seconds: 15));
-      } else if (_engine == JarvisSettings.engineEdge) {
-        final label = EdgeTtsService.voices
-            .firstWhere((v) => v['id'] == _voice,
-                orElse: () => EdgeTtsService.voices.first)['label'];
-        final mp3 = await EdgeTtsService.synthesize(
-          '您好，我是 Jarvis，这是$label，现在的声音就是这样。',
-          voice: _voice,
-          rate: _rate,
-          pitch: _pitch,
-        );
-        await _player.play(BytesSource(mp3));
-        await _player.onPlayerComplete.first
-            .timeout(const Duration(seconds: 15));
-      } else {
-        await _systemTts.setLanguage('zh-CN');
-        await _systemTts.setSpeechRate(_rate);
-        await _systemTts.setPitch(_pitch);
-        await _systemTts.speak('您好，我是 Jarvis，这是系统语音试听。');
-      }
+      final label = EdgeTtsService.voices
+          .firstWhere((v) => v['id'] == _voice,
+              orElse: () => EdgeTtsService.voices.first)['label'];
+      final mp3 = await EdgeTtsService.synthesize(
+        '您好，我是 Jarvis，这是$label，现在的声音就是这样。',
+        voice: _voice,
+        rate: _rate,
+        pitch: _pitch,
+      );
+      await _player.play(BytesSource(mp3));
+      await _player.onPlayerComplete.first
+          .timeout(const Duration(seconds: 15));
     } catch (e) {
       if (mounted) {
         final msg = e.toString().replaceFirst('StateError: ', '');
@@ -222,88 +192,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ]),
           const SizedBox(height: 16),
           _section(title: '语音播报', children: [
-            InputDecorator(
-              decoration: _dec('语音引擎'),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _engine,
-                  dropdownColor: _dropdownBg,
-                  style: const TextStyle(color: Colors.white),
-                  isExpanded: true,
-                  isDense: true,
-                  items: const [
-                    DropdownMenuItem(
-                        value: JarvisSettings.engineKokoro,
-                        child: Text('Kokoro 离线（推荐，默认）')),
-                    DropdownMenuItem(
-                        value: JarvisSettings.engineEdge,
-                        child: Text('Edge 在线')),
-                    DropdownMenuItem(
-                        value: JarvisSettings.engineSystem,
-                        child: Text('系统')),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) setState(() => _engine = v);
-                  },
-                ),
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              _engine == JarvisSettings.engineKokoro
-                  ? 'Kokoro 离线：8 个中文声，男女声都有，默认云阳男声。离线优先，不走网络。'
-                  : _engine == JarvisSettings.engineEdge
-                      ? 'Edge 在线音色多，但国内网络可能不通；失败时自动回落到 Kokoro / 系统。'
-                      : '系统语音：使用手机系统音色，不走网络。',
-              style: const TextStyle(color: Colors.white60, fontSize: 12),
-            ),
+            const Text('语音引擎：Edge 在线（唯一）。断网时无语音播报。',
+                style: TextStyle(color: Colors.white60, fontSize: 12)),
             const SizedBox(height: 12),
-            if (_engine == JarvisSettings.engineKokoro) ...[
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: InputDecorator(
-                      decoration: _dec('播报声音'),
-                      child: DropdownButtonHideUnderline(
-                        child: DropdownButton<String>(
-                          value: _kokoroVoice,
-                          dropdownColor: _dropdownBg,
-                          style: const TextStyle(color: Colors.white),
-                          isExpanded: true,
-                          isDense: true,
-                          items: KokoroTtsService.voices
-                              .map((v) => DropdownMenuItem<String>(
-                                  value: v['id'] as String,
-                                  child: Text(v['label'] as String)))
-                              .toList(),
-                          onChanged: (v) {
-                            if (v != null) {
-                              setState(() => _kokoroVoice = v);
-                            }
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  OutlinedButton(
-                    onPressed: _previewVoice,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: _accent,
-                      side: const BorderSide(color: _accent),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 16),
-                    ),
-                    child: Text(_previewing ? '停止' : '试听'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              const Text('Kokoro 离线不支持音调，音调只对 Edge / 系统生效。',
-                  style: TextStyle(color: Colors.white60, fontSize: 12)),
-            ] else if (_engine == JarvisSettings.engineEdge) ...[
-              Row(
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
@@ -351,18 +243,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 4),
             const Text('先点“试听”确认声音，再点底部“保存设置”。',
                 style: TextStyle(color: Colors.white60, fontSize: 12)),
-            ] else if (_engine == JarvisSettings.engineSystem) ...[
-              OutlinedButton(
-                onPressed: _previewVoice,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: _accent,
-                  side: const BorderSide(color: _accent),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 16),
-                ),
-                child: Text(_previewing ? '停止' : '试听系统语音'),
-              ),
-            ],
             const SizedBox(height: 12),
             Row(children: [
               const SizedBox(
