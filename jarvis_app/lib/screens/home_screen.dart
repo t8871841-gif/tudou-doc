@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/action_service.dart';
@@ -181,6 +182,25 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<bool> _ensureSpeech() async {
     if (_speechInit) return true;
+    // Android 6+ needs a RUNTIME microphone grant: the manifest
+    // declaration alone is not enough, and speech_to_text does not
+    // request it itself. Without this, initialize() just fails and
+    // tapping the mic looks like "no response".
+    try {
+      var mic = await Permission.microphone.status;
+      if (!mic.isGranted) mic = await Permission.microphone.request();
+      if (!mic.isGranted) {
+        if (mic.isPermanentlyDenied) {
+          _notice('麦克风权限被永久拒绝，请在系统设置里给 Jarvis 打开麦克风权限。');
+          await openAppSettings();
+        } else {
+          _notice('麦克风权限未授予，语音识别用不了。');
+        }
+        return false;
+      }
+    } catch (_) {
+      // Permission check failed; fall through and let initialize decide.
+    }
     try {
       _speechInit = await _speech.initialize(
         onStatus: (s) {
@@ -192,8 +212,14 @@ class _HomeScreenState extends State<HomeScreen>
             if (_wakeMode && mounted && !_muted) _startWakeListening();
           }
         },
-        onError: (_) {},
+        onError: (e) {
+          // Surface real recognizer errors instead of swallowing them.
+          _notice('语音识别出错：${e.errorMsg}');
+        },
       );
+      if (!_speechInit) {
+        _notice('本机语音识别服务不可用：请确认麦克风权限已给，且系统带有语音识别服务。');
+      }
     } catch (_) {
       _speechInit = false;
     }
