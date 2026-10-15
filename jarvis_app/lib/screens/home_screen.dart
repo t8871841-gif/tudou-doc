@@ -256,7 +256,13 @@ class _HomeScreenState extends State<HomeScreen>
           }
         },
       );
-    } catch (_) {}
+    } catch (_) {
+      // Wake listening failed to start: don't leave the chip showing
+      // "on" while nothing is listening.
+      _wakeMode = false;
+      if (mounted) setState(() {});
+      _notice('语音唤醒启动失败，请点麦克风说话。');
+    }
   }
 
   /// Wake-word capsule toggle (HTML chip): on -> start standby, on -> stop.
