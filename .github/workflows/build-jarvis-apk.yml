@@ -47,9 +47,6 @@ jobs:
       - name: Remove stale local.properties
         run: rm -f jarvis_app/android/local.properties
 
-      - name: Reassemble Kokoro model assets
-        run: bash jarvis_app/kokoro-parts/reassemble.sh
-
       - name: Flutter pub get
         run: cd jarvis_app && flutter pub get
 
@@ -70,13 +67,6 @@ jobs:
       - name: Build APK
         timeout-minutes: 60
         run: cd jarvis_app && flutter build apk --release --target-platform android-arm64
-
-      - name: Verify Kokoro assets in APK
-        run: |
-          unzip -l jarvis_app/build/app/outputs/flutter-apk/app-release.apk | grep -q 'assets/kokoro/espeak-ng-data/' || (echo 'MISSING espeak-ng-data in APK' && exit 1)
-          unzip -l jarvis_app/build/app/outputs/flutter-apk/app-release.apk | grep -q 'assets/kokoro/dict/' || (echo 'MISSING dict in APK' && exit 1)
-          unzip -l jarvis_app/build/app/outputs/flutter-apk/app-release.apk | grep -q 'assets/kokoro/model.int8.onnx' || (echo 'MISSING model in APK' && exit 1)
-          echo 'Kokoro assets verified in APK.'
 
       - uses: actions/upload-artifact@v4
         with:
