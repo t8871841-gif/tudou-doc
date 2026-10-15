@@ -4,9 +4,9 @@ import 'dart:math' as math;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/action_service.dart';
+import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
 import '../services/llm_service.dart';
 import '../services/settings_store.dart';
@@ -14,6 +14,10 @@ import '../widgets/hud_painters.dart';
 import 'settings_screen.dart';
 
 enum JarvisState { booting, idle, listening, thinking, speaking }
+
+const _ice = Color(0xFFEAFFFF);
+const _bootCyan = Color(0xFF19D3FF);
+const _bootBg = Color(0xFF00060B);
 
 class _Msg {
   final String role; // user | assistant | system
@@ -26,6 +30,9 @@ class _Msg {
 /// dialogue -> mic -> input. All behaviour (Edge TTS, speech
 /// recognition, wake word, device actions, LLM chat) is unchanged;
 /// only the presentation layer was rewritten.
+///
+/// v21: rebuild / repaint cost reduced (see "Notifiers" below) and a
+/// few voice-flow races fixed.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
   @override
@@ -37,359 +44,508 @@ class _HomeScreenState extends State<HomeScreen>
   final _settings = JarvisSettings();
   final _input = TextEditingController();
   final _scroll = ScrollController();
-  final _speech = stt.SpeechToText();
+  final _asr = AsrService();
   final _player = AudioPlayer();
+  final _grid = GridBackgroundPainter();
 
   JarvisState _state = JarvisState.booting;
-  final _tickNotifier = ValueNotifier<double>(0);
-  double _tick = 0;
-  Duration? _lastTickElapsed;
-  Ticker? _ticker;
-  Timer? _clockTimer;
-  Timer? _hudTimer;
-  bool _speechInit = false;
-  bool _wakeMode = false;
+  bool _wakeEnabled = false; // the chip: user wants wake-word standby
+  bool _wakeMode = false; // standby is actually listening right now
   bool _muted = false;
-  bool _micDown = false;
+  int _speakSeq = 0; // bumped whenever speech is (re)started or cancelled
+  Completer<void>? _speakAbort;
+  int _emptyEndpoints = 0;
+  Timer? _listenTimer;
   String _recognized = '';
   String _statusLine = '正在初始化核心…';
-  String _clock = '--:--:--';
   double _micLevel = 0; // 0..1 from speech_to_text sound-level callback
-  final List<double> _hudLevels = [0.7, 0.6, 0.8, 0.75, 0.65, 0.7];
   final _rnd = math.Random();
   final List<_Msg> _messages = [];
   late final ReactorPainter _reactor;
   late final FxPainter _fx;
 
+  // ---- Notifiers -------------------------------------------------------
+  // Only the painters, the mic button and the boot screen need a per-frame
+  // tick. Everything else listens to a low-rate notifier, so a clock tick or
+  // a HUD drift no longer rebuilds the whole screen via setState.
+  final _tick = ValueNotifier<double>(0); // seconds, every frame
+  late final ValueNotifier<double> _hue; // reactor hue, synced at ~20 fps
+  final _glitch = ValueNotifier<int>(0); // 0 none, 1/2 RGB split, 3 skew
+  final _clock = ValueNotifier<String>('--:--:--');
+  final _hudLevels = ValueNotifier<List<double>>(
+      const <double>[0.7, 0.6, 0.8, 0.75, 0.65, 0.7]);
+  final _micDown = ValueNotifier<bool>(false);
+
+  late final Listenable _topAnim = Listenable.merge([_hue, _glitch, _clock]);
+  late final Listenable _hudAnim = Listenable.merge([_hue, _hudLevels]);
+  late final Listenable _micAnim = Listenable.merge([_tick, _micDown]);
+
+  late final Ticker _ticker;
+  Duration? _lastElapsed;
+  Duration _lastHueSync = Duration.zero;
+  Timer? _clockTimer;
+  Timer? _hudTimer;
+
   HudMode get _hudMode => switch (_state) {
         JarvisState.listening => HudMode.listening,
         JarvisState.thinking => HudMode.thinking,
         JarvisState.speaking => HudMode.speaking,
-        JarvisState.booting => HudMode.idle,
-        JarvisState.idle => HudMode.idle,
+        JarvisState.booting || JarvisState.idle => HudMode.idle,
       };
 
   @override
   void initState() {
     super.initState();
     _reactor = ReactorPainter(
-      tick: _tickNotifier,
+      tick: _tick,
       mode: () => _hudMode,
       wakeMode: () => _wakeMode,
       micLevel: () => _micLevel,
     );
     _fx = FxPainter(
-      tick: _tickNotifier,
+      tick: _tick,
       mode: () => _hudMode,
       wakeMode: () => _wakeMode,
       micLevel: () => _micLevel,
     );
+    _hue = ValueNotifier<double>(_reactor.smoothedHue.toDouble());
+
     // Display-rate tick: drives the painters and per-frame widgets
     // without rebuilding the chat list.
-    _ticker = createTicker((elapsed) {
-      final dt = _lastTickElapsed == null
-          ? 0.016
-          : (elapsed - _lastTickElapsed!).inMicroseconds / 1e6;
-      _lastTickElapsed = elapsed;
-      _tick += dt.clamp(0.0, 0.1);
-      _tickNotifier.value = _tick;
-    });
-    _ticker!.start();
-    _clockTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-      if (!mounted) return;
-      final now = DateTime.now();
-      setState(() {
-        _clock =
-            '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
-      });
-    });
+    _ticker = createTicker(_onFrame)..start();
+
+    _updateClock();
+    _clockTimer = Timer.periodic(
+        const Duration(milliseconds: 500), (_) => _updateClock());
     // HUD readout bars drift like the HTML setInterval (700ms).
-    _hudTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
-      if (!mounted) return;
-      setState(() {
-        for (var i = 0; i < _hudLevels.length; i++) {
-          _hudLevels[i] =
-              (_hudLevels[i] * 0.6 + _rnd.nextDouble() * 0.4 + _micLevel * 0.1)
-                  .clamp(0.0, 1.0);
-        }
-      });
-    });
+    _hudTimer = Timer.periodic(
+        const Duration(milliseconds: 700), (_) => _driftHud());
     _init();
   }
 
   Future<void> _init() async {
     await _settings.load();
-    if (!mounted) return;
-    setState(() {});
+    _set(() {});
+    unawaited(_warmUpAsr());
   }
 
   @override
   void dispose() {
-    _ticker?.dispose();
-    _tickNotifier.dispose();
+    _ticker.dispose();
     _clockTimer?.cancel();
     _hudTimer?.cancel();
+    _tick.dispose();
+    _hue.dispose();
+    _glitch.dispose();
+    _clock.dispose();
+    _hudLevels.dispose();
+    _micDown.dispose();
     _input.dispose();
     _scroll.dispose();
-    _speech.stop();
+    _listenTimer?.cancel();
+    unawaited(_asr.dispose());
     _player.dispose();
     super.dispose();
   }
 
+  /// setState that is safe to call after an `await`.
+  void _set(VoidCallback fn) {
+    if (mounted) setState(fn);
+  }
+
+  // ---------- Frame / timers ----------
+
+  void _onFrame(Duration elapsed) {
+    final last = _lastElapsed;
+    // Cap animation at ~60 fps: a 120 Hz screen would otherwise do double
+    // the work for no visible gain.
+    if (last != null && (elapsed - last) < const Duration(milliseconds: 15)) {
+      return;
+    }
+    _lastElapsed = elapsed;
+    final dt = last == null ? 0.016 : (elapsed - last).inMicroseconds / 1e6;
+    final t = _tick.value + dt.clamp(0.0, 0.1);
+    _tick.value = t;
+
+    // Hue only drifts slowly: sync it to the widgets at ~20 fps.
+    if (elapsed - _lastHueSync >= const Duration(milliseconds: 50)) {
+      _lastHueSync = elapsed;
+      final h = _reactor.smoothedHue.toDouble();
+      if (h != _hue.value) _hue.value = h;
+    }
+    // The title glitch is a handful of discrete stages per 7s loop.
+    final g = _glitchStage(t);
+    if (g != _glitch.value) _glitch.value = g;
+  }
+
+  /// Title glitch (HTML `@keyframes gl` on a 7s loop): brief RGB-split
+  /// shift at 94-98% of the cycle, then a skew until the loop ends.
+  static int _glitchStage(double t) {
+    final p = t % 7;
+    if (p >= 6.86) return 3;
+    if (p >= 6.72) return 2;
+    if (p >= 6.58) return 1;
+    return 0;
+  }
+
+  void _updateClock() {
+    final n = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    _clock.value = '${two(n.hour)}:${two(n.minute)}:${two(n.second)}';
+  }
+
+  void _driftHud() {
+    _hudLevels.value = <double>[
+      for (final v in _hudLevels.value)
+        (v * 0.6 + _rnd.nextDouble() * 0.4 + _micLevel * 0.1).clamp(0.0, 1.0),
+    ];
+  }
+
   // ---------- Voice ----------
+
+  /// Loads the offline model in the background so the first tap is instant.
+  Future<void> _warmUpAsr() async {
+    try {
+      await _asr.init();
+    } catch (e) {
+      _notice('离线语音识别模型加载失败：$e');
+    }
+  }
+
+  Future<bool> _ensureAsr() async {
+    try {
+      await _asr.init();
+      return true;
+    } catch (e) {
+      _notice('离线语音识别不可用：$e');
+      return false;
+    }
+  }
+
+  /// Interrupts any TTS playback / in-flight synthesis.
+  void _stopSpeaking() {
+    _speakSeq++;
+    final abort = _speakAbort;
+    if (abort != null && !abort.isCompleted) abort.complete();
+    unawaited(_player.stop().catchError((_) {}));
+  }
 
   Future<void> _speak(String text) async {
     final clean = text.trim();
     if (clean.isEmpty || !_settings.speakReplies || _muted) return;
-    if (mounted) setState(() => _state = JarvisState.speaking);
+
+    final seq = ++_speakSeq;
+    final prev = _speakAbort;
+    if (prev != null && !prev.isCompleted) prev.complete();
+    final abort = _speakAbort = Completer<void>();
+    // Only own the status when nothing else (thinking / listening) does.
+    final ownsState =
+        _state == JarvisState.idle || _state == JarvisState.speaking;
+    if (ownsState) _set(() => _state = JarvisState.speaking);
     try {
       await _player.stop();
       final short =
           clean.length > 1200 ? '${clean.substring(0, 1200)}…' : clean;
       // Edge only: no system-TTS fallback. If Edge fails (e.g. no
       // network), the reply stays silent but visible in chat.
-      await _speakByEngine(short);
+      final mp3 = await EdgeTtsService.synthesize(
+        short,
+        voice: _settings.edgeVoice,
+        rate: _settings.rate,
+        pitch: _settings.pitch,
+      );
+      if (seq != _speakSeq || !mounted) return; // superseded / cancelled
+      // Subscribe before play() so a short clip can't finish unnoticed.
+      final done = _player.onPlayerComplete.first..ignore();
+      await _player.play(BytesSource(mp3));
+      // Safety net only (the old text.length/8 limit cut long replies off).
+      // _stopSpeaking() ends the wait immediately via [abort].
+      await Future.any<void>([
+        done.timeout(Duration(seconds: 20 + short.length ~/ 2)),
+        abort.future,
+      ]);
     } catch (_) {
       // Swallow: Edge failure must never crash the chat flow.
+      if (seq == _speakSeq) {
+        try {
+          await _player.stop();
+        } catch (_) {}
+      }
     } finally {
-      if (mounted && _state == JarvisState.speaking) {
+      if (ownsState &&
+          seq == _speakSeq &&
+          mounted &&
+          _state == JarvisState.speaking) {
         setState(() => _state = JarvisState.idle);
       }
     }
   }
 
-  /// Edge (online) only. Returns true when audio was played.
-  Future<bool> _speakByEngine(String text) async {
-    try {
-      final mp3 = await EdgeTtsService.synthesize(
-        text,
-        voice: _settings.edgeVoice,
-        rate: _settings.rate,
-        pitch: _settings.pitch,
-      );
-      await _player.play(BytesSource(mp3));
-      await _player.onPlayerComplete.first.timeout(
-          Duration(seconds: (text.length / 8).clamp(3, 30).toInt()));
-      return true;
-    } catch (_) {
-      try {
-        await _player.stop();
-      } catch (_) {}
-    }
-    return false;
-  }
+  /// Mic level (already 0..1 from AsrService) for the reactor bars.
+  void _onSoundLevel(double level) => _micLevel = level;
 
-  Future<bool> _ensureSpeech() async {
-    if (_speechInit) return true;
-    try {
-      _speechInit = await _speech.initialize(
-        onStatus: (s) {
-          if ((s == 'done' || s == 'notListening') && mounted) {
-            if (_state == JarvisState.listening) {
-              setState(() => _state = JarvisState.idle);
-            }
-            // Wake-word standby: restart listening quietly.
-            if (_wakeMode && mounted && !_muted) _startWakeListening();
-          }
-        },
-        onError: (e) {
-          if (mounted) _notice('语音识别出错：${e.errorMsg}');
-        },
-      );
-      if (!_speechInit) {
-        _notice('本机语音识别服务不可用：请确认麦克风权限已给，且系统带有语音识别服务。');
-      }
-    } catch (_) {
-      _speechInit = false;
-    }
-    return _speechInit;
-  }
+  /// “贾维斯” / “Jarvis”, tolerant of spaces and common mis-hearings.
+  static final _wakeRe = RegExp(
+      r'(贾|嘉|加)\s*维\s*(斯|思)|j\s*a\s*r\s*v\s*i\s*s',
+      caseSensitive: false);
 
-
-  /// Feeds the reactor sound bars with the real mic level.
-  void _onSoundLevel(double level) {
-    // Android reports RMS-ish values (roughly -2..10); normalise to 0..1.
-    _micLevel = ((level + 2) / 12).clamp(0.0, 1.0);
-  }
-
-  /// Standby: listen only for the wake word “贾维斯”.
-  Future<void> _startWakeListening() async {
-    if (_muted) return;
-    if (!await _ensureSpeech()) return;
-    _wakeMode = true;
-    if (mounted) setState(() {});
-    try {
-      await _speech.listen(
-        listenOptions: stt.SpeechListenOptions(
-          localeId: 'zh_CN',
-          listenFor: const Duration(seconds: 30),
-          pauseFor: const Duration(seconds: 3),
-        ),
-        onSoundLevelChange: _onSoundLevel,
-        onResult: (r) {
-          final words = r.recognizedWords;
-          if (words.contains('贾维斯')) {
-            _wakeMode = false;
-            _speech.stop();
-            _notice('已唤醒，Jarvis 在听。');
-            _startActiveListening();
-          }
-        },
-      );
-    } catch (_) {
-      // Wake listening failed to start: don't leave the chip showing
-      // "on" while nothing is listening.
-      _wakeMode = false;
-      if (mounted) setState(() {});
-      _notice('语音唤醒启动失败，请点麦克风说话。');
-    }
-  }
-
-  /// Wake-word capsule toggle (HTML chip): on -> start standby, on -> stop.
-  Future<void> _toggleWake() async {
-    if (_wakeMode) {
-      _wakeMode = false;
-      await _speech.stop();
-      if (mounted) setState(() {});
+  /// Back to wake-word standby once nothing else is going on.
+  void _resumeWake() {
+    if (!mounted ||
+        !_wakeEnabled ||
+        _muted ||
+        _state != JarvisState.idle ||
+        _asr.isRunning) {
       return;
     }
-    await _startWakeListening();
-    if (mounted) setState(() {});
+    unawaited(_startWakeListening());
+  }
+
+  /// Standby: the offline recogniser keeps running (no restarts, no beeps,
+  /// no network) and reacts when an utterance contains the wake word.
+  Future<void> _startWakeListening() async {
+    if (_muted || _state != JarvisState.idle) return;
+    if (!await _ensureAsr()) {
+      _set(() {
+        _wakeEnabled = false;
+        _wakeMode = false;
+      });
+      return;
+    }
+    // State may have changed while the model was loading.
+    if (_muted || _state != JarvisState.idle || !_wakeEnabled) return;
+    final ok = await _asr.start(
+      onLevel: _onSoundLevel,
+      onEndpoint: _onWakeUtterance,
+    );
+    if (!ok) {
+      _set(() {
+        _wakeEnabled = false;
+        _wakeMode = false;
+      });
+      _notice('无法使用麦克风，请检查录音权限。');
+      return;
+    }
+    if (_state == JarvisState.idle && _wakeEnabled) {
+      _set(() => _wakeMode = true);
+    }
+  }
+
+  void _onWakeUtterance(String text) {
+    if (!mounted || !_wakeMode) return;
+    final m = _wakeRe.firstMatch(text);
+    if (m == null) return;
+    // "贾维斯，打开微信" in one breath: what follows is the question.
+    final rest =
+        text.substring(m.end).replaceFirst(RegExp(r'^[\s，,。.、！!？?]+'), '');
+    _wakeMode = false;
+    unawaited(_asr.stop());
+    if (rest.length >= 2) {
+      _set(() {});
+      unawaited(_send(rest));
+    } else {
+      unawaited(_onWakeWord());
+    }
+  }
+
+  Future<void> _onWakeWord() async {
+    _set(() {}); // refresh status (_wakeMode is already false)
+    _notice('已唤醒，Jarvis 在听。');
+    await _startActiveListening();
+  }
+
+  /// Wake-word capsule toggle (HTML chip): on -> standby, off -> stop.
+  Future<void> _toggleWake() async {
+    if (_wakeEnabled) {
+      final wasListening = _wakeMode;
+      _set(() {
+        _wakeEnabled = false;
+        _wakeMode = false;
+      });
+      if (wasListening) await _asr.stop();
+      return;
+    }
+    _set(() => _wakeEnabled = true);
+    if (_muted) {
+      _notice('当前已静音，取消静音后语音唤醒才会生效。');
+      return;
+    }
+    _resumeWake(); // no-op while busy; resumes automatically afterwards
   }
 
   Future<void> _startActiveListening() async {
     if (_muted) return;
-    if (!await _ensureSpeech()) {
-      _notice('系统语音识别不可用，请检查麦克风权限。');
+    if (!await _ensureAsr()) return;
+    _stopSpeaking(); // don't let our own TTS leak into the recogniser
+    _emptyEndpoints = 0;
+    _set(() {
+      _wakeMode = false;
+      _recognized = '';
+      _state = JarvisState.listening;
+    });
+    final ok = await _asr.start(
+      onLevel: _onSoundLevel,
+      onPartial: (t) {
+        // Late results (mic tapped again, muted, already sent) are ignored.
+        if (!mounted || _state != JarvisState.listening) return;
+        setState(() {
+          _recognized = t;
+          _input.text = t;
+        });
+      },
+      onEndpoint: _onActiveEndpoint,
+    );
+    if (!ok) {
+      _set(() => _state = JarvisState.idle);
+      _notice('无法使用麦克风，请检查录音权限。');
       return;
     }
-    _wakeMode = false;
-    _recognized = '';
-    if (mounted) setState(() => _state = JarvisState.listening);
-    try {
-      await _speech.listen(
-        listenOptions: stt.SpeechListenOptions(
-          localeId: 'zh_CN',
-          listenFor: const Duration(seconds: 60),
-          pauseFor: const Duration(seconds: 4),
-        ),
-        onSoundLevelChange: _onSoundLevel,
-        onResult: (r) {
-          if (!mounted) return;
-          setState(() {
-            _recognized = r.recognizedWords;
-            _input.text = _recognized;
-          });
-          if (r.finalResult && _recognized.trim().isNotEmpty) {
-            final q = _recognized.trim();
-            _recognized = '';
-            _send(q);
-          }
-        },
-      );
-    } catch (_) {
-      if (mounted) setState(() => _state = JarvisState.idle);
+    _listenTimer?.cancel();
+    _listenTimer = Timer(const Duration(seconds: 60), () {
+      if (_state == JarvisState.listening) _endListening();
+    });
+  }
+
+  void _onActiveEndpoint(String text) {
+    if (!mounted || _state != JarvisState.listening) return;
+    final q = text.trim();
+    if (q.isEmpty) {
+      // ~2.4 s of silence per empty endpoint: give up after three.
+      if (++_emptyEndpoints >= 3) _endListening();
+      return;
     }
+    _listenTimer?.cancel();
+    unawaited(_asr.stop());
+    unawaited(_send(q));
+  }
+
+  /// Listening ended without a question (silence / timeout).
+  void _endListening() {
+    _listenTimer?.cancel();
+    unawaited(_asr.stop());
+    _set(() => _state = JarvisState.idle);
+    _resumeWake();
   }
 
   Future<void> _toggleMic() async {
     if (_muted) {
-      setState(() => _muted = false);
+      _set(() => _muted = false);
       _notice('已取消静音。');
+      _resumeWake();
       return;
     }
     if (_state == JarvisState.listening) {
-      await _speech.stop();
-      setState(() => _state = JarvisState.idle);
-      if (_input.text.trim().isNotEmpty) _send(_input.text.trim());
+      final text = _input.text.trim();
+      _listenTimer?.cancel();
+      // Leave "listening" first so late recogniser results are ignored.
+      _set(() => _state = JarvisState.idle);
+      await _asr.stop();
+      if (text.isNotEmpty) {
+        unawaited(_send(text));
+      } else {
+        _resumeWake();
+      }
       return;
     }
     await _startActiveListening();
   }
 
   void _toggleMute() {
-    setState(() => _muted = !_muted);
-    if (_muted) {
-      _speech.stop();
-      _player.stop();
-      _state = JarvisState.idle;
-      _notice('已静音。静音时语音唤醒不生效，请点麦克风恢复。');
+    final mute = !_muted;
+    _set(() {
+      _muted = mute;
+      if (mute) {
+        _wakeMode = false;
+        // Don't clobber "thinking": a request may still be in flight.
+        if (_state == JarvisState.listening ||
+            _state == JarvisState.speaking) {
+          _state = JarvisState.idle;
+        }
+      }
+    });
+    if (mute) {
+      _listenTimer?.cancel();
+      unawaited(_asr.stop());
+      _stopSpeaking();
+      _notice('已静音。静音时语音唤醒不生效，取消静音后自动恢复。');
+    } else {
+      _resumeWake();
     }
   }
 
   // ---------- Chat ----------
 
+  /// Last 7 non-system messages (call before adding the new question).
+  List<Map<String, String>> _buildHistory() {
+    final prior = _messages.where((m) => m.role != 'system').toList();
+    final start = math.max(0, prior.length - 7);
+    return [
+      for (final m in prior.skip(start)) {'role': m.role, 'content': m.text},
+    ];
+  }
+
+  void _reply(String text, String status) {
+    if (!mounted) return;
+    setState(() {
+      _messages.add(_Msg('assistant', text));
+      _state = JarvisState.idle;
+      _statusLine = status;
+    });
+    _scrollDown();
+  }
+
   Future<void> _send([String? override]) async {
     final q = (override ?? _input.text).trim();
     if (q.isEmpty || _state == JarvisState.thinking) return;
+    try {
+      await _ask(q);
+    } finally {
+      _resumeWake(); // back to wake-word standby once the exchange is over
+    }
+  }
+
+  Future<void> _ask(String q) async {
     FocusScope.of(context).unfocus();
+    final hist = _buildHistory();
+    _stopSpeaking(); // a new question cuts off the previous answer
+    _listenTimer?.cancel();
+    unawaited(_asr.stop());
     setState(() {
       _messages.add(_Msg('user', q));
       _input.clear();
       _recognized = '';
+      _wakeMode = false;
       _state = JarvisState.thinking;
       _statusLine = '正在思考…';
     });
     _scrollDown();
+
     // Device actions first (call / message / alarm / open app).
     // Returns null when the text is not an action command.
+    String? actionReply;
     try {
-      final actionReply = await DeviceActions.tryHandle(q);
-      if (actionReply != null) {
-        if (!mounted) return;
-        setState(() {
-          _messages.add(_Msg('assistant', actionReply));
-          _state = JarvisState.idle;
-          _statusLine = '已执行设备指令。';
-        });
-        _scrollDown();
-        await _speak(actionReply);
-        return;
-      }
+      actionReply = await DeviceActions.tryHandle(q);
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _messages.add(_Msg('assistant', '设备指令执行失败：$e'));
-        _state = JarvisState.idle;
-        _statusLine = '设备指令失败。';
-      });
-      _scrollDown();
+      _reply('设备指令执行失败：$e', '设备指令失败。');
       return;
     }
-    try {
-      final history = _messages
-          .where((m) => m.role != 'system')
-          .toList()
-          .reversed
-          .take(8)
-          .toList()
-          .reversed
-          .map((m) => {'role': m.role, 'content': m.text})
-          .toList();
-      // Drop the just-added user message from history (it is `q`).
-      final hist = history.length > 1
-          ? history.sublist(0, history.length - 1)
-          : <Map<String, String>>[];
-      final answer = await LlmService.ask(
-          settings: _settings, question: q, history: hist);
-      if (!mounted) return;
-      setState(() {
-        _messages.add(_Msg('assistant', answer));
-        _state = JarvisState.idle;
-        _statusLine = '已回答。';
-      });
-      _scrollDown();
-      await _speak(answer);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _messages.add(_Msg('assistant',
-            '连接失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。未填 Key 时无法联网问答。'));
-        _state = JarvisState.idle;
-        _statusLine = '联网问答失败，请检查设置。';
-      });
-      _scrollDown();
+    if (actionReply != null) {
+      _reply(actionReply, '已执行设备指令。');
+      if (mounted) await _speak(actionReply);
+      return;
     }
+
+    final String answer;
+    try {
+      answer = await LlmService.ask(
+          settings: _settings, question: q, history: hist);
+    } catch (e) {
+      _reply('连接失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。未填 Key 时无法联网问答。',
+          '联网问答失败，请检查设置。');
+      return;
+    }
+    _reply(answer, '已回答。');
+    if (mounted) await _speak(answer);
   }
 
   void _scrollDown() {
@@ -403,7 +559,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _notice(String m) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(m)));
   }
 
   Future<void> _openSettings() async {
@@ -435,6 +593,8 @@ class _HomeScreenState extends State<HomeScreen>
     await _speak(welcome);
   }
 
+  // ---------- Build ----------
+
   @override
   Widget build(BuildContext context) {
     if (_state == JarvisState.booting) return _bootScreen();
@@ -442,8 +602,9 @@ class _HomeScreenState extends State<HomeScreen>
       backgroundColor: hudDeep,
       body: Stack(
         children: [
+          // Static background: cached in its own layer.
           Positioned.fill(
-              child: CustomPaint(painter: GridBackgroundPainter())),
+              child: RepaintBoundary(child: CustomPaint(painter: _grid))),
           Positioned.fill(
             child: SafeArea(
               child: Stack(
@@ -456,7 +617,11 @@ class _HomeScreenState extends State<HomeScreen>
                       _bottomArea(),
                     ],
                   ),
-                  ..._cornerBrackets(),
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: RepaintBoundary(child: _cornerBrackets()),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -469,15 +634,14 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _bootScreen() {
     // HTML #boot: breathing pulse ring + JARVIS + "轻触屏幕 · 唤醒系统".
     return Scaffold(
-      backgroundColor: const Color(0xFF00060B),
+      backgroundColor: _bootBg,
       body: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: _enterApp,
         child: Center(
-          child: AnimatedBuilder(
-            animation: _tickNotifier,
-            builder: (_, _) {
-              final t = _tickNotifier.value;
+          child: ValueListenableBuilder<double>(
+            valueListenable: _tick,
+            builder: (_, t, _) {
               // 2.2s breathing pulse: scale 1 -> 1.12, opacity 1 -> .55.
               final phase = (t % 2.2) / 2.2;
               final ease = 0.5 - 0.5 * math.cos(phase * math.pi * 2);
@@ -499,16 +663,14 @@ class _HomeScreenState extends State<HomeScreen>
                         height: 170,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          border: Border.all(
-                              color: const Color(0xFF19D3FF), width: 2),
+                          border: Border.all(color: _bootCyan, width: 2),
                           gradient: RadialGradient(colors: [
-                            const Color(0xFF19D3FF).withValues(alpha: 0.22),
+                            _bootCyan.withValues(alpha: 0.22),
                             Colors.transparent,
                           ]),
                           boxShadow: [
                             BoxShadow(
-                                color: const Color(0xFF19D3FF)
-                                    .withValues(alpha: 0.55),
+                                color: _bootCyan.withValues(alpha: 0.55),
                                 blurRadius: 40,
                                 spreadRadius: 2),
                           ],
@@ -523,15 +685,13 @@ class _HomeScreenState extends State<HomeScreen>
                       offset: Offset(spacing / 2, 0),
                       child: Text('JARVIS',
                           style: TextStyle(
-                            color: const Color(0xFFEAFFFF),
+                            color: _ice,
                             fontSize: 34,
                             fontWeight: FontWeight.w500,
                             letterSpacing: spacing,
                             shadows: const [
-                              Shadow(
-                                  color: Color(0xFF19D3FF), blurRadius: 18),
-                              Shadow(
-                                  color: Color(0xFF19D3FF), blurRadius: 40),
+                              Shadow(color: _bootCyan, blurRadius: 18),
+                              Shadow(color: _bootCyan, blurRadius: 40),
                             ],
                           )),
                     ),
@@ -541,7 +701,7 @@ class _HomeScreenState extends State<HomeScreen>
                     opacity: blink,
                     child: const Text('轻触屏幕 · 唤醒系统',
                         style: TextStyle(
-                            color: Color(0xFF19D3FF),
+                            color: _bootCyan,
                             fontSize: 13,
                             letterSpacing: 4.5)),
                   ),
@@ -554,101 +714,91 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  // ---------- Top bar (HTML .top) ----------
-
-  Widget _topBar() {
-    return AnimatedBuilder(
-      animation: _tickNotifier,
-      builder: (_, _) {
-        final color = hueColor(_reactor.smoothedHue, 1);
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _glitchTitle(color),
-                  Text('STARK INDUSTRIES',
-                      style: TextStyle(
-                          color: color,
-                          fontSize: 12,
-                          letterSpacing: 2.2,
-                          shadows: [
-                            Shadow(color: color, blurRadius: 8),
-                          ])),
-                ],
-              ),
-              const Spacer(),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(_clock,
-                      style: TextStyle(
-                          color: color,
-                          fontSize: 12,
-                          letterSpacing: 2.2,
-                          shadows: [
-                            Shadow(color: color, blurRadius: 8),
-                          ])),
-                  const SizedBox(height: 2),
-                  // No battery plugin in the dependency set (pubspec and
-                  // android/ are off-limits): same "PWR --" fallback the
-                  // HTML shows when navigator.getBattery is unavailable.
-                  Text('PWR --',
-                      style: TextStyle(
-                          color: color,
-                          fontSize: 12,
-                          letterSpacing: 2.2,
-                          shadows: [
-                            Shadow(color: color, blurRadius: 8),
-                          ])),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
+  /// Glowing HUD text: [glow] is the shadow colour, [color] the fill
+  /// (defaults to the glow colour).
+  TextStyle _glow(Color glow,
+      {required double size,
+      required double spacing,
+      double blur = 8,
+      Color? color}) {
+    return TextStyle(
+      color: color ?? glow,
+      fontSize: size,
+      letterSpacing: spacing,
+      shadows: [Shadow(color: glow, blurRadius: blur)],
     );
   }
 
-  /// Title glitch (HTML `@keyframes gl` on a 7s loop): brief RGB-split
-  /// shift at 94-98% of the cycle. Kept subtle.
+  // ---------- Top bar (HTML .top) ----------
+
+  Widget _topBar() {
+    return RepaintBoundary(
+      child: ListenableBuilder(
+        listenable: _topAnim,
+        builder: (_, _) {
+          final color = hueColor(_hue.value, 1);
+          final style = _glow(color, size: 12, spacing: 2.2);
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _glitchTitle(color),
+                    Text('STARK INDUSTRIES', style: style),
+                  ],
+                ),
+                const Spacer(),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(_clock.value, style: style),
+                    const SizedBox(height: 2),
+                    // No battery plugin in the dependency set (pubspec and
+                    // android/ are off-limits): same "PWR --" fallback the
+                    // HTML shows when navigator.getBattery is unavailable.
+                    Text('PWR --', style: style),
+                  ],
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _glitchTitle(Color color) {
-    final phase = _tick % 7;
-    final glitchA = phase >= 6.58 && phase < 6.72;
-    final glitchB = phase >= 6.72 && phase < 6.86;
-    final skew = phase >= 6.86;
+    final stage = _glitch.value;
     final shadows = <Shadow>[
       Shadow(color: color, blurRadius: 8),
-      if (glitchA) ...[
-        const Shadow(offset: Offset(-2, 0), color: Color(0xFFFF00FF)),
-        const Shadow(offset: Offset(2, 0), color: Color(0xFF00FFFF)),
+      if (stage == 1) ...const [
+        Shadow(offset: Offset(-2, 0), color: Color(0xFFFF00FF)),
+        Shadow(offset: Offset(2, 0), color: Color(0xFF00FFFF)),
       ],
-      if (glitchB) ...[
-        const Shadow(offset: Offset(2, 0), color: Color(0xFFFF00FF)),
-        const Shadow(offset: Offset(-2, 0), color: Color(0xFF00FFFF)),
+      if (stage == 2) ...const [
+        Shadow(offset: Offset(2, 0), color: Color(0xFFFF00FF)),
+        Shadow(offset: Offset(-2, 0), color: Color(0xFF00FFFF)),
       ],
     ];
-    Widget title = Text('J.A.R.V.I.S',
+    final Widget title = Text('J.A.R.V.I.S',
         style: TextStyle(
             color: color,
             fontSize: 20,
             fontWeight: FontWeight.w600,
             letterSpacing: 6,
             shadows: shadows));
-    if (glitchA) {
-      title = Transform.translate(offset: const Offset(2, 0), child: title);
-    } else if (glitchB) {
-      title = Transform.translate(offset: const Offset(-2, 0), child: title);
-    } else if (skew) {
-      title = Transform(
+    return switch (stage) {
+      1 => Transform.translate(offset: const Offset(2, 0), child: title),
+      2 => Transform.translate(offset: const Offset(-2, 0), child: title),
+      3 => Transform(
           transform: Matrix4.skewX(0.14),
           alignment: Alignment.center,
-          child: title);
-    }
-    return title;
+          child: title),
+      _ => title,
+    };
   }
 
   // ---------- Reactor stage (HTML .stage) ----------
@@ -658,57 +808,27 @@ class _HomeScreenState extends State<HomeScreen>
       height: 330,
       child: Stack(
         children: [
-          // FX layer honours the "粒子特效" setting (as the old
-          // particle sphere did); the reactor itself always draws.
-          if (_settings.particles)
-            Positioned.fill(child: CustomPaint(painter: _fx)),
-          Positioned.fill(child: CustomPaint(painter: _reactor)),
-          Center(
-            child: AnimatedBuilder(
-              animation: _tickNotifier,
-              builder: (_, _) => _statusText(),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            top: 0,
-            child: AnimatedBuilder(
-              animation: _tickNotifier,
-              builder: (_, _) => _gearButton(),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 4,
-            child: Center(
-              child: AnimatedBuilder(
-                animation: _tickNotifier,
-                builder: (_, _) => _wakeChip(),
+          // Per-frame painters live in their own layer, so they never
+          // repaint the chat / text below.
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: Stack(
+                children: [
+                  // FX layer honours the "粒子特效" setting (as the old
+                  // particle sphere did); the reactor itself always draws.
+                  if (_settings.particles)
+                    Positioned.fill(child: CustomPaint(painter: _fx)),
+                  Positioned.fill(child: CustomPaint(painter: _reactor)),
+                ],
               ),
             ),
           ),
-          Positioned(
-            right: 0,
-            top: 0,
-            child: AnimatedBuilder(
-              animation: _tickNotifier,
-              builder: (_, _) => _readout(
-                const ['POWER', 'LATENCY', 'SIGNAL'],
-                _hudLevels.sublist(3),
-                alignRight: true,
-              ),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            bottom: 6,
-            child: AnimatedBuilder(
-              animation: _tickNotifier,
-              builder: (_, _) => _readout(
-                const ['ARC REACTOR', 'NEURAL LINK', 'VOICE CORE'],
-                _hudLevels.sublist(0, 3),
-                alignRight: false,
+          // HUD text overlay: rebuilt only on hue / readout changes.
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: ListenableBuilder(
+                listenable: _hudAnim,
+                builder: (_, _) => _stageOverlay(),
               ),
             ),
           ),
@@ -717,8 +837,45 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _statusText() {
-    final color = hueColor(_reactor.smoothedHue, 1);
+  Widget _stageOverlay() {
+    final hue = _hue.value;
+    final levels = _hudLevels.value;
+    return Stack(
+      children: [
+        Center(child: _statusText(hue)),
+        Positioned(left: 0, top: 0, child: _gearButton(hue)),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 4,
+          child: Center(child: _wakeChip(hue)),
+        ),
+        Positioned(
+          right: 0,
+          top: 0,
+          child: _readout(
+            hue,
+            const ['POWER', 'LATENCY', 'SIGNAL'],
+            levels.sublist(3),
+            alignRight: true,
+          ),
+        ),
+        Positioned(
+          left: 0,
+          bottom: 6,
+          child: _readout(
+            hue,
+            const ['ARC REACTOR', 'NEURAL LINK', 'VOICE CORE'],
+            levels.sublist(0, 3),
+            alignRight: false,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statusText(double hue) {
+    final color = hueColor(hue, 1);
     final (en, cn) = switch (_state) {
       JarvisState.listening => ('LISTENING', '正在聆听'),
       JarvisState.thinking => ('PROCESSING', '思考中'),
@@ -728,25 +885,16 @@ class _HomeScreenState extends State<HomeScreen>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(en,
-            style: TextStyle(
-                color: color,
-                fontSize: 13,
-                letterSpacing: 5.2,
-                shadows: [Shadow(color: color, blurRadius: 10)])),
+        Text(en, style: _glow(color, size: 13, spacing: 5.2, blur: 10)),
         const SizedBox(height: 6),
         Text(cn,
-            style: TextStyle(
-                color: const Color(0xFFEAFFFF),
-                fontSize: 30,
-                letterSpacing: 7.5,
-                shadows: [Shadow(color: color, blurRadius: 12)])),
+            style: _glow(color,
+                size: 30, spacing: 7.5, blur: 12, color: _ice)),
       ],
     );
   }
 
-  Widget _gearButton() {
-    final color = hueColor(_reactor.smoothedHue, 1);
+  Widget _gearButton(double hue) {
     return GestureDetector(
       onTap: _openSettings,
       child: Container(
@@ -754,75 +902,69 @@ class _HomeScreenState extends State<HomeScreen>
         height: 38,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border:
-              Border.all(color: hueColor(_reactor.smoothedHue, 0.25)),
+          border: Border.all(color: hueColor(hue, 0.25)),
         ),
+        // Icon instead of the "⚙︎" text glyph, which some devices render
+        // as a colour emoji.
         child: Center(
-          child: Text('⚙︎',
-              style: TextStyle(color: color, fontSize: 18)),
+          child: Icon(Icons.settings_outlined,
+              size: 18, color: hueColor(hue, 1)),
         ),
       ),
     );
   }
 
-  Widget _wakeChip() {
-    final hue = _reactor.smoothedHue;
+  Widget _wakeChip(double hue) {
     final color = hueColor(hue, 1);
-    final on = _wakeMode;
+    final on = _wakeEnabled;
     return GestureDetector(
       onTap: _toggleWake,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-              color: on ? color : hueColor(hue, 0.25)),
+          border: Border.all(color: on ? color : hueColor(hue, 0.25)),
           color: on ? hueColor(hue, 0.25) : Colors.transparent,
           boxShadow: on
-              ? [
-                  BoxShadow(
-                      color: hueColor(hue, 0.25), blurRadius: 14),
-                ]
+              ? [BoxShadow(color: hueColor(hue, 0.25), blurRadius: 14)]
               : null,
         ),
         child: Text('唤醒词 · ${on ? '开' : '关'}',
-            style: TextStyle(
-                color: color, fontSize: 13, letterSpacing: 2.6)),
+            style: TextStyle(color: color, fontSize: 13, letterSpacing: 2.6)),
       ),
     );
   }
 
   /// HUD readout bars (HTML `.rd`): label + glowing 2px bar.
-  Widget _readout(List<String> labels, List<double> values,
+  Widget _readout(double hue, List<String> labels, List<double> values,
       {required bool alignRight}) {
-    final hue = _reactor.smoothedHue;
     final color = hueColor(hue, 1);
+    final track = hueColor(hue, 0.25);
     return IgnorePointer(
       child: SizedBox(
         width: 92,
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: alignRight
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.start,
+          crossAxisAlignment:
+              alignRight ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             for (var i = 0; i < labels.length; i++) ...[
               Text(labels[i],
-                  style: TextStyle(
-                      color: color.withValues(alpha: 0.8),
-                      fontSize: 9,
-                      letterSpacing: 1.6,
-                      shadows: [Shadow(color: color, blurRadius: 6)])),
+                  style: _glow(color,
+                      size: 9,
+                      spacing: 1.6,
+                      blur: 6,
+                      color: color.withValues(alpha: 0.8))),
               const SizedBox(height: 3),
               Container(
                 height: 2,
                 width: 92,
-                color: hueColor(hue, 0.25),
+                color: track,
                 alignment: Alignment.centerLeft,
                 child: Container(
                   width: 92 * values[i].clamp(0.0, 1.0),
-                  color: color,
                   height: 2,
+                  color: color,
                 ),
               ),
               const SizedBox(height: 7),
@@ -833,78 +975,39 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  List<Widget> _cornerBrackets() {
-    const s = 22.0;
-    Widget brk({
-      double? left,
-      double? top,
-      double? right,
-      double? bottom,
-      required Border border,
-    }) {
-      return Positioned(
-        left: left,
-        top: top,
-        right: right,
-        bottom: bottom,
-        child: AnimatedBuilder(
-          animation: _tickNotifier,
-          builder: (_, _) {
-            final color =
-                hueColor(_reactor.smoothedHue, 0.85);
-            return Container(
-              width: s,
-              height: s,
-              decoration: BoxDecoration(
-                border: Border(
-                  left: border.left.width == 0
-                      ? BorderSide.none
-                      : BorderSide(color: color, width: 2),
-                  top: border.top.width == 0
-                      ? BorderSide.none
-                      : BorderSide(color: color, width: 2),
-                  right: border.right.width == 0
-                      ? BorderSide.none
-                      : BorderSide(color: color, width: 2),
-                  bottom: border.bottom.width == 0
-                      ? BorderSide.none
-                      : BorderSide(color: color, width: 2),
-                ),
-              ),
-            );
-          },
-        ),
-      );
-    }
-
-    const side = BorderSide(width: 2);
-    const none = BorderSide.none;
-    return [
-      brk(
-          left: 8,
-          top: 6,
-          border: const Border(left: side, top: side, right: none, bottom: none)),
-      brk(
-          right: 8,
-          top: 6,
-          border:
-              const Border(left: none, top: side, right: side, bottom: none)),
-      brk(
-          left: 8,
-          bottom: 8,
-          border:
-              const Border(left: side, top: none, right: none, bottom: side)),
-      brk(
-          right: 8,
-          bottom: 8,
-          border:
-              const Border(left: none, top: none, right: side, bottom: side)),
-    ];
+  Widget _cornerBrackets() {
+    return ValueListenableBuilder<double>(
+      valueListenable: _hue,
+      builder: (_, hue, _) {
+        final c = hueColor(hue, 0.85);
+        return Stack(
+          children: [
+            Positioned(
+                left: 8,
+                top: 6,
+                child: _Bracket(color: c, left: true, top: true)),
+            Positioned(
+                right: 8,
+                top: 6,
+                child: _Bracket(color: c, right: true, top: true)),
+            Positioned(
+                left: 8,
+                bottom: 8,
+                child: _Bracket(color: c, left: true, bottom: true)),
+            Positioned(
+                right: 8,
+                bottom: 8,
+                child: _Bracket(color: c, right: true, bottom: true)),
+          ],
+        );
+      },
+    );
   }
 
   // ---------- Dialogue (HTML .sub colours) ----------
 
   Widget _chatArea() {
+    final thinking = _state == JarvisState.thinking;
     return Expanded(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 10),
@@ -916,9 +1019,10 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         child: ListView.builder(
           controller: _scroll,
-          itemCount: _messages.length + (_state == JarvisState.thinking ? 1 : 0),
+          itemCount: _messages.length + (thinking ? 1 : 0),
           itemBuilder: (context, i) {
-            if (_state == JarvisState.thinking && i == _messages.length) {
+            // The extra last row only exists while thinking.
+            if (i == _messages.length) {
               return const Padding(
                 padding: EdgeInsets.all(10),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -934,43 +1038,7 @@ class _HomeScreenState extends State<HomeScreen>
               );
             }
             final m = _messages[i];
-            final user = m.role == 'user';
-            return Align(
-              alignment: user ? Alignment.centerRight : Alignment.centerLeft,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // HTML .sub: user line dim, Jarvis reply bright + glow.
-                    SelectableText(m.text,
-                        style: TextStyle(
-                            color: user
-                                ? userDimColor
-                                : const Color(0xFFEAFFFF),
-                            height: 1.5,
-                            fontSize: 14,
-                            shadows: user
-                                ? null
-                                : const [
-                                    Shadow(
-                                        color: hudCyan, blurRadius: 12),
-                                  ])),
-                    if (!user)
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: '朗读回答',
-                          onPressed: () => _speak(m.text),
-                          icon: const Icon(Icons.volume_up_outlined,
-                              size: 19, color: hudCyan),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            );
+            return _MessageTile(msg: m, onSpeak: () => _speak(m.text));
           },
         ),
       ),
@@ -980,6 +1048,9 @@ class _HomeScreenState extends State<HomeScreen>
   // ---------- Bottom: mic + input (HTML .mic) ----------
 
   Widget _bottomArea() {
+    final outline = OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: hudCyan.withValues(alpha: 0.35)));
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       child: Column(
@@ -992,9 +1063,7 @@ class _HomeScreenState extends State<HomeScreen>
                 const SizedBox(width: 8),
                 Expanded(
                     child: Text(
-                        _recognized.isEmpty
-                            ? '正在聆听，请开始说话…'
-                            : _recognized,
+                        _recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized,
                         style: const TextStyle(color: hudCyan))),
                 const Text('点麦克风结束',
                     style: TextStyle(color: Colors.white38, fontSize: 11)),
@@ -1024,14 +1093,8 @@ class _HomeScreenState extends State<HomeScreen>
                     hintStyle: const TextStyle(color: Colors.white38),
                     filled: true,
                     fillColor: Colors.black.withValues(alpha: 0.35),
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide:
-                            BorderSide(color: hudCyan.withValues(alpha: 0.35))),
-                    enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide:
-                            BorderSide(color: hudCyan.withValues(alpha: 0.35))),
+                    border: outline,
+                    enabledBorder: outline,
                     contentPadding: const EdgeInsets.symmetric(
                         horizontal: 13, vertical: 12),
                   ),
@@ -1056,85 +1119,170 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _micButton() {
-    return AnimatedBuilder(
-      animation: _tickNotifier,
-      builder: (_, _) {
-        final hue = _reactor.smoothedHue;
-        final color = hueColor(hue, 1);
-        final listening = _state == JarvisState.listening;
-        final ripplePhase = _tick % 1;
-        return GestureDetector(
-          onTap: _toggleMic,
-          onTapDown: (_) => setState(() => _micDown = true),
-          onTapUp: (_) => setState(() => _micDown = false),
-          onTapCancel: () => setState(() => _micDown = false),
-          child: Transform.scale(
-            scale: _micDown ? 0.92 : 1.0,
-            child: SizedBox(
-              width: 78,
-              height: 78,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  // Listening pulse ripple (HTML `.mic:after` pulse).
-                  if (listening)
-                    Opacity(
-                      opacity: 1 - ripplePhase,
-                      child: Transform.scale(
-                        scale: 1 + 0.8 * ripplePhase,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: color, width: 2),
+    // Own layer: the per-frame ripple / ring / bars repaint only this
+    // 78px button instead of the whole page.
+    return RepaintBoundary(
+      child: ListenableBuilder(
+        listenable: _micAnim,
+        builder: (_, _) {
+          final t = _tick.value;
+          final hue = _reactor.smoothedHue;
+          final color = hueColor(hue, 1);
+          final listening = _state == JarvisState.listening;
+          final ripplePhase = t % 1;
+          return GestureDetector(
+            onTap: _toggleMic,
+            onTapDown: (_) => _micDown.value = true,
+            onTapUp: (_) => _micDown.value = false,
+            onTapCancel: () => _micDown.value = false,
+            child: Transform.scale(
+              scale: _micDown.value ? 0.92 : 1.0,
+              child: SizedBox(
+                width: 78,
+                height: 78,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Listening pulse ripple (HTML `.mic:after` pulse).
+                    if (listening)
+                      Opacity(
+                        opacity: 1 - ripplePhase,
+                        child: Transform.scale(
+                          scale: 1 + 0.8 * ripplePhase,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: color, width: 2),
+                            ),
                           ),
                         ),
                       ),
+                    // Rotating dashed outer ring (HTML `.mic:before`, 8s).
+                    // The ring is cached; only its rotation changes.
+                    Transform.rotate(
+                      angle: t * math.pi * 2 / 8,
+                      child: RepaintBoundary(
+                        child: CustomPaint(
+                          size: const Size(102, 102),
+                          painter: _DashedRingPainter(
+                              color: color.withValues(alpha: 0.6)),
+                        ),
+                      ),
                     ),
-                  // Rotating dashed outer ring (HTML `.mic:before`, 8s).
-                  Transform.rotate(
-                    angle: _tick * math.pi * 2 / 8,
-                    child: CustomPaint(
-                      size: const Size(102, 102),
-                      painter: _DashedRingPainter(
-                          color: color.withValues(alpha: 0.6)),
+                    // Gradient disc (HTML radial gradient + glow). Static
+                    // between hue changes, so it keeps its own layer.
+                    RepaintBoundary(
+                      child: Container(
+                        width: 78,
+                        height: 78,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: RadialGradient(colors: [
+                            hueColor(hue, 0.25),
+                            Colors.transparent,
+                          ], stops: const [
+                            0.0,
+                            0.7
+                          ]),
+                          border: Border.all(color: color, width: 2),
+                          boxShadow: [
+                            BoxShadow(
+                                color: hueColor(hue, 0.25),
+                                blurRadius: 24,
+                                spreadRadius: 1),
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
-                  // Gradient disc (HTML radial gradient + glow).
-                  Container(
-                    width: 78,
-                    height: 78,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(colors: [
-                        hueColor(hue, 0.25),
-                        Colors.transparent,
-                      ], stops: const [
-                        0.0,
-                        0.7
-                      ]),
-                      border: Border.all(color: color, width: 2),
-                      boxShadow: [
-                        BoxShadow(
-                            color: hueColor(hue, 0.25),
-                            blurRadius: 24,
-                            spreadRadius: 1),
-                      ],
-                    ),
-                  ),
-                  if (listening)
-                    CustomPaint(
-                      size: const Size(32, 32),
-                      painter: _BarsIconPainter(
-                          tick: _tick, color: color),
-                    )
-                  else
-                    Icon(Icons.mic, size: 32, color: color),
-                ],
+                    if (listening)
+                      CustomPaint(
+                        size: const Size(32, 32),
+                        painter: _BarsIconPainter(tick: t, color: color),
+                      )
+                    else
+                      Icon(Icons.mic, size: 32, color: color),
+                  ],
+                ),
               ),
             ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// One chat line. Split out of the State so it can be built independently.
+class _MessageTile extends StatelessWidget {
+  const _MessageTile({required this.msg, required this.onSpeak});
+  final _Msg msg;
+  final VoidCallback onSpeak;
+
+  @override
+  Widget build(BuildContext context) {
+    final user = msg.role == 'user';
+    return Align(
+      alignment: user ? Alignment.centerRight : Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // HTML .sub: user line dim, Jarvis reply bright + glow.
+            SelectableText(msg.text,
+                style: TextStyle(
+                    color: user ? userDimColor : _ice,
+                    height: 1.5,
+                    fontSize: 14,
+                    shadows: user
+                        ? null
+                        : const [Shadow(color: hudCyan, blurRadius: 12)])),
+            if (!user)
+              Align(
+                alignment: Alignment.centerRight,
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: '朗读回答',
+                  onPressed: onSpeak,
+                  icon: const Icon(Icons.volume_up_outlined,
+                      size: 19, color: hudCyan),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// HUD corner bracket: draws only the requested sides.
+class _Bracket extends StatelessWidget {
+  const _Bracket({
+    required this.color,
+    this.left = false,
+    this.top = false,
+    this.right = false,
+    this.bottom = false,
+  });
+  final Color color;
+  final bool left, top, right, bottom;
+
+  @override
+  Widget build(BuildContext context) {
+    final side = BorderSide(color: color, width: 2);
+    return SizedBox(
+      width: 22,
+      height: 22,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border(
+            left: left ? side : BorderSide.none,
+            top: top ? side : BorderSide.none,
+            right: right ? side : BorderSide.none,
+            bottom: bottom ? side : BorderSide.none,
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }
@@ -1148,21 +1296,20 @@ class _DashedRingPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final c = Offset(size.width / 2, size.height / 2);
     final r = math.min(size.width, size.height) / 2;
+    final rect = Rect.fromCircle(center: c, radius: r);
     final p = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
     const n = 24;
+    const step = math.pi * 2 / n;
     for (var i = 0; i < n; i++) {
-      final a0 = i * math.pi * 2 / n;
-      canvas.drawArc(Rect.fromCircle(center: c, radius: r), a0,
-          math.pi * 2 / n * 0.5, false, p);
+      canvas.drawArc(rect, i * step, step * 0.5, false, p);
     }
   }
 
   @override
-  bool shouldRepaint(covariant _DashedRingPainter old) =>
-      old.color != color;
+  bool shouldRepaint(covariant _DashedRingPainter old) => old.color != color;
 }
 
 /// Sound-bar icon shown on the mic button while listening.
@@ -1175,6 +1322,9 @@ class _BarsIconPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     const n = 4;
     final bw = size.width / n;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
     for (var i = 0; i < n; i++) {
       final h =
           (0.3 + 0.7 * (math.sin(tick * 6 + i * 1.2)).abs()) * size.height;
@@ -1184,8 +1334,7 @@ class _BarsIconPainter extends CustomPainter {
               width: bw * 0.5,
               height: h),
           const Radius.circular(2));
-      canvas.drawRRect(
-          rect, Paint()..color = color..style = PaintingStyle.fill);
+      canvas.drawRRect(rect, paint);
     }
   }
 
