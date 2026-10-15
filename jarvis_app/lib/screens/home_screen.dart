@@ -5,6 +5,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/action_service.dart';
@@ -49,6 +50,9 @@ class _HomeScreenState extends State<HomeScreen>
   Timer? _clockTimer;
   Timer? _hudTimer;
   bool _speechInit = false;
+  // Consecutive error_busy auto-retries. Reset on every successful
+  // listen start, so a retry loop can never run forever.
+  int _busyRetries = 0;
   bool _wakeMode = false;
   bool _muted = false;
   bool _micDown = false;
@@ -212,10 +216,7 @@ class _HomeScreenState extends State<HomeScreen>
             if (_wakeMode && mounted && !_muted) _startWakeListening();
           }
         },
-        onError: (e) {
-          // Surface real recognizer errors instead of swallowing them.
-          _notice('语音识别出错：${e.errorMsg}');
-        },
+        onError: _onSpeechError,
       );
       if (!_speechInit) {
         _notice('本机语音识别服务不可用：请确认麦克风权限已给，且系统带有语音识别服务。');
@@ -224,6 +225,56 @@ class _HomeScreenState extends State<HomeScreen>
       _speechInit = false;
     }
     return _speechInit;
+  }
+
+  /// Recognizer error handler.
+  ///
+  /// error_busy is the Android SpeechRecognizer race: listen() was called
+  /// while a previous session was still tearing down (wake-word stop() ->
+  /// active listen(), a quick double-tap on the mic, or a 'done' restart
+  /// landing on a not-yet-released session). Without recovery the
+  /// recognizer stays dead: the mic shows the error once and wake mode
+  /// never restarts, which is exactly "唤醒不能用，且语音识别还是错误".
+  /// So on error_busy we release the recognizer and retry the current
+  /// mode once (max 2 consecutive retries); other errors are shown.
+  void _onSpeechError(SpeechRecognitionError e) {
+    if (e.errorMsg == 'error_busy' && _busyRetries < 2 && mounted) {
+      _busyRetries++;
+      Future.delayed(const Duration(milliseconds: 600), () async {
+        if (!mounted || _muted) return;
+        await _releaseRecognizer();
+        if (!mounted) return;
+        if (_wakeMode) {
+          await _startWakeListening();
+        } else if (_state == JarvisState.listening) {
+          await _startActiveListening();
+        }
+      });
+      return;
+    }
+    _notice('语音识别出错：${e.errorMsg}');
+  }
+
+  /// Fully release any in-flight recognizer session, then wait for the
+  /// release to land. Callers must await this before a new listen()
+  /// when the previous session may still be tearing down.
+  Future<void> _releaseRecognizer() async {
+    try {
+      await _speech.cancel();
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 400));
+  }
+
+  /// Wake word heard: end the wake session, wait for the recognizer to
+  /// release, then start active listening. Starting the new session
+  /// without the wait is the main source of error_busy.
+  Future<void> _wakeToActive() async {
+    try {
+      await _speech.stop();
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (!mounted || _muted) return;
+    await _startActiveListening();
   }
 
   /// Feeds the reactor sound bars with the real mic level.
@@ -236,6 +287,12 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _startWakeListening() async {
     if (_muted) return;
     if (!await _ensureSpeech()) return;
+    // Never start a second session on top of a live one: that is
+    // error_busy. Release first, then start.
+    if (_speech.isListening) {
+      await _releaseRecognizer();
+      if (_speech.isListening) return;
+    }
     _wakeMode = true;
     if (mounted) setState(() {});
     try {
@@ -244,18 +301,19 @@ class _HomeScreenState extends State<HomeScreen>
           localeId: 'zh_CN',
           listenFor: const Duration(seconds: 30),
           pauseFor: const Duration(seconds: 3),
+          cancelOnError: true,
         ),
         onSoundLevelChange: _onSoundLevel,
         onResult: (r) {
           final words = r.recognizedWords;
           if (words.contains('贾维斯')) {
             _wakeMode = false;
-            _speech.stop();
             _notice('已唤醒，Jarvis 在听。');
-            _startActiveListening();
+            _wakeToActive();
           }
         },
       );
+      _busyRetries = 0;
     } catch (_) {
       // Wake listening failed to start: don't leave the chip showing
       // "on" while nothing is listening.
@@ -283,6 +341,12 @@ class _HomeScreenState extends State<HomeScreen>
       _notice('系统语音识别不可用，请检查麦克风权限。');
       return;
     }
+    // Never start a second session on top of a live one: that is
+    // error_busy. Release first, then start.
+    if (_speech.isListening) {
+      await _releaseRecognizer();
+      if (_speech.isListening) return;
+    }
     _wakeMode = false;
     _recognized = '';
     if (mounted) setState(() => _state = JarvisState.listening);
@@ -292,6 +356,7 @@ class _HomeScreenState extends State<HomeScreen>
           localeId: 'zh_CN',
           listenFor: const Duration(seconds: 60),
           pauseFor: const Duration(seconds: 4),
+          cancelOnError: true,
         ),
         onSoundLevelChange: _onSoundLevel,
         onResult: (r) {
@@ -307,6 +372,7 @@ class _HomeScreenState extends State<HomeScreen>
           }
         },
       );
+      _busyRetries = 0;
     } catch (_) {
       if (mounted) setState(() => _state = JarvisState.idle);
     }
