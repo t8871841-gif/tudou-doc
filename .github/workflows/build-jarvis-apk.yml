@@ -47,6 +47,9 @@ jobs:
       - name: Remove stale local.properties
         run: rm -f jarvis_app/android/local.properties
 
+      - name: Reassemble Kokoro model assets
+        run: bash jarvis_app/kokoro-parts/reassemble.sh
+
       - name: Flutter pub get
         run: cd jarvis_app && flutter pub get
 
