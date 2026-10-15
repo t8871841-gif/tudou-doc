@@ -13,16 +13,10 @@ class JarvisSettings {
   static const defaultSpeakReplies = true;
   static const defaultParticles = true;
 
-  // TTS engine: kokoro (offline, default) | edge (online) | system.
-  // Kokoro offline has 8 Mandarin voices (4 male + 4 female, default
-  // zm_yunyang 云阳 male). Unknown / missing values fall back to kokoro.
-  // Legacy 'piper' values from the earlier offline build are migrated
-  // to kokoro on load (Piper was removed).
-  static const engineKokoro = 'kokoro';
+  // TTS: Edge online only. Legacy stored values ('kokoro', 'piper',
+  // 'system') are migrated to Edge on load.
   static const engineEdge = 'edge';
-  static const engineSystem = 'system';
-  static const defaultTtsEngine = engineKokoro;
-  static const defaultKokoroVoice = 'zm_yunyang';
+  static const defaultTtsEngine = engineEdge;
 
   // Default persona prompt (HTML settings "人设提示词"). Kept identical
   // to the previously hard-coded system prompt in LlmService.
@@ -35,7 +29,6 @@ class JarvisSettings {
   String model = defaultModel;
   String apiKey = ''; // empty by default; user fills in Settings
   String ttsEngine = defaultTtsEngine;
-  String kokoroVoice = defaultKokoroVoice;
   String edgeVoice = defaultEdgeVoice;
   double rate = defaultRate;
   double pitch = defaultPitch;
@@ -49,12 +42,8 @@ class JarvisSettings {
     model = await _storage.read(key: 'jarvis_model') ?? defaultModel;
     apiKey = await _storage.read(key: 'jarvis_api_key') ?? '';
     final engine = await _storage.read(key: 'jarvis_tts_engine');
-    // 'piper' is a legacy value: the Piper build was replaced by Kokoro.
-    ttsEngine = (engine == engineEdge || engine == engineSystem)
-        ? engine!
-        : defaultTtsEngine;
-    kokoroVoice =
-        await _storage.read(key: 'jarvis_kokoro_voice') ?? defaultKokoroVoice;
+    // Legacy values ('kokoro', 'piper', 'system') migrate to Edge.
+    ttsEngine = (engine == engineEdge) ? engine! : defaultTtsEngine;
     edgeVoice =
         await _storage.read(key: 'jarvis_edge_voice') ?? defaultEdgeVoice;
     rate = double.tryParse(
@@ -82,7 +71,6 @@ class JarvisSettings {
       await _storage.write(key: 'jarvis_api_key', value: apiKey.trim());
     }
     await _storage.write(key: 'jarvis_tts_engine', value: ttsEngine);
-    await _storage.write(key: 'jarvis_kokoro_voice', value: kokoroVoice);
     await _storage.write(key: 'jarvis_edge_voice', value: edgeVoice);
     await _storage.write(key: 'jarvis_tts_rate', value: rate.toString());
     await _storage.write(key: 'jarvis_tts_pitch', value: pitch.toString());
