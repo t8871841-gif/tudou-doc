@@ -15,7 +15,8 @@ android {
 
     defaultConfig {
         applicationId = "com.jarvis.jarvis_app"
-        minSdk = flutter.minSdkVersion
+        // record 插件要求 minSdk 23
+        minSdk = 23
         // 固定 34：兼容魅族 20 Pro 的 Android 13，避免 targetSdk 36 在旧系统上解析失败
         targetSdk = 34
         versionCode = flutter.versionCode
