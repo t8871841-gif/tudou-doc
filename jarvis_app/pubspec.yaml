@@ -34,3 +34,42 @@ flutter:
   uses-material-design: true
   assets:
     - assets/kokoro/
+    - assets/kokoro/dict/
+    - assets/kokoro/dict/pos_dict/
+    - assets/kokoro/espeak-ng-data/
+    - assets/kokoro/espeak-ng-data/lang/
+    - assets/kokoro/espeak-ng-data/lang/aav/
+    - assets/kokoro/espeak-ng-data/lang/art/
+    - assets/kokoro/espeak-ng-data/lang/azc/
+    - assets/kokoro/espeak-ng-data/lang/bat/
+    - assets/kokoro/espeak-ng-data/lang/bnt/
+    - assets/kokoro/espeak-ng-data/lang/ccs/
+    - assets/kokoro/espeak-ng-data/lang/cel/
+    - assets/kokoro/espeak-ng-data/lang/cus/
+    - assets/kokoro/espeak-ng-data/lang/dra/
+    - assets/kokoro/espeak-ng-data/lang/esx/
+    - assets/kokoro/espeak-ng-data/lang/gmq/
+    - assets/kokoro/espeak-ng-data/lang/gmw/
+    - assets/kokoro/espeak-ng-data/lang/grk/
+    - assets/kokoro/espeak-ng-data/lang/inc/
+    - assets/kokoro/espeak-ng-data/lang/ine/
+    - assets/kokoro/espeak-ng-data/lang/ira/
+    - assets/kokoro/espeak-ng-data/lang/iro/
+    - assets/kokoro/espeak-ng-data/lang/itc/
+    - assets/kokoro/espeak-ng-data/lang/jpx/
+    - assets/kokoro/espeak-ng-data/lang/map/
+    - assets/kokoro/espeak-ng-data/lang/miz/
+    - assets/kokoro/espeak-ng-data/lang/myn/
+    - assets/kokoro/espeak-ng-data/lang/poz/
+    - assets/kokoro/espeak-ng-data/lang/roa/
+    - assets/kokoro/espeak-ng-data/lang/sai/
+    - assets/kokoro/espeak-ng-data/lang/sem/
+    - assets/kokoro/espeak-ng-data/lang/sit/
+    - assets/kokoro/espeak-ng-data/lang/tai/
+    - assets/kokoro/espeak-ng-data/lang/trk/
+    - assets/kokoro/espeak-ng-data/lang/urj/
+    - assets/kokoro/espeak-ng-data/lang/zle/
+    - assets/kokoro/espeak-ng-data/lang/zls/
+    - assets/kokoro/espeak-ng-data/lang/zlw/
+    - assets/kokoro/espeak-ng-data/voices/
+    - assets/kokoro/espeak-ng-data/voices/!v/
