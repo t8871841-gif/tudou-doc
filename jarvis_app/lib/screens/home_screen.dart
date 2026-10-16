@@ -5,10 +5,9 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
-import '../services/action_service.dart';
+import '../services/agent_service.dart';
 import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
-import '../services/llm_service.dart';
 import '../services/settings_store.dart';
 import '../widgets/hud_painters.dart';
 import 'settings_screen.dart';
@@ -504,10 +503,11 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  /// 使用 Agent 智能体调度系统处理用户指令（支持联网、跨应用、任务拆解）
   Future<void> _ask(String q) async {
     FocusScope.of(context).unfocus();
     final hist = _buildHistory();
-    _stopSpeaking(); // a new question cuts off the previous answer
+    _stopSpeaking();
     _listenTimer?.cancel();
     unawaited(_asr.stop());
     setState(() {
@@ -516,35 +516,31 @@ class _HomeScreenState extends State<HomeScreen>
       _recognized = '';
       _wakeMode = false;
       _state = JarvisState.thinking;
-      _statusLine = '正在思考…';
+      _statusLine = '正在分析目标并规划任务…';
     });
     _scrollDown();
 
-    // Device actions first (call / message / alarm / open app).
-    // Returns null when the text is not an action command.
-    String? actionReply;
-    try {
-      actionReply = await DeviceActions.tryHandle(q);
-    } catch (e) {
-      _reply('设备指令执行失败：$e', '设备指令失败。');
-      return;
-    }
-    if (actionReply != null) {
-      _reply(actionReply, '已执行设备指令。');
-      if (mounted) await _speak(actionReply);
-      return;
-    }
-
     final String answer;
     try {
-      answer = await LlmService.ask(
-          settings: _settings, question: q, history: hist);
+      // 启用 Agent 智能体服务
+      answer = await AgentService.runAgent(
+        settings: _settings,
+        userGoal: q,
+        history: hist,
+        onProgress: (status) {
+          if (mounted) {
+            setState(() {
+              _statusLine = status; // 实时显示底层子任务执行步骤
+            });
+          }
+        },
+      );
     } catch (e) {
-      _reply('连接失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。未填 Key 时无法联网问答。',
-          '联网问答失败，请检查设置。');
+      _reply('执行失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。',
+          '智能体执行失败。');
       return;
     }
-    _reply(answer, '已回答。');
+    _reply(answer, '任务执行完毕。');
     if (mounted) await _speak(answer);
   }
 
@@ -584,7 +580,7 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _enterApp() async {
     if (_state != JarvisState.booting) return;
     const welcome =
-        '您好，我是 Jarvis。您可以直接说话、点麦克风，或者打字提问。我可以回答各种各样的问题，还能打电话、发消息、读短信、设闹钟、开 App。';
+        '您好，我是 Jarvis。已为您装配智能体与联网跨应用能力。您可以直接说话、点麦克风，或者打字提问。';
     setState(() {
       _state = JarvisState.idle;
       _statusLine = '核心已上线，随时可以开始。';
