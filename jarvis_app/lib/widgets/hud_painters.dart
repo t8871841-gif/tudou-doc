@@ -45,12 +45,22 @@ abstract class _HudPainter extends CustomPainter {
     required this.mode,
     required this.wakeMode,
     required this.micLevel,
+    required this.themeColor,
   }) : super(repaint: tick);
 
   final ValueListenable<double> tick;
   final HudMode Function() mode;
   final bool Function() wakeMode;
   final double Function() micLevel;
+  // 动态主题色：待命全息蓝 / 聆听纳米红 / 思考·说话纳米金，由 home_screen 按 JarvisState 提供。
+  final Color Function() themeColor;
+
+  // 平滑过渡后的主题色：每帧向目标色 lerp，避免状态切换时颜色硬跳。
+  Color _displayedTheme = const Color(0xFF19D3FF);
+
+  /// 主题色 + 透明度，替代旧的 hueColor(hue, a) 漂移色。
+  Color themeCol(double a) =>
+      _displayedTheme.withValues(alpha: a.clamp(0.0, 1.0));
 
   double hue = 190;
   double spin = 1;
@@ -71,6 +81,10 @@ abstract class _HudPainter extends CustomPainter {
 
     hue += (hudHueFor(m) - hue) * 0.06;
     spin += ((m == HudMode.thinking ? 5 : 1) - spin) * 0.05;
+
+    // 主题色平滑过渡：每帧向目标主题色靠 8%，蓝 ↔ 金 / 红不硬跳。
+    _displayedTheme =
+        Color.lerp(_displayedTheme, themeColor(), 0.08) ?? themeColor();
 
     // Energy target mirrors the HTML: real mic level while listening,
     // synthetic waves while speaking / thinking / idle.
@@ -95,7 +109,7 @@ abstract class _HudPainter extends CustomPainter {
         c,
         rr,
         Paint()
-          ..color = hueColor(hue, a.clamp(0.0, 1.0))
+          ..color = themeCol(a.clamp(0.0, 1.0))
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2 + a * 3,
       );
@@ -115,6 +129,7 @@ class ReactorPainter extends _HudPainter {
     required super.mode,
     required super.wakeMode,
     required super.micLevel,
+    required super.themeColor,
   });
 
   double get smoothedHue => hue;
@@ -129,7 +144,7 @@ class ReactorPainter extends _HudPainter {
     // HTML: R = min(W, H) * .36 of the stage.
     final r = math.min(size.width, size.height) * 0.36;
     final lvl = level;
-    Color col(double a) => hueColor(hue, a);
+    Color col(double a) => themeCol(a);
 
     // Core glow (radial gradient).
     final glow = Paint()
@@ -327,6 +342,7 @@ class FxPainter extends _HudPainter {
     required super.mode,
     required super.wakeMode,
     required super.micLevel,
+    required super.themeColor,
   });
 
   final _rnd = math.Random();
@@ -338,7 +354,7 @@ class FxPainter extends _HudPainter {
 
   String _hexByte() => _rnd.nextInt(256).toRadixString(16).padLeft(2, '0').toUpperCase();
 
-  void _regenHex(double hueNow) {
+  void _regenHex(Color theme) {
     _hex = List.generate(36, (_) => _hexByte());
     _hexPainters
       ..clear()
@@ -349,7 +365,7 @@ class FxPainter extends _HudPainter {
             style: TextStyle(
               fontSize: 9,
               fontFamily: 'monospace',
-              color: hueColor(hueNow, 0.45),
+              color: theme.withValues(alpha: 0.45),
             ),
           ),
           textAlign: TextAlign.center,
@@ -373,7 +389,7 @@ class FxPainter extends _HudPainter {
     final r = math.min(size.width, size.height) * 0.36;
     final maxR = math.max(size.width, size.height) * 0.62;
     final lvl = level;
-    Color col(double a) => hueColor(hue, a);
+    Color col(double a) => themeCol(a);
 
     // Trail particles: converge while listening, diffuse while speaking.
     final pull =
@@ -424,7 +440,7 @@ class FxPainter extends _HudPainter {
     // Hex data ring: fast refresh while thinking (HTML .1s vs 1.8s).
     if ((thinking && t - _lastHex > 0.1) || t - _lastHex > 1.8) {
       _lastHex = t;
-      _regenHex(hue);
+      _regenHex(_displayedTheme);
     }
     for (var i = 0; i < _hexPainters.length; i++) {
       final tp = _hexPainters[i];

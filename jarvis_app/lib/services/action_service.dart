@@ -19,6 +19,33 @@ class DeviceActions {
   static final _phoneReg = RegExp(r'1[3-9]\d{9}');
   static const _smsChannel = MethodChannel('jarvis/sms');
   static const _launcherChannel = MethodChannel('jarvis/launcher');
+  static const _accessibilityChannel =
+      MethodChannel('com.example.jarvis/accessibility');
+
+  /// 触发跨应用操作前调用：武装无障碍自动点击，目标界面出现后自动点“发送”/“Send”。
+  /// 必须在拉起目标 App 之前调用，否则窗口事件可能已错过。
+  static Future<void> _enableAutoClick() async {
+    try {
+      await _accessibilityChannel.invokeMethod('enableAutoClick');
+    } catch (_) {}
+  }
+
+  static Future<bool> _isAccessibilityEnabled() async {
+    try {
+      return await _accessibilityChannel.invokeMethod<bool>(
+              'isAccessibilityEnabled') ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 跳转系统无障碍设置，供用户手动开启 Jarvis 跨应用全自动引擎。
+  static Future<void> openAccessibilitySettings() async {
+    try {
+      await _accessibilityChannel.invokeMethod('openAccessibilitySettings');
+    } catch (_) {}
+  }
 
   // Chinese app name -> candidate package names, tried in order.
   // System apps: AOSP name first, then Flyme/Meizu equivalents
@@ -236,12 +263,19 @@ class DeviceActions {
       final who = target.name ?? phone;
       return '消息内容为空，请说：给 $who 发短信 + 内容。';
     }
+    // 跨应用全自动：先查无障碍服务是否已开启，已开启才武装自动点击。
+    // 未开启时仍打开编辑页，由用户手动点发送，并提示去开启。
+    final autoEnabled = await _isAccessibilityEnabled();
+    if (autoEnabled) await _enableAutoClick();
+    final autoHint = autoEnabled
+        ? '已开启全自动发送，打开后会自动点发送。'
+        : '未开启无障碍自动发送，需手动点发送；首次使用请在系统设置 > 无障碍 > 开启“Jarvis 跨应用全自动引擎”，即可全自动发送。';
     if (isWhatsapp) {
       final uri = Uri.parse(
           'https://wa.me/$phone?text=${Uri.encodeComponent(body)}');
       if (await canLaunchUrl(uri)) {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
-        return '已打开 WhatsApp，收件人 $phone，内容已填好。';
+        return '已打开 WhatsApp，收件人 $phone，内容已填好。$autoHint';
       }
       return '打不开 WhatsApp，请确认已安装。';
     }
@@ -252,7 +286,7 @@ class DeviceActions {
           scheme: 'sms', path: phone, queryParameters: {'body': body});
       if (await canLaunchUrl(uri)) {
         await launchUrl(uri);
-        return '微信没有直接发消息接口，已帮你打开短信，收件人 $phone，内容已填好，在短信里发就行。';
+        return '微信没有直接发消息接口，已帮你打开短信，收件人 $phone，内容已填好，在短信里发就行。$autoHint';
       }
       return '微信没有直接发消息接口，短信也打不开，请检查短信权限。';
     }
@@ -260,7 +294,7 @@ class DeviceActions {
         scheme: 'sms', path: phone, queryParameters: {'body': body});
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
-      return '已打开短信，收件人 $phone，内容已填好。';
+      return '已打开短信，收件人 $phone，内容已填好。$autoHint';
     }
     return '打不开短信，请检查短信权限。';
   }

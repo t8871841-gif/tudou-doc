@@ -18,6 +18,26 @@ const _ice = Color(0xFFEAFFFF);
 const _bootCyan = Color(0xFF19D3FF);
 const _bootBg = Color(0xFF00060B);
 
+// 1. 核心主题色定义与动态分发器
+const Color nanoGold = Color(0xFFFFB700);
+const Color nanoRed = Color(0xFFFF2A2A);
+const Color holoCyan = Color(0xFF19D3FF);
+
+Color getActiveThemeColor(JarvisState state, double _hue) {
+  // _hue 保留参数位：待命已锁定 holoCyan，不再随 hue 漂移；后续若要恢复漂移可直接用。
+  switch (state) {
+    case JarvisState.thinking:
+    case JarvisState.speaking:
+      return nanoGold; // 思考/回答状态切为纳米金色
+    case JarvisState.listening:
+      return nanoRed; // 聆听状态切为高能红色
+    case JarvisState.booting:
+    case JarvisState.idle:
+    default:
+      return holoCyan; // 待命状态锁定全息蓝，不随 hue 漂移
+  }
+}
+
 class _Msg {
   final String role; // user | assistant | system
   final String text;
@@ -68,20 +88,18 @@ class _HomeScreenState extends State<HomeScreen>
   // tick. Everything else listens to a low-rate notifier, so a clock tick or
   // a HUD drift no longer rebuilds the whole screen via setState.
   final _tick = ValueNotifier<double>(0); // seconds, every frame
-  late final ValueNotifier<double> _hue; // reactor hue, synced at ~20 fps
   final _glitch = ValueNotifier<int>(0); // 0 none, 1/2 RGB split, 3 skew
   final _clock = ValueNotifier<String>('--:--:--');
   final _hudLevels = ValueNotifier<List<double>>(
       const <double>[0.7, 0.6, 0.8, 0.75, 0.65, 0.7]);
   final _micDown = ValueNotifier<bool>(false);
 
-  late final Listenable _topAnim = Listenable.merge([_hue, _glitch, _clock]);
-  late final Listenable _hudAnim = Listenable.merge([_hue, _hudLevels]);
+  late final Listenable _topAnim = Listenable.merge([_glitch, _clock]);
+  late final Listenable _hudAnim = _hudLevels;
   late final Listenable _micAnim = Listenable.merge([_tick, _micDown]);
 
   late final Ticker _ticker;
   Duration? _lastElapsed;
-  Duration _lastHueSync = Duration.zero;
   Timer? _clockTimer;
   Timer? _hudTimer;
 
@@ -100,14 +118,15 @@ class _HomeScreenState extends State<HomeScreen>
       mode: () => _hudMode,
       wakeMode: () => _wakeMode,
       micLevel: () => _micLevel,
+      themeColor: () => getActiveThemeColor(_state, 0),
     );
     _fx = FxPainter(
       tick: _tick,
       mode: () => _hudMode,
       wakeMode: () => _wakeMode,
       micLevel: () => _micLevel,
+      themeColor: () => getActiveThemeColor(_state, 0),
     );
-    _hue = ValueNotifier<double>(_reactor.smoothedHue.toDouble());
 
     // Display-rate tick: drives the painters and per-frame widgets
     // without rebuilding the chat list.
@@ -134,7 +153,6 @@ class _HomeScreenState extends State<HomeScreen>
     _clockTimer?.cancel();
     _hudTimer?.cancel();
     _tick.dispose();
-    _hue.dispose();
     _glitch.dispose();
     _clock.dispose();
     _hudLevels.dispose();
@@ -166,12 +184,6 @@ class _HomeScreenState extends State<HomeScreen>
     final t = _tick.value + dt.clamp(0.0, 0.1);
     _tick.value = t;
 
-    // Hue only drifts slowly: sync it to the widgets at ~20 fps.
-    if (elapsed - _lastHueSync >= const Duration(milliseconds: 50)) {
-      _lastHueSync = elapsed;
-      final h = _reactor.smoothedHue.toDouble();
-      if (h != _hue.value) _hue.value = h;
-    }
     // The title glitch is a handful of discrete stages per 7s loop.
     final g = _glitchStage(t);
     if (g != _glitch.value) _glitch.value = g;
@@ -591,14 +603,33 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---------- Build ----------
 
+// 2. 升级后的 build 方法（深空径向渐变背景）
   @override
   Widget build(BuildContext context) {
     if (_state == JarvisState.booting) return _bootScreen();
-    return Scaffold(
-      backgroundColor: hudDeep,
+    final themeColor = getActiveThemeColor(_state, 0);
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
+
+    final page = Scaffold(
+      backgroundColor: const Color(0xFF010409),
       body: Stack(
         children: [
-          // Static background: cached in its own layer.
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: RadialGradient(
+                  center: const Alignment(0.0, -0.2),
+                  radius: 1.2,
+                  colors: [
+                    themeColor.withValues(alpha: 0.25),
+                    const Color(0xFF010409),
+                    const Color(0xFF000103),
+                  ],
+                  stops: const [0.0, 0.5, 1.0],
+                ),
+              ),
+            ),
+          ),
           Positioned.fill(
               child: RepaintBoundary(child: CustomPaint(painter: _grid))),
           Positioned.fill(
@@ -607,15 +638,21 @@ class _HomeScreenState extends State<HomeScreen>
                 children: [
                   Column(
                     children: [
-                      _topBar(),
-                      _stage(),
-                      _chatArea(),
-                      _bottomArea(),
+                      _topBar(themeColor),
+                      // Keyboard up: the 330px stage would push the input
+                      // row off-screen (Column overflow), so show a slim
+                      // status row instead.
+                      if (keyboardOpen)
+                        _compactStatus(themeColor)
+                      else
+                        _stage(themeColor),
+                      _chatArea(themeColor),
+                      _bottomArea(themeColor),
                     ],
                   ),
                   Positioned.fill(
                     child: IgnorePointer(
-                      child: RepaintBoundary(child: _cornerBrackets()),
+                      child: RepaintBoundary(child: _cornerBrackets(themeColor)),
                     ),
                   ),
                 ],
@@ -624,6 +661,15 @@ class _HomeScreenState extends State<HomeScreen>
           ),
         ],
       ),
+    );
+    // Fixed-size HUD layout: large system fonts are allowed, but the scale
+    // is capped at 1.3x so nothing overflows.
+    return MediaQuery(
+      data: MediaQuery.of(context).copyWith(
+        textScaler: MediaQuery.textScalerOf(context)
+            .clamp(minScaleFactor: 1.0, maxScaleFactor: 1.3),
+      ),
+      child: page,
     );
   }
 
@@ -727,12 +773,12 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---------- Top bar (HTML .top) ----------
 
-  Widget _topBar() {
+  Widget _topBar(Color themeColor) {
     return RepaintBoundary(
       child: ListenableBuilder(
         listenable: _topAnim,
         builder: (_, _) {
-          final color = hueColor(_hue.value, 1);
+          final color = themeColor;
           final style = _glow(color, size: 12, spacing: 2.2);
           return Padding(
             padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
@@ -767,7 +813,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _glitchTitle(Color color) {
-    final stage = _glitch.value;
+    // Honour the system "remove animations" setting.
+    final stage =
+        MediaQuery.disableAnimationsOf(context) ? 0 : _glitch.value;
     final shadows = <Shadow>[
       Shadow(color: color, blurRadius: 8),
       if (stage == 1) ...const [
@@ -799,7 +847,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---------- Reactor stage (HTML .stage) ----------
 
-  Widget _stage() {
+  Widget _stage(Color themeColor) {
     return SizedBox(
       height: 330,
       child: Stack(
@@ -812,7 +860,8 @@ class _HomeScreenState extends State<HomeScreen>
                 children: [
                   // FX layer honours the "粒子特效" setting (as the old
                   // particle sphere did); the reactor itself always draws.
-                  if (_settings.particles)
+                  if (_settings.particles &&
+                      !MediaQuery.disableAnimationsOf(context))
                     Positioned.fill(child: CustomPaint(painter: _fx)),
                   Positioned.fill(child: CustomPaint(painter: _reactor)),
                 ],
@@ -824,7 +873,7 @@ class _HomeScreenState extends State<HomeScreen>
             child: RepaintBoundary(
               child: ListenableBuilder(
                 listenable: _hudAnim,
-                builder: (_, _) => _stageOverlay(),
+                builder: (_, _) => _stageOverlay(themeColor),
               ),
             ),
           ),
@@ -833,24 +882,23 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _stageOverlay() {
-    final hue = _hue.value;
+  Widget _stageOverlay(Color themeColor) {
     final levels = _hudLevels.value;
     return Stack(
       children: [
-        Center(child: _statusText(hue)),
-        Positioned(left: 0, top: 0, child: _gearButton(hue)),
+        Center(child: _statusText(themeColor)),
+        Positioned(left: 0, top: 0, child: _gearButton(themeColor)),
         Positioned(
           left: 0,
           right: 0,
           bottom: 4,
-          child: Center(child: _wakeChip(hue)),
+          child: Center(child: _wakeChip(themeColor)),
         ),
         Positioned(
           right: 0,
           top: 0,
           child: _readout(
-            hue,
+            themeColor,
             const ['POWER', 'LATENCY', 'SIGNAL'],
             levels.sublist(3),
             alignRight: true,
@@ -860,7 +908,7 @@ class _HomeScreenState extends State<HomeScreen>
           left: 0,
           bottom: 6,
           child: _readout(
-            hue,
+            themeColor,
             const ['ARC REACTOR', 'NEURAL LINK', 'VOICE CORE'],
             levels.sublist(0, 3),
             alignRight: false,
@@ -870,73 +918,145 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _statusText(double hue) {
-    final color = hueColor(hue, 1);
-    final (en, cn) = switch (_state) {
-      JarvisState.listening => ('LISTENING', '正在聆听'),
-      JarvisState.thinking => ('PROCESSING', '思考中'),
-      JarvisState.speaking => ('RESPONDING', '回应中'),
-      _ => _wakeMode ? ('WAKE WORD', '等待唤醒') : ('STANDBY', '待命'),
-    };
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(en, style: _glow(color, size: 13, spacing: 5.2, blur: 10)),
-        const SizedBox(height: 6),
-        Text(cn,
-            style: _glow(color,
-                size: 30, spacing: 7.5, blur: 12, color: _ice)),
-      ],
+  (String, String) _statusLabels() => switch (_state) {
+        JarvisState.listening => ('LISTENING', '正在聆听'),
+        JarvisState.thinking => ('PROCESSING', '思考中'),
+        JarvisState.speaking => ('RESPONDING', '回应中'),
+        _ => _wakeMode ? ('WAKE WORD', '等待唤醒') : ('STANDBY', '待命'),
+      };
+
+  Widget _statusText(Color themeColor) {
+    final color = themeColor;
+    final (en, cn) = _statusLabels();
+    // liveRegion: TalkBack announces state changes (聆听 / 思考 / 回应).
+    return Semantics(
+      liveRegion: true,
+      label: 'Jarvis $cn',
+      excludeSemantics: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(en, style: _glow(color, size: 13, spacing: 5.2, blur: 10)),
+          const SizedBox(height: 6),
+          Text(cn,
+              style: _glow(color,
+                  size: 30, spacing: 7.5, blur: 12, color: _ice)),
+        ],
+      ),
     );
   }
 
-  Widget _gearButton(double hue) {
-    return GestureDetector(
-      onTap: _openSettings,
-      child: Container(
-        width: 38,
-        height: 38,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: hueColor(hue, 0.25)),
-        ),
-        // Icon instead of the "⚙︎" text glyph, which some devices render
-        // as a colour emoji.
-        child: Center(
-          child: Icon(Icons.settings_outlined,
-              size: 18, color: hueColor(hue, 1)),
+  /// Slim status row shown instead of the stage while the keyboard is up.
+  Widget _compactStatus(Color themeColor) {
+    final (en, cn) = _statusLabels();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+      child: Semantics(
+        liveRegion: true,
+        label: 'Jarvis $cn',
+        excludeSemantics: true,
+        child: Row(
+          children: [
+            Icon(Icons.circle, size: 10, color: themeColor),
+            const SizedBox(width: 10),
+            Text(cn,
+                style: _glow(themeColor,
+                    size: 16, spacing: 3, blur: 8, color: _ice)),
+            const SizedBox(width: 10),
+            Text(en, style: _glow(themeColor, size: 10, spacing: 3)),
+          ],
         ),
       ),
     );
   }
 
-  Widget _wakeChip(double hue) {
-    final color = hueColor(hue, 1);
-    final on = _wakeEnabled;
-    return GestureDetector(
-      onTap: _toggleWake,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: on ? color : hueColor(hue, 0.25)),
-          color: on ? hueColor(hue, 0.25) : Colors.transparent,
-          boxShadow: on
-              ? [BoxShadow(color: hueColor(hue, 0.25), blurRadius: 14)]
-              : null,
+  Widget _gearButton(Color themeColor) {
+    return Semantics(
+      button: true,
+      label: '设置',
+      onTap: _openSettings,
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _openSettings,
+        // 48dp touch target around the 38dp visual.
+        child: SizedBox(
+          width: 48,
+          height: 48,
+          child: Center(
+            child: Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: themeColor.withValues(alpha: 0.25)),
+              ),
+              // Icon instead of the "⚙︎" text glyph, which some devices
+              // render as a colour emoji.
+              child: Center(
+                child: Icon(Icons.settings_outlined,
+                    size: 18, color: themeColor),
+              ),
+            ),
+          ),
         ),
-        child: Text('唤醒词 · ${on ? '开' : '关'}',
-            style: TextStyle(color: color, fontSize: 13, letterSpacing: 2.6)),
+      ),
+    );
+  }
+
+  Widget _wakeChip(Color themeColor) {
+    final color = themeColor;
+    final on = _wakeEnabled;
+    return Semantics(
+      button: true,
+      toggled: on,
+      label: '语音唤醒词，说“贾维斯”唤醒',
+      value: on ? '已开启' : '已关闭',
+      onTap: _toggleWake,
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _toggleWake,
+        // At least 48dp tall, still hugging the capsule horizontally.
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 48),
+          child: Center(
+            widthFactor: 1,
+            heightFactor: 1,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                    color: on ? color : themeColor.withValues(alpha: 0.25)),
+                color: on
+                    ? themeColor.withValues(alpha: 0.25)
+                    : Colors.transparent,
+                boxShadow: on
+                    ? [
+                        BoxShadow(
+                            color: themeColor.withValues(alpha: 0.25),
+                            blurRadius: 14)
+                      ]
+                    : null,
+              ),
+              child: Text('唤醒词 · ${on ? '开' : '关'}',
+                  style: TextStyle(
+                      color: color, fontSize: 13, letterSpacing: 2.6)),
+            ),
+          ),
+        ),
       ),
     );
   }
 
   /// HUD readout bars (HTML `.rd`): label + glowing 2px bar.
-  Widget _readout(double hue, List<String> labels, List<double> values,
+  Widget _readout(Color themeColor, List<String> labels, List<double> values,
       {required bool alignRight}) {
-    final color = hueColor(hue, 1);
-    final track = hueColor(hue, 0.25);
-    return IgnorePointer(
+    final color = themeColor;
+    final track = themeColor.withValues(alpha: 0.25);
+    return ExcludeSemantics(child: IgnorePointer(
       child: SizedBox(
         width: 92,
         child: Column(
@@ -968,73 +1088,89 @@ class _HomeScreenState extends State<HomeScreen>
           ],
         ),
       ),
-    );
+    ));
   }
 
-  Widget _cornerBrackets() {
-    return ValueListenableBuilder<double>(
-      valueListenable: _hue,
-      builder: (_, hue, _) {
-        final c = hueColor(hue, 0.85);
-        return Stack(
-          children: [
-            Positioned(
-                left: 8,
-                top: 6,
-                child: _Bracket(color: c, left: true, top: true)),
-            Positioned(
-                right: 8,
-                top: 6,
-                child: _Bracket(color: c, right: true, top: true)),
-            Positioned(
-                left: 8,
-                bottom: 8,
-                child: _Bracket(color: c, left: true, bottom: true)),
-            Positioned(
-                right: 8,
-                bottom: 8,
-                child: _Bracket(color: c, right: true, bottom: true)),
-          ],
-        );
-      },
+  Widget _cornerBrackets(Color themeColor) {
+    final c = themeColor.withValues(alpha: 0.85);
+    return Stack(
+      children: [
+        Positioned(
+            left: 8,
+            top: 6,
+            child: _Bracket(color: c, left: true, top: true)),
+        Positioned(
+            right: 8,
+            top: 6,
+            child: _Bracket(color: c, right: true, top: true)),
+        Positioned(
+            left: 8,
+            bottom: 8,
+            child: _Bracket(color: c, left: true, bottom: true)),
+        Positioned(
+            right: 8,
+            bottom: 8,
+            child: _Bracket(color: c, right: true, bottom: true)),
+      ],
     );
   }
 
   // ---------- Dialogue (HTML .sub colours) ----------
 
-  Widget _chatArea() {
+// 3. 升级后的 _chatArea 方法（通透全息玻璃卡片）
+  Widget _chatArea(Color themeColor) {
     final thinking = _state == JarvisState.thinking;
     return Expanded(
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 10),
-        padding: const EdgeInsets.all(10),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.32),
-          border: Border.all(color: hudCyan.withValues(alpha: 0.22)),
-          borderRadius: BorderRadius.circular(12),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              themeColor.withValues(alpha: 0.15),
+              Colors.black.withValues(alpha: 0.55),
+            ],
+          ),
+          border: Border.all(
+            color: themeColor.withValues(alpha: 0.4),
+            width: 1.2,
+          ),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: themeColor.withValues(alpha: 0.08),
+              blurRadius: 16,
+              spreadRadius: 1,
+            ),
+          ],
         ),
         child: ListView.builder(
           controller: _scroll,
           itemCount: _messages.length + (thinking ? 1 : 0),
           itemBuilder: (context, i) {
-            // The extra last row only exists while thinking.
             if (i == _messages.length) {
-              return const Padding(
-                padding: EdgeInsets.all(10),
+              return Semantics(liveRegion: true, label: 'Jarvis 正在思考', excludeSemantics: true, child: Padding(
+                padding: const EdgeInsets.all(10),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: hudCyan)),
-                  SizedBox(width: 10),
-                  Text('Jarvis 正在思考…',
-                      style: TextStyle(color: Colors.white70)),
+                          strokeWidth: 2, color: themeColor)),
+                  const SizedBox(width: 12),
+                  Text('Jarvis 正在重构神经网络…',
+                      style: TextStyle(
+                          color: themeColor.withValues(alpha: 0.85),
+                          fontSize: 13,
+                          letterSpacing: 1.2)),
                 ]),
-              );
+              ));
             }
             final m = _messages[i];
-            return _MessageTile(msg: m, onSpeak: () => _speak(m.text));
+            return _MessageTile(
+                msg: m, themeColor: themeColor, onSpeak: () => _speak(m.text));
           },
         ),
       ),
@@ -1043,10 +1179,10 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---------- Bottom: mic + input (HTML .mic) ----------
 
-  Widget _bottomArea() {
+  Widget _bottomArea(Color themeColor) {
     final outline = OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide(color: hudCyan.withValues(alpha: 0.35)));
+        borderSide: BorderSide(color: themeColor.withValues(alpha: 0.35)));
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       child: Column(
@@ -1055,17 +1191,17 @@ class _HomeScreenState extends State<HomeScreen>
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Row(children: [
-                const Icon(Icons.graphic_eq, color: hudCyan),
+                Icon(Icons.graphic_eq, color: themeColor),
                 const SizedBox(width: 8),
                 Expanded(
                     child: Text(
                         _recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized,
-                        style: const TextStyle(color: hudCyan))),
+                        style: TextStyle(color: themeColor))),
                 const Text('点麦克风结束',
-                    style: TextStyle(color: Colors.white38, fontSize: 11)),
+                    style: TextStyle(color: Colors.white54, fontSize: 11)),
               ]),
             ),
-          _micButton(),
+          _micButton(themeColor),
           const SizedBox(height: 10),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
@@ -1074,7 +1210,7 @@ class _HomeScreenState extends State<HomeScreen>
                 tooltip: _muted ? '取消静音' : '静音',
                 onPressed: _toggleMute,
                 icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
-                    color: hudCyan),
+                    color: themeColor),
               ),
               Expanded(
                 child: TextField(
@@ -1086,7 +1222,7 @@ class _HomeScreenState extends State<HomeScreen>
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     hintText: '输入问题，或点麦克风说话，也可说“贾维斯”唤醒',
-                    hintStyle: const TextStyle(color: Colors.white38),
+                    hintStyle: const TextStyle(color: Colors.white54),
                     filled: true,
                     fillColor: Colors.black.withValues(alpha: 0.35),
                     border: outline,
@@ -1098,23 +1234,24 @@ class _HomeScreenState extends State<HomeScreen>
               ),
               const SizedBox(width: 8),
               IconButton.filled(
+                tooltip: '发送',
                 onPressed:
                     _state == JarvisState.thinking ? null : () => _send(),
                 style: IconButton.styleFrom(
-                    backgroundColor: hudCyan, foregroundColor: Colors.black),
+                    backgroundColor: themeColor, foregroundColor: Colors.black),
                 icon: const Icon(Icons.arrow_upward),
               ),
             ],
           ),
           const SizedBox(height: 6),
           Text(_statusLine,
-              style: const TextStyle(color: Colors.white38, fontSize: 10)),
+              style: const TextStyle(color: Colors.white54, fontSize: 11)),
         ],
       ),
     );
   }
 
-  Widget _micButton() {
+  Widget _micButton(Color themeColor) {
     // Own layer: the per-frame ripple / ring / bars repaint only this
     // 78px button instead of the whole page.
     return RepaintBoundary(
@@ -1122,11 +1259,10 @@ class _HomeScreenState extends State<HomeScreen>
         listenable: _micAnim,
         builder: (_, _) {
           final t = _tick.value;
-          final hue = _reactor.smoothedHue;
-          final color = hueColor(hue, 1);
+          final color = themeColor;
           final listening = _state == JarvisState.listening;
           final ripplePhase = t % 1;
-          return GestureDetector(
+          return Semantics(button: true, label: _muted ? '取消静音' : listening ? '停止聆听并发送' : '开始语音输入', onTap: _toggleMic, excludeSemantics: true, child: GestureDetector(
             onTap: _toggleMic,
             onTapDown: (_) => _micDown.value = true,
             onTapUp: (_) => _micDown.value = false,
@@ -1140,7 +1276,8 @@ class _HomeScreenState extends State<HomeScreen>
                   alignment: Alignment.center,
                   children: [
                     // Listening pulse ripple (HTML `.mic:after` pulse).
-                    if (listening)
+                    if (listening &&
+                        !MediaQuery.disableAnimationsOf(context))
                       Opacity(
                         opacity: 1 - ripplePhase,
                         child: Transform.scale(
@@ -1174,7 +1311,7 @@ class _HomeScreenState extends State<HomeScreen>
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           gradient: RadialGradient(colors: [
-                            hueColor(hue, 0.25),
+                            themeColor.withValues(alpha: 0.25),
                             Colors.transparent,
                           ], stops: const [
                             0.0,
@@ -1183,7 +1320,7 @@ class _HomeScreenState extends State<HomeScreen>
                           border: Border.all(color: color, width: 2),
                           boxShadow: [
                             BoxShadow(
-                                color: hueColor(hue, 0.25),
+                                color: themeColor.withValues(alpha: 0.25),
                                 blurRadius: 24,
                                 spreadRadius: 1),
                           ],
@@ -1201,7 +1338,7 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
               ),
             ),
-          );
+          ));
         },
       ),
     );
@@ -1210,14 +1347,16 @@ class _HomeScreenState extends State<HomeScreen>
 
 /// One chat line. Split out of the State so it can be built independently.
 class _MessageTile extends StatelessWidget {
-  const _MessageTile({required this.msg, required this.onSpeak});
+  const _MessageTile(
+      {required this.msg, required this.themeColor, required this.onSpeak});
   final _Msg msg;
+  final Color themeColor;
   final VoidCallback onSpeak;
 
   @override
   Widget build(BuildContext context) {
     final user = msg.role == 'user';
-    return Align(
+    return Semantics(container: true, label: user ? '你说：' : 'Jarvis 回答：', child: Align(
       alignment: user ? Alignment.centerRight : Alignment.centerLeft,
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10),
@@ -1232,7 +1371,7 @@ class _MessageTile extends StatelessWidget {
                     fontSize: 14,
                     shadows: user
                         ? null
-                        : const [Shadow(color: hudCyan, blurRadius: 12)])),
+                        : [Shadow(color: themeColor, blurRadius: 12)])),
             if (!user)
               Align(
                 alignment: Alignment.centerRight,
@@ -1240,14 +1379,14 @@ class _MessageTile extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                   tooltip: '朗读回答',
                   onPressed: onSpeak,
-                  icon: const Icon(Icons.volume_up_outlined,
-                      size: 19, color: hudCyan),
+                  icon: Icon(Icons.volume_up_outlined,
+                      size: 19, color: themeColor),
                 ),
               ),
           ],
         ),
       ),
-    );
+    ));
   }
 }
 
