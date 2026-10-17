@@ -806,7 +806,8 @@ class _HomeScreenState extends State<HomeScreen>
             child: Image.asset(
               'assets/images/earth_bg.jpg',
               fit: BoxFit.contain,
-              alignment: Alignment.topCenter,
+              // 靠上一点，但不贴顶：y=-0.4（-1 贴顶，0 居中）。
+              alignment: const Alignment(0.0, -0.4),
               errorBuilder: (context, error, stackTrace) =>
                   const DecoratedBox(
                 decoration: BoxDecoration(
