@@ -1191,19 +1191,38 @@ class _HomeScreenState extends State<HomeScreen>
                         constraints.maxWidth, constraints.maxHeight) *
                     0.36;
                 final earthD = r * 2 * 1.08;
+                // 公转（#34）：不是钟表指针那种原地转动，而是地球整体绕舞台
+                // 中心公转：圆心沿小圆轨道走，30 秒一圈，逆时针（与真实地球
+                // 公转方向一致，屏幕 y 向下故用 -sin）。轨道半径 0.05*r，
+                // 地球边缘最远到 1.13r，仍在霓虹环 1.15r 之内。
+                // 用现成的每帧 _tick（秒）驱动，连续渲染，每帧位置都不同。
                 return Center(
-                  child: ClipOval(
-                    child: SizedBox(
-                      width: earthD,
-                      height: earthD,
-                      child: Image.asset(
-                        'assets/images/earth_bg.jpg',
-                        fit: BoxFit.cover,
-                        alignment: const Alignment(0.0, 0.69),
-                        errorBuilder: (_, __, ___) =>
-                            const SizedBox.shrink(),
-                      ),
-                    ),
+                  child: ListenableBuilder(
+                    listenable: _tick,
+                    builder: (context, _) {
+                      final angle =
+                          (_tick.value % 30) / 30 * math.pi * 2;
+                      final orbitR = r * 0.05;
+                      return Transform.translate(
+                        offset: Offset(
+                          math.cos(angle) * orbitR,
+                          -math.sin(angle) * orbitR,
+                        ),
+                        child: ClipOval(
+                          child: SizedBox(
+                            width: earthD,
+                            height: earthD,
+                            child: Image.asset(
+                              'assets/images/earth_bg.jpg',
+                              fit: BoxFit.cover,
+                              alignment: const Alignment(0.0, 0.69),
+                              errorBuilder: (_, __, ___) =>
+                                  const SizedBox.shrink(),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 );
               },
