@@ -261,6 +261,27 @@ class ReactorPainter extends _HudPainter {
     );
     _dashedCircle(canvas, c, r * 1.3, 1, col(0.16), 2, 10, -t * 0.12 * spin);
 
+    // 4b. 霓虹渐变环（草稿固定配色）：电光青 → 霓虹紫 → 翡翠绿 → 电光青，
+    // 缓慢旋转。草稿的 SweepGradient(...).shader 不存在，改用 createShader。
+    final neonR = r * 1.15;
+    canvas.drawCircle(
+      c,
+      neonR,
+      Paint()
+        ..shader = SweepGradient(
+          colors: const [
+            Color(0xFF00F0FF),
+            Color(0xFF7000FF),
+            Color(0xFF00FF9D),
+            Color(0xFF00F0FF),
+          ],
+          transform: GradientRotation(t * 0.5 * spin),
+        ).createShader(Rect.fromCircle(center: c, radius: neonR))
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0
+        ..strokeCap = StrokeCap.round,
+    );
+
     // 5. 声波点阵：待命时是一圈小点，说话 / 聆听时随声音伸长。
     final barPaint = Paint()
       ..strokeWidth = 2.4

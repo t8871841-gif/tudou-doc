@@ -18,7 +18,7 @@ enum JarvisState { booting, idle, listening, thinking, speaking }
 
 const _ice = Color(0xFFF1F4FF); // 近白文字
 const _bootCyan = Color(0xFF8AB4F8); // 蓝
-const _bootBg = Color(0xFF0B0C12);
+const _bootBg = Color(0xFF050811);
 const _bootViolet = Color(0xFFA98BE0); // 紫
 const _bootPink = Color(0xFFE8788A); // 玫瑰
 
@@ -720,21 +720,57 @@ class _HomeScreenState extends State<HomeScreen>
     final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
 
     final page = Scaffold(
-      backgroundColor: const Color(0xFF0B0C12),
+      backgroundColor: const Color(0xFF050811),
       body: Stack(
         children: [
+          // 深邃夜蓝渐变底（草稿配色）：#050811 → #0B132B → #050811。
           const Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: Alignment(0.0, -0.2),
-                  radius: 1.2,
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                   colors: [
-                    Color(0xFF14161F),
-                    Color(0xFF0B0C12),
-                    Color(0xFF07080C),
+                    Color(0xFF050811),
+                    Color(0xFF0B132B),
+                    Color(0xFF050811),
                   ],
-                  stops: [0.0, 0.5, 1.0],
+                ),
+              ),
+            ),
+          ),
+          // 霓虹弥散光：顶部青光 + 底部紫光。径向渐变晕染（草稿的
+          // BoxDecoration.blurRadius 不存在，改用渐变到透明实现弥散）。
+          const Positioned(
+            top: -100,
+            left: -50,
+            child: SizedBox(
+              width: 300,
+              height: 300,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [Color(0x1F00F0FF), Color(0x0000F0FF)],
+                    stops: [0.0, 1.0],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const Positioned(
+            bottom: -100,
+            right: -50,
+            child: SizedBox(
+              width: 350,
+              height: 350,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [Color(0x267000FF), Color(0x007000FF)],
+                    stops: [0.0, 1.0],
+                  ),
                 ),
               ),
             ),
@@ -951,6 +987,32 @@ class _HomeScreenState extends State<HomeScreen>
                     _glitchTitle(themeColor),
                     const SizedBox(height: 2),
                     const Text('STARK INDUSTRIES', style: dim),
+                    const SizedBox(height: 4),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF00FF9D),
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                  color: Color(0xFF00FF9D), blurRadius: 6)
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                            'SYSTEM ACTIVE',
+                            style: dim.copyWith(
+                                color: Colors.white70,
+                                fontSize: 12,
+                                letterSpacing: 1.5,
+                                fontWeight: FontWeight.bold)),
+                      ],
+                    ),
                   ],
                 ),
                 const Spacer(),
@@ -1267,7 +1329,23 @@ class _HomeScreenState extends State<HomeScreen>
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+          // 深蓝玻璃层（草稿配色 #0D1526 @ 0.6）+ 主题色弱发光边框。
+          border: Border.all(color: themeColor.withValues(alpha: 0.20)),
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0x990D1526),
+              Color(0x730D1526),
+            ],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: themeColor.withValues(alpha: 0.05),
+              blurRadius: 20,
+              spreadRadius: 2,
+            ),
+          ],
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(23),
