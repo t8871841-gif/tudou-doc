@@ -12,22 +12,27 @@ import 'package:crypto/crypto.dart';
 /// service answers the upgrade with `Connection: close`, which strict
 /// WebSocket clients reject even though the upgrade itself succeeds (101).
 class EdgeTtsService {
-  static const _host = 'speech.platform.bing.com';
+  // New endpoint (Oct 2026): Microsoft moved Read Aloud off
+  // speech.platform.bing.com, whose v1 handshake now 403s in many
+  // regions. The new host accepts the existing Sec-MS-GEC token/version
+  // when the token is passed as Ocp-Apim-Subscription-Key (Readest fix).
+  static const _host = 'api.msedgeservices.com';
   // Public client token shipped with the open-source edge-tts project.
   static const _token = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
   static const _chromiumMajor = '143';
 
   /// Chinese neural voices offered in the app.
+  /// Male voices first: Jarvis uses a male voice by default.
   static const voices = <Map<String, String>>[
-    {'id': 'zh-CN-XiaoxiaoNeural', 'label': '晓晓（女声·温柔）'},
-    {'id': 'zh-CN-YunxiNeural', 'label': '云希（男声·活泼）'},
-    {'id': 'zh-CN-YunjianNeural', 'label': '云健（男声·沉稳）'},
-    {'id': 'zh-CN-XiaoyiNeural', 'label': '晓伊（女声·俏皮）'},
     {'id': 'zh-CN-YunyangNeural', 'label': '云扬（男声·专业）'},
+    {'id': 'zh-CN-YunjianNeural', 'label': '云健（男声·沉稳）'},
+    {'id': 'zh-CN-YunxiNeural', 'label': '云希（男声·活泼）'},
+    {'id': 'zh-CN-XiaoxiaoNeural', 'label': '晓晓（女声·温柔）'},
+    {'id': 'zh-CN-XiaoyiNeural', 'label': '晓伊（女声·俏皮）'},
     {'id': 'zh-CN-XiaochenNeural', 'label': '晓辰（女声·年轻）'},
   ];
 
-  static const defaultVoice = 'zh-CN-XiaoxiaoNeural';
+  static const defaultVoice = 'zh-CN-YunyangNeural';
 
   /// Synthesizes [text] to MP3 bytes (24kHz 48kbps mono).
   /// Long texts are split into chunks and the resulting MP3 frames concatenated.
@@ -204,8 +209,8 @@ class _EdgeConnection {
     final gec = EdgeTtsService._secMsGec();
     final key = base64Encode(
         List<int>.generate(16, (_) => Random.secure().nextInt(256)));
-    final path = '/consumer/speech/synthesize/readaloud/edge/v1'
-        '?TrustedClientToken=${EdgeTtsService._token}'
+    final path = '/tts/cognitiveservices/websocket/v1'
+        '?Ocp-Apim-Subscription-Key=${EdgeTtsService._token}'
         '&ConnectionId=${EdgeTtsService._hexId()}'
         '&Sec-MS-GEC=$gec'
         '&Sec-MS-GEC-Version=1-${EdgeTtsService._chromiumMajor}.0.3650.75';

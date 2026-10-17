@@ -1,13 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 
+import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
 
 /// Voice-first Chinese medicine reference assistant.
@@ -51,10 +51,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   ];
   final _input = TextEditingController();
   final _scroll = ScrollController();
-  final _speech = stt.SpeechToText();
-  final _tts = FlutterTts();
+  final _asr = AsrService();
   final _player = AudioPlayer();
-  String _ttsEngine = 'edge'; // edge | system
   String _edgeVoice = EdgeTtsService.defaultVoice;
   final List<_VoiceMessage> _messages = [
     _VoiceMessage(
@@ -78,11 +76,11 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   /// 金色文字在浅色下的可读替代（深金棕）
   Color get _accentText => _isDark ? _gold : const Color(0xFF8B6914);
   String _recognized = '';
+  int _emptyEndpoints = 0;
+  Timer? _listenTimer;
   String _offlineKnowledge = '';
   String _baseUrl = 'https://apihub.agnes-ai.com/v1';
   String _model = 'agnes-3.0-flash';
-  List<Map<String, String>> _ttsVoices = [];
-  String? _ttsVoiceName;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
 
@@ -91,75 +89,43 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
     super.initState();
     _loadKnowledge();
     _loadConfig();
-    _loadTtsConfig();
+    _loadVoiceConfig();
+    _warmUpAsr();
   }
 
-  /// 加载可用播报音色与已保存的语音设置
-  Future<void> _loadTtsConfig() async {
-    try {
-      final voices = await _tts.getVoices;
-      final list = <Map<String, String>>[];
-      if (voices is List) {
-        for (final v in voices) {
-          if (v is Map) {
-            final name = v['name']?.toString() ?? '';
-            if (name.isNotEmpty) {
-              list.add({'name': name, 'locale': v['locale']?.toString() ?? ''});
-            }
-          }
-        }
-      }
-      // 中文音色排前面
-      list.sort((a, b) {
-        final azh = a['locale']!.toLowerCase().startsWith('zh') ? 0 : 1;
-        final bzh = b['locale']!.toLowerCase().startsWith('zh') ? 0 : 1;
-        return azh.compareTo(bzh);
-      });
-      _ttsVoices = list;
-    } catch (_) {}
-    _ttsVoiceName = await _storage.read(key: 'voice_ai_tts_voice');
-    _ttsEngine = await _storage.read(key: 'voice_ai_tts_engine') ?? 'edge';
+  /// 加载已保存的语音设置（Edge 音色 / 语速 / 音调）。
+  Future<void> _loadVoiceConfig() async {
     _edgeVoice = await _storage.read(key: 'voice_ai_edge_voice') ?? EdgeTtsService.defaultVoice;
     _ttsRate = double.tryParse(await _storage.read(key: 'voice_ai_tts_rate') ?? '') ?? 0.48;
     _ttsPitch = double.tryParse(await _storage.read(key: 'voice_ai_tts_pitch') ?? '') ?? 1.0;
-    await _applyTtsSettings();
     if (mounted) setState(() {});
   }
 
-  /// 统一播报入口：按所选引擎播报，Edge 失败时回退到系统语音。
+  /// 后台预加载离线识别模型，首次点击麦克风不用等（Jarvis 同款做法）。
+  Future<void> _warmUpAsr() async {
+    try {
+      await _asr.init();
+    } catch (e) {
+      _notice('离线语音识别模型加载失败：$e');
+    }
+  }
+
+  /// 播报入口：Edge 神经网络语音（Jarvis 同款，无系统语音回落）。
+  /// Edge 失败时提示一次（与 Jarvis 静默吞错不同：汉方已有失败提示习惯）。
   Future<void> _speak(String text) async {
     final clean = text.trim();
     if (clean.isEmpty) return;
-    if (_ttsEngine == 'edge') {
-      try {
-        await _player.stop();
-        final mp3 = await EdgeTtsService.synthesize(
-          clean,
-          voice: _edgeVoice,
-          rate: _ttsRate,
-          pitch: _ttsPitch,
-        );
-        await _player.play(BytesSource(mp3));
-        return;
-      } catch (e) {
-        final msg = e.toString();
-        _notice('Edge 语音失败，已用系统语音播报（${msg.length > 80 ? '${msg.substring(0, 80)}…' : msg}）');
-      }
-    }
-    await _tts.speak(clean);
-  }
-
-  Future<void> _applyTtsSettings() async {
-    await _tts.setLanguage('zh-CN');
-    await _tts.setSpeechRate(_ttsRate);
-    await _tts.setPitch(_ttsPitch);
-    if (_ttsVoiceName != null && _ttsVoiceName!.isNotEmpty) {
-      for (final v in _ttsVoices) {
-        if (v['name'] == _ttsVoiceName) {
-          await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
-          break;
-        }
-      }
+    try {
+      await _player.stop();
+      final mp3 = await EdgeTtsService.synthesize(
+        clean,
+        voice: _edgeVoice,
+        rate: _ttsRate,
+        pitch: _ttsPitch,
+      );
+      await _player.play(BytesSource(mp3));
+    } catch (_) {
+      _notice('Edge 语音失败，请检查网络');
     }
   }
 
@@ -189,8 +155,8 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
   void dispose() {
     _input.dispose();
     _scroll.dispose();
-    _speech.stop();
-    _tts.stop();
+    _listenTimer?.cancel();
+    _asr.dispose();
     _player.dispose();
     super.dispose();
   }
@@ -201,10 +167,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
     final key = TextEditingController(
       text: await _storage.read(key: 'voice_ai_api_key') ?? '',
     );
-    if (_ttsVoices.isEmpty) await _loadTtsConfig();
-    String engine = _ttsEngine;
     String edgeVoice = _edgeVoice;
-    String? voiceName = _ttsVoiceName;
     double rate = _ttsRate;
     double pitch = _ttsPitch;
     if (!mounted) return;
@@ -212,7 +175,6 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
-          final voiceValid = voiceName != null && _ttsVoices.any((v) => v['name'] == voiceName);
           return AlertDialog(
             backgroundColor: _cardBg,
             title: Text('模型服务设置', style: TextStyle(color: _accentText)),
@@ -229,48 +191,19 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
                   child: Text('语音播报设置', style: TextStyle(color: _accentText, fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
                 const SizedBox(height: 8),
+                // 播报引擎：Edge 神经网络语音（Jarvis 同款，无系统语音选项）。
                 DropdownButtonFormField<String>(
-                  value: engine,
-                  decoration: const InputDecoration(labelText: '播报引擎'),
+                  value: EdgeTtsService.voices.any((v) => v['id'] == edgeVoice) ? edgeVoice : EdgeTtsService.defaultVoice,
+                  decoration: const InputDecoration(labelText: '播报音色', hintText: '云扬'),
                   isExpanded: true,
-                  items: const [
-                    DropdownMenuItem(value: 'edge', child: Text('Edge 神经网络语音（推荐·免费）', style: TextStyle(fontSize: 13))),
-                    DropdownMenuItem(value: 'system', child: Text('系统语音', style: TextStyle(fontSize: 13))),
-                  ],
-                  onChanged: (nv) => setDialogState(() => engine = nv ?? 'edge'),
+                  items: EdgeTtsService.voices
+                      .map((v) => DropdownMenuItem<String>(
+                            value: v['id'],
+                            child: Text(v['label']!, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+                          ))
+                      .toList(),
+                  onChanged: (nv) => setDialogState(() => edgeVoice = nv ?? EdgeTtsService.defaultVoice),
                 ),
-                const SizedBox(height: 8),
-                if (engine == 'edge')
-                  DropdownButtonFormField<String>(
-                    value: EdgeTtsService.voices.any((v) => v['id'] == edgeVoice) ? edgeVoice : EdgeTtsService.defaultVoice,
-                    decoration: const InputDecoration(labelText: '播报音色', hintText: '晓晓'),
-                    isExpanded: true,
-                    items: EdgeTtsService.voices
-                        .map((v) => DropdownMenuItem<String>(
-                              value: v['id'],
-                              child: Text(v['label']!, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
-                            ))
-                        .toList(),
-                    onChanged: (nv) => setDialogState(() => edgeVoice = nv ?? EdgeTtsService.defaultVoice),
-                  )
-                else if (_ttsVoices.isEmpty)
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('未读取到系统语音，请检查系统文字转语音设置。', style: TextStyle(fontSize: 12)),
-                  )
-                else
-                  DropdownButtonFormField<String>(
-                    value: voiceValid ? voiceName : null,
-                    decoration: const InputDecoration(labelText: '播报音色', hintText: '系统默认'),
-                    isExpanded: true,
-                    items: _ttsVoices
-                        .map((v) => DropdownMenuItem<String>(
-                              value: v['name'],
-                              child: Text('${v['name']} (${v['locale']})', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
-                            ))
-                        .toList(),
-                    onChanged: (nv) => setDialogState(() => voiceName = nv),
-                  ),
                 const SizedBox(height: 6),
                 Row(children: [
                   const SizedBox(width: 72, child: Text('语速', style: TextStyle(fontSize: 13))),
@@ -288,33 +221,19 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
                   alignment: Alignment.centerRight,
                   child: TextButton(
                     onPressed: () async {
-                      // 试听：按对话框当前选择试播
-                      if (engine == 'edge') {
-                        try {
-                          final mp3 = await EdgeTtsService.synthesize(
-                            '你好，我是汉方唐鉴语音助手。',
-                            voice: edgeVoice,
-                            rate: rate,
-                            pitch: pitch,
-                          );
-                          await _player.stop();
-                          await _player.play(BytesSource(mp3));
-                        } catch (e) {
-                          _notice('Edge 语音试听失败：$e');
-                        }
-                        return;
+                      // 试听：按对话框当前选择试播（Edge 神经网络语音，Jarvis 同款）。
+                      try {
+                        final mp3 = await EdgeTtsService.synthesize(
+                          '你好，我是汉方唐鉴语音助手。',
+                          voice: edgeVoice,
+                          rate: rate,
+                          pitch: pitch,
+                        );
+                        await _player.stop();
+                        await _player.play(BytesSource(mp3));
+                      } catch (e) {
+                        _notice('Edge 语音试听失败：$e');
                       }
-                      await _tts.setSpeechRate(rate);
-                      await _tts.setPitch(pitch);
-                      if (voiceName != null) {
-                        for (final v in _ttsVoices) {
-                          if (v['name'] == voiceName) {
-                            await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
-                            break;
-                          }
-                        }
-                      }
-                      await _tts.speak('你好，我是汉方唐鉴语音助手。');
                     },
                     child: const Text('试听语音'),
                   ),
@@ -338,70 +257,85 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
       } else {
         await _storage.delete(key: 'voice_ai_api_key');
       }
-      _ttsVoiceName = voiceName;
-      _ttsEngine = engine;
       _edgeVoice = edgeVoice;
       _ttsRate = rate;
       _ttsPitch = pitch;
-      final vn = voiceName;
-      if (vn == null || vn.isEmpty) {
-        await _storage.delete(key: 'voice_ai_tts_voice');
-      } else {
-        await _storage.write(key: 'voice_ai_tts_voice', value: vn);
-      }
-      await _storage.write(key: 'voice_ai_tts_engine', value: engine);
       await _storage.write(key: 'voice_ai_edge_voice', value: edgeVoice);
       await _storage.write(key: 'voice_ai_tts_rate', value: rate.toString());
       await _storage.write(key: 'voice_ai_tts_pitch', value: pitch.toString());
-      await _applyTtsSettings();
       await _loadConfig();
       if (mounted) _notice('设置已安全保存');
     }
     base.dispose(); model.dispose(); key.dispose();
   }
 
+  /// 麦克风开关：离线识别（Jarvis 同款）。
+  /// 点麦克风开始聆听，说完停顿约 1 秒自动发送；再点一次手动结束并发送。
   Future<void> _toggleListening() async {
     if (_busy) return;
     if (_listening) {
-      await _speech.stop();
-      if (mounted) setState(() => _listening = false);
+      // 先退出聆听态，再停识别，避免迟到的识别结果被处理。
+      _listenTimer?.cancel();
+      setState(() => _listening = false);
+      await _asr.stop();
       if (_recognized.trim().isNotEmpty) {
         _input.text = _recognized.trim();
         await _send();
       }
       return;
     }
-    final available = await _speech.initialize(
-      onStatus: (status) {
-        if (status == 'done' || status == 'notListening') {
-          if (mounted) setState(() => _listening = false);
-        }
-      },
-      onError: (error) {
-        if (mounted) {
-          setState(() => _listening = false);
-          _notice('语音识别不可用：${error.errorMsg}');
-        }
-      },
-    );
-    if (!available) {
-      _notice('系统语音识别不可用，请检查麦克风权限或安装语音识别服务。');
+    // 停止正在播报的语音，避免自己的声音被识别进去（Jarvis 同款做法）。
+    await _player.stop();
+    try {
+      await _asr.init();
+    } catch (e) {
+      _notice('离线语音识别不可用：$e');
       return;
     }
     _recognized = '';
+    _emptyEndpoints = 0;
     setState(() => _listening = true);
-    await _speech.listen(
-      localeId: 'zh_CN',
-      listenFor: const Duration(seconds: 60),
-      pauseFor: const Duration(seconds: 4),
-      onResult: (result) {
-        if (mounted) setState(() {
-          _recognized = result.recognizedWords;
-          _input.text = _recognized;
+    final ok = await _asr.start(
+      onPartial: (t) {
+        if (!mounted || !_listening) return;
+        setState(() {
+          _recognized = t;
+          _input.text = t;
           _input.selection = TextSelection.collapsed(offset: _input.text.length);
         });
       },
+      onEndpoint: (t) {
+        if (!mounted || !_listening) return;
+        final q = t.trim();
+        if (q.isEmpty) {
+          // 约 2.4 秒无语音的空端点：连续三次则结束聆听（Jarvis 同款做法）。
+          if (++_emptyEndpoints >= 3) {
+            _listenTimer?.cancel();
+            setState(() => _listening = false);
+            unawaited(_asr.stop());
+          }
+          return;
+        }
+        _listenTimer?.cancel();
+        setState(() => _listening = false);
+        _recognized = q;
+        _input.text = q;
+        unawaited(_asr.stop());
+        unawaited(_send());
+      },
     );
+    if (!ok) {
+      if (mounted) setState(() => _listening = false);
+      _notice('无法使用麦克风，请检查录音权限。');
+      return;
+    }
+    // 60 秒上限（旧版系统识别 listenFor 60 秒的同款限制）。
+    _listenTimer?.cancel();
+    _listenTimer = Timer(const Duration(seconds: 60), () {
+      if (!_listening) return;
+      setState(() => _listening = false);
+      unawaited(_asr.stop());
+    });
   }
 
   List<String> _retrieve(String query) {
@@ -548,7 +482,7 @@ class _VoiceAiScreenState extends State<VoiceAiScreen> {
               IconButton.filled(onPressed: _busy ? null : _send, style: IconButton.styleFrom(backgroundColor: _gold, foregroundColor: const Color(0xFF201806)), icon: const Icon(Icons.arrow_upward)),
             ]),
             const SizedBox(height: 6),
-            Text('典籍学习工具，不替代执业医师诊断；语音识别可能由系统服务处理。', style: TextStyle(fontSize: 10, color: _faintText)),
+            Text('典籍学习工具，不替代执业医师诊断；语音识别为本地离线识别，无需联网。', style: TextStyle(fontSize: 10, color: _faintText)),
           ]),
         )),
       ]),

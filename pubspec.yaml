@@ -27,8 +27,8 @@ dependencies:
   bazi_core: ^0.6.7
   crypto: ^3.0.0
   flutter_secure_storage: ^9.2.4
-  speech_to_text: ^7.0.0
-  flutter_tts: ^4.2.2
+  sherpa_onnx: ^1.12.23
+  record: ^6.1.2
   audioplayers: ^6.1.0
 
 dev_dependencies:
@@ -42,6 +42,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/SKILL.md
+    - assets/asr/
     - assets/data/formulas.json
     - assets/data/formula_oral_hints.json
     - assets/data/herbs.json

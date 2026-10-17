@@ -16,7 +16,8 @@ android {
 
     defaultConfig {
         applicationId = "com.nihaisha.nihaisha_app"
-        minSdk = flutter.minSdkVersion
+        // record 插件要求 minSdk 23（Jarvis 同款；语音换成离线识别后必须）
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
