@@ -17,6 +17,26 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+      # 离线语音识别模型不提交进仓库（release tarball 约 500MB）。
+      # 从 sherpa-onnx 官方 release 下载流式 zipformer 双语模型，
+      # 只取 App 需要的 4 个文件 staging 到 assets/asr/（Jarvis 同款做法）。
+      - name: Download sherpa-onnx ASR models
+        run: |
+          curl -sL -o asr-model.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2
+          mkdir -p asr-model assets/asr
+          tar -xjf asr-model.tar.bz2 -C asr-model
+          # Only the 4 files the app needs (the tarball also ships fp32
+          # duplicates, test wavs and bpe files we must NOT bundle).
+          find asr-model -name 'encoder-epoch-99-avg-1.int8.onnx' -exec cp {} assets/asr/ \;
+          find asr-model -name 'decoder-epoch-99-avg-1.onnx' -exec cp {} assets/asr/ \;
+          find asr-model -name 'joiner-epoch-99-avg-1.int8.onnx' -exec cp {} assets/asr/ \;
+          find asr-model -name 'tokens.txt' -exec cp {} assets/asr/ \;
+          ls -la assets/asr/
+          test -f assets/asr/encoder-epoch-99-avg-1.int8.onnx && test -f assets/asr/decoder-epoch-99-avg-1.onnx && test -f assets/asr/joiner-epoch-99-avg-1.int8.onnx && test -f assets/asr/tokens.txt
+          # Free the ~1.5GB tarball + extracted tree: the runner ran out
+          # of disk on the last build at the final APK copy.
+          rm -rf asr-model asr-model.tar.bz2
+          df -h .
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
