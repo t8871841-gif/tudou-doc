@@ -59,6 +59,12 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with TickerProviderStateMixin {
+  // --- 新增：动效控制器与动画对象 ---
+  late final AnimationController _pulseController;
+  late final AnimationController _floatController;
+  late final Animation<double> _pulseAnimation;
+  late final Animation<double> _floatAnimation;
+
   final _settings = JarvisSettings();
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -116,6 +122,29 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
+    // --- 新增：核心按钮呼吸动效控制器（3秒周期，0.95 -> 1.05） ---
+    _pulseController = AnimationController(
+      duration: const Duration(seconds: 3),
+      vsync: this,
+    );
+    _pulseAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    // --- 新增：底部面板微浮动动效控制器（4秒周期，0 -> -6px） ---
+    _floatController = AnimationController(
+      duration: const Duration(seconds: 4),
+      vsync: this,
+    );
+    _floatAnimation = Tween<double>(begin: 0.0, end: -6.0).animate(
+      CurvedAnimation(parent: _floatController, curve: Curves.easeInOut),
+    );
+
+    // 根据系统动效开关决定是否播放动画。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateAnimationsState();
+    });
+
     _reactor = ReactorPainter(
       tick: _tick,
       mode: () => _hudMode,
@@ -152,6 +181,19 @@ class _HomeScreenState extends State<HomeScreen>
     _init();
   }
 
+  // --- 新增：检测系统动效设置并控制播放状态 ---
+  void _updateAnimationsState() {
+    if (!mounted) return;
+    final disableAnimations = MediaQuery.disableAnimationsOf(context);
+    if (disableAnimations) {
+      _pulseController.stop();
+      _floatController.stop();
+    } else {
+      if (!_pulseController.isAnimating) _pulseController.repeat(reverse: true);
+      if (!_floatController.isAnimating) _floatController.repeat(reverse: true);
+    }
+  }
+
   Future<void> _init() async {
     await _settings.load();
     await _memory.load();
@@ -180,6 +222,9 @@ class _HomeScreenState extends State<HomeScreen>
     _listenTimer?.cancel();
     unawaited(_asr.dispose());
     _player.dispose();
+    // --- 新增：释放动效控制器 ---
+    _pulseController.dispose();
+    _floatController.dispose();
     super.dispose();
   }
 
@@ -775,6 +820,24 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
+          // 边缘暗化：顶部黑 0.65 → 透明 → 底部黑 0.8，保证顶部与底部面板清晰。
+          // 只压在背景层之上，不影响 SafeArea 内的内容。
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0xA6000000),
+                    Colors.transparent,
+                    Color(0xCC000000),
+                  ],
+                  stops: [0.0, 0.5, 1.0],
+                ),
+              ),
+            ),
+          ),
           // 极光层：彩色光晕缓慢漂移，颜色随状态平滑过渡。
           Positioned.fill(
               child: RepaintBoundary(child: CustomPaint(painter: _aurora))),
@@ -793,9 +856,9 @@ class _HomeScreenState extends State<HomeScreen>
                       if (keyboardOpen)
                         _compactStatus(themeColor)
                       else
-                        _stage(themeColor),
+                        _buildMiddleHudSection(_stage(themeColor)),
                       _chatArea(themeColor),
-                      _bottomArea(themeColor),
+                      _buildGlassControlPanel(_bottomArea(themeColor)),
                     ],
                   ),
                 ],
@@ -1321,6 +1384,80 @@ class _HomeScreenState extends State<HomeScreen>
   // ---------- Dialogue (HTML .sub colours) ----------
 
 // 3. 安静的毛玻璃对话卡片
+  // --- 新增：中间核心按钮呼吸动效与发光文本包装组件 ---
+  Widget _buildMiddleHudSection(Widget existingHudWidget) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 现有 HUD 舞台（330px）加上 3 秒周期呼吸动效
+        ScaleTransition(
+          scale: _pulseAnimation,
+          child: existingHudWidget,
+        ),
+        const SizedBox(height: 16),
+        // 底部“JARVIS GLOBAL SYSTEM”青色发光文字
+        const Text(
+          "JARVIS GLOBAL SYSTEM",
+          style: TextStyle(
+            color: Color(0xFF00F0FF),
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 2.0,
+            shadows: [
+              Shadow(
+                color: Color(0xFF00F0FF),
+                blurRadius: 10,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // --- 新增：底部毛玻璃控制面板与微浮动动效包装组件 ---
+  // 只包 _bottomArea（输入行 + 麦克风）。_chatArea 返回 Expanded，只能直接
+  // 放在 Column 里，包进面板会闪退，所以不包它（它在 #28 已有自己的玻璃）。
+  Widget _buildGlassControlPanel(Widget existingBottomContent) {
+    return AnimatedBuilder(
+      animation: _floatAnimation,
+      builder: (context, child) {
+        return Transform.translate(
+          offset: Offset(0, _floatAnimation.value),
+          child: child,
+        );
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+            child: Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0D1526).withValues(alpha: 0.65),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: const Color(0xFF00F0FF).withValues(alpha: 0.2),
+                  width: 1,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 20,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: existingBottomContent,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _chatArea(Color themeColor) {
     final thinking = _state == JarvisState.thinking;
     final pal = hudPaletteFor(themeColor);
