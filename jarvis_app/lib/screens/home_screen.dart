@@ -825,42 +825,7 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-          // 霓虹弥散光：顶部青光 + 底部紫光。径向渐变晕染（草稿的
-          // BoxDecoration.blurRadius 不存在，改用渐变到透明实现弥散）。
-          const Positioned(
-            top: -100,
-            left: -50,
-            child: SizedBox(
-              width: 300,
-              height: 300,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [Color(0x1F00F0FF), Color(0x0000F0FF)],
-                    stops: [0.0, 1.0],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const Positioned(
-            bottom: -100,
-            right: -50,
-            child: SizedBox(
-              width: 350,
-              height: 350,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [Color(0x267000FF), Color(0x007000FF)],
-                    stops: [0.0, 1.0],
-                  ),
-                ),
-              ),
-            ),
-          ),
+          // #35：背景激光层已删（顶部青光 + 底部紫光 + 下方极光层），圆环保留，呼吸效果保留。
           // 边缘暗化：顶部黑 0.65 → 透明 → 底部黑 0.8，保证顶部与底部面板清晰。
           // 只压在背景层之上，不影响 SafeArea 内的内容。
           const Positioned.fill(
@@ -879,9 +844,6 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-          // 极光层：彩色光晕缓慢漂移，颜色随状态平滑过渡。
-          Positioned.fill(
-              child: RepaintBoundary(child: CustomPaint(painter: _aurora))),
           Positioned.fill(
               child: RepaintBoundary(child: CustomPaint(painter: _grid))),
           Positioned.fill(
@@ -1086,10 +1048,7 @@ class _HomeScreenState extends State<HomeScreen>
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _glitchTitle(themeColor),
-                    const SizedBox(height: 2),
-                    const Text('STARK INDUSTRIES', style: dim),
-                    const SizedBox(height: 4),
+                    // #35：顶栏品牌字已删（J.A.R.V.I.S / STARK / PWR）。
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -1123,8 +1082,6 @@ class _HomeScreenState extends State<HomeScreen>
                   children: [
                     Text(_clock.value,
                         style: dim.copyWith(color: Colors.white54)),
-                    const SizedBox(height: 2),
-                    const Text('PWR --', style: dim),
                   ],
                 ),
               ],
@@ -1132,22 +1089,6 @@ class _HomeScreenState extends State<HomeScreen>
           );
         },
       ),
-    );
-  }
-
-  /// 标题：蓝 → 紫 → 玫瑰 的柔和渐变（不再有 RGB 故障闪烁）。
-  Widget _glitchTitle(Color color) {
-    final pal = hudPaletteFor(color);
-    return ShaderMask(
-      blendMode: BlendMode.srcIn,
-      shaderCallback: (r) =>
-          LinearGradient(colors: [color, pal.$1, pal.$2]).createShader(r),
-      child: const Text('J.A.R.V.I.S',
-          style: TextStyle(
-              color: Colors.white,
-              fontSize: 20,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 6)),
     );
   }
 
