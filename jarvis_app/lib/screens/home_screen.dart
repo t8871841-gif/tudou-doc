@@ -1166,8 +1166,8 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-          // 地球收进圆环：裁成圆形，与反应堆圆环同心，直径为环直径 ×0.90，
-          // 由呼吸包装（_buildMiddleHudSection）带着与圆环一起呼吸。
+          // 地球收进圆环：裁成圆形，与反应堆圆环同心，直径为环直径 ×0.95
+          //（略小于主环，留出环线），由呼吸包装带着与圆环一起呼吸。
           // 放在画笔层之上：光环/声波点阵（在圆外）仍可见，星云光球被地球取代。
           Positioned.fill(
             child: LayoutBuilder(
@@ -1176,7 +1176,7 @@ class _HomeScreenState extends State<HomeScreen>
                 final r = math.min(
                         constraints.maxWidth, constraints.maxHeight) *
                     0.36;
-                final earthD = r * 2 * 0.90;
+                final earthD = r * 2 * 0.95;
                 return Center(
                   child: ClipOval(
                     child: SizedBox(
