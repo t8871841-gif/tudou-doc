@@ -86,12 +86,13 @@ jobs:
           grep -q '^org.gradle.daemon=' gradle.properties || echo 'org.gradle.daemon=true' >> gradle.properties
           cat gradle.properties
 
+      # #37: --split-per-abi 只出 arm64-v8a 一个包（另两个架构的原生库不再打包，约 47.7MB 瘦身）。拆分后产物名为 app-arm64-v8a-release.apk，不再是 app-release.apk。
       - name: Build APK
         timeout-minutes: 60
-        run: cd jarvis_app && flutter build apk --release --target-platform android-arm64
+        run: cd jarvis_app && flutter build apk --release --target-platform android-arm64 --split-per-abi
 
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-apk
-          path: jarvis_app/build/app/outputs/flutter-apk/app-release.apk
+          path: jarvis_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
           retention-days: 30
