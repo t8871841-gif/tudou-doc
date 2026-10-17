@@ -79,7 +79,7 @@ class _HomeScreenState extends State<HomeScreen>
   int _speakSeq = 0; // bumped whenever speech is (re)started or cancelled
   Completer<void>? _speakAbort;
 
-  // 打字机同步输出：底部面板输出框逐字显示最新一条助手回复。
+  // 打字机同步输出：上方输出框（_chatArea）逐字显示最新一条助手回复。
   String _displayedOutputText = '系统就绪，点击下方麦克风开始对话...';
   bool _isSpeakingWithAnimation = false;
   int _typewriterRun = 0; // 新回复开始时递增，作废旧的打字循环
@@ -325,6 +325,14 @@ class _HomeScreenState extends State<HomeScreen>
       if (!mounted || run != _typewriterRun) return;
       setState(() {
         _displayedOutputText += fullText[i];
+      });
+      // 打字机显示在上方输出框：已在底部附近时跟随到底，手动上翻阅读时不抢滚动。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scroll.hasClients) return;
+        final pos = _scroll.position;
+        if (pos.maxScrollExtent - pos.pixels < 120) {
+          _scroll.jumpTo(pos.maxScrollExtent);
+        }
       });
     }
     if (mounted && run == _typewriterRun) {
@@ -1166,9 +1174,13 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-          // 地球收进圆环：裁成圆形，与反应堆圆环同心，直径为环直径 ×0.95
-          //（略小于主环，留出环线），由呼吸包装带着与圆环一起呼吸。
+          // 地球收进圆环：裁成圆形，与反应堆圆环同心，直径为环直径 ×1.08
+          //（盖住主环 0.98，仍在霓虹环 1.15 与声波点阵 1.1 之内，霓虹外框仍可见），
+          // 由呼吸包装带着与圆环一起呼吸。
           // 放在画笔层之上：光环/声波点阵（在圆外）仍可见，星云光球被地球取代。
+          // 居中修正：原图 1030×1190 里地球圆心在 (515,650)，比图片中心 (515,595)
+          // 低 55px；BoxFit.cover 默认居中裁切会让地球看起来偏下，故 alignment
+          // 上移 -0.69（55/1030 ÷ 溢出一半 0.0775）把地球圆心拉回圆环中心。
           Positioned.fill(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -1176,7 +1188,7 @@ class _HomeScreenState extends State<HomeScreen>
                 final r = math.min(
                         constraints.maxWidth, constraints.maxHeight) *
                     0.36;
-                final earthD = r * 2 * 0.95;
+                final earthD = r * 2 * 1.08;
                 return Center(
                   child: ClipOval(
                     child: SizedBox(
@@ -1185,6 +1197,7 @@ class _HomeScreenState extends State<HomeScreen>
                       child: Image.asset(
                         'assets/images/earth_bg.jpg',
                         fit: BoxFit.cover,
+                        alignment: const Alignment(0.0, -0.69),
                         errorBuilder: (_, __, ___) =>
                             const SizedBox.shrink(),
                       ),
@@ -1505,7 +1518,7 @@ class _HomeScreenState extends State<HomeScreen>
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
             child: Container(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
@@ -1543,8 +1556,16 @@ class _HomeScreenState extends State<HomeScreen>
                         ));
                   }
                   final m = _messages[i];
+                  // 打字机改在上方输出框显示：动画进行中时，最后一条助手消息
+                  // 显示逐字增长的 _displayedOutputText，动画结束恢复全文。
+                  final displayMsg =
+                      (i == _messages.length - 1 &&
+                              m.role == 'assistant' &&
+                              _isSpeakingWithAnimation)
+                          ? _Msg('assistant', _displayedOutputText)
+                          : m;
                   return _MessageTile(
-                      msg: m,
+                      msg: displayMsg,
                       themeColor: themeColor,
                       onSpeak: () => _speak(m.text));
                 },
@@ -1565,12 +1586,16 @@ class _HomeScreenState extends State<HomeScreen>
   // --- 精简后的底部控制面板（纯语音为主，输入框默认隐藏、点键盘图标展开，紧凑版） ---
   // 接线说明（与草稿的不同，均已按真实文件修正）：
   // 1. 麦克风 onTap 接真实 _toggleMic（草稿的 _handleCoreTap 不存在）。
-  // 2. 聆听时输出框显示实时识别文字（输入框默认隐藏，说话内容仍可见）。
+  // 2. 聆听时识别文字为纯文字行（无框无底），输入框默认隐藏，说话内容仍可见。
   // 3. 保留静音按钮与 Agent 状态行（否则静音和任务进度没有入口）。
   // 4. 面板自带 #29 的悬浮动效（原 _buildGlassControlPanel 的 float 包装已并入此处）。
-  // 5. 输入框默认隐藏，点键盘图标展开紧凑版（单行、小字、小发送键）。
+  // 5. #32：下方不要框——已删底部面板的外框/毛玻璃底与下面的输出框，只剩
+  //    输入行（展开时）+ 麦克风行 + 提示行；上方输出框（_chatArea）为唯一输出框，
+  //    打字机改在上方输出框显示（见 _chatArea 与 _startSyncedSpeechAnimation）。
+  //    输入框默认隐藏，点键盘图标展开紧凑版（单行、小字、小发送键）。
   Widget _buildCleanVoiceControlPanel(Color themeColor) {
     final listening = _state == JarvisState.listening;
+    // #32 下方不要框：无外框容器、无毛玻璃底、无下面的输出框，只剩控制行。
     return AnimatedBuilder(
       animation: _floatAnimation,
       builder: (context, child) {
@@ -1580,66 +1605,21 @@ class _HomeScreenState extends State<HomeScreen>
         );
       },
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(28),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0D1526).withValues(alpha: 0.75),
-                borderRadius: BorderRadius.circular(28),
-                border: Border.all(
-                  color: const Color(0xFF00F0FF).withValues(alpha: 0.25),
-                  width: 1,
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 聆听时实时识别文字：纯文字行，无框无底。
+            if (listening)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(
+                  _recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: Colors.white70, fontSize: 14, height: 1.4),
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.5),
-                    blurRadius: 24,
-                    spreadRadius: 2,
-                  ),
-                ],
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // 扩大后的输出文本区域（带音字同步流式效果）
-                  Container(
-                    width: double.infinity,
-                    constraints:
-                        const BoxConstraints(minHeight: 70, maxHeight: 120),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.35),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color:
-                            const Color(0xFF00F0FF).withValues(alpha: 0.15),
-                      ),
-                    ),
-                    child: SingleChildScrollView(
-                      child: Text(
-                        listening
-                            ? (_recognized.isEmpty
-                                ? '正在聆听，请开始说话…'
-                                : _recognized)
-                            : _displayedOutputText,
-                        style: TextStyle(
-                          color: listening
-                              ? Colors.white
-                              : (_isSpeakingWithAnimation
-                                  ? const Color(0xFF00FF9D)
-                                  : Colors.white),
-                          fontSize: 14,
-                          height: 1.4,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
                   // 输入框默认隐藏，点键盘图标展开；紧凑版（单行、小字、小发送键）。
                   if (_showInput)
                     Padding(
@@ -1789,10 +1769,7 @@ class _HomeScreenState extends State<HomeScreen>
                   Text(_statusLine,
                       style: const TextStyle(
                           color: Colors.white38, fontSize: 11)),
-                ],
-              ),
-            ),
-          ),
+          ],
         ),
       ),
     );
@@ -1818,8 +1795,8 @@ class _MessageTile extends StatelessWidget {
         constraints: BoxConstraints(
             maxWidth: MediaQuery.sizeOf(context).width * 0.82),
         child: Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: EdgeInsets.fromLTRB(14, 10, 14, user ? 10 : 2),
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: EdgeInsets.fromLTRB(16, 12, 16, user ? 12 : 4),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.only(
               topLeft: Radius.circular(user ? 18 : 4),
@@ -1848,7 +1825,7 @@ class _MessageTile extends StatelessWidget {
             children: [
               SelectableText(msg.text,
                   style: const TextStyle(
-                      color: _ice, height: 1.55, fontSize: 14)),
+                      color: _ice, height: 1.6, fontSize: 16)),
               if (!user)
                 Align(
                   alignment: Alignment.centerRight,
