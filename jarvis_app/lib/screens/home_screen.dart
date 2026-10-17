@@ -1179,8 +1179,10 @@ class _HomeScreenState extends State<HomeScreen>
           // 由呼吸包装带着与圆环一起呼吸。
           // 放在画笔层之上：光环/声波点阵（在圆外）仍可见，星云光球被地球取代。
           // 居中修正：原图 1030×1190 里地球圆心在 (515,650)，比图片中心 (515,595)
-          // 低 55px；BoxFit.cover 默认居中裁切会让地球看起来偏下，故 alignment
-          // 上移 -0.69（55/1030 ÷ 溢出一半 0.0775）把地球圆心拉回圆环中心。
+          // 低 55px；BoxFit.cover 默认居中裁切会让地球看起来偏下。
+          // 注意符号（#32 曾写反为 -0.69，结果地球更偏下）：图片比框高，溢出
+          // 一半为 0.0775；alignment y=+0.69 把图片上移 55/1030（≈0.053），
+          // 地球圆心正好落到圆环中心。y 为负会把图片下移、地球更偏下，切勿再反。
           Positioned.fill(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -1197,7 +1199,7 @@ class _HomeScreenState extends State<HomeScreen>
                       child: Image.asset(
                         'assets/images/earth_bg.jpg',
                         fit: BoxFit.cover,
-                        alignment: const Alignment(0.0, -0.69),
+                        alignment: const Alignment(0.0, 0.69),
                         errorBuilder: (_, __, ___) =>
                             const SizedBox.shrink(),
                       ),
