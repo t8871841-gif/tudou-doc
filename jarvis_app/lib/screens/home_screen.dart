@@ -78,6 +78,12 @@ class _HomeScreenState extends State<HomeScreen>
   bool _muted = false;
   int _speakSeq = 0; // bumped whenever speech is (re)started or cancelled
   Completer<void>? _speakAbort;
+
+  // 打字机同步输出：底部面板输出框逐字显示最新一条助手回复。
+  String _displayedOutputText = '系统就绪，点击下方麦克风开始对话...';
+  bool _isSpeakingWithAnimation = false;
+  int _typewriterRun = 0; // 新回复开始时递增，作废旧的打字循环
+  bool _showInput = false; // 输入框默认隐藏，点键盘图标展开（紧凑版）
   int _emptyEndpoints = 0;
   Timer? _listenTimer;
   String _recognized = '';
@@ -299,9 +305,33 @@ class _HomeScreenState extends State<HomeScreen>
   /// Interrupts any TTS playback / in-flight synthesis.
   void _stopSpeaking() {
     _speakSeq++;
+    _typewriterRun++; // 新提问打断旧回复：作废正在进行的打字循环
     final abort = _speakAbort;
     if (abort != null && !abort.isCompleted) abort.complete();
     unawaited(_player.stop().catchError((_) {}));
+  }
+
+  /// 逐字流式显示最新回复（与语音播报同步的打字机效果）。
+  /// 由 _reply 在每次助手回复到达时调用；新回复开始时旧循环自动作废。
+  void _startSyncedSpeechAnimation(String fullText) async {
+    final run = ++_typewriterRun;
+    setState(() {
+      _isSpeakingWithAnimation = true;
+      _displayedOutputText = '';
+    });
+    for (int i = 0; i < fullText.length; i++) {
+      if (!mounted || run != _typewriterRun) return;
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted || run != _typewriterRun) return;
+      setState(() {
+        _displayedOutputText += fullText[i];
+      });
+    }
+    if (mounted && run == _typewriterRun) {
+      setState(() {
+        _isSpeakingWithAnimation = false;
+      });
+    }
   }
 
   Future<void> _speak(String text) async {
@@ -567,6 +597,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
     _scrollDown();
     _persistChat();
+    _startSyncedSpeechAnimation(text);
   }
 
   /// 把对话记录保存到本机（后台，失败不影响使用）。
@@ -752,6 +783,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (!returning) _messages.add(_Msg('assistant', welcome));
     });
     if (returning) _scrollDown();
+    _startSyncedSpeechAnimation(welcome);
     await _speak(welcome);
   }
 
@@ -855,15 +887,13 @@ class _HomeScreenState extends State<HomeScreen>
                   Column(
                     children: [
                       _topBar(themeColor),
-                      // Keyboard up: the 330px stage would push the input
-                      // row off-screen (Column overflow), so show a slim
-                      // status row instead.
+                      // 输入框默认隐藏；展开并聚焦时键盘弹起，保留键盘分支。
                       if (keyboardOpen)
                         _compactStatus(themeColor)
                       else
                         _buildMiddleHudSection(_stage(themeColor)),
                       _chatArea(themeColor),
-                      _buildGlassControlPanel(_bottomArea(themeColor)),
+                      _bottomArea(themeColor),
                     ],
                   ),
                 ],
@@ -1420,49 +1450,6 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  // --- 新增：底部毛玻璃控制面板与微浮动动效包装组件 ---
-  // 只包 _bottomArea（输入行 + 麦克风）。_chatArea 返回 Expanded，只能直接
-  // 放在 Column 里，包进面板会闪退，所以不包它（它在 #28 已有自己的玻璃）。
-  Widget _buildGlassControlPanel(Widget existingBottomContent) {
-    return AnimatedBuilder(
-      animation: _floatAnimation,
-      builder: (context, child) {
-        return Transform.translate(
-          offset: Offset(0, _floatAnimation.value),
-          child: child,
-        );
-      },
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(24),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0D1526).withValues(alpha: 0.65),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: const Color(0xFF00F0FF).withValues(alpha: 0.2),
-                  width: 1,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 20,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: existingBottomContent,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _chatArea(Color themeColor) {
     final thinking = _state == JarvisState.thinking;
     final pal = hudPaletteFor(themeColor);
@@ -1545,201 +1532,248 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  // ---------- Bottom: mic + input (HTML .mic) ----------
+  // ---------- Bottom: voice-first control panel (Gemini) ----------
 
   Widget _bottomArea(Color themeColor) {
-    final pal = hudPaletteFor(themeColor);
-    final outline = OutlineInputBorder(
-        borderRadius: BorderRadius.circular(26),
-        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.14)));
-    final focused = OutlineInputBorder(
-        borderRadius: BorderRadius.circular(26),
-        borderSide:
-            BorderSide(color: themeColor.withValues(alpha: 0.8), width: 1.4));
-    final sendDisabled = _state == JarvisState.thinking;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      child: Column(
-        children: [
-          if (_state == JarvisState.listening)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(children: [
-                Icon(Icons.graphic_eq, color: themeColor),
-                const SizedBox(width: 8),
-                Expanded(
-                    child: Text(
-                        _recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized,
-                        style: const TextStyle(color: _ice))),
-                const Text('点麦克风结束',
-                    style: TextStyle(color: Colors.white54, fontSize: 11)),
-              ]),
-            ),
-          _micButton(themeColor),
-          const SizedBox(height: 10),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              IconButton(
-                tooltip: _muted ? '取消静音' : '静音',
-                onPressed: _toggleMute,
-                icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
-                    color: Colors.white60),
-              ),
-              Expanded(
-                child: TextField(
-                  controller: _input,
-                  minLines: 1,
-                  maxLines: 4,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => _send(),
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: themeColor,
-                  decoration: InputDecoration(
-                    hintText: '输入问题，或点麦克风说话，也可说“贾维斯”唤醒',
-                    hintStyle: const TextStyle(color: Colors.white38),
-                    filled: true,
-                    fillColor: Colors.white.withValues(alpha: 0.06),
-                    border: outline,
-                    enabledBorder: outline,
-                    focusedBorder: focused,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 18, vertical: 12),
-                  ),
+    return _buildCleanVoiceControlPanel(themeColor);
+  }
+
+  // --- 精简后的底部控制面板（纯语音为主，输入框默认隐藏、点键盘图标展开，紧凑版） ---
+  // 接线说明（与草稿的不同，均已按真实文件修正）：
+  // 1. 麦克风 onTap 接真实 _toggleMic（草稿的 _handleCoreTap 不存在）。
+  // 2. 聆听时输出框显示实时识别文字（输入框默认隐藏，说话内容仍可见）。
+  // 3. 保留静音按钮与 Agent 状态行（否则静音和任务进度没有入口）。
+  // 4. 面板自带 #29 的悬浮动效（原 _buildGlassControlPanel 的 float 包装已并入此处）。
+  // 5. 输入框默认隐藏，点键盘图标展开紧凑版（单行、小字、小发送键）。
+  Widget _buildCleanVoiceControlPanel(Color themeColor) {
+    final listening = _state == JarvisState.listening;
+    return AnimatedBuilder(
+      animation: _floatAnimation,
+      builder: (context, child) {
+        return Transform.translate(
+          offset: Offset(0, _floatAnimation.value),
+          child: child,
+        );
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(28),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+            child: Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0D1526).withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(
+                  color: const Color(0xFF00F0FF).withValues(alpha: 0.25),
+                  width: 1,
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.5),
+                    blurRadius: 24,
+                    spreadRadius: 2,
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Opacity(
-                opacity: sendDisabled ? 0.4 : 1,
-                child: Container(
-                  width: 46,
-                  height: 46,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [themeColor, pal.$1],
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 扩大后的输出文本区域（带音字同步流式效果）
+                  Container(
+                    width: double.infinity,
+                    constraints:
+                        const BoxConstraints(minHeight: 70, maxHeight: 120),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.35),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color:
+                            const Color(0xFF00F0FF).withValues(alpha: 0.15),
+                      ),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                          color: themeColor.withValues(alpha: 0.30),
-                          blurRadius: 12),
+                    child: SingleChildScrollView(
+                      child: Text(
+                        listening
+                            ? (_recognized.isEmpty
+                                ? '正在聆听，请开始说话…'
+                                : _recognized)
+                            : _displayedOutputText,
+                        style: TextStyle(
+                          color: listening
+                              ? Colors.white
+                              : (_isSpeakingWithAnimation
+                                  ? const Color(0xFF00FF9D)
+                                  : Colors.white),
+                          fontSize: 14,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  // 输入框默认隐藏，点键盘图标展开；紧凑版（单行、小字、小发送键）。
+                  if (_showInput)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 14),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _input,
+                              minLines: 1,
+                              maxLines: 1,
+                              textInputAction: TextInputAction.send,
+                              onSubmitted: (_) => _send(),
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 13),
+                              cursorColor: themeColor,
+                              decoration: InputDecoration(
+                                hintText: '输入问题',
+                                hintStyle: const TextStyle(
+                                    color: Colors.white38, fontSize: 13),
+                                filled: true,
+                                fillColor:
+                                    Colors.white.withValues(alpha: 0.06),
+                                border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                    borderSide: BorderSide(
+                                        color: Colors.white
+                                            .withValues(alpha: 0.14))),
+                                enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                    borderSide: BorderSide(
+                                        color: Colors.white
+                                            .withValues(alpha: 0.14))),
+                                focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                    borderSide: BorderSide(
+                                        color: themeColor.withValues(
+                                            alpha: 0.8),
+                                        width: 1.4)),
+                                contentPadding:
+                                    const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 8),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Opacity(
+                            opacity:
+                                _state == JarvisState.thinking ? 0.4 : 1,
+                            child: Container(
+                              width: 38,
+                              height: 38,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: LinearGradient(
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                  colors: [
+                                    themeColor,
+                                    const Color(0xFF00F0FF)
+                                  ],
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                      color: themeColor.withValues(
+                                          alpha: 0.30),
+                                      blurRadius: 12),
+                                ],
+                              ),
+                              child: IconButton(
+                                tooltip: '发送',
+                                onPressed: _state == JarvisState.thinking
+                                    ? null
+                                    : () => _send(),
+                                icon: const Icon(Icons.arrow_upward,
+                                    color: Colors.white, size: 18),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  // 核心大号语音图标 / 麦克风交互按钮（左静音，右键盘图标展开输入框）
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: _muted ? '取消静音' : '静音',
+                        onPressed: _toggleMute,
+                        icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
+                            color: Colors.white60),
+                      ),
+                      GestureDetector(
+                        onTap: _toggleMic,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 300),
+                          width: 64,
+                          height: 64,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF00F0FF), Color(0xFF7000FF)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF00F0FF)
+                                    .withValues(alpha: 0.4),
+                                blurRadius: 15,
+                                spreadRadius: 2,
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            Icons.mic,
+                            color: Colors.white,
+                            size: 30,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: _showInput ? '隐藏输入框' : '显示输入框',
+                        onPressed: () =>
+                            setState(() => _showInput = !_showInput),
+                        icon: Icon(
+                            _showInput
+                                ? Icons.keyboard_hide
+                                : Icons.keyboard,
+                            color: _showInput
+                                ? const Color(0xFF00F0FF)
+                                : Colors.white60),
+                      ),
                     ],
                   ),
-                  child: IconButton(
-                    tooltip: '发送',
-                    onPressed: sendDisabled ? null : () => _send(),
-                    icon: const Icon(Icons.arrow_upward, color: Colors.white),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '点击麦克风开始语音交互',
+                    style: TextStyle(
+                      color: Colors.white60,
+                      fontSize: 11,
+                      letterSpacing: 1.0,
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 6),
+                  Text(_statusLine,
+                      style: const TextStyle(
+                          color: Colors.white38, fontSize: 11)),
+                ],
               ),
-            ],
+            ),
           ),
-          const SizedBox(height: 6),
-          Text(_statusLine,
-              style: const TextStyle(color: Colors.white38, fontSize: 11)),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _micButton(Color themeColor) {
-    // Own layer: the per-frame ripple / rim repaint only this button.
-    final pal = hudPaletteFor(themeColor);
-    return RepaintBoundary(
-      child: ListenableBuilder(
-        listenable: _micAnim,
-        builder: (_, _) {
-          final t = _tick.value;
-          final color = themeColor;
-          final listening = _state == JarvisState.listening;
-          final ripplePhase = t % 1.4 / 1.4;
-          final animate = !MediaQuery.disableAnimationsOf(context);
-          return Semantics(button: true, label: _muted ? '取消静音' : listening ? '停止聆听并发送' : '开始语音输入', onTap: _toggleMic, excludeSemantics: true, child: GestureDetector(
-            onTap: _toggleMic,
-            onTapDown: (_) => _micDown.value = true,
-            onTapUp: (_) => _micDown.value = false,
-            onTapCancel: () => _micDown.value = false,
-            child: Transform.scale(
-              scale: _micDown.value ? 0.94 : 1.0,
-              child: SizedBox(
-                width: 78,
-                height: 78,
-                child: Stack(
-                  alignment: Alignment.center,
-                  clipBehavior: Clip.none,
-                  children: [
-                    // 聆听时向外扩散的柔和波纹。
-                    if (listening && animate)
-                      Opacity(
-                        opacity: (1 - ripplePhase) * 0.7,
-                        child: Transform.scale(
-                          scale: 1 + 0.7 * ripplePhase,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(color: color, width: 1.6),
-                            ),
-                          ),
-                        ),
-                      ),
-                    // 缓慢旋转的三色渐变边缘 + 柔光。
-                    RepaintBoundary(
-                      child: Transform.rotate(
-                        angle: t * math.pi * 2 / 10,
-                        child: Container(
-                          width: 78,
-                          height: 78,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: SweepGradient(
-                                colors: [color, pal.$1, pal.$2, color]),
-                            boxShadow: [
-                              BoxShadow(
-                                  color: color.withValues(alpha: 0.30),
-                                  blurRadius: 26,
-                                  spreadRadius: 1),
-                              BoxShadow(
-                                  color: pal.$2.withValues(alpha: 0.18),
-                                  blurRadius: 36),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    // 深色玻璃中心。
-                    Container(
-                      width: 72,
-                      height: 72,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: RadialGradient(
-                          center: const Alignment(-0.3, -0.4),
-                          colors: [
-                            color.withValues(alpha: 0.30),
-                            const Color(0xFF0E1018),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (listening)
-                      CustomPaint(
-                        size: const Size(30, 30),
-                        painter:
-                            _BarsIconPainter(tick: t, color: Colors.white),
-                      )
-                    else
-                      const Icon(Icons.mic, size: 30, color: Colors.white),
-                  ],
-                ),
-              ),
-            ),
-          ));
-        },
-      ),
-    );
-  }
 }
 
 /// One chat line：用户 = 渐变气泡靠右，Jarvis = 安静的玻璃气泡靠左。
