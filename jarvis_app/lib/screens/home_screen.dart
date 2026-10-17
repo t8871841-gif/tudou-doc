@@ -800,26 +800,19 @@ class _HomeScreenState extends State<HomeScreen>
       backgroundColor: const Color(0xFF050811),
       body: Stack(
         children: [
-          // 地球夜景背景图（本地资源，离线可用）；加载失败时回落到夜蓝渐变。
-          // contain 完整显示整颗地球，不裁切放大（cover 会把地球放大到裁掉上下）。
-          Positioned.fill(
-            child: Image.asset(
-              'assets/images/earth_bg.jpg',
-              fit: BoxFit.contain,
-              // 靠上一点，但不贴顶：y=-0.4（-1 贴顶，0 居中）。
-              alignment: const Alignment(0.0, -0.4),
-              errorBuilder: (context, error, stackTrace) =>
-                  const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color(0xFF050811),
-                      Color(0xFF0B132B),
-                      Color(0xFF050811),
-                    ],
-                  ),
+          // 深邃夜蓝渐变底（#28 配色）：#050811 → #0B132B → #050811。
+          // 地球已收进舞台圆环内（见 _stage），不再铺整屏背景。
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Color(0xFF050811),
+                    Color(0xFF0B132B),
+                    Color(0xFF050811),
+                  ],
                 ),
               ),
             ),
@@ -1171,6 +1164,34 @@ class _HomeScreenState extends State<HomeScreen>
                   Positioned.fill(child: CustomPaint(painter: _reactor)),
                 ],
               ),
+            ),
+          ),
+          // 地球收进圆环：裁成圆形，与反应堆圆环同心，直径为环直径 ×0.90，
+          // 由呼吸包装（_buildMiddleHudSection）带着与圆环一起呼吸。
+          // 放在画笔层之上：光环/声波点阵（在圆外）仍可见，星云光球被地球取代。
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // 与 ReactorPainter 的 r 口径一致：min(w,h)×0.36。
+                final r = math.min(
+                        constraints.maxWidth, constraints.maxHeight) *
+                    0.36;
+                final earthD = r * 2 * 0.90;
+                return Center(
+                  child: ClipOval(
+                    child: SizedBox(
+                      width: earthD,
+                      height: earthD,
+                      child: Image.asset(
+                        'assets/images/earth_bg.jpg',
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) =>
+                            const SizedBox.shrink(),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
           // HUD text overlay: rebuilt only on hue / readout changes.
