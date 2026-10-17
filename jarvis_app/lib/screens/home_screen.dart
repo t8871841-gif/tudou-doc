@@ -768,18 +768,23 @@ class _HomeScreenState extends State<HomeScreen>
       backgroundColor: const Color(0xFF050811),
       body: Stack(
         children: [
-          // 深邃夜蓝渐变底（草稿配色）：#050811 → #0B132B → #050811。
-          const Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color(0xFF050811),
-                    Color(0xFF0B132B),
-                    Color(0xFF050811),
-                  ],
+          // 地球夜景背景图（本地资源，离线可用）；加载失败时回落到夜蓝渐变。
+          Positioned.fill(
+            child: Image.asset(
+              'assets/images/earth_bg.jpg',
+              fit: BoxFit.cover,
+              errorBuilder: (context, error, stackTrace) =>
+                  const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color(0xFF050811),
+                      Color(0xFF0B132B),
+                      Color(0xFF050811),
+                    ],
+                  ),
                 ),
               ),
             ),
