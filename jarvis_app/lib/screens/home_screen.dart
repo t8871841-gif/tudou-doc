@@ -801,10 +801,12 @@ class _HomeScreenState extends State<HomeScreen>
       body: Stack(
         children: [
           // 地球夜景背景图（本地资源，离线可用）；加载失败时回落到夜蓝渐变。
+          // contain 完整显示整颗地球，不裁切放大（cover 会把地球放大到裁掉上下）。
           Positioned.fill(
             child: Image.asset(
               'assets/images/earth_bg.jpg',
-              fit: BoxFit.cover,
+              fit: BoxFit.contain,
+              alignment: Alignment.center,
               errorBuilder: (context, error, stackTrace) =>
                   const DecoratedBox(
                 decoration: BoxDecoration(
