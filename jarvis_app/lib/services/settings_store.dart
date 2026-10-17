@@ -35,6 +35,9 @@ class JarvisSettings {
   bool speakReplies = defaultSpeakReplies;
   bool particles = defaultParticles;
   String systemPrompt = defaultSystemPrompt;
+  bool autoMemory = true; // 自动整理长期记忆（每几轮对话后台调用一次大模型）
+  /// 运行时注入的长期记忆（不落盘，由 MemoryService 生成）。
+  String memoryContext = '';
 
   Future<void> load() async {
     baseUrl =
@@ -57,6 +60,7 @@ class JarvisSettings {
     particles = (await _storage.read(key: 'jarvis_particles')) != 'false';
     systemPrompt = await _storage.read(key: 'jarvis_system_prompt') ??
         defaultSystemPrompt;
+    autoMemory = (await _storage.read(key: 'jarvis_auto_memory')) != 'false';
   }
 
   Future<void> save() async {
@@ -79,6 +83,8 @@ class JarvisSettings {
     await _storage.write(
         key: 'jarvis_particles', value: particles ? 'true' : 'false');
     await _storage.write(key: 'jarvis_system_prompt', value: systemPrompt);
+    await _storage.write(
+        key: 'jarvis_auto_memory', value: autoMemory ? 'true' : 'false');
   }
 
   bool get configured => apiKey.trim().isNotEmpty;

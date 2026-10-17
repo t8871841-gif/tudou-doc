@@ -19,7 +19,8 @@ class JarvisApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF00060B),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFF33DDFF),
-          secondary: Color(0xFF2E9BFF),
+          secondary: Color(0xFF8B5CFF),
+          tertiary: Color(0xFFFF3DCB),
         ),
         useMaterial3: true,
       ),

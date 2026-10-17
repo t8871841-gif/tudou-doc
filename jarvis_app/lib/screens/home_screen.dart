@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:flutter/scheduler.dart';
 import '../services/agent_service.dart';
 import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
+import '../services/memory_service.dart';
 import '../services/settings_store.dart';
 import '../widgets/hud_painters.dart';
 import 'settings_screen.dart';
@@ -17,18 +19,22 @@ enum JarvisState { booting, idle, listening, thinking, speaking }
 const _ice = Color(0xFFEAFFFF);
 const _bootCyan = Color(0xFF19D3FF);
 const _bootBg = Color(0xFF00060B);
+const _bootViolet = Color(0xFF8B5CFF);
+const _bootPink = Color(0xFFFF3DCB);
 
 // 1. 核心主题色定义与动态分发器
 const Color nanoGold = Color(0xFFFFB700);
 const Color nanoRed = Color(0xFFFF2A2A);
 const Color holoCyan = Color(0xFF19D3FF);
+const Color nanoViolet = Color(0xFF9D6BFF); // 思考：电光紫
 
 Color getActiveThemeColor(JarvisState state, double _hue) {
   // _hue 保留参数位：待命已锁定 holoCyan，不再随 hue 漂移；后续若要恢复漂移可直接用。
   switch (state) {
     case JarvisState.thinking:
+      return nanoViolet; // 思考：电光紫（想改回金色，把这里改成 nanoGold）
     case JarvisState.speaking:
-      return nanoGold; // 思考/回答状态切为纳米金色
+      return nanoGold; // 回答：纳米金
     case JarvisState.listening:
       return nanoRed; // 聆听状态切为高能红色
     case JarvisState.booting:
@@ -80,8 +86,12 @@ class _HomeScreenState extends State<HomeScreen>
   double _micLevel = 0; // 0..1 from speech_to_text sound-level callback
   final _rnd = math.Random();
   final List<_Msg> _messages = [];
+  final _memory = MemoryService.instance;
+  int _turnsSinceMemory = 0; // 距离上次整理长期记忆已过几轮
+  bool _consolidating = false;
   late final ReactorPainter _reactor;
   late final FxPainter _fx;
+  late final AuroraPainter _aurora;
 
   // ---- Notifiers -------------------------------------------------------
   // Only the painters, the mic button and the boot screen need a per-frame
@@ -128,6 +138,14 @@ class _HomeScreenState extends State<HomeScreen>
       themeColor: () => getActiveThemeColor(_state, 0),
     );
 
+    _aurora = AuroraPainter(
+      tick: _tick,
+      mode: () => _hudMode,
+      wakeMode: () => _wakeMode,
+      micLevel: () => _micLevel,
+      themeColor: () => getActiveThemeColor(_state, 0),
+    );
+
     // Display-rate tick: drives the painters and per-frame widgets
     // without rebuilding the chat list.
     _ticker = createTicker(_onFrame)..start();
@@ -143,7 +161,14 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _init() async {
     await _settings.load();
-    _set(() {});
+    await _memory.load();
+    _settings.memoryContext = _memory.contextBlock();
+    _set(() {
+      // 恢复上次的对话（插到最前面，避免和开机问候冲突）。
+      _messages.insertAll(0, [
+        for (final m in _memory.chat) _Msg(m['role']!, m['text']!),
+      ]);
+    });
     unawaited(_warmUpAsr());
   }
 
@@ -486,10 +511,10 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---------- Chat ----------
 
-  /// Last 7 non-system messages (call before adding the new question).
+  /// Last 12 non-system messages (call before adding the new question).
   List<Map<String, String>> _buildHistory() {
     final prior = _messages.where((m) => m.role != 'system').toList();
-    final start = math.max(0, prior.length - 7);
+    final start = math.max(0, prior.length - 12);
     return [
       for (final m in prior.skip(start)) {'role': m.role, 'content': m.text},
     ];
@@ -503,6 +528,66 @@ class _HomeScreenState extends State<HomeScreen>
       _statusLine = status;
     });
     _scrollDown();
+    _persistChat();
+  }
+
+  /// 把对话记录保存到本机（后台，失败不影响使用）。
+  void _persistChat() {
+    unawaited(_memory.saveChat([
+      for (final m in _messages)
+        if (m.role != 'system') {'role': m.role, 'text': m.text},
+    ]));
+  }
+
+  /// 每几轮对话后，后台让大模型整理一次长期记忆。
+  void _maybeConsolidateMemory() {
+    if (!_settings.autoMemory || !_settings.configured || _consolidating) {
+      return;
+    }
+    if (++_turnsSinceMemory < 4) return;
+    _turnsSinceMemory = 0;
+    _consolidating = true;
+    final recent = _buildHistory();
+    unawaited(() async {
+      try {
+        await _memory.consolidate(_settings, recent);
+        _settings.memoryContext = _memory.contextBlock();
+      } finally {
+        _consolidating = false;
+      }
+    }());
+  }
+
+  /// 本地处理“记住… / 忘记… / 你记得什么”等口令，不走大模型。
+  Future<String> _handleMemoryCommand(MemoryCommand c) async {
+    String reply;
+    switch (c.kind) {
+      case 'remember':
+        await _memory.addFact(c.arg);
+        reply = '好的，我记住了：${c.arg}';
+      case 'forgetAll':
+        await _memory.clearFacts();
+        reply = '好的，长期记忆已全部清空。';
+      case 'forget':
+        final n = await _memory.removeMatching(c.arg);
+        reply = n > 0 ? '好的，已忘记 $n 条和“${c.arg}”有关的记忆。' : '我没有找到和“${c.arg}”有关的记忆。';
+      default:
+        if (_memory.facts.isEmpty) {
+          reply = '我目前还没有记住关于您的长期信息。您可以对我说“记住……”。';
+        } else {
+          final shown = _memory.facts.reversed.take(15).toList();
+          final sb = StringBuffer('我记得这些：\n');
+          for (var i = 0; i < shown.length; i++) {
+            sb.writeln('${i + 1}. ${shown[i]}');
+          }
+          if (_memory.facts.length > shown.length) {
+            sb.writeln('……共 ${_memory.facts.length} 条，更多可在设置里查看。');
+          }
+          reply = sb.toString().trimRight();
+        }
+    }
+    _settings.memoryContext = _memory.contextBlock();
+    return reply;
   }
 
   Future<void> _send([String? override]) async {
@@ -518,6 +603,28 @@ class _HomeScreenState extends State<HomeScreen>
   /// 使用 Agent 智能体调度系统处理用户指令（支持联网、跨应用、任务拆解）
   Future<void> _ask(String q) async {
     FocusScope.of(context).unfocus();
+    var memCmd = MemoryService.parseCommand(q);
+    // “忘记密码怎么办”这类普通提问：没有对应记忆就不拦截，交给大模型。
+    if (memCmd != null &&
+        memCmd.kind == 'forget' &&
+        !_memory.hasMatch(memCmd.arg)) {
+      memCmd = null;
+    }
+    if (memCmd != null) {
+      _stopSpeaking();
+      _listenTimer?.cancel();
+      unawaited(_asr.stop());
+      setState(() {
+        _messages.add(_Msg('user', q));
+        _input.clear();
+        _recognized = '';
+        _wakeMode = false;
+      });
+      final reply = await _handleMemoryCommand(memCmd);
+      _reply(reply, '记忆已更新。');
+      if (mounted) await _speak(reply);
+      return;
+    }
     final hist = _buildHistory();
     _stopSpeaking();
     _listenTimer?.cancel();
@@ -553,6 +660,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     _reply(answer, '任务执行完毕。');
+    _maybeConsolidateMemory();
     if (mounted) await _speak(answer);
   }
 
@@ -578,8 +686,12 @@ class _HomeScreenState extends State<HomeScreen>
         MaterialPageRoute(
             builder: (_) => SettingsScreen(settings: _settings)));
     await _settings.load();
+    _settings.memoryContext = _memory.contextBlock();
     if (mounted) {
-      setState(() {});
+      setState(() {
+        // 在设置里清空了对话记录：主页同步清屏。
+        if (_memory.consumeChatCleared()) _messages.clear();
+      });
       // Settings pops with true only after a real save, so this
       // confirmation is shown on Home (a SnackBar shown in Settings
       // would vanish instantly on pop).
@@ -591,13 +703,17 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _enterApp() async {
     if (_state != JarvisState.booting) return;
-    const welcome =
-        '您好，我是 Jarvis。已为您装配智能体与联网跨应用能力。您可以直接说话、点麦克风，或者打字提问。';
+    // 有历史对话 = 老朋友回来了：恢复记录，只说一句简短问候。
+    final returning = _messages.isNotEmpty;
+    final welcome = returning
+        ? '欢迎回来，我在。'
+        : '您好，我是 Jarvis。已为您装配智能体与联网跨应用能力。您可以直接说话、点麦克风，或者打字提问。';
     setState(() {
       _state = JarvisState.idle;
-      _statusLine = '核心已上线，随时可以开始。';
-      _messages.add(const _Msg('assistant', welcome));
+      _statusLine = returning ? '核心已上线，已恢复上次的对话。' : '核心已上线，随时可以开始。';
+      if (!returning) _messages.add(_Msg('assistant', welcome));
     });
+    if (returning) _scrollDown();
     await _speak(welcome);
   }
 
@@ -614,22 +730,25 @@ class _HomeScreenState extends State<HomeScreen>
       backgroundColor: const Color(0xFF010409),
       body: Stack(
         children: [
-          Positioned.fill(
+          const Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: RadialGradient(
-                  center: const Alignment(0.0, -0.2),
+                  center: Alignment(0.0, -0.2),
                   radius: 1.2,
                   colors: [
-                    themeColor.withValues(alpha: 0.25),
-                    const Color(0xFF010409),
-                    const Color(0xFF000103),
+                    Color(0xFF0A1330),
+                    Color(0xFF02050F),
+                    Color(0xFF000103),
                   ],
-                  stops: const [0.0, 0.5, 1.0],
+                  stops: [0.0, 0.5, 1.0],
                 ),
               ),
             ),
           ),
+          // 极光层：彩色光晕缓慢漂移，颜色随状态平滑过渡。
+          Positioned.fill(
+              child: RepaintBoundary(child: CustomPaint(painter: _aurora))),
           Positioned.fill(
               child: RepaintBoundary(child: CustomPaint(painter: _grid))),
           Positioned.fill(
@@ -674,83 +793,139 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _bootScreen() {
-    // HTML #boot: breathing pulse ring + JARVIS + "轻触屏幕 · 唤醒系统".
+    // 开机页：旋转的三色渐变光环 + 渐变标题 + 极光背景。
     return Scaffold(
       backgroundColor: _bootBg,
       body: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: _enterApp,
-        child: Center(
-          child: ValueListenableBuilder<double>(
-            valueListenable: _tick,
-            builder: (_, t, _) {
-              // 2.2s breathing pulse: scale 1 -> 1.12, opacity 1 -> .55.
-              final phase = (t % 2.2) / 2.2;
-              final ease = 0.5 - 0.5 * math.cos(phase * math.pi * 2);
-              final scale = 1 + 0.12 * ease;
-              final opacity = 1 - 0.45 * ease;
-              // One-shot 2.4s letter-spacing intro (HTML `ls` keyframe).
-              final intro = (t / 2.4).clamp(0.0, 1.0);
-              final spacing = 34 * (0.5 + 0.9 * (1 - intro));
-              final blink = (t % 1.6) < 0.8 ? 1.0 : 0.25;
-              return Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Opacity(
-                    opacity: opacity,
-                    child: Transform.scale(
-                      scale: scale,
-                      child: Container(
-                        width: 170,
-                        height: 170,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(color: _bootCyan, width: 2),
-                          gradient: RadialGradient(colors: [
-                            _bootCyan.withValues(alpha: 0.22),
-                            Colors.transparent,
-                          ]),
-                          boxShadow: [
-                            BoxShadow(
-                                color: _bootCyan.withValues(alpha: 0.55),
-                                blurRadius: 40,
-                                spreadRadius: 2),
-                          ],
+        child: Stack(
+          children: [
+            Positioned.fill(
+                child: RepaintBoundary(
+                    child: CustomPaint(painter: _aurora))),
+            Positioned.fill(
+              child: Center(
+                child: ValueListenableBuilder<double>(
+                  valueListenable: _tick,
+                  builder: (_, t, _) {
+                    // 2.2s breathing pulse: scale 1 -> 1.12, opacity 1 -> .55.
+                    final phase = (t % 2.2) / 2.2;
+                    final ease = 0.5 - 0.5 * math.cos(phase * math.pi * 2);
+                    final scale = 1 + 0.12 * ease;
+                    final opacity = 1 - 0.35 * ease;
+                    // One-shot 2.4s letter-spacing intro (HTML `ls` keyframe).
+                    final intro = (t / 2.4).clamp(0.0, 1.0);
+                    final spacing = 34 * (0.5 + 0.9 * (1 - intro));
+                    final blink = (t % 1.6) < 0.8 ? 1.0 : 0.25;
+                    return Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Opacity(
+                          opacity: opacity,
+                          child: Transform.scale(
+                            scale: scale,
+                            child: SizedBox(
+                              width: 170,
+                              height: 170,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  Transform.rotate(
+                                    angle: t * math.pi * 2 / 5,
+                                    child: Container(
+                                      width: 170,
+                                      height: 170,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        gradient: const SweepGradient(colors: [
+                                          _bootCyan,
+                                          _bootViolet,
+                                          _bootPink,
+                                          _bootCyan,
+                                        ]),
+                                        boxShadow: [
+                                          BoxShadow(
+                                              color: _bootCyan
+                                                  .withValues(alpha: 0.5),
+                                              blurRadius: 40,
+                                              spreadRadius: 2),
+                                          BoxShadow(
+                                              color: _bootPink
+                                                  .withValues(alpha: 0.35),
+                                              blurRadius: 64),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  Container(
+                                    width: 164,
+                                    height: 164,
+                                    decoration: const BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: _bootBg),
+                                  ),
+                                  Container(
+                                    width: 164,
+                                    height: 164,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      gradient: RadialGradient(colors: [
+                                        _bootViolet.withValues(alpha: 0.4),
+                                        Colors.transparent,
+                                      ]),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Opacity(
-                    opacity: intro,
-                    child: Transform.translate(
-                      offset: Offset(spacing / 2, 0),
-                      child: Text('JARVIS',
-                          style: TextStyle(
-                            color: _ice,
-                            fontSize: 34,
-                            fontWeight: FontWeight.w500,
-                            letterSpacing: spacing,
-                            shadows: const [
-                              Shadow(color: _bootCyan, blurRadius: 18),
-                              Shadow(color: _bootCyan, blurRadius: 40),
-                            ],
-                          )),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Opacity(
-                    opacity: blink,
-                    child: const Text('轻触屏幕 · 唤醒系统',
-                        style: TextStyle(
-                            color: _bootCyan,
-                            fontSize: 13,
-                            letterSpacing: 4.5)),
-                  ),
-                ],
-              );
-            },
-          ),
+                        const SizedBox(height: 18),
+                        Opacity(
+                          opacity: intro,
+                          child: Transform.translate(
+                            offset: Offset(spacing / 2, 0),
+                            child: ShaderMask(
+                              blendMode: BlendMode.srcIn,
+                              shaderCallback: (r) => const LinearGradient(
+                                      colors: [
+                                    _bootCyan,
+                                    _bootViolet,
+                                    _bootPink
+                                  ]).createShader(r),
+                              child: Text('JARVIS',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 34,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: spacing,
+                                    shadows: const [
+                                      Shadow(
+                                          color: _bootViolet, blurRadius: 18),
+                                      Shadow(
+                                          color: _bootCyan, blurRadius: 40),
+                                    ],
+                                  )),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Opacity(
+                          opacity: blink,
+                          child: const Text('轻触屏幕 · 唤醒系统',
+                              style: TextStyle(
+                                  color: _bootCyan,
+                                  fontSize: 13,
+                                  letterSpacing: 4.5)),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -779,7 +954,9 @@ class _HomeScreenState extends State<HomeScreen>
         listenable: _topAnim,
         builder: (_, _) {
           final color = themeColor;
+          final pal = hudPaletteFor(color);
           final style = _glow(color, size: 12, spacing: 2.2);
+          final style2 = _glow(pal.$1, size: 12, spacing: 2.2);
           return Padding(
             padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
             child: Row(
@@ -796,12 +973,11 @@ class _HomeScreenState extends State<HomeScreen>
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(_clock.value, style: style),
+                    Text(_clock.value, style: style2),
                     const SizedBox(height: 2),
-                    // No battery plugin in the dependency set (pubspec and
-                    // android/ are off-limits): same "PWR --" fallback the
-                    // HTML shows when navigator.getBattery is unavailable.
-                    Text('PWR --', style: style),
+                    // No battery plugin in the dependency set: same
+                    // "PWR --" fallback the HTML shows.
+                    Text('PWR --', style: style2),
                   ],
                 ),
               ],
@@ -813,6 +989,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _glitchTitle(Color color) {
+    final pal = hudPaletteFor(color);
     // Honour the system "remove animations" setting.
     final stage =
         MediaQuery.disableAnimationsOf(context) ? 0 : _glitch.value;
@@ -827,21 +1004,34 @@ class _HomeScreenState extends State<HomeScreen>
         Shadow(offset: Offset(-2, 0), color: Color(0xFF00FFFF)),
       ],
     ];
-    final Widget title = Text('J.A.R.V.I.S',
+    // 平时：三色渐变标题；故障闪烁瞬间用带 RGB 错位阴影的普通标题。
+    final Widget glitchTitle = Text('J.A.R.V.I.S',
         style: TextStyle(
             color: color,
             fontSize: 20,
             fontWeight: FontWeight.w600,
             letterSpacing: 6,
             shadows: shadows));
+    final Widget gradTitle = ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (r) =>
+          LinearGradient(colors: [color, pal.$1, pal.$2]).createShader(r),
+      child: Text('J.A.R.V.I.S',
+          style: TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 6,
+              shadows: [Shadow(color: color, blurRadius: 10)])),
+    );
     return switch (stage) {
-      1 => Transform.translate(offset: const Offset(2, 0), child: title),
-      2 => Transform.translate(offset: const Offset(-2, 0), child: title),
+      1 => Transform.translate(offset: const Offset(2, 0), child: glitchTitle),
+      2 => Transform.translate(offset: const Offset(-2, 0), child: glitchTitle),
       3 => Transform(
           transform: Matrix4.skewX(0.14),
           alignment: Alignment.center,
-          child: title),
-      _ => title,
+          child: gradTitle),
+      _ => gradTitle,
     };
   }
 
@@ -927,6 +1117,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _statusText(Color themeColor) {
     final color = themeColor;
+    final pal = hudPaletteFor(color);
     final (en, cn) = _statusLabels();
     // liveRegion: TalkBack announces state changes (聆听 / 思考 / 回应).
     return Semantics(
@@ -936,11 +1127,16 @@ class _HomeScreenState extends State<HomeScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(en, style: _glow(color, size: 13, spacing: 5.2, blur: 10)),
+          Text(en, style: _glow(pal.$1, size: 13, spacing: 5.2, blur: 10)),
           const SizedBox(height: 6),
-          Text(cn,
-              style: _glow(color,
-                  size: 30, spacing: 7.5, blur: 12, color: _ice)),
+          ShaderMask(
+            blendMode: BlendMode.srcIn,
+            shaderCallback: (r) => LinearGradient(
+                colors: [pal.$2, color, pal.$1]).createShader(r),
+            child: Text(cn,
+                style: _glow(color,
+                    size: 30, spacing: 7.5, blur: 14, color: Colors.white)),
+          ),
         ],
       ),
     );
@@ -971,6 +1167,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _gearButton(Color themeColor) {
+    final pal = hudPaletteFor(themeColor);
     return Semantics(
       button: true,
       label: '设置',
@@ -989,13 +1186,19 @@ class _HomeScreenState extends State<HomeScreen>
               height: 38,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: themeColor.withValues(alpha: 0.25)),
+                border: Border.all(color: pal.$1.withValues(alpha: 0.75)),
+                gradient: RadialGradient(colors: [
+                  pal.$1.withValues(alpha: 0.25),
+                  Colors.transparent,
+                ]),
+                boxShadow: [
+                  BoxShadow(
+                      color: pal.$1.withValues(alpha: 0.35), blurRadius: 12),
+                ],
               ),
-              // Icon instead of the "⚙︎" text glyph, which some devices
-              // render as a colour emoji.
               child: Center(
-                child: Icon(Icons.settings_outlined,
-                    size: 18, color: themeColor),
+                child:
+                    Icon(Icons.settings_outlined, size: 18, color: pal.$1),
               ),
             ),
           ),
@@ -1006,6 +1209,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _wakeChip(Color themeColor) {
     final color = themeColor;
+    final pal = hudPaletteFor(color);
     final on = _wakeEnabled;
     return Semantics(
       button: true,
@@ -1023,27 +1227,36 @@ class _HomeScreenState extends State<HomeScreen>
           child: Center(
             widthFactor: 1,
             heightFactor: 1,
-            child: Container(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 250),
               padding:
                   const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                    color: on ? color : themeColor.withValues(alpha: 0.25)),
-                color: on
-                    ? themeColor.withValues(alpha: 0.25)
-                    : Colors.transparent,
+                    color: on
+                        ? pal.$1
+                        : themeColor.withValues(alpha: 0.35)),
+                gradient: on
+                    ? LinearGradient(colors: [
+                        color.withValues(alpha: 0.4),
+                        pal.$1.withValues(alpha: 0.4),
+                        pal.$2.withValues(alpha: 0.4),
+                      ])
+                    : null,
                 boxShadow: on
                     ? [
                         BoxShadow(
-                            color: themeColor.withValues(alpha: 0.25),
-                            blurRadius: 14)
+                            color: pal.$1.withValues(alpha: 0.45),
+                            blurRadius: 16)
                       ]
                     : null,
               ),
               child: Text('唤醒词 · ${on ? '开' : '关'}',
                   style: TextStyle(
-                      color: color, fontSize: 13, letterSpacing: 2.6)),
+                      color: on ? Colors.white : color,
+                      fontSize: 13,
+                      letterSpacing: 2.6)),
             ),
           ),
         ),
@@ -1051,11 +1264,11 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  /// HUD readout bars (HTML `.rd`): label + glowing 2px bar.
+  /// HUD readout bars (HTML `.rd`): label + glowing bar，三条三种颜色。
   Widget _readout(Color themeColor, List<String> labels, List<double> values,
       {required bool alignRight}) {
-    final color = themeColor;
-    final track = themeColor.withValues(alpha: 0.25);
+    final pal = hudPaletteFor(themeColor);
+    final barColors = [themeColor, pal.$1, pal.$2];
     return ExcludeSemantics(child: IgnorePointer(
       child: SizedBox(
         width: 92,
@@ -1066,21 +1279,35 @@ class _HomeScreenState extends State<HomeScreen>
           children: [
             for (var i = 0; i < labels.length; i++) ...[
               Text(labels[i],
-                  style: _glow(color,
+                  style: _glow(barColors[i % 3],
                       size: 9,
                       spacing: 1.6,
                       blur: 6,
-                      color: color.withValues(alpha: 0.8))),
+                      color: barColors[i % 3].withValues(alpha: 0.95))),
               const SizedBox(height: 3),
               Container(
-                height: 2,
+                height: 3,
                 width: 92,
-                color: track,
+                decoration: BoxDecoration(
+                  color: barColors[i % 3].withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(2),
+                ),
                 alignment: Alignment.centerLeft,
                 child: Container(
                   width: 92 * values[i].clamp(0.0, 1.0),
-                  height: 2,
-                  color: color,
+                  height: 3,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: [
+                      barColors[i % 3].withValues(alpha: 0.35),
+                      barColors[i % 3],
+                    ]),
+                    borderRadius: BorderRadius.circular(2),
+                    boxShadow: [
+                      BoxShadow(
+                          color: barColors[i % 3].withValues(alpha: 0.7),
+                          blurRadius: 6),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 7),
@@ -1092,86 +1319,113 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _cornerBrackets(Color themeColor) {
-    final c = themeColor.withValues(alpha: 0.85);
+    final pal = hudPaletteFor(themeColor);
+    final c1 = themeColor.withValues(alpha: 0.9);
+    final c2 = pal.$1.withValues(alpha: 0.9);
+    final c3 = pal.$2.withValues(alpha: 0.9);
     return Stack(
       children: [
         Positioned(
             left: 8,
             top: 6,
-            child: _Bracket(color: c, left: true, top: true)),
+            child: _Bracket(color: c1, left: true, top: true)),
         Positioned(
             right: 8,
             top: 6,
-            child: _Bracket(color: c, right: true, top: true)),
+            child: _Bracket(color: c2, right: true, top: true)),
         Positioned(
             left: 8,
             bottom: 8,
-            child: _Bracket(color: c, left: true, bottom: true)),
+            child: _Bracket(color: c3, left: true, bottom: true)),
         Positioned(
             right: 8,
             bottom: 8,
-            child: _Bracket(color: c, right: true, bottom: true)),
+            child: _Bracket(color: c1, right: true, bottom: true)),
       ],
     );
   }
 
   // ---------- Dialogue (HTML .sub colours) ----------
 
-// 3. 升级后的 _chatArea 方法（通透全息玻璃卡片）
+// 3. 毛玻璃 + 三色渐变描边的对话卡片
   Widget _chatArea(Color themeColor) {
     final thinking = _state == JarvisState.thinking;
+    final pal = hudPaletteFor(themeColor);
     return Expanded(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(1.4),
         decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
-              themeColor.withValues(alpha: 0.15),
-              Colors.black.withValues(alpha: 0.55),
+              themeColor.withValues(alpha: 0.9),
+              pal.$1.withValues(alpha: 0.55),
+              pal.$2.withValues(alpha: 0.9),
             ],
           ),
-          border: Border.all(
-            color: themeColor.withValues(alpha: 0.4),
-            width: 1.2,
-          ),
-          borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: themeColor.withValues(alpha: 0.08),
-              blurRadius: 16,
+              color: pal.$1.withValues(alpha: 0.22),
+              blurRadius: 22,
               spreadRadius: 1,
             ),
           ],
         ),
-        child: ListView.builder(
-          controller: _scroll,
-          itemCount: _messages.length + (thinking ? 1 : 0),
-          itemBuilder: (context, i) {
-            if (i == _messages.length) {
-              return Semantics(liveRegion: true, label: 'Jarvis 正在思考', excludeSemantics: true, child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: themeColor)),
-                  const SizedBox(width: 12),
-                  Text('Jarvis 正在重构神经网络…',
-                      style: TextStyle(
-                          color: themeColor.withValues(alpha: 0.85),
-                          fontSize: 13,
-                          letterSpacing: 1.2)),
-                ]),
-              ));
-            }
-            final m = _messages[i];
-            return _MessageTile(
-                msg: m, themeColor: themeColor, onSpeak: () => _speak(m.text));
-          },
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16.6),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.55),
+                    themeColor.withValues(alpha: 0.10),
+                    pal.$2.withValues(alpha: 0.12),
+                  ],
+                ),
+              ),
+              child: ListView.builder(
+                controller: _scroll,
+                itemCount: _messages.length + (thinking ? 1 : 0),
+                itemBuilder: (context, i) {
+                  if (i == _messages.length) {
+                    return Semantics(
+                        liveRegion: true,
+                        label: 'Jarvis 正在思考',
+                        excludeSemantics: true,
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: pal.$1)),
+                            const SizedBox(width: 12),
+                            Text('Jarvis 正在重构神经网络…',
+                                style: TextStyle(
+                                    color: pal.$1.withValues(alpha: 0.9),
+                                    fontSize: 13,
+                                    letterSpacing: 1.2)),
+                          ]),
+                        ));
+                  }
+                  final m = _messages[i];
+                  return _MessageTile(
+                      msg: m,
+                      themeColor: themeColor,
+                      onSpeak: () => _speak(m.text));
+                },
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -1180,9 +1434,14 @@ class _HomeScreenState extends State<HomeScreen>
   // ---------- Bottom: mic + input (HTML .mic) ----------
 
   Widget _bottomArea(Color themeColor) {
+    final pal = hudPaletteFor(themeColor);
     final outline = OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide(color: themeColor.withValues(alpha: 0.35)));
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide(color: pal.$1.withValues(alpha: 0.45)));
+    final focused = OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide(color: themeColor, width: 1.6));
+    final sendDisabled = _state == JarvisState.thinking;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       child: Column(
@@ -1191,7 +1450,7 @@ class _HomeScreenState extends State<HomeScreen>
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Row(children: [
-                Icon(Icons.graphic_eq, color: themeColor),
+                Icon(Icons.graphic_eq, color: pal.$1),
                 const SizedBox(width: 8),
                 Expanded(
                     child: Text(
@@ -1204,13 +1463,13 @@ class _HomeScreenState extends State<HomeScreen>
           _micButton(themeColor),
           const SizedBox(height: 10),
           Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               IconButton(
                 tooltip: _muted ? '取消静音' : '静音',
                 onPressed: _toggleMute,
                 icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
-                    color: themeColor),
+                    color: pal.$1),
               ),
               Expanded(
                 child: TextField(
@@ -1220,26 +1479,45 @@ class _HomeScreenState extends State<HomeScreen>
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _send(),
                   style: const TextStyle(color: Colors.white),
+                  cursorColor: themeColor,
                   decoration: InputDecoration(
                     hintText: '输入问题，或点麦克风说话，也可说“贾维斯”唤醒',
                     hintStyle: const TextStyle(color: Colors.white54),
                     filled: true,
-                    fillColor: Colors.black.withValues(alpha: 0.35),
+                    fillColor: Colors.black.withValues(alpha: 0.4),
                     border: outline,
                     enabledBorder: outline,
+                    focusedBorder: focused,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 13, vertical: 12),
+                        horizontal: 14, vertical: 12),
                   ),
                 ),
               ),
               const SizedBox(width: 8),
-              IconButton.filled(
-                tooltip: '发送',
-                onPressed:
-                    _state == JarvisState.thinking ? null : () => _send(),
-                style: IconButton.styleFrom(
-                    backgroundColor: themeColor, foregroundColor: Colors.black),
-                icon: const Icon(Icons.arrow_upward),
+              Opacity(
+                opacity: sendDisabled ? 0.4 : 1,
+                child: Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [themeColor, pal.$1, pal.$2],
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                          color: pal.$1.withValues(alpha: 0.5),
+                          blurRadius: 14),
+                    ],
+                  ),
+                  child: IconButton(
+                    tooltip: '发送',
+                    onPressed: sendDisabled ? null : () => _send(),
+                    icon: const Icon(Icons.arrow_upward, color: Colors.white),
+                  ),
+                ),
               ),
             ],
           ),
@@ -1253,7 +1531,8 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _micButton(Color themeColor) {
     // Own layer: the per-frame ripple / ring / bars repaint only this
-    // 78px button instead of the whole page.
+    // 102px button instead of the whole page.
+    final pal = hudPaletteFor(themeColor);
     return RepaintBoundary(
       child: ListenableBuilder(
         listenable: _micAnim,
@@ -1262,6 +1541,20 @@ class _HomeScreenState extends State<HomeScreen>
           final color = themeColor;
           final listening = _state == JarvisState.listening;
           final ripplePhase = t % 1;
+          final ripplePhase2 = (t + 0.5) % 1;
+          final animate = !MediaQuery.disableAnimationsOf(context);
+          Widget ripple(double ph, Color c) => Opacity(
+                opacity: 1 - ph,
+                child: Transform.scale(
+                  scale: 1 + 0.9 * ph,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: c, width: 2),
+                    ),
+                  ),
+                ),
+              );
           return Semantics(button: true, label: _muted ? '取消静音' : listening ? '停止聆听并发送' : '开始语音输入', onTap: _toggleMic, excludeSemantics: true, child: GestureDetector(
             onTap: _toggleMic,
             onTapDown: (_) => _micDown.value = true,
@@ -1274,55 +1567,67 @@ class _HomeScreenState extends State<HomeScreen>
                 height: 78,
                 child: Stack(
                   alignment: Alignment.center,
+                  clipBehavior: Clip.none,
                   children: [
-                    // Listening pulse ripple (HTML `.mic:after` pulse).
-                    if (listening &&
-                        !MediaQuery.disableAnimationsOf(context))
-                      Opacity(
-                        opacity: 1 - ripplePhase,
-                        child: Transform.scale(
-                          scale: 1 + 0.8 * ripplePhase,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(color: color, width: 2),
-                            ),
-                          ),
-                        ),
-                      ),
-                    // Rotating dashed outer ring (HTML `.mic:before`, 8s).
-                    // The ring is cached; only its rotation changes.
+                    // Listening pulse ripples: two colours, offset phase.
+                    if (listening && animate) ripple(ripplePhase, color),
+                    if (listening && animate) ripple(ripplePhase2, pal.$1),
+                    // Rotating dashed outer rings, counter-rotating.
                     Transform.rotate(
                       angle: t * math.pi * 2 / 8,
                       child: RepaintBoundary(
                         child: CustomPaint(
                           size: const Size(102, 102),
                           painter: _DashedRingPainter(
-                              color: color.withValues(alpha: 0.6)),
+                              color: pal.$1.withValues(alpha: 0.75)),
                         ),
                       ),
                     ),
-                    // Gradient disc (HTML radial gradient + glow). Static
-                    // between hue changes, so it keeps its own layer.
+                    Transform.rotate(
+                      angle: -t * math.pi * 2 / 5,
+                      child: RepaintBoundary(
+                        child: CustomPaint(
+                          size: const Size(92, 92),
+                          painter: _DashedRingPainter(
+                              color: pal.$2.withValues(alpha: 0.65)),
+                        ),
+                      ),
+                    ),
+                    // Rotating tri-colour gradient rim with glow.
                     RepaintBoundary(
-                      child: Container(
-                        width: 78,
-                        height: 78,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: RadialGradient(colors: [
-                            themeColor.withValues(alpha: 0.25),
-                            Colors.transparent,
-                          ], stops: const [
-                            0.0,
-                            0.7
-                          ]),
-                          border: Border.all(color: color, width: 2),
-                          boxShadow: [
-                            BoxShadow(
-                                color: themeColor.withValues(alpha: 0.25),
-                                blurRadius: 24,
-                                spreadRadius: 1),
+                      child: Transform.rotate(
+                        angle: t * math.pi * 2 / 6,
+                        child: Container(
+                          width: 78,
+                          height: 78,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: SweepGradient(
+                                colors: [color, pal.$1, pal.$2, color]),
+                            boxShadow: [
+                              BoxShadow(
+                                  color: color.withValues(alpha: 0.45),
+                                  blurRadius: 22,
+                                  spreadRadius: 1),
+                              BoxShadow(
+                                  color: pal.$2.withValues(alpha: 0.3),
+                                  blurRadius: 30),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Dark glassy centre disc.
+                    Container(
+                      width: 70,
+                      height: 70,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(
+                          center: const Alignment(-0.3, -0.4),
+                          colors: [
+                            color.withValues(alpha: 0.55),
+                            const Color(0xFF050B1A),
                           ],
                         ),
                       ),
@@ -1330,10 +1635,11 @@ class _HomeScreenState extends State<HomeScreen>
                     if (listening)
                       CustomPaint(
                         size: const Size(32, 32),
-                        painter: _BarsIconPainter(tick: t, color: color),
+                        painter:
+                            _BarsIconPainter(tick: t, color: Colors.white),
                       )
                     else
-                      Icon(Icons.mic, size: 32, color: color),
+                      const Icon(Icons.mic, size: 32, color: Colors.white),
                   ],
                 ),
               ),
@@ -1345,7 +1651,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 }
 
-/// One chat line. Split out of the State so it can be built independently.
+/// One chat line，气泡式：用户=渐变气泡靠右，Jarvis=彩色玻璃气泡靠左。
 class _MessageTile extends StatelessWidget {
   const _MessageTile(
       {required this.msg, required this.themeColor, required this.onSpeak});
@@ -1356,34 +1662,70 @@ class _MessageTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = msg.role == 'user';
+    final pal = hudPaletteFor(themeColor);
+    final accent = user ? pal.$1 : themeColor;
     return Semantics(container: true, label: user ? '你说：' : 'Jarvis 回答：', child: Align(
       alignment: user ? Alignment.centerRight : Alignment.centerLeft,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // HTML .sub: user line dim, Jarvis reply bright + glow.
-            SelectableText(msg.text,
-                style: TextStyle(
-                    color: user ? userDimColor : _ice,
-                    height: 1.5,
-                    fontSize: 14,
-                    shadows: user
-                        ? null
-                        : [Shadow(color: themeColor, blurRadius: 12)])),
-            if (!user)
-              Align(
-                alignment: Alignment.centerRight,
-                child: IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: '朗读回答',
-                  onPressed: onSpeak,
-                  icon: Icon(Icons.volume_up_outlined,
-                      size: 19, color: themeColor),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.sizeOf(context).width * 0.82),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: EdgeInsets.fromLTRB(12, 10, 12, user ? 10 : 2),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(user ? 16 : 4),
+              topRight: Radius.circular(user ? 4 : 16),
+              bottomLeft: const Radius.circular(16),
+              bottomRight: const Radius.circular(16),
+            ),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: user
+                  ? [
+                      pal.$1.withValues(alpha: 0.32),
+                      pal.$2.withValues(alpha: 0.24),
+                    ]
+                  : [
+                      themeColor.withValues(alpha: 0.18),
+                      pal.$1.withValues(alpha: 0.08),
+                    ],
+            ),
+            border: Border.all(color: accent.withValues(alpha: 0.45)),
+            boxShadow: [
+              BoxShadow(color: accent.withValues(alpha: 0.14), blurRadius: 12),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(msg.text,
+                  style: TextStyle(
+                      color: user ? Colors.white : _ice,
+                      height: 1.5,
+                      fontSize: 14,
+                      shadows: user
+                          ? null
+                          : [
+                              Shadow(
+                                  color: themeColor.withValues(alpha: 0.6),
+                                  blurRadius: 10)
+                            ])),
+              if (!user)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: '朗读回答',
+                    onPressed: onSpeak,
+                    icon: Icon(Icons.volume_up_outlined,
+                        size: 19, color: pal.$1),
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     ));

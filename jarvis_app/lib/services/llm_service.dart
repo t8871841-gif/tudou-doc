@@ -12,6 +12,7 @@ class LlmService {
     required JarvisSettings settings,
     required String question,
     required List<Map<String, String>> history,
+    bool withMemory = true,
   }) async {
     if (!settings.configured) {
       throw StateError('未配置 API Key，请先在设置里填写 Key。');
@@ -19,9 +20,12 @@ class LlmService {
     final base = settings.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$base/chat/completions');
     // Persona prompt from Settings (HTML "人设提示词"); empty = default.
-    final system = settings.systemPrompt.trim().isEmpty
+    final persona = settings.systemPrompt.trim().isEmpty
         ? JarvisSettings.defaultSystemPrompt
         : settings.systemPrompt.trim();
+    // 长期记忆：每次提问都带上，所以 Jarvis 跨会话也认识用户。
+    final mem = withMemory ? settings.memoryContext.trim() : '';
+    final system = mem.isEmpty ? persona : '$persona\n\n$mem';
     final messages = <Map<String, String>>[
       {'role': 'system', 'content': system},
       ...history,

@@ -2,6 +2,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 
 import '../services/edge_tts_service.dart';
+import '../services/memory_service.dart';
 import '../services/settings_store.dart';
 
 /// Settings: base URL, model, API key, persona prompt, voice, rate, pitch.
@@ -37,6 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late double _pitch = widget.settings.pitch;
   late bool _speak = widget.settings.speakReplies;
   late bool _particles = widget.settings.particles;
+  late bool _autoMem = widget.settings.autoMemory;
 
   final _player = AudioPlayer();
   bool _previewing = false;
@@ -69,6 +71,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.settings.pitch = _pitch;
     widget.settings.speakReplies = _speak;
     widget.settings.particles = _particles;
+    widget.settings.autoMemory = _autoMem;
     try {
       await widget.settings.save();
     } catch (e) {
@@ -154,6 +157,103 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  Future<bool> _confirm(String title, String body) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _card,
+        title: Text(title, style: const TextStyle(color: Colors.white)),
+        content: Text(body, style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  /// 长期记忆：查看 / 删除单条 / 清空；对话记录清空。修改立即生效，不需要点“保存设置”。
+  Widget _memorySection() {
+    final mem = MemoryService.instance;
+    return _section(title: '记忆', children: [
+      SwitchListTile(
+          title: const Text('自动整理长期记忆',
+              style: TextStyle(color: Colors.white)),
+          subtitle: const Text('每聊几轮，后台让大模型提炼一次关于您的信息（会多消耗少量额度）',
+              style: TextStyle(color: Colors.white60, fontSize: 12)),
+          value: _autoMem,
+          activeThumbColor: _accent,
+          onChanged: (v) => setState(() => _autoMem = v)),
+      const SizedBox(height: 4),
+      Text('长期记忆（${mem.facts.length} 条）· 也可以直接对 Jarvis 说“记住……”“忘记……”',
+          style: const TextStyle(color: Colors.white70, fontSize: 13)),
+      const SizedBox(height: 6),
+      if (mem.facts.isEmpty)
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 8),
+          child: Text('还没有记忆。',
+              style: TextStyle(color: Colors.white54, fontSize: 13)),
+        )
+      else
+        for (var i = 0; i < mem.facts.length; i++)
+          Row(children: [
+            Expanded(
+                child: Text(mem.facts[i],
+                    style:
+                        const TextStyle(color: Colors.white, fontSize: 14))),
+            IconButton(
+              tooltip: '删除这条',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close, size: 18, color: Colors.white54),
+              onPressed: () async {
+                await mem.removeAt(i);
+                widget.settings.memoryContext = mem.contextBlock();
+                if (mounted) setState(() {});
+              },
+            ),
+          ]),
+      const SizedBox(height: 8),
+      Row(children: [
+        Expanded(
+          child: OutlinedButton(
+            onPressed: mem.facts.isEmpty
+                ? null
+                : () async {
+                    if (!await _confirm('清空长期记忆？', 'Jarvis 将忘记所有关于您的长期信息。')) {
+                      return;
+                    }
+                    await mem.clearFacts();
+                    widget.settings.memoryContext = mem.contextBlock();
+                    if (mounted) setState(() {});
+                  },
+            child: const Text('清空长期记忆'),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: OutlinedButton(
+            onPressed: () async {
+              if (!await _confirm('清空对话记录？', '主页的历史对话会被清除（长期记忆不受影响）。')) {
+                return;
+              }
+              await mem.clearChat();
+              if (mounted) setState(() {});
+            },
+            child: const Text('清空对话记录'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 8),
+      const Text('记忆只保存在本机应用的私有目录；长期记忆会随每次提问发给上面配置的大模型服务。请不要让 Jarvis 记密码等敏感信息。',
+          style: TextStyle(color: Colors.white60, fontSize: 12)),
+    ]);
   }
 
   @override
@@ -301,6 +401,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Text('默认语速已调慢；速度和声音都可以在这里改。语音识别由系统服务处理。',
                 style: TextStyle(color: Colors.white60, fontSize: 12)),
           ]),
+          const SizedBox(height: 16),
+          _memorySection(),
           const SizedBox(height: 20),
           FilledButton(
               onPressed: _save,

@@ -31,6 +31,31 @@ double hudHueFor(HudMode mode) => switch (mode) {
 Color hueColor(double hue, double alpha) =>
     HSLColor.fromAHSL(alpha, hue, 1.0, 0.6).toColor();
 
+/// 多彩霓虹配色：每个状态主色配两个邻近的辅助色，渐变、光环、粒子都用这三色。
+(Color, Color) hudPaletteFor(Color primary) {
+  if (primary == const Color(0xFF19D3FF)) {
+    // 待命：青 + 紫 + 粉
+    return (const Color(0xFF8B5CFF), const Color(0xFFFF3DCB));
+  }
+  if (primary == const Color(0xFFFF2A2A)) {
+    // 聆听：红 + 橙 + 品红
+    return (const Color(0xFFFF8A1F), const Color(0xFFFF2E9A));
+  }
+  if (primary == const Color(0xFFFFB700)) {
+    // 回答：金 + 珊瑚 + 薄荷
+    return (const Color(0xFFFF5E7E), const Color(0xFF3DF2C0));
+  }
+  if (primary == const Color(0xFF9D6BFF)) {
+    // 思考：紫 + 电光蓝 + 粉
+    return (const Color(0xFF3D8BFF), const Color(0xFFFF4FD8));
+  }
+  final h = HSLColor.fromColor(primary);
+  return (
+    h.withHue((h.hue + 65) % 360).withSaturation(1).withLightness(0.6).toColor(),
+    h.withHue((h.hue + 150) % 360).withSaturation(1).withLightness(0.6).toColor(),
+  );
+}
+
 /// HTML `.sub .y` user line: hsla(190, 60%, 75%, .65).
 Color get userDimColor =>
     HSLColor.fromAHSL(0.65, 190, 0.6, 0.75).toColor();
@@ -57,6 +82,36 @@ abstract class _HudPainter extends CustomPainter {
 
   // 平滑过渡后的主题色：每帧向目标色 lerp，避免状态切换时颜色硬跳。
   Color _displayedTheme = const Color(0xFF19D3FF);
+  Color _displayedSec = const Color(0xFF8B5CFF);
+  Color _displayedTer = const Color(0xFFFF3DCB);
+
+  /// 辅助色 / 第三色（同样每帧平滑过渡）。
+  Color secCol(double a) => _displayedSec.withValues(alpha: a.clamp(0.0, 1.0));
+  Color terCol(double a) => _displayedTer.withValues(alpha: a.clamp(0.0, 1.0));
+
+  /// 沿 主色→辅色→第三色→主色 的环形渐变取色，u 为 0..1（自动取小数部分）。
+  Color spectrumCol(double u, double a) {
+    final w = u - u.floorToDouble();
+    final s3 = w * 3;
+    final Color from;
+    final Color to;
+    final double f;
+    if (s3 < 1) {
+      from = _displayedTheme;
+      to = _displayedSec;
+      f = s3;
+    } else if (s3 < 2) {
+      from = _displayedSec;
+      to = _displayedTer;
+      f = s3 - 1;
+    } else {
+      from = _displayedTer;
+      to = _displayedTheme;
+      f = s3 - 2;
+    }
+    return (Color.lerp(from, to, f) ?? from)
+        .withValues(alpha: a.clamp(0.0, 1.0));
+  }
 
   /// 主题色 + 透明度，替代旧的 hueColor(hue, a) 漂移色。
   Color themeCol(double a) =>
@@ -85,6 +140,9 @@ abstract class _HudPainter extends CustomPainter {
     // 主题色平滑过渡：每帧向目标主题色靠 8%，蓝 ↔ 金 / 红不硬跳。
     _displayedTheme =
         Color.lerp(_displayedTheme, themeColor(), 0.08) ?? themeColor();
+    final pal = hudPaletteFor(themeColor());
+    _displayedSec = Color.lerp(_displayedSec, pal.$1, 0.08) ?? pal.$1;
+    _displayedTer = Color.lerp(_displayedTer, pal.$2, 0.08) ?? pal.$2;
 
     // Energy target mirrors the HTML: real mic level while listening,
     // synthetic waves while speaking / thinking / idle.
@@ -151,8 +209,8 @@ class ReactorPainter extends _HudPainter {
       ..shader = RadialGradient(
         colors: [
           col(0.5 + lvl * 0.45),
-          col(0.1 + lvl * 0.18),
-          col(0),
+          secCol(0.14 + lvl * 0.22),
+          terCol(0),
         ],
         stops: const [0.0, 0.45, 1.0],
       ).createShader(Rect.fromCircle(center: c, radius: r * 0.7))
@@ -160,14 +218,38 @@ class ReactorPainter extends _HudPainter {
     canvas.drawCircle(c, r * 0.7, glow);
 
     // Concentric dashed rings, alternating rotation (HTML `ring()`).
-    _dashedCircle(canvas, c, r * 1.12, 1, col(0.45), 2, 9, t * 0.3 * spin);
+    // 渐变光环：主色→辅色→第三色，缓慢旋转，带外发光。
+    final haloRect = Rect.fromCircle(center: c, radius: r * 1.05);
+    final haloShader = SweepGradient(
+      colors: [col(0.95), secCol(0.95), terCol(0.95), col(0.95)],
+      transform: GradientRotation(t * 0.6 * spin),
+    ).createShader(haloRect);
+    canvas.drawCircle(
+      c,
+      r * 1.05,
+      Paint()
+        ..shader = haloShader
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 7
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 9),
+    );
+    canvas.drawCircle(
+      c,
+      r * 1.05,
+      Paint()
+        ..shader = haloShader
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.4,
+    );
+
+    _dashedCircle(canvas, c, r * 1.12, 1, secCol(0.6), 2, 9, t * 0.3 * spin);
     _patternCircle(
-        canvas, c, r * 0.98, 3, col(0.85), [r * 0.9, r * 0.25, r * 0.12, r * 0.25],
+        canvas, c, r * 0.98, 3, col(0.9), [r * 0.9, r * 0.25, r * 0.12, r * 0.25],
         -t * 0.5 * spin);
-    _dashedCircle(canvas, c, r * 0.82, 1.5, col(0.6), 4, 7, t * 0.8 * spin);
+    _dashedCircle(canvas, c, r * 0.82, 1.5, terCol(0.75), 4, 7, t * 0.8 * spin);
     _dashedCircle(
-        canvas, c, r * 0.64, 4, col(0.95), r * 0.55, r * 0.22, t * 1.1 * spin);
-    _circle(canvas, c, r * 0.3, 2, col(0.9));
+        canvas, c, r * 0.64, 4, secCol(0.95), r * 0.55, r * 0.22, t * 1.1 * spin);
+    _circle(canvas, c, r * 0.3, 2, terCol(0.9));
 
     // 72-tick ring, slowly counter-rotating.
     canvas.save();
@@ -175,11 +257,12 @@ class ReactorPainter extends _HudPainter {
     canvas.rotate(-t * 0.12 * spin);
     final tickPaint = Paint()
       ..color = col(0.7)
-      ..strokeWidth = 1.2;
+      ..strokeWidth = 1.4;
     for (var i = 0; i < 72; i++) {
       final a = i / 72 * math.pi * 2;
       final inner = r * 1.2;
       final outer = r * 1.2 + (i % 6 == 0 ? 14 : 6);
+      tickPaint.color = spectrumCol(i / 72 + t * 0.04, 0.85);
       canvas.drawLine(
         Offset(math.cos(a) * inner, math.sin(a) * inner),
         Offset(math.cos(a) * outer, math.sin(a) * outer),
@@ -197,6 +280,7 @@ class ReactorPainter extends _HudPainter {
     for (var i = 0; i < 96; i++) {
       final a = i / 96 * math.pi * 2;
       final r0 = r * 0.34;
+      barPaint.color = spectrumCol(i / 96 + t * 0.08, 0.95);
       final len = r * 0.26 * lvl *
               (0.35 +
                   0.65 *
@@ -228,7 +312,7 @@ class ReactorPainter extends _HudPainter {
     canvas.drawPath(
       tri,
       Paint()
-        ..color = col(1)
+        ..color = terCol(1)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2,
     );
@@ -243,7 +327,7 @@ class ReactorPainter extends _HudPainter {
       ..shader = RadialGradient(
         colors: [
           Colors.white.withValues(alpha: 0.95),
-          col(0.6),
+          secCol(0.6),
           col(0),
         ],
         stops: const [0.0, 0.3, 1.0],
@@ -354,25 +438,26 @@ class FxPainter extends _HudPainter {
 
   String _hexByte() => _rnd.nextInt(256).toRadixString(16).padLeft(2, '0').toUpperCase();
 
-  void _regenHex(Color theme) {
+  void _regenHex(Color a, Color b, Color c3) {
     _hex = List.generate(36, (_) => _hexByte());
+    final cols = [a, b, c3];
     _hexPainters
       ..clear()
-      ..addAll(_hex.map((s) {
-        final tp = TextPainter(
-          text: TextSpan(
-            text: s,
-            style: TextStyle(
-              fontSize: 9,
-              fontFamily: 'monospace',
-              color: theme.withValues(alpha: 0.45),
+      ..addAll([
+        for (var i = 0; i < _hex.length; i++)
+          TextPainter(
+            text: TextSpan(
+              text: _hex[i],
+              style: TextStyle(
+                fontSize: 9,
+                fontFamily: 'monospace',
+                color: cols[i % 3].withValues(alpha: 0.6),
+              ),
             ),
-          ),
-          textAlign: TextAlign.center,
-          textDirection: TextDirection.ltr,
-        )..layout();
-        return tp;
-      }));
+            textAlign: TextAlign.center,
+            textDirection: TextDirection.ltr,
+          )..layout(),
+      ]);
   }
 
   @override
@@ -411,7 +496,7 @@ class FxPainter extends _HudPainter {
           Offset(p.px!, p.py!),
           Offset(x, y),
           Paint()
-            ..color = col(0.1 + p.z * 0.5)
+            ..color = spectrumCol(p.a / (math.pi * 2) + p.z * 0.3, 0.1 + p.z * 0.55)
             ..strokeWidth = 0.4 + p.z * 1.4,
         );
       }
@@ -423,7 +508,7 @@ class FxPainter extends _HudPainter {
     final sa = t * 1.2 * spin;
     final sweep = Paint()
       ..shader = SweepGradient(
-        colors: [col(0), col(0), col(0.3)],
+        colors: [secCol(0), secCol(0), secCol(0.38)],
         stops: const [0.0, 0.84, 1.0],
         transform: GradientRotation(sa),
       ).createShader(Rect.fromCircle(center: c, radius: r * 1.18))
@@ -433,14 +518,14 @@ class FxPainter extends _HudPainter {
       Offset(cx + math.cos(sa) * r * 0.36, cy + math.sin(sa) * r * 0.36),
       Offset(cx + math.cos(sa) * r * 1.18, cy + math.sin(sa) * r * 1.18),
       Paint()
-        ..color = col(0.7)
+        ..color = secCol(0.85)
         ..strokeWidth = 1.5,
     );
 
     // Hex data ring: fast refresh while thinking (HTML .1s vs 1.8s).
     if ((thinking && t - _lastHex > 0.1) || t - _lastHex > 1.8) {
       _lastHex = t;
-      _regenHex(_displayedTheme);
+      _regenHex(_displayedTheme, _displayedSec, _displayedTer);
     }
     for (var i = 0; i < _hexPainters.length; i++) {
       final tp = _hexPainters[i];
@@ -457,7 +542,10 @@ class FxPainter extends _HudPainter {
       (1.42, -0.6, 2.0),
       (1.24, 1.4, 4.0),
     ];
+    var si = 0;
     for (final (k, sp, ph) in sats) {
+      final sc = si == 0 ? col(1) : (si == 1 ? secCol(1) : terCol(1));
+      si++;
       final a = t * sp * spin + ph;
       final x = cx + math.cos(a) * r * k;
       final y = cy + math.sin(a) * r * k;
@@ -467,12 +555,12 @@ class FxPainter extends _HudPainter {
         0.8,
         false,
         Paint()
-          ..color = col(0.4)
+          ..color = sc.withValues(alpha: 0.55)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.4,
+          ..strokeWidth = 1.6,
       );
       final dotPaint = Paint()..color = Colors.white;
-      canvas.drawCircle(Offset(x, y), 2.6 * 2.2, dotPaint..color = col(0.25));
+      canvas.drawCircle(Offset(x, y), 2.6 * 2.2, dotPaint..color = sc.withValues(alpha: 0.35));
       canvas.drawCircle(Offset(x, y), 2.6, dotPaint..color = Colors.white);
     }
 
@@ -482,11 +570,72 @@ class FxPainter extends _HudPainter {
     // Horizontal lens flare.
     final flare = Paint()
       ..shader = LinearGradient(
-        colors: [col(0), col(0.3 + lvl * 0.7), col(0)],
-        stops: const [0.0, 0.5, 1.0],
+        colors: [
+          terCol(0),
+          col(0.3 + lvl * 0.7),
+          secCol(0.3 + lvl * 0.5),
+          terCol(0),
+        ],
+        stops: const [0.0, 0.35, 0.65, 1.0],
       ).createShader(Rect.fromLTWH(0, cy - 1, size.width, 2))
       ..style = PaintingStyle.fill;
     canvas.drawRect(Rect.fromLTWH(0, cy - 1, size.width, 2), flare);
+  }
+}
+
+/// 极光背景：四团缓慢漂移的彩色光晕（主色 / 辅色 / 第三色），
+/// 强度随语音能量起伏，颜色随状态平滑过渡。
+class AuroraPainter extends _HudPainter {
+  AuroraPainter({
+    required super.tick,
+    required super.mode,
+    required super.wakeMode,
+    required super.micLevel,
+    required super.themeColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final t = tick.value;
+    step(t);
+    final w = size.width;
+    final h = size.height;
+    final lvl = level;
+
+    void blob(Offset c, double r, Color col) {
+      canvas.drawCircle(
+        c,
+        r,
+        Paint()
+          ..shader = RadialGradient(
+            colors: [col, col.withValues(alpha: 0)],
+          ).createShader(Rect.fromCircle(center: c, radius: r)),
+      );
+    }
+
+    blob(
+      Offset(w * (0.12 + 0.10 * math.sin(t * 0.23)),
+          h * (0.16 + 0.07 * math.cos(t * 0.31))),
+      w * 0.95,
+      secCol(0.30 + lvl * 0.14),
+    );
+    blob(
+      Offset(w * (0.92 + 0.08 * math.cos(t * 0.27)),
+          h * (0.52 + 0.10 * math.sin(t * 0.19))),
+      w * 0.9,
+      terCol(0.26 + lvl * 0.12),
+    );
+    blob(
+      Offset(w * (0.5 + 0.14 * math.sin(t * 0.17)),
+          h * (1.0 + 0.03 * math.cos(t * 0.29))),
+      w * 0.95,
+      themeCol(0.24 + lvl * 0.12),
+    );
+    blob(
+      Offset(w * 0.5, h * 0.3),
+      w * 0.75,
+      themeCol(0.20 + lvl * 0.22),
+    );
   }
 }
 
@@ -511,19 +660,25 @@ class GridBackgroundPainter extends CustomPainter {
     canvas.drawRect(Offset.zero & size, bg);
 
     // Perspective grid, 40px cells, hue 190 at .18 (HTML `--cd`).
-    final gridPaint = Paint()
-      ..color = hueColor(190, 0.18)
+    // 竖线青色、横线紫色，双色网格。
+    final gridV = Paint()
+      ..color = hueColor(190, 0.2)
       ..strokeWidth = 1;
-    final gridPath = Path();
+    final gridH = Paint()
+      ..color = hueColor(275, 0.2)
+      ..strokeWidth = 1;
+    final pathV = Path();
+    final pathH = Path();
     for (var x = 0.0; x <= size.width; x += 40) {
-      gridPath.moveTo(x, 0);
-      gridPath.lineTo(x, size.height);
+      pathV.moveTo(x, 0);
+      pathV.lineTo(x, size.height);
     }
     for (var y = 0.0; y <= size.height; y += 40) {
-      gridPath.moveTo(0, y);
-      gridPath.lineTo(size.width, y);
+      pathH.moveTo(0, y);
+      pathH.lineTo(size.width, y);
     }
-    canvas.drawPath(gridPath, gridPaint);
+    canvas.drawPath(pathV, gridV);
+    canvas.drawPath(pathH, gridH);
 
     // Radial mask: fade the grid out toward the edges (HTML mask).
     final fade = Paint()
