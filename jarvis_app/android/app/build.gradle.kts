@@ -21,6 +21,11 @@ android {
         targetSdk = 34
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // #36：只打 arm64-v8a，删 x86_64 与 armeabi-v7a 两个架构的原生库（约 47.7MB 瘦身）。
+        // App 核心库（Flutter 引擎 + Dart 代码）本来就只有 arm64，另两个架构的库从未被加载。
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {
