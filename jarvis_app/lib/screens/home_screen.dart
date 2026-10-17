@@ -16,31 +16,24 @@ import 'settings_screen.dart';
 
 enum JarvisState { booting, idle, listening, thinking, speaking }
 
-const _ice = Color(0xFFEAFFFF);
-const _bootCyan = Color(0xFF19D3FF);
-const _bootBg = Color(0xFF00060B);
-const _bootViolet = Color(0xFF8B5CFF);
-const _bootPink = Color(0xFFFF3DCB);
+const _ice = Color(0xFFF1F4FF); // 近白文字
+const _bootCyan = Color(0xFF8AB4F8); // 蓝
+const _bootBg = Color(0xFF0B0C12);
+const _bootViolet = Color(0xFFA98BE0); // 紫
+const _bootPink = Color(0xFFE8788A); // 玫瑰
 
-// 1. 核心主题色定义与动态分发器
-const Color nanoGold = Color(0xFFFFB700);
-const Color nanoRed = Color(0xFFFF2A2A);
-const Color holoCyan = Color(0xFF19D3FF);
-const Color nanoViolet = Color(0xFF9D6BFF); // 思考：电光紫
-
+// 配色（参考 Gemini：蓝 → 紫 → 玫瑰），每个状态一个主色，辅助色在 hud_painters.dart 的 hudPaletteFor。
 Color getActiveThemeColor(JarvisState state, double _hue) {
-  // _hue 保留参数位：待命已锁定 holoCyan，不再随 hue 漂移；后续若要恢复漂移可直接用。
   switch (state) {
     case JarvisState.thinking:
-      return nanoViolet; // 思考：电光紫（想改回金色，把这里改成 nanoGold）
+      return hudPurple; // 思考：薰衣草紫
     case JarvisState.speaking:
-      return nanoGold; // 回答：纳米金
+      return hudAqua; // 回答：浅青
     case JarvisState.listening:
-      return nanoRed; // 聆听状态切为高能红色
+      return hudRose; // 聆听：玫瑰
     case JarvisState.booting:
     case JarvisState.idle:
-    default:
-      return holoCyan; // 待命状态锁定全息蓝，不随 hue 漂移
+      return hudBlue2; // 待命：天蓝
   }
 }
 
@@ -727,7 +720,7 @@ class _HomeScreenState extends State<HomeScreen>
     final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
 
     final page = Scaffold(
-      backgroundColor: const Color(0xFF010409),
+      backgroundColor: const Color(0xFF0B0C12),
       body: Stack(
         children: [
           const Positioned.fill(
@@ -737,9 +730,9 @@ class _HomeScreenState extends State<HomeScreen>
                   center: Alignment(0.0, -0.2),
                   radius: 1.2,
                   colors: [
-                    Color(0xFF0A1330),
-                    Color(0xFF02050F),
-                    Color(0xFF000103),
+                    Color(0xFF14161F),
+                    Color(0xFF0B0C12),
+                    Color(0xFF07080C),
                   ],
                   stops: [0.0, 0.5, 1.0],
                 ),
@@ -768,11 +761,6 @@ class _HomeScreenState extends State<HomeScreen>
                       _chatArea(themeColor),
                       _bottomArea(themeColor),
                     ],
-                  ),
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: RepaintBoundary(child: _cornerBrackets(themeColor)),
-                    ),
                   ),
                 ],
               ),
@@ -847,12 +835,12 @@ class _HomeScreenState extends State<HomeScreen>
                                         boxShadow: [
                                           BoxShadow(
                                               color: _bootCyan
-                                                  .withValues(alpha: 0.5),
+                                                  .withValues(alpha: 0.35),
                                               blurRadius: 40,
                                               spreadRadius: 2),
                                           BoxShadow(
                                               color: _bootPink
-                                                  .withValues(alpha: 0.35),
+                                                  .withValues(alpha: 0.22),
                                               blurRadius: 64),
                                         ],
                                       ),
@@ -898,13 +886,11 @@ class _HomeScreenState extends State<HomeScreen>
                                   style: TextStyle(
                                     color: Colors.white,
                                     fontSize: 34,
-                                    fontWeight: FontWeight.w600,
+                                    fontWeight: FontWeight.w300,
                                     letterSpacing: spacing,
                                     shadows: const [
                                       Shadow(
-                                          color: _bootViolet, blurRadius: 18),
-                                      Shadow(
-                                          color: _bootCyan, blurRadius: 40),
+                                          color: _bootViolet, blurRadius: 24),
                                     ],
                                   )),
                             ),
@@ -915,7 +901,7 @@ class _HomeScreenState extends State<HomeScreen>
                           opacity: blink,
                           child: const Text('轻触屏幕 · 唤醒系统',
                               style: TextStyle(
-                                  color: _bootCyan,
+                                  color: Colors.white54,
                                   fontSize: 13,
                                   letterSpacing: 4.5)),
                         ),
@@ -942,42 +928,39 @@ class _HomeScreenState extends State<HomeScreen>
       color: color ?? glow,
       fontSize: size,
       letterSpacing: spacing,
-      shadows: [Shadow(color: glow, blurRadius: blur)],
+      shadows: [Shadow(color: glow.withValues(alpha: 0.4), blurRadius: blur * 0.6)],
     );
   }
 
   // ---------- Top bar (HTML .top) ----------
 
   Widget _topBar(Color themeColor) {
+    const dim = TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 2.2);
     return RepaintBoundary(
       child: ListenableBuilder(
         listenable: _topAnim,
         builder: (_, _) {
-          final color = themeColor;
-          final pal = hudPaletteFor(color);
-          final style = _glow(color, size: 12, spacing: 2.2);
-          final style2 = _glow(pal.$1, size: 12, spacing: 2.2);
           return Padding(
-            padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _glitchTitle(color),
-                    Text('STARK INDUSTRIES', style: style),
+                    _glitchTitle(themeColor),
+                    const SizedBox(height: 2),
+                    const Text('STARK INDUSTRIES', style: dim),
                   ],
                 ),
                 const Spacer(),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(_clock.value, style: style2),
+                    Text(_clock.value,
+                        style: dim.copyWith(color: Colors.white54)),
                     const SizedBox(height: 2),
-                    // No battery plugin in the dependency set: same
-                    // "PWR --" fallback the HTML shows.
-                    Text('PWR --', style: style2),
+                    const Text('PWR --', style: dim),
                   ],
                 ),
               ],
@@ -988,51 +971,20 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  /// 标题：蓝 → 紫 → 玫瑰 的柔和渐变（不再有 RGB 故障闪烁）。
   Widget _glitchTitle(Color color) {
     final pal = hudPaletteFor(color);
-    // Honour the system "remove animations" setting.
-    final stage =
-        MediaQuery.disableAnimationsOf(context) ? 0 : _glitch.value;
-    final shadows = <Shadow>[
-      Shadow(color: color, blurRadius: 8),
-      if (stage == 1) ...const [
-        Shadow(offset: Offset(-2, 0), color: Color(0xFFFF00FF)),
-        Shadow(offset: Offset(2, 0), color: Color(0xFF00FFFF)),
-      ],
-      if (stage == 2) ...const [
-        Shadow(offset: Offset(2, 0), color: Color(0xFFFF00FF)),
-        Shadow(offset: Offset(-2, 0), color: Color(0xFF00FFFF)),
-      ],
-    ];
-    // 平时：三色渐变标题；故障闪烁瞬间用带 RGB 错位阴影的普通标题。
-    final Widget glitchTitle = Text('J.A.R.V.I.S',
-        style: TextStyle(
-            color: color,
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 6,
-            shadows: shadows));
-    final Widget gradTitle = ShaderMask(
+    return ShaderMask(
       blendMode: BlendMode.srcIn,
       shaderCallback: (r) =>
           LinearGradient(colors: [color, pal.$1, pal.$2]).createShader(r),
-      child: Text('J.A.R.V.I.S',
+      child: const Text('J.A.R.V.I.S',
           style: TextStyle(
               color: Colors.white,
               fontSize: 20,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 6,
-              shadows: [Shadow(color: color, blurRadius: 10)])),
+              fontWeight: FontWeight.w500,
+              letterSpacing: 6)),
     );
-    return switch (stage) {
-      1 => Transform.translate(offset: const Offset(2, 0), child: glitchTitle),
-      2 => Transform.translate(offset: const Offset(-2, 0), child: glitchTitle),
-      3 => Transform(
-          transform: Matrix4.skewX(0.14),
-          alignment: Alignment.center,
-          child: gradTitle),
-      _ => gradTitle,
-    };
   }
 
   // ---------- Reactor stage (HTML .stage) ----------
@@ -1127,15 +1079,20 @@ class _HomeScreenState extends State<HomeScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(en, style: _glow(pal.$1, size: 13, spacing: 5.2, blur: 10)),
-          const SizedBox(height: 6),
+          Text(en,
+              style: const TextStyle(
+                  color: Colors.white54, fontSize: 12, letterSpacing: 6)),
+          const SizedBox(height: 8),
           ShaderMask(
             blendMode: BlendMode.srcIn,
             shaderCallback: (r) => LinearGradient(
-                colors: [pal.$2, color, pal.$1]).createShader(r),
+                colors: [color, pal.$1, pal.$2]).createShader(r),
             child: Text(cn,
-                style: _glow(color,
-                    size: 30, spacing: 7.5, blur: 14, color: Colors.white)),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 34,
+                    fontWeight: FontWeight.w300,
+                    letterSpacing: 9)),
           ),
         ],
       ),
@@ -1167,7 +1124,6 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _gearButton(Color themeColor) {
-    final pal = hudPaletteFor(themeColor);
     return Semantics(
       button: true,
       label: '设置',
@@ -1186,19 +1142,12 @@ class _HomeScreenState extends State<HomeScreen>
               height: 38,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: pal.$1.withValues(alpha: 0.75)),
-                gradient: RadialGradient(colors: [
-                  pal.$1.withValues(alpha: 0.25),
-                  Colors.transparent,
-                ]),
-                boxShadow: [
-                  BoxShadow(
-                      color: pal.$1.withValues(alpha: 0.35), blurRadius: 12),
-                ],
+                color: Colors.white.withValues(alpha: 0.05),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
               ),
-              child: Center(
-                child:
-                    Icon(Icons.settings_outlined, size: 18, color: pal.$1),
+              child: const Center(
+                child: Icon(Icons.settings_outlined,
+                    size: 18, color: Colors.white70),
               ),
             ),
           ),
@@ -1230,31 +1179,30 @@ class _HomeScreenState extends State<HomeScreen>
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 250),
               padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
                     color: on
-                        ? pal.$1
-                        : themeColor.withValues(alpha: 0.35)),
+                        ? color.withValues(alpha: 0.8)
+                        : Colors.white.withValues(alpha: 0.18)),
                 gradient: on
                     ? LinearGradient(colors: [
-                        color.withValues(alpha: 0.4),
-                        pal.$1.withValues(alpha: 0.4),
-                        pal.$2.withValues(alpha: 0.4),
+                        color.withValues(alpha: 0.30),
+                        pal.$1.withValues(alpha: 0.30),
                       ])
                     : null,
                 boxShadow: on
                     ? [
                         BoxShadow(
-                            color: pal.$1.withValues(alpha: 0.45),
-                            blurRadius: 16)
+                            color: color.withValues(alpha: 0.28),
+                            blurRadius: 14)
                       ]
                     : null,
               ),
               child: Text('唤醒词 · ${on ? '开' : '关'}',
                   style: TextStyle(
-                      color: on ? Colors.white : color,
+                      color: on ? Colors.white : Colors.white60,
                       fontSize: 13,
                       letterSpacing: 2.6)),
             ),
@@ -1264,11 +1212,9 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  /// HUD readout bars (HTML `.rd`): label + glowing bar，三条三种颜色。
+  /// 状态读数条：低调的单色细条，只作点缀。
   Widget _readout(Color themeColor, List<String> labels, List<double> values,
       {required bool alignRight}) {
-    final pal = hudPaletteFor(themeColor);
-    final barColors = [themeColor, pal.$1, pal.$2];
     return ExcludeSemantics(child: IgnorePointer(
       child: SizedBox(
         width: 92,
@@ -1279,34 +1225,26 @@ class _HomeScreenState extends State<HomeScreen>
           children: [
             for (var i = 0; i < labels.length; i++) ...[
               Text(labels[i],
-                  style: _glow(barColors[i % 3],
-                      size: 9,
-                      spacing: 1.6,
-                      blur: 6,
-                      color: barColors[i % 3].withValues(alpha: 0.95))),
+                  style: const TextStyle(
+                      color: Colors.white38, fontSize: 9, letterSpacing: 1.6)),
               const SizedBox(height: 3),
               Container(
-                height: 3,
+                height: 2,
                 width: 92,
                 decoration: BoxDecoration(
-                  color: barColors[i % 3].withValues(alpha: 0.2),
-                  borderRadius: BorderRadius.circular(2),
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(1),
                 ),
                 alignment: Alignment.centerLeft,
                 child: Container(
                   width: 92 * values[i].clamp(0.0, 1.0),
-                  height: 3,
+                  height: 2,
                   decoration: BoxDecoration(
                     gradient: LinearGradient(colors: [
-                      barColors[i % 3].withValues(alpha: 0.35),
-                      barColors[i % 3],
+                      themeColor.withValues(alpha: 0.25),
+                      themeColor.withValues(alpha: 0.9),
                     ]),
-                    borderRadius: BorderRadius.circular(2),
-                    boxShadow: [
-                      BoxShadow(
-                          color: barColors[i % 3].withValues(alpha: 0.7),
-                          blurRadius: 6),
-                    ],
+                    borderRadius: BorderRadius.circular(1),
                   ),
                 ),
               ),
@@ -1318,66 +1256,23 @@ class _HomeScreenState extends State<HomeScreen>
     ));
   }
 
-  Widget _cornerBrackets(Color themeColor) {
-    final pal = hudPaletteFor(themeColor);
-    final c1 = themeColor.withValues(alpha: 0.9);
-    final c2 = pal.$1.withValues(alpha: 0.9);
-    final c3 = pal.$2.withValues(alpha: 0.9);
-    return Stack(
-      children: [
-        Positioned(
-            left: 8,
-            top: 6,
-            child: _Bracket(color: c1, left: true, top: true)),
-        Positioned(
-            right: 8,
-            top: 6,
-            child: _Bracket(color: c2, right: true, top: true)),
-        Positioned(
-            left: 8,
-            bottom: 8,
-            child: _Bracket(color: c3, left: true, bottom: true)),
-        Positioned(
-            right: 8,
-            bottom: 8,
-            child: _Bracket(color: c1, right: true, bottom: true)),
-      ],
-    );
-  }
-
   // ---------- Dialogue (HTML .sub colours) ----------
 
-// 3. 毛玻璃 + 三色渐变描边的对话卡片
+// 3. 安静的毛玻璃对话卡片
   Widget _chatArea(Color themeColor) {
     final thinking = _state == JarvisState.thinking;
     final pal = hudPaletteFor(themeColor);
     return Expanded(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        padding: const EdgeInsets.all(1.4),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(18),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              themeColor.withValues(alpha: 0.9),
-              pal.$1.withValues(alpha: 0.55),
-              pal.$2.withValues(alpha: 0.9),
-            ],
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: pal.$1.withValues(alpha: 0.22),
-              blurRadius: 22,
-              spreadRadius: 1,
-            ),
-          ],
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
         ),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(16.6),
+          borderRadius: BorderRadius.circular(23),
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -1385,9 +1280,8 @@ class _HomeScreenState extends State<HomeScreen>
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                   colors: [
-                    Colors.black.withValues(alpha: 0.55),
-                    themeColor.withValues(alpha: 0.10),
-                    pal.$2.withValues(alpha: 0.12),
+                    Colors.white.withValues(alpha: 0.08),
+                    Colors.white.withValues(alpha: 0.03),
                   ],
                 ),
               ),
@@ -1409,9 +1303,9 @@ class _HomeScreenState extends State<HomeScreen>
                                 child: CircularProgressIndicator(
                                     strokeWidth: 2, color: pal.$1)),
                             const SizedBox(width: 12),
-                            Text('Jarvis 正在重构神经网络…',
+                            const Text('Jarvis 正在思考…',
                                 style: TextStyle(
-                                    color: pal.$1.withValues(alpha: 0.9),
+                                    color: Colors.white60,
                                     fontSize: 13,
                                     letterSpacing: 1.2)),
                           ]),
@@ -1436,11 +1330,12 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _bottomArea(Color themeColor) {
     final pal = hudPaletteFor(themeColor);
     final outline = OutlineInputBorder(
-        borderRadius: BorderRadius.circular(16),
-        borderSide: BorderSide(color: pal.$1.withValues(alpha: 0.45)));
+        borderRadius: BorderRadius.circular(26),
+        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.14)));
     final focused = OutlineInputBorder(
-        borderRadius: BorderRadius.circular(16),
-        borderSide: BorderSide(color: themeColor, width: 1.6));
+        borderRadius: BorderRadius.circular(26),
+        borderSide:
+            BorderSide(color: themeColor.withValues(alpha: 0.8), width: 1.4));
     final sendDisabled = _state == JarvisState.thinking;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
@@ -1450,12 +1345,12 @@ class _HomeScreenState extends State<HomeScreen>
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Row(children: [
-                Icon(Icons.graphic_eq, color: pal.$1),
+                Icon(Icons.graphic_eq, color: themeColor),
                 const SizedBox(width: 8),
                 Expanded(
                     child: Text(
                         _recognized.isEmpty ? '正在聆听，请开始说话…' : _recognized,
-                        style: TextStyle(color: themeColor))),
+                        style: const TextStyle(color: _ice))),
                 const Text('点麦克风结束',
                     style: TextStyle(color: Colors.white54, fontSize: 11)),
               ]),
@@ -1469,7 +1364,7 @@ class _HomeScreenState extends State<HomeScreen>
                 tooltip: _muted ? '取消静音' : '静音',
                 onPressed: _toggleMute,
                 icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
-                    color: pal.$1),
+                    color: Colors.white60),
               ),
               Expanded(
                 child: TextField(
@@ -1482,14 +1377,14 @@ class _HomeScreenState extends State<HomeScreen>
                   cursorColor: themeColor,
                   decoration: InputDecoration(
                     hintText: '输入问题，或点麦克风说话，也可说“贾维斯”唤醒',
-                    hintStyle: const TextStyle(color: Colors.white54),
+                    hintStyle: const TextStyle(color: Colors.white38),
                     filled: true,
-                    fillColor: Colors.black.withValues(alpha: 0.4),
+                    fillColor: Colors.white.withValues(alpha: 0.06),
                     border: outline,
                     enabledBorder: outline,
                     focusedBorder: focused,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 12),
+                        horizontal: 18, vertical: 12),
                   ),
                 ),
               ),
@@ -1504,12 +1399,12 @@ class _HomeScreenState extends State<HomeScreen>
                     gradient: LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
-                      colors: [themeColor, pal.$1, pal.$2],
+                      colors: [themeColor, pal.$1],
                     ),
                     boxShadow: [
                       BoxShadow(
-                          color: pal.$1.withValues(alpha: 0.5),
-                          blurRadius: 14),
+                          color: themeColor.withValues(alpha: 0.30),
+                          blurRadius: 12),
                     ],
                   ),
                   child: IconButton(
@@ -1523,15 +1418,14 @@ class _HomeScreenState extends State<HomeScreen>
           ),
           const SizedBox(height: 6),
           Text(_statusLine,
-              style: const TextStyle(color: Colors.white54, fontSize: 11)),
+              style: const TextStyle(color: Colors.white38, fontSize: 11)),
         ],
       ),
     );
   }
 
   Widget _micButton(Color themeColor) {
-    // Own layer: the per-frame ripple / ring / bars repaint only this
-    // 102px button instead of the whole page.
+    // Own layer: the per-frame ripple / rim repaint only this button.
     final pal = hudPaletteFor(themeColor);
     return RepaintBoundary(
       child: ListenableBuilder(
@@ -1540,28 +1434,15 @@ class _HomeScreenState extends State<HomeScreen>
           final t = _tick.value;
           final color = themeColor;
           final listening = _state == JarvisState.listening;
-          final ripplePhase = t % 1;
-          final ripplePhase2 = (t + 0.5) % 1;
+          final ripplePhase = t % 1.4 / 1.4;
           final animate = !MediaQuery.disableAnimationsOf(context);
-          Widget ripple(double ph, Color c) => Opacity(
-                opacity: 1 - ph,
-                child: Transform.scale(
-                  scale: 1 + 0.9 * ph,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: c, width: 2),
-                    ),
-                  ),
-                ),
-              );
           return Semantics(button: true, label: _muted ? '取消静音' : listening ? '停止聆听并发送' : '开始语音输入', onTap: _toggleMic, excludeSemantics: true, child: GestureDetector(
             onTap: _toggleMic,
             onTapDown: (_) => _micDown.value = true,
             onTapUp: (_) => _micDown.value = false,
             onTapCancel: () => _micDown.value = false,
             child: Transform.scale(
-              scale: _micDown.value ? 0.92 : 1.0,
+              scale: _micDown.value ? 0.94 : 1.0,
               child: SizedBox(
                 width: 78,
                 height: 78,
@@ -1569,34 +1450,24 @@ class _HomeScreenState extends State<HomeScreen>
                   alignment: Alignment.center,
                   clipBehavior: Clip.none,
                   children: [
-                    // Listening pulse ripples: two colours, offset phase.
-                    if (listening && animate) ripple(ripplePhase, color),
-                    if (listening && animate) ripple(ripplePhase2, pal.$1),
-                    // Rotating dashed outer rings, counter-rotating.
-                    Transform.rotate(
-                      angle: t * math.pi * 2 / 8,
-                      child: RepaintBoundary(
-                        child: CustomPaint(
-                          size: const Size(102, 102),
-                          painter: _DashedRingPainter(
-                              color: pal.$1.withValues(alpha: 0.75)),
+                    // 聆听时向外扩散的柔和波纹。
+                    if (listening && animate)
+                      Opacity(
+                        opacity: (1 - ripplePhase) * 0.7,
+                        child: Transform.scale(
+                          scale: 1 + 0.7 * ripplePhase,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: color, width: 1.6),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                    Transform.rotate(
-                      angle: -t * math.pi * 2 / 5,
-                      child: RepaintBoundary(
-                        child: CustomPaint(
-                          size: const Size(92, 92),
-                          painter: _DashedRingPainter(
-                              color: pal.$2.withValues(alpha: 0.65)),
-                        ),
-                      ),
-                    ),
-                    // Rotating tri-colour gradient rim with glow.
+                    // 缓慢旋转的三色渐变边缘 + 柔光。
                     RepaintBoundary(
                       child: Transform.rotate(
-                        angle: t * math.pi * 2 / 6,
+                        angle: t * math.pi * 2 / 10,
                         child: Container(
                           width: 78,
                           height: 78,
@@ -1606,40 +1477,40 @@ class _HomeScreenState extends State<HomeScreen>
                                 colors: [color, pal.$1, pal.$2, color]),
                             boxShadow: [
                               BoxShadow(
-                                  color: color.withValues(alpha: 0.45),
-                                  blurRadius: 22,
+                                  color: color.withValues(alpha: 0.30),
+                                  blurRadius: 26,
                                   spreadRadius: 1),
                               BoxShadow(
-                                  color: pal.$2.withValues(alpha: 0.3),
-                                  blurRadius: 30),
+                                  color: pal.$2.withValues(alpha: 0.18),
+                                  blurRadius: 36),
                             ],
                           ),
                         ),
                       ),
                     ),
-                    // Dark glassy centre disc.
+                    // 深色玻璃中心。
                     Container(
-                      width: 70,
-                      height: 70,
+                      width: 72,
+                      height: 72,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         gradient: RadialGradient(
                           center: const Alignment(-0.3, -0.4),
                           colors: [
-                            color.withValues(alpha: 0.55),
-                            const Color(0xFF050B1A),
+                            color.withValues(alpha: 0.30),
+                            const Color(0xFF0E1018),
                           ],
                         ),
                       ),
                     ),
                     if (listening)
                       CustomPaint(
-                        size: const Size(32, 32),
+                        size: const Size(30, 30),
                         painter:
                             _BarsIconPainter(tick: t, color: Colors.white),
                       )
                     else
-                      const Icon(Icons.mic, size: 32, color: Colors.white),
+                      const Icon(Icons.mic, size: 30, color: Colors.white),
                   ],
                 ),
               ),
@@ -1651,7 +1522,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 }
 
-/// One chat line，气泡式：用户=渐变气泡靠右，Jarvis=彩色玻璃气泡靠左。
+/// One chat line：用户 = 渐变气泡靠右，Jarvis = 安静的玻璃气泡靠左。
 class _MessageTile extends StatelessWidget {
   const _MessageTile(
       {required this.msg, required this.themeColor, required this.onSpeak});
@@ -1663,7 +1534,6 @@ class _MessageTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final user = msg.role == 'user';
     final pal = hudPaletteFor(themeColor);
-    final accent = user ? pal.$1 : themeColor;
     return Semantics(container: true, label: user ? '你说：' : 'Jarvis 回答：', child: Align(
       alignment: user ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
@@ -1671,48 +1541,36 @@ class _MessageTile extends StatelessWidget {
             maxWidth: MediaQuery.sizeOf(context).width * 0.82),
         child: Container(
           margin: const EdgeInsets.only(bottom: 10),
-          padding: EdgeInsets.fromLTRB(12, 10, 12, user ? 10 : 2),
+          padding: EdgeInsets.fromLTRB(14, 10, 14, user ? 10 : 2),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(user ? 16 : 4),
-              topRight: Radius.circular(user ? 4 : 16),
-              bottomLeft: const Radius.circular(16),
-              bottomRight: const Radius.circular(16),
+              topLeft: Radius.circular(user ? 18 : 4),
+              topRight: Radius.circular(user ? 4 : 18),
+              bottomLeft: const Radius.circular(18),
+              bottomRight: const Radius.circular(18),
             ),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: user
-                  ? [
-                      pal.$1.withValues(alpha: 0.32),
-                      pal.$2.withValues(alpha: 0.24),
-                    ]
-                  : [
-                      themeColor.withValues(alpha: 0.18),
-                      pal.$1.withValues(alpha: 0.08),
+            gradient: user
+                ? LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      themeColor.withValues(alpha: 0.38),
+                      pal.$1.withValues(alpha: 0.30),
                     ],
-            ),
-            border: Border.all(color: accent.withValues(alpha: 0.45)),
-            boxShadow: [
-              BoxShadow(color: accent.withValues(alpha: 0.14), blurRadius: 12),
-            ],
+                  )
+                : null,
+            color: user ? null : Colors.white.withValues(alpha: 0.06),
+            border: user
+                ? null
+                : Border.all(color: Colors.white.withValues(alpha: 0.08)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               SelectableText(msg.text,
-                  style: TextStyle(
-                      color: user ? Colors.white : _ice,
-                      height: 1.5,
-                      fontSize: 14,
-                      shadows: user
-                          ? null
-                          : [
-                              Shadow(
-                                  color: themeColor.withValues(alpha: 0.6),
-                                  blurRadius: 10)
-                            ])),
+                  style: const TextStyle(
+                      color: _ice, height: 1.55, fontSize: 14)),
               if (!user)
                 Align(
                   alignment: Alignment.centerRight,
@@ -1720,8 +1578,8 @@ class _MessageTile extends StatelessWidget {
                     visualDensity: VisualDensity.compact,
                     tooltip: '朗读回答',
                     onPressed: onSpeak,
-                    icon: Icon(Icons.volume_up_outlined,
-                        size: 19, color: pal.$1),
+                    icon: const Icon(Icons.volume_up_outlined,
+                        size: 19, color: Colors.white54),
                   ),
                 ),
             ],
@@ -1730,63 +1588,6 @@ class _MessageTile extends StatelessWidget {
       ),
     ));
   }
-}
-
-/// HUD corner bracket: draws only the requested sides.
-class _Bracket extends StatelessWidget {
-  const _Bracket({
-    required this.color,
-    this.left = false,
-    this.top = false,
-    this.right = false,
-    this.bottom = false,
-  });
-  final Color color;
-  final bool left, top, right, bottom;
-
-  @override
-  Widget build(BuildContext context) {
-    final side = BorderSide(color: color, width: 2);
-    return SizedBox(
-      width: 22,
-      height: 22,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border(
-            left: left ? side : BorderSide.none,
-            top: top ? side : BorderSide.none,
-            right: right ? side : BorderSide.none,
-            bottom: bottom ? side : BorderSide.none,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Dashed outer ring around the mic button (HTML `.mic:before`).
-class _DashedRingPainter extends CustomPainter {
-  final Color color;
-  _DashedRingPainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final c = Offset(size.width / 2, size.height / 2);
-    final r = math.min(size.width, size.height) / 2;
-    final rect = Rect.fromCircle(center: c, radius: r);
-    final p = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    const n = 24;
-    const step = math.pi * 2 / n;
-    for (var i = 0; i < n; i++) {
-      canvas.drawArc(rect, i * step, step * 0.5, false, p);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _DashedRingPainter old) => old.color != color;
 }
 
 /// Sound-bar icon shown on the mic button while listening.

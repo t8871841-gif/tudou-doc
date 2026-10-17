@@ -44,11 +44,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _previewing = false;
 
   // Lifted-contrast dark palette (still dark, no longer flat black).
-  static const _accent = Color(0xFF33DDFF);
-  static const _pageBg = Color(0xFF0A1622);
-  static const _card = Color(0xFF14273A);
-  static const _inputBg = Color(0xFF1D3852);
-  static const _dropdownBg = Color(0xFF1E3A52);
+  static const _accent = Color(0xFF8AB4F8);
+  static const _pageBg = Color(0xFF111319);
+  static const _card = Color(0xFF1A1D26);
+  static const _inputBg = Color(0xFF252936);
+  static const _dropdownBg = Color(0xFF252936);
 
   @override
   void dispose() {
