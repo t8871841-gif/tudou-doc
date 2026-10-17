@@ -64,8 +64,14 @@ jobs:
         run: flutter analyze --no-pub
         continue-on-error: true
 
-      - name: Build universal release APK
-        run: flutter build apk --release
+      # 上次构建在打包时磁盘满（No space left on device）：包里多了 199MB 离线模型，
+      # 通用包 + 拆分包两轮构建撑爆了磁盘。只出拆分包 + 提前清理与构建无关的大文件。
+      - name: Free disk space
+        run: |
+          df -h .
+          rm -f "汉唐本草_定制APK源码_语音AI版.zip" || true
+          docker system prune -af || true
+          df -h .
 
       - name: Build split APKs
         run: flutter build apk --release --split-per-abi
