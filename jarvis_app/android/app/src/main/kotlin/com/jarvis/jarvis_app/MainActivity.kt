@@ -55,6 +55,26 @@ class MainActivity : FlutterActivity() {
                         JarvisAccessibilityService.arm(pkgs, windowMs)
                         result.success(true)
                     }
+                    // ---------- 任务模式：每 App 一个适配器，由 Dart 下发声明式步骤 ----------
+                    "startTask" -> {
+                        // 必须在拉起目标 App 之前调用。包名只能取“硬白名单 + 默认短信 App”的交集。
+                        // packages 为空 = 默认（WhatsApp + 系统默认短信 App）；传了也只取与白名单的交集
+                        val pkgs = call.argument<List<String>>("packages")?.toSet()
+                            ?.takeIf { it.isNotEmpty() } ?: defaultSendPackages()
+                        val steps = call.argument<List<Map<String, Any?>>>("steps") ?: emptyList()
+                        val windowMs = (call.argument<Number>("windowMs")?.toLong() ?: 40_000L)
+                            .coerceIn(5_000L, 90_000L)
+                        JarvisAccessibilityService.setExtraWhitelist(smsPackages())
+                        result.success(JarvisAccessibilityService.startTask(pkgs, steps, windowMs))
+                    }
+                    "awaitTask" -> {
+                        // 任务结束（成功/失败/超时）时才回调；已结束则立刻返回上一次结果
+                        JarvisAccessibilityService.awaitTask { map -> result.success(map) }
+                    }
+                    "cancelTask" -> {
+                        JarvisAccessibilityService.cancelTask()
+                        result.success(true)
+                    }
                     "disableAutoClick" -> {
                         JarvisAccessibilityService.disarm()
                         result.success(true)
@@ -100,25 +120,28 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /** 自动点“发送”的默认白名单：系统默认短信 App + WhatsApp。 */
-    private fun defaultSendPackages(): Set<String> {
-        val out = mutableSetOf("com.whatsapp", "com.whatsapp.w4b")
+    /** 系统默认短信 App 的包名集合（取不到时给常见候选）。 */
+    private fun smsPackages(): Set<String> {
         val sms = try {
             Telephony.Sms.getDefaultSmsPackage(this)
         } catch (_: Exception) {
             null
         }
-        if (sms != null) {
-            out.add(sms)
+        return if (sms != null) {
+            setOf(sms)
         } else {
-            out.addAll(
-                listOf(
-                    "com.android.mms",
-                    "com.google.android.apps.messaging",
-                    "com.samsung.android.messaging"
-                )
+            setOf(
+                "com.android.mms",
+                "com.google.android.apps.messaging",
+                "com.samsung.android.messaging"
             )
         }
+    }
+
+    /** 自动点“发送”的默认白名单：系统默认短信 App + WhatsApp（旧模式 enableAutoClick 用）。 */
+    private fun defaultSendPackages(): Set<String> {
+        val out = mutableSetOf("com.whatsapp", "com.whatsapp.w4b")
+        out.addAll(smsPackages())
         return out
     }
 

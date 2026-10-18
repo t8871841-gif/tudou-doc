@@ -4,31 +4,29 @@ import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// Device actions: call / message / read SMS / alarm / open app.
+/// Device actions: call / message / cross-app message / read SMS / alarm / open app.
 /// Chinese commands only. Returns a reply string when handled,
 /// null when the text is not a device-action command (caller falls
 /// through to LLM chat).
 ///
-/// Safety: calls open the dialer (ACTION_DIAL semantics via tel:),
-/// messages open the SMS composer (WeChat has no public compose
-/// intent, so WeChat requests fall back to opening the SMS composer
-/// with the body prefilled), alarms open the system Clock app to
-/// confirm, SMS reading only reads the inbox and speaks it back.
-/// Nothing is sent silently.
+/// 安全与诚实原则：
+///  - 打电话只打开拨号盘（tel:），不直接拨出；
+///  - 微信 / QQ 等跨应用发消息：先复述确认，用户确认后才执行；
+///    由原生无障碍引擎在“白名单 App”里一步步操作（每步等界面就绪，超时即失败），
+///    发完回查界面核实，核实成功才说“已发送”，否则如实说“没发成 / 没能确认”和卡在哪一步；
+///  - 不做：转账 / 付款 / 红包、输入密码 / 验证码、删除内容、发朋友圈 / 动态、
+///    点赞 / 评论 / 关注、修改账号设置；
+///  - 闹钟只打开系统时钟让用户确认；读短信只读收件箱并朗读。
+///
+/// 跨应用状态：确认发送 / 选第几个联系人，靠 [_pending] 在下一次 [tryHandle] 里接上，
+/// 所以调用方必须让“用户的下一句话”也先经过 tryHandle（见 [hasPending]）。
 class DeviceActions {
   static final _phoneReg = RegExp(r'1[3-9]\d{9}');
+  static final _mobileFull = RegExp(r'^1[3-9]\d{9}$');
   static const _smsChannel = MethodChannel('jarvis/sms');
   static const _launcherChannel = MethodChannel('jarvis/launcher');
   static const _accessibilityChannel =
       MethodChannel('com.example.jarvis/accessibility');
-
-  /// 触发跨应用操作前调用：武装无障碍自动点击，目标界面出现后自动点“发送”/“Send”。
-  /// 必须在拉起目标 App 之前调用，否则窗口事件可能已错过。
-  static Future<void> _enableAutoClick() async {
-    try {
-      await _accessibilityChannel.invokeMethod('enableAutoClick');
-    } catch (_) {}
-  }
 
   static Future<bool> _isAccessibilityEnabled() async {
     try {
@@ -45,6 +43,20 @@ class DeviceActions {
     try {
       await _accessibilityChannel.invokeMethod('openAccessibilitySettings');
     } catch (_) {}
+  }
+
+  /// 跳转本应用的系统设置页（用来开通讯录权限）。UI 想做“去开权限”按钮时直接调这个。
+  static Future<void> openContactsPermissionSettings() async {
+    try {
+      await openAppSettings();
+    } catch (_) {}
+  }
+
+  /// 是否有“等用户回答”的挂起操作（确认发送 / 选联系人）。
+  /// 调用方应保证：hasPending 为 true 时，用户的下一句话一定先交给 [tryHandle]。
+  static bool get hasPending {
+    final p = _pending;
+    return p != null && DateTime.now().isBefore(p.expires);
   }
 
   // Chinese app name -> candidate package names, tried in order.
@@ -124,17 +136,101 @@ class DeviceActions {
     'Netflix': ['com.netflix.mediaclient'],
   };
 
+
+  // ======================================================================
+  // 入口
+  // ======================================================================
+
+  static bool _busy = false;
+  static _Pending? _pending;
+
   static Future<String?> tryHandle(String text) async {
     final t = text.trim();
     if (t.isEmpty) return null;
-    return await _tryCall(t) ??
-        await _tryMessage(t) ??
+
+    // 上一轮留下的“确认发送 / 选第几个联系人”：先取走，只给一次机会。
+    final p = _pending;
+    if (p != null) {
+      _pending = null;
+      if (DateTime.now().isBefore(p.expires)) {
+        final r = await _handlePending(p, t);
+        if (r != null) return r;
+        // 既不是确认也不是取消：旧的作废，当作新指令继续往下走
+      }
+    }
+    // 顺序有讲究：先判“发消息”，再判“打电话”——
+    // 否则消息正文里带“打电话”（“发信息说我打电话给你”）会被当成拨号。
+    // “拒绝类”放发消息/打电话之后：只在不是合法发消息/打电话指令时才判拒绝，
+    // 否则消息正文里的“点赞/验证码”会被误判（“发消息说别点赞了”）。
+    return await _tryMessage(t) ??
+        await _tryCall(t) ??
+        await _tryRefuse(t) ??
         await _tryReadSms(t) ??
         await _tryAlarm(t) ??
         await _tryOpenApp(t);
   }
 
-  // ---------- Contacts ----------
+  // ---------- 挂起操作：确认 / 选人 ----------
+
+  static final _yesReg = RegExp(
+      r'^(对|对的|对啊|对呀|是|是的|是啊|没错|正确|确认|确定|好|好的|好吧|好啊|可以|行|行的|发吧|发送|发|嗯|嗯嗯|ok|yes)$',
+      caseSensitive: false);
+  static final _noReg = RegExp(r'^(不|不对|不是|不用|不要|不发|取消|算了|别发|别|错了|否|no)',
+      caseSensitive: false);
+
+  static String _trimPunct(String s) => s
+      .replaceAll(RegExp(r'^[\s，。！？,.!?~、]+'), '')
+      .replaceAll(RegExp(r'[\s，。！？,.!?~、]+$'), '');
+
+  static Future<String?> _handlePending(_Pending p, String raw) async {
+    final s = _trimPunct(raw);
+    if (_noReg.hasMatch(s)) {
+      return p.cands == null ? '好的，已取消，没有发送。' : '好的，已取消。';
+    }
+    if (p.cands == null) {
+      if (_yesReg.hasMatch(s)) return await p.run(null);
+      return null;
+    }
+    final idx = _pickIndex(s, p.cands!);
+    if (idx == null) return null;
+    return await p.run(p.cands![idx]);
+  }
+
+  static int? _pickIndex(String s, List<_Cand> cands) {
+    final m = RegExp(r'^第?([0-9]+|[零一二两三四五六七八九十]+)(?:个|位|号|条)?$')
+        .firstMatch(s);
+    if (m != null) {
+      final g = m.group(1)!;
+      final n = int.tryParse(g) ?? _parseCnNumber(g);
+      if (n != null && n >= 1 && n <= cands.length) return n - 1;
+      return null;
+    }
+    // 直接说名字 / 尾号也行：必须唯一命中才算，绝不擅自挑第一个
+    final hits = <int>[];
+    for (var i = 0; i < cands.length; i++) {
+      if (s.isNotEmpty &&
+          (cands[i].label.contains(s) || s.contains(cands[i].name))) {
+        hits.add(i);
+      }
+    }
+    return hits.length == 1 ? hits.first : null;
+  }
+
+  // ---------- 明确不做的事：直说，别答应了又没做 ----------
+
+  static Future<String?> _tryRefuse(String t) async {
+    final bad = RegExp(
+        r'转账|汇款|付款|发红包|抢红包|发朋友圈|发动态|点赞|刷赞|评论|关注|删除.{0,6}(聊天|消息|好友|联系人)|验证码|密码');
+    final question = RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？');
+    if (bad.hasMatch(t) && _detectApp(t) != null && !question.hasMatch(t)) {
+      return '这类操作（转账、红包、发朋友圈/动态、点赞评论关注、删除内容、验证码和密码）我不做，也没有动手。我只能帮你给联系人发消息。';
+    }
+    return null;
+  }
+
+  // ======================================================================
+  // 通讯录
+  // ======================================================================
 
   static String _normalizePhone(String raw) {
     var d = raw.replaceAll(RegExp(r'\D'), '');
@@ -143,160 +239,534 @@ class DeviceActions {
     return d;
   }
 
-  /// Find the contact whose display name appears in [text].
-  /// Longest matching name wins ("微信读书" beats "微信", "张小明" beats "张").
-  /// Returns null when contacts permission is denied or no name matches.
-  static Future<Contact?> _findContactInText(String text) async {
-    try {
-      final ok = await FlutterContacts.requestPermission();
-      if (!ok) return null;
-      final contacts =
-          await FlutterContacts.getContacts(withProperties: true);
-      final flat = text.replaceAll(' ', '');
-      Contact? best;
-      var bestLen = 0;
-      for (final c in contacts) {
-        final name = c.displayName.trim();
-        if (name.isEmpty) continue;
-        final flatName = name.replaceAll(' ', '');
-        if (flatName.isNotEmpty &&
-            flat.contains(flatName) &&
-            flatName.length > bestLen) {
-          best = c;
-          bestLen = flatName.length;
-        }
-      }
-      return best;
-    } catch (_) {
-      return null;
+  static String _flat(String s) =>
+      s.replaceAll(RegExp(r'[\s，。,.！？!?、：:“”"]'), '');
+
+  static const _compoundSurnames = <String>[
+    '欧阳', '司马', '上官', '诸葛', '东方', '皇甫', '尉迟', '公孙',
+    '慕容', '令狐', '长孙', '宇文', '轩辕', '夏侯', '司徒', '端木',
+  ];
+
+  /// 去掉姓后的“名”。只处理纯中文名；两字名去姓后只剩一个字，太短，不按名匹配。
+  static String _givenName(String name) {
+    if (!RegExp(r'^[\u4e00-\u9fa5]+$').hasMatch(name)) return '';
+    for (final s in _compoundSurnames) {
+      if (name.startsWith(s) && name.length > 2) return name.substring(2);
     }
+    return name.length >= 3 ? name.substring(1) : '';
   }
 
-  static String? _contactPhone(Contact c) {
+  /// 取联系人号码：11 位手机号优先；打电话时没有手机号也接受其他号码（座机 / 客服号）。
+  static String? _contactPhone(Contact c, {required bool mobileOnly}) {
+    String? fallback;
     for (final p in c.phones) {
       final d = _normalizePhone(p.number);
-      if (_phoneReg.hasMatch(d)) return d;
+      if (_mobileFull.hasMatch(d)) return d;
+      if (!mobileOnly && d.length >= 5) fallback ??= d;
     }
-    return null;
+    return fallback;
   }
 
-  /// Resolve a target phone number from text: raw 11-digit number first,
-  /// then a contact name found in the text. Returns (phone, contactName).
-  /// contactName is null when the number came from raw digits.
-  static Future<({String? phone, String? name})> _resolveTarget(
-      String t) async {
-    final raw = _phoneReg.firstMatch(t)?.group(0);
-    if (raw != null) return (phone: raw, name: null);
-    final contact = await _findContactInText(t);
-    if (contact == null) return (phone: null, name: null);
-    final phone = _contactPhone(contact);
-    if (phone == null) return (phone: null, name: contact.displayName);
-    return (phone: phone, name: contact.displayName);
+  /// 按“名字”查通讯录。匹配分三档，哪一档先有结果就用哪一档：
+  ///  1. 全名；2. 名（去掉姓，如“小明”匹配“张小明”）；3. 名字里包含这几个字。
+  /// 只拿“收件人 / 被叫人名字”去匹配，不再拿整句话（正文里的人名会串进来）。
+  static Future<_Lookup> _lookupContact(String query,
+      {required bool forCall}) async {
+    try {
+      var st = await Permission.contacts.status;
+      if (!st.isGranted && !st.isLimited) {
+        st = await Permission.contacts.request();
+      }
+      if (!st.isGranted && !st.isLimited) {
+        return const _Lookup(_LookupKind.denied);
+      }
+      final q = _flat(query);
+      if (q.isEmpty) return const _Lookup(_LookupKind.none);
+      final contacts = await FlutterContacts.getContacts(withProperties: true);
+      final t1 = <Contact>[], t2 = <Contact>[], t3 = <Contact>[];
+      for (final c in contacts) {
+        final name = _flat(c.displayName);
+        if (name.isEmpty) continue;
+        if (name == q || (name.length >= 2 && q.contains(name))) {
+          t1.add(c);
+          continue;
+        }
+        final given = _givenName(name);
+        if (given.isNotEmpty &&
+            (given == q || (given.length >= 2 && q.contains(given)))) {
+          t2.add(c);
+          continue;
+        }
+        if (q.length >= 2 && name.contains(q)) t3.add(c);
+      }
+      final tier = t1.isNotEmpty ? t1 : (t2.isNotEmpty ? t2 : t3);
+      if (tier.isEmpty) return const _Lookup(_LookupKind.none);
+      final cands = <_Cand>[];
+      final seen = <String>{};
+      String? noNumName;
+      for (final c in tier) {
+        final phone = _contactPhone(c, mobileOnly: !forCall);
+        if (phone == null) {
+          noNumName ??= c.displayName;
+          continue;
+        }
+        if (seen.add('${c.displayName}|$phone')) {
+          cands.add(_Cand(c.displayName.trim(), phone));
+        }
+      }
+      if (cands.isEmpty) {
+        return _Lookup(_LookupKind.noNumber, name: noNumName);
+      }
+      return cands.length == 1
+          ? _Lookup(_LookupKind.one, cands: cands)
+          : _Lookup(_LookupKind.many, cands: cands);
+    } catch (_) {
+      return const _Lookup(_LookupKind.error);
+    }
   }
 
-  // ---------- Call ----------
+  /// 通讯录权限被拒：明说，并直接跳到应用设置，不再静默回落到“请带上号码”。
+  static Future<String> _contactsDeniedReply() async {
+    await openContactsPermissionSettings();
+    return '通讯录权限被拒绝，所以我没法按名字找人。已为你打开应用设置，请在“权限”里允许 Jarvis 读取通讯录，然后再说一次。';
+  }
+
+  /// 按名字找人并交给 [onPick]。多个匹配时列出来让用户选，绝不擅自选第一个。
+  static Future<String> _withContact(
+    String query, {
+    required bool forCall,
+    required Future<String> Function(_Cand c) onPick,
+  }) async {
+    final r = await _lookupContact(query, forCall: forCall);
+    switch (r.kind) {
+      case _LookupKind.denied:
+        return await _contactsDeniedReply();
+      case _LookupKind.error:
+        return '读取通讯录失败，请稍后再试，或者直接说号码。';
+      case _LookupKind.none:
+        return '通讯录里没找到“$query”，请换个叫法，或者直接说号码。';
+      case _LookupKind.noNumber:
+        return '通讯录里的 ${r.name} 没有${forCall ? '' : '手机'}号码，请直接说号码。';
+      case _LookupKind.one:
+        return await onPick(r.cands!.first);
+      case _LookupKind.many:
+        _pending = _Pending(r.cands, (c) => onPick(c!));
+        final buf = StringBuffer('通讯录里有 ${r.cands!.length} 个匹配，请说第几个：');
+        for (var i = 0; i < r.cands!.length; i++) {
+          buf.write('\n${i + 1}. ${r.cands![i].label}');
+        }
+        return buf.toString();
+    }
+  }
+
+  // ======================================================================
+  // 打电话
+  // ======================================================================
+
+  static final _callTrigger =
+      RegExp(r'打个?电话|拨个?电话|拨打|打给|呼叫|拨个?号|给.{1,12}?[打拨]个?电话');
+
+  static String _parseCallTarget(String t) {
+    var q = RegExp(r'给(.{1,12}?)[打拨]个?电话').firstMatch(t)?.group(1);
+    q ??= RegExp(r'(?:打个?电话|拨个?电话|拨打|打给|呼叫|拨个?号)(?:给|到)?(.*)$')
+            .firstMatch(t)
+            ?.group(1) ??
+        '';
+    q = q
+        .replaceAll(RegExp(r'^(请|帮我|麻烦|我要|我想|帮忙)+'), '')
+        .replaceAll(RegExp(r'(的电话|的号码|的手机|电话|一下|吧|啊|谢谢|好吗)+$'), '');
+    return _flat(q).replaceAll(RegExp(r'的$'), '');
+  }
 
   static Future<String?> _tryCall(String t) async {
-    if (!t.contains('打电话') &&
-        !t.contains('拨打') &&
-        !t.contains('打给') &&
-        !t.contains('呼叫')) {
-      return null;
-    }
-    final target = await _resolveTarget(t);
-    final phone = target.phone;
-    if (phone == null) {
-      if (target.name != null) {
-        return '通讯录里 ${target.name} 没有手机号，请带上号码，例如：打电话给 13812345678。';
-      }
-      return '要打电话请带上号码或通讯录里的名字，例如：打电话给张三，或打电话给 13812345678。';
-    }
+    if (!_callTrigger.hasMatch(t)) return null;
+    // 说了号码优先用号码（语音识别常带空格 / 横线，先去掉再找）
+    final raw =
+        _phoneReg.firstMatch(t.replaceAll(RegExp(r'[\s\-]'), ''))?.group(0);
+    if (raw != null) return await _dial(raw, null);
+    final q = _parseCallTarget(t);
+    if (q.isEmpty) return '打给谁？请说名字或号码，例如：给张三打个电话。';
+    return await _withContact(q,
+        forCall: true, onPick: (c) => _dial(c.phone, c.name));
+  }
+
+  /// 仍然只打开拨号盘，不直接拨出。
+  static Future<String> _dial(String phone, String? name) async {
     final uri = Uri(scheme: 'tel', path: phone);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
-      final who = target.name != null ? '${target.name} $phone' : phone;
+      final who = name != null ? '$name $phone' : phone;
       return '已打开拨号盘，号码 $who，点拨打即可接通。';
     }
     return '打不开拨号盘，请检查电话权限。';
   }
 
-  // ---------- Message ----------
+  // ======================================================================
+  // 发消息：识别 App / 收件人 / 正文
+  // ======================================================================
+
+  static const _channelWords =
+      '微信|QQ|qq|短信|短消息|信息|消息|WhatsApp|whatsapp|Whatsapp';
+  static const _lead = r'(?:请|麻烦|帮我|帮忙|替我|我要|我想|你)*';
+  static const _fill = r'(?:了|个|条|一条|一下|封)?';
+
+  /// 找出这句话要用哪个 App：取“最先出现”的那个，
+  /// 这样“给张三发短信说我在微信上等你”不会被正文里的“微信”带偏。
+  static String? _detectApp(String s) {
+    final low = s.toLowerCase();
+    String? best;
+    var bestIdx = 1 << 30;
+    var bestLen = 0;
+    void consider(String alias, String id) {
+      final i = low.indexOf(alias.toLowerCase());
+      if (i < 0) return;
+      if (i < bestIdx || (i == bestIdx && alias.length > bestLen)) {
+        best = id;
+        bestIdx = i;
+        bestLen = alias.length;
+      }
+    }
+
+    for (final a in _adapters) {
+      for (final al in a.aliases) {
+        consider(al, a.id);
+      }
+    }
+    consider('whatsapp', 'whatsapp');
+    consider('短信', 'sms');
+    consider('短消息', 'sms');
+    return best;
+  }
+
+  /// 所有 App 名字拼成正则备选（长名在前，“企业微信”先于“微信”）。
+  static String _appAlternation() {
+    final names = <String>{'WhatsApp', 'whatsapp', '短信', '短消息'};
+    for (final a in _adapters) {
+      names.addAll(a.aliases);
+    }
+    final list = names.toList()..sort((x, y) => y.length.compareTo(x.length));
+    return list.map(RegExp.escape).join('|');
+  }
+
+  static _Adapter? _adapterById(String id) {
+    for (final a in _adapters) {
+      if (a.id == id) return a;
+    }
+    return null;
+  }
+
+  static String _cleanBody(String b) {
+    var s = b.replaceFirst(RegExp(r'^[，,：:、\s]+'), '');
+    s = s.replaceFirst(RegExp(r'^(?:说|讲|道|告诉他|告诉她|告诉)(?=.)'), '');
+    s = s.replaceFirst(RegExp(r'^[，,：:、\s]+'), '');
+    return s.replaceFirst(RegExp(r'[。\s]+$'), '').trim();
+  }
+
+  static String _cleanRecipient(String n) =>
+      _flat(n).replaceAll(RegExp(r'^我的'), '').replaceAll(RegExp(r'的$'), '');
+
+  /// “收件人+正文”粘在一起时拆开：优先标点 / “说”做分界；都没有就取前 2 个字当名字。
+  /// 拆错了也不要紧：发送前一定会复述确认。
+  static (String, String)? _splitNameBody(String rest0) {
+    // 开头是手机号（语音识别常把号码拆成“138 1234 5678”）：号码就是收件人
+    final rest = rest0.replaceAll(RegExp(r'(?<=\d)[\s\-](?=\d)'), '');
+    final ph = RegExp(r'^(1[3-9]\d{9})(.*)$').firstMatch(rest);
+    if (ph != null) return (ph.group(1)!, ph.group(2)!);
+    final p1 = RegExp(r'^(.{1,10}?)[，,：:、\s]+(.+)$').firstMatch(rest);
+    if (p1 != null) return (p1.group(1)!, p1.group(2)!);
+    final p2 =
+        RegExp(r'^(.{1,6}?)(?:说|讲|道|告诉他|告诉她)[，,：:\s]*(.+)$').firstMatch(rest);
+    if (p2 != null) return (p2.group(1)!, p2.group(2)!);
+    if (rest.length > 3) return (rest.substring(0, 2), rest.substring(2));
+    return null;
+  }
+
+  static _MsgIntent? _parseMessageIntent(String s0, String? app) {
+    // 去掉开头的“在微信上 / 用QQ / 通过短信”
+    final s = s0.replaceFirst(
+        RegExp(r'^' +
+            _lead +
+            r'(?:在|用|通过|打开|切到)?(?:' +
+            _appAlternation() +
+            r')(?:上|里|中|里面|app|App)?[，,\s]*'),
+        '');
+    // 没点名 App 时，必须出现“微信/短信/信息/消息…”这类词才算发消息，避免误伤“给我发个红包”。
+    final chan = app != null ? '(?:$_channelWords)?' : '(?:$_channelWords)';
+
+    // A：给<名字>发<微信/信息…>[，说]<正文>
+    final a = RegExp('^$_lead' +
+            r'给(.{1,12}?)发(?:送)?' +
+            _fill +
+            chan +
+            r'[，,：:\s]*(?:说|讲|道|告诉他|告诉她|告诉)?[，,：:\s]*(.*)$')
+        .firstMatch(s);
+    if (a != null) {
+      return _MsgIntent(
+          _cleanRecipient(a.group(1)!), _cleanBody(a.group(2) ?? ''));
+    }
+
+    // B：发<微信/信息…>给<名字>[，说]<正文>
+    final b = RegExp('^$_lead' + r'发(?:送)?' + _fill + chan + r'(?:给|到)(.+)$')
+        .firstMatch(s);
+    if (b != null) {
+      final nb = _splitNameBody(b.group(1)!);
+      if (nb == null) return _MsgIntent(_cleanRecipient(b.group(1)!), '');
+      return _MsgIntent(_cleanRecipient(nb.$1), _cleanBody(nb.$2));
+    }
+    return null;
+  }
 
   static Future<String?> _tryMessage(String t) async {
-    final isSms = t.contains('发短信') ||
-        t.contains('发短消息') ||
-        t.contains('发信息') ||
-        (t.contains('发消息') && !t.contains('微信'));
-    final isWechat = t.contains('发微信');
-    final isWhatsapp =
-        t.toLowerCase().contains('whatsapp') || t.contains('发WhatsApp');
-    if (!isSms && !isWechat && !isWhatsapp) return null;
+    final s0 = t.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final app = _detectApp(s0);
+    final intent = _parseMessageIntent(s0, app);
+    if (intent == null) {
+      // 明明是发消息的口气却没解析出来：直说，不要漏给闲聊、更不要假装办了。
+      // 疑问句（“怎么在微信上发消息”）不是指令：别问“发给谁”，交给闲聊回答。
+      final isQuestion =
+          RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(s0);
+      if (!isQuestion &&
+          RegExp(r'发(?:送)?' + _fill + r'(?:' + _channelWords + r')')
+              .hasMatch(s0)) {
+        return '要发给谁、发什么内容？例如：在微信上给张三发消息，晚上我回家吃饭。';
+      }
+      return null;
+    }
+    if (intent.name.isEmpty || intent.body.isEmpty) {
+      final where = app == null ? '' : (_adapterById(app)?.label ?? '');
+      return intent.name.isEmpty
+          ? '要发给谁？例如：在微信上给张三发消息，晚上我回家吃饭。'
+          : '要给$where${intent.name}发什么内容？请连内容一起说，例如：给${intent.name}发消息，晚上我回家吃饭。';
+    }
 
-    final target = await _resolveTarget(t);
-    final phone = target.phone;
-    if (phone == null) {
-      if (target.name != null) {
-        return '通讯录里 ${target.name} 没有手机号，请带上号码，例如：给 13812345678 发短信你好。';
+    final key = app ?? 'sms'; // 没点名 App：保持原有行为，按短信处理
+    final adapter = _adapterById(key);
+    if (adapter != null) {
+      if (!adapter.enabled) {
+        return '目前还没适配“${adapter.label}”的自动发消息，所以我没有动手，也没有发出任何内容。目前能自动发的有：微信、QQ、短信、WhatsApp。';
       }
-      return '要发消息请带上号码或通讯录里的名字，例如：给张三发短信你好，或给 13812345678 发短信你好。';
+      return await _confirmCrossApp(adapter, intent.name, intent.body);
     }
-    // Message body: text minus phone, contact name, keywords, fillers.
-    var body = t
-        .replaceAll(_phoneReg, '')
-        .replaceAll(RegExp(r'^(给|帮我给|请给)'), '')
-        .replaceAll(RegExp(r'(发短信|发短消息|发信息|发消息|发微信|发WhatsApp|WhatsApp)'), '')
-        .replaceAll(RegExp(r'[给：:，,。 ]+'), ' ')
-        .replaceAll(RegExp(r'^(说|讲|告诉他|告诉她|告诉)'), '')
-        .trim();
-    if (target.name != null) {
-      body = body.replaceAll(target.name!, '').trim();
+
+    // 短信 / WhatsApp：号码优先，否则按名字查通讯录
+    final wa = key == 'whatsapp';
+    final raw = _phoneReg
+        .firstMatch(intent.name.replaceAll(RegExp(r'[\s\-]'), ''))
+        ?.group(0);
+    if (raw != null) return await _sendDirect(wa, raw, null, intent.body);
+    return await _withContact(intent.name,
+        forCall: false, onPick: (c) => _sendDirect(wa, c.phone, c.name, intent.body));
+  }
+
+  // ======================================================================
+  // 跨应用发消息（微信 / QQ …）
+  // ======================================================================
+
+  /// 每个 App 一个适配器，登记在这里。要扩展新 App：写一个 _Adapter 子类，加进列表即可，
+  /// 同时在原生 JarvisAccessibilityService.HARD_WHITELIST 里有意识地加上包名。
+  static final List<_Adapter> _adapters = <_Adapter>[
+    _WeChatAdapter(),
+    _QqAdapter(),
+    // 以下只是预留（enabled=false）：没有实现，也不在原生白名单里，
+    // 被问到时会如实说“还没适配”，不会假装办了。
+    const _ReservedAdapter('wework', '企业微信', ['企业微信'], 'com.tencent.wework'),
+    const _ReservedAdapter('douyin', '抖音', ['抖音'], 'com.ss.android.ugc.aweme'),
+    const _ReservedAdapter('taobao', '淘宝', ['淘宝'], 'com.taobao.taobao'),
+    const _ReservedAdapter('alipay', '支付宝', ['支付宝'], 'com.eg.android.AlipayGphone'),
+    const _ReservedAdapter('weibo', '微博', ['微博'], 'com.sina.weibo'),
+    const _ReservedAdapter('xhs', '小红书', ['小红书'], 'com.xingin.xhs'),
+    const _ReservedAdapter('bilibili', '哔哩哔哩', ['哔哩哔哩', 'B站'], 'tv.danmaku.bili'),
+  ];
+
+  static Future<String> _confirmCrossApp(
+      _Adapter a, String name, String body) async {
+    if (!await _isAccessibilityEnabled()) {
+      return await _openAndHandOver(a, name, body,
+          '没开启无障碍自动化，没法替你在${a.label}里操作（系统设置 > 无障碍 > 开启“Jarvis 跨应用全自动引擎”后即可全自动发送）。这次没发成。');
     }
-    // Drop a leftover 1-4 char name segment when body still looks like
-    // "张三 你好".
-    if (body.length > 2 && body.contains(' ')) {
-      final parts = body.split(' ');
-      if (parts.length >= 2 && parts[0].length <= 4) {
-        body = parts.sublist(1).join(' ').trim();
+    // 发送前复述确认：用户说“对 / 确认”才执行
+    _pending = _Pending(null, (_) => _runCrossApp(a, name, body));
+    return '给${a.label}上的$name发：“$body”，对吗？说“对”或“确认”我就发，说“取消”就不发。';
+  }
+
+  static Future<bool> _openPackage(String pkg) async {
+    try {
+      return await _launcherChannel
+              .invokeMethod<bool>('openApp', {'package': pkg}) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 失败降级：打开 App，内容复制到剪贴板，交给用户手动发。绝不“答应了但什么都没做”。
+  static Future<String> _openAndHandOver(
+      _Adapter a, String name, String body, String reason) async {
+    await Clipboard.setData(ClipboardData(text: body));
+    final opened = await _openPackage(a.package);
+    if (!opened) return '$reason ${a.label} 似乎没安装。';
+    return '$reason 已打开${a.label}，内容已复制到剪贴板，请手动找到$name，粘贴后点发送。';
+  }
+
+  static Future<String> _runCrossApp(_Adapter a, String name, String body) async {
+    if (_busy) return '上一个跨应用任务还在执行，请稍等它结束再说。';
+    _busy = true;
+    try {
+      final steps = a.steps(name, body);
+      final start = await _startTask(a.package, steps, 45000);
+      if (start != 'ok') {
+        return await _openAndHandOver(a, name, body, _startFailText(start));
       }
-    }
-    if (body.isEmpty) {
-      final who = target.name ?? phone;
-      return '消息内容为空，请说：给 $who 发短信 + 内容。';
-    }
-    // 跨应用全自动：先查无障碍服务是否已开启，已开启才武装自动点击。
-    // 未开启时仍打开编辑页，由用户手动点发送，并提示去开启。
-    final autoEnabled = await _isAccessibilityEnabled();
-    if (autoEnabled) await _enableAutoClick();
-    final autoHint = autoEnabled
-        ? '已开启全自动发送，打开后会自动点发送。'
-        : '未开启无障碍自动发送，需手动点发送；首次使用请在系统设置 > 无障碍 > 开启“Jarvis 跨应用全自动引擎”，即可全自动发送。';
-    if (isWhatsapp) {
-      final uri = Uri.parse(
-          'https://wa.me/$phone?text=${Uri.encodeComponent(body)}');
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
-        return '已打开 WhatsApp，收件人 $phone，内容已填好。$autoHint';
+      // 必须在拉起目标 App 之前武装（上面已经做了）
+      if (!await _openPackage(a.package)) {
+        await _cancelTask();
+        return '${a.label} 似乎没安装，没发成。';
       }
-      return '打不开 WhatsApp，请确认已安装。';
+      final res = await _awaitTask(const Duration(seconds: 60));
+      return await _describeResult(res, steps,
+          appLabel: a.label,
+          sentPhrase: '给${a.label}上的$name发了',
+          manualTarget: name,
+          body: body);
+    } finally {
+      _busy = false;
     }
-    if (isWechat) {
-      // WeChat has no public compose intent. Open the SMS composer with
-      // the body prefilled instead of leaving the user with nothing.
-      final uri = Uri(
-          scheme: 'sms', path: phone, queryParameters: {'body': body});
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-        return '微信没有直接发消息接口，已帮你打开短信，收件人 $phone，内容已填好，在短信里发就行。$autoHint';
+  }
+
+  static String _startFailText(String code) {
+    switch (code) {
+      case 'busy':
+        return '上一个自动任务还没结束，这次没发成。';
+      case 'no_service':
+        return '无障碍服务没有在运行（刚开启的话请稍等几秒，或重新开关一次），这次没发成。';
+      default:
+        return '自动化没能启动（$code），这次没发成。';
+    }
+  }
+
+  // ---------- 与原生引擎通信 ----------
+
+  static Future<String> _startTask(
+      String? pkg, List<Map<String, dynamic>> steps, int windowMs) async {
+    try {
+      return await _accessibilityChannel.invokeMethod<String>('startTask', {
+            'packages': pkg == null ? <String>[] : <String>[pkg],
+            'steps': steps,
+            'windowMs': windowMs,
+          }) ??
+          'error';
+    } catch (_) {
+      return 'error';
+    }
+  }
+
+  static Future<void> _cancelTask() async {
+    try {
+      await _accessibilityChannel.invokeMethod('cancelTask');
+    } catch (_) {}
+  }
+
+  static Future<Map<dynamic, dynamic>?> _awaitTask(Duration guard) async {
+    try {
+      return await _accessibilityChannel
+          .invokeMethod<Map<dynamic, dynamic>>('awaitTask')
+          .timeout(guard, onTimeout: () async {
+        await _cancelTask();
+        return <dynamic, dynamic>{
+          'status': 'timeout',
+          'step': -1,
+          'stepName': '等待结果',
+          'detail': '等待超时',
+        };
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 把引擎结果翻成人话。核实成功才说“已发送”；否则如实说没发成 / 没能确认，以及卡在哪一步。
+  static Future<String> _describeResult(
+    Map<dynamic, dynamic>? raw,
+    List<Map<String, dynamic>> steps, {
+    required String appLabel,
+    required String sentPhrase,
+    required String manualTarget,
+    required String body,
+    bool prefilled = false, // 短信 / WhatsApp：内容是随 intent 预填好的
+  }) async {
+    final status = (raw?['status'] as String?) ?? 'error';
+    final idx = (raw?['step'] as num?)?.toInt() ?? -1;
+    final stepName = (raw?['stepName'] as String?) ?? '';
+    final detail = (raw?['detail'] as String?) ?? '';
+    final hint = (idx >= 0 && idx < steps.length)
+        ? ((steps[idx]['hint'] as String?) ?? '')
+        : '';
+    switch (status) {
+      case 'sent':
+        return '已发送：$sentPhrase“$body”，并且已在聊天界面核实这条消息出现了。';
+      case 'unverified':
+        return '没能确认已发送（卡在“$stepName”）：我点了发送，但没能在界面上核实到这条消息，可能发出了也可能没发出，请你打开$appLabel看一眼。';
+      case 'blocked':
+        return '为安全起见我停下了，没有继续：$detail。';
+      case 'cancelled':
+        return '任务被取消了，没有发送。';
+      default:
+        final filledIdx = steps.indexWhere((s) => s['fills'] == true);
+        final filled = prefilled || (filledIdx >= 0 && idx > filledIdx);
+        if (filled) {
+          return '自动发送失败，已帮你打开并填好，请手动点发送。（卡在“$stepName”：$hint）';
+        }
+        await Clipboard.setData(ClipboardData(text: body));
+        return '没发成，卡在“$stepName”：$hint 已打开$appLabel，内容也复制到剪贴板了，可以手动找到$manualTarget后粘贴发送。';
+    }
+  }
+
+  // ======================================================================
+  // 短信 / WhatsApp
+  // ======================================================================
+
+  static Future<String> _sendDirect(
+      bool wa, String phone, String? name, String body) async {
+    final who = name != null ? '$name $phone' : phone;
+    final label = wa ? 'WhatsApp' : '短信';
+    final uri = wa
+        ? Uri.parse('https://wa.me/$phone?text=${Uri.encodeComponent(body)}')
+        : Uri(scheme: 'sms', path: phone, queryParameters: {'body': body});
+    if (!await canLaunchUrl(uri)) {
+      return wa ? '打不开 WhatsApp，请确认已安装，这次没发成。' : '打不开短信，请检查短信权限，这次没发成。';
+    }
+    Future<void> open() => wa
+        ? launchUrl(uri, mode: LaunchMode.externalApplication)
+        : launchUrl(uri);
+
+    if (!await _isAccessibilityEnabled()) {
+      await open();
+      return '已打开$label，收件人 $who，内容已填好。没开启无障碍自动发送，需要你手动点发送（系统设置 > 无障碍 > 开启“Jarvis 跨应用全自动引擎”后可自动发送）。这次还没有发出。';
+    }
+    final steps = <Map<String, dynamic>>[
+      _step('send', '点发送', '没找到可点的发送按钮', timeoutMs: 15000, settleMs: 600),
+      _step('verifyText', '核实消息已发出', '点了发送，但没能在界面上看到这条消息',
+          text: body, timeoutMs: 7000, soft: true),
+    ];
+    if (_busy) return '上一个跨应用任务还在执行，请稍等它结束再说。';
+    _busy = true;
+    try {
+      final start = await _startTask(null, steps, 30000);
+      if (start != 'ok') {
+        await open();
+        return '${_startFailText(start)} 已打开$label，收件人 $who，内容已填好，请手动点发送。';
       }
-      return '微信没有直接发消息接口，短信也打不开，请检查短信权限。';
+      await open();
+      final res = await _awaitTask(const Duration(seconds: 40));
+      return await _describeResult(res, steps,
+          appLabel: label,
+          sentPhrase: '给$who发了',
+          manualTarget: who,
+          body: body,
+          prefilled: true);
+    } finally {
+      _busy = false;
     }
-    final uri = Uri(
-        scheme: 'sms', path: phone, queryParameters: {'body': body});
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-      return '已打开短信，收件人 $phone，内容已填好。$autoHint';
-    }
-    return '打不开短信，请检查短信权限。';
   }
 
   // ---------- Read SMS ----------
@@ -515,4 +985,234 @@ class DeviceActions {
     }
     return '$name 似乎没安装。';
   }
+}
+
+// ============================================================================
+// 数据类
+// ============================================================================
+
+/// 挂起的操作：cands == null 表示“等用户确认发送”，否则表示“等用户选第几个联系人”。
+class _Pending {
+  _Pending(this.cands, this.run)
+      : expires = DateTime.now().add(const Duration(seconds: 90));
+  final List<_Cand>? cands;
+  final Future<String> Function(_Cand? c) run;
+  final DateTime expires;
+}
+
+class _Cand {
+  const _Cand(this.name, this.phone);
+  final String name;
+  final String phone;
+  String get label {
+    final tail =
+        phone.length >= 4 ? phone.substring(phone.length - 4) : phone;
+    return '$name（尾号$tail）';
+  }
+}
+
+enum _LookupKind { one, many, none, noNumber, denied, error }
+
+class _Lookup {
+  const _Lookup(this.kind, {this.cands, this.name});
+  final _LookupKind kind;
+  final List<_Cand>? cands;
+  final String? name;
+}
+
+class _MsgIntent {
+  const _MsgIntent(this.name, this.body);
+  final String name;
+  final String body;
+}
+
+// ============================================================================
+// 跨应用适配器：每个 App 一个类，各自声明“怎么找人、怎么填内容、怎么发送、怎么核实”。
+// 步骤是声明式的（选择器 + 动作），由原生 JarvisAccessibilityService 逐步执行：
+//   click      点击匹配的控件（点前有黑名单检查）
+//   setText    向匹配的输入框填字
+//   wait       等某个控件出现（用来确认“已进入正确的聊天”）
+//   send       点“发送”（只点一次）
+//   verifyText 回查：聊天里是否出现了这句话（只读）
+// 选择器字段：textEquals / textRegex / descRegex / idRegex / classContains /
+//            editable / topOnly（只认界面最上方 20% 以内，用来认聊天标题）
+// 步骤里的 hint = 这步失败时对用户说的人话；fills = 这步之后内容已经填进输入框。
+// 注意：各 App 的界面文字会随版本变化，选择器需要真机校准（失败时返回的“卡在哪一步”
+// 就是校准依据）。
+// ============================================================================
+
+Map<String, dynamic> _m({
+  String? textEquals,
+  String? textRegex,
+  String? descRegex,
+  String? idRegex,
+  String? classContains,
+  bool? editable,
+  bool topOnly = false,
+}) =>
+    <String, dynamic>{
+      if (textEquals != null) 'textEquals': textEquals,
+      if (textRegex != null) 'textRegex': textRegex,
+      if (descRegex != null) 'descRegex': descRegex,
+      if (idRegex != null) 'idRegex': idRegex,
+      if (classContains != null) 'classContains': classContains,
+      if (editable != null) 'editable': editable,
+      if (topOnly) 'topOnly': true,
+    };
+
+Map<String, dynamic> _step(
+  String action,
+  String name,
+  String hint, {
+  List<Map<String, dynamic>> matches = const <Map<String, dynamic>>[],
+  String? text,
+  int timeoutMs = 6000,
+  int settleMs = 500,
+  bool optional = false,
+  bool soft = false,
+  int maxBack = 0,
+  int backAfterMs = 2500,
+  bool fills = false,
+}) =>
+    <String, dynamic>{
+      'action': action,
+      'name': name,
+      'hint': hint,
+      'matches': matches,
+      if (text != null) 'text': text,
+      'timeoutMs': timeoutMs,
+      'settleMs': settleMs,
+      'optional': optional,
+      'soft': soft,
+      'maxBack': maxBack,
+      'backAfterMs': backAfterMs,
+      if (fills) 'fills': true,
+    };
+
+abstract class _Adapter {
+  const _Adapter();
+  String get id;
+  String get label;
+  List<String> get aliases;
+  String get package;
+
+  /// 是否已实现。false = 只是预留位置，不会被执行。
+  bool get enabled;
+
+  /// 声明式步骤。[contact] / [body] 已经是干净的收件人和正文。
+  List<Map<String, dynamic>> steps(String contact, String body);
+}
+
+/// 微信：首页搜索 → 搜联系人 → 点进聊天 → 核对标题 → 填内容 → 发送 → 核实。
+class _WeChatAdapter extends _Adapter {
+  _WeChatAdapter();
+  @override
+  String get id => 'wechat';
+  @override
+  String get label => '微信';
+  @override
+  List<String> get aliases => const ['微信', 'weixin', 'wechat'];
+  @override
+  String get package => 'com.tencent.mm';
+  @override
+  bool get enabled => true;
+
+  @override
+  List<Map<String, dynamic>> steps(String contact, String body) => [
+        _step('click', '打开搜索', '没找到微信首页的搜索入口（微信可能没停在首页）。',
+            matches: [_m(descRegex: r'^搜索$'), _m(textRegex: r'^搜索$')],
+            timeoutMs: 10000,
+            settleMs: 900,
+            maxBack: 3),
+        _step('setText', '输入联系人名', '没能在搜索框里输入名字。',
+            matches: [_m(editable: true)],
+            text: contact,
+            timeoutMs: 6000,
+            settleMs: 900),
+        _step('click', '点选联系人', '没在搜索结果里找到“$contact”（名字需要和微信里显示的一致）。',
+            matches: [_m(textEquals: contact, editable: false)],
+            timeoutMs: 9000,
+            settleMs: 1000),
+        _step('wait', '确认聊天对象', '进入聊天后标题不是“$contact”，为避免发错人已停止。',
+            matches: [_m(textEquals: contact, editable: false, topOnly: true)],
+            timeoutMs: 6000),
+        _step('setText', '输入消息', '没找到聊天输入框（可能处于语音输入模式）。',
+            matches: [_m(editable: true)],
+            text: body,
+            timeoutMs: 6000,
+            settleMs: 600,
+            fills: true),
+        _step('send', '点发送', '没找到可点的发送按钮。', timeoutMs: 6000, settleMs: 600),
+        _step('verifyText', '核实消息已发出', '点了发送，但没能在聊天里看到这条消息。',
+            text: body, timeoutMs: 7000, soft: true),
+      ];
+}
+
+/// QQ：流程同微信，但搜索入口是顶部的“搜索”框，各步骤的选择器各自声明。
+class _QqAdapter extends _Adapter {
+  _QqAdapter();
+  @override
+  String get id => 'qq';
+  @override
+  String get label => 'QQ';
+  @override
+  List<String> get aliases => const ['QQ'];
+  @override
+  String get package => 'com.tencent.mobileqq';
+  @override
+  bool get enabled => true;
+
+  @override
+  List<Map<String, dynamic>> steps(String contact, String body) => [
+        _step('click', '打开搜索', '没找到 QQ 顶部的搜索框（QQ 可能没停在消息首页）。',
+            matches: [_m(textRegex: r'^搜索$'), _m(descRegex: r'^搜索$')],
+            timeoutMs: 10000,
+            settleMs: 900,
+            maxBack: 3),
+        _step('setText', '输入联系人名', '没能在搜索框里输入名字。',
+            matches: [_m(editable: true)],
+            text: contact,
+            timeoutMs: 6000,
+            settleMs: 900),
+        _step('click', '点选联系人', '没在搜索结果里找到“$contact”（名字需要和 QQ 里显示的一致）。',
+            matches: [_m(textEquals: contact, editable: false)],
+            timeoutMs: 9000,
+            settleMs: 1000),
+        _step('wait', '确认聊天对象', '进入聊天后标题不是“$contact”，为避免发错人已停止。',
+            matches: [_m(textEquals: contact, editable: false, topOnly: true)],
+            timeoutMs: 6000),
+        _step('setText', '输入消息', '没找到聊天输入框。',
+            matches: [_m(editable: true)],
+            text: body,
+            timeoutMs: 6000,
+            settleMs: 600,
+            fills: true),
+        _step('send', '点发送', '没找到可点的发送按钮。', timeoutMs: 6000, settleMs: 600),
+        _step('verifyText', '核实消息已发出', '点了发送，但没能在聊天里看到这条消息。',
+            text: body, timeoutMs: 7000, soft: true),
+      ];
+}
+
+/// 预留适配器（抖音、淘宝、支付宝、微博、小红书、哔哩哔哩、企业微信……）：
+/// 现在不实现，被问到时如实说“还没适配”。以后按 _WeChatAdapter 的模式
+/// 写成真正的子类，并在原生 HARD_WHITELIST 里有意识地加上包名即可。
+/// 支付类 App（支付宝等）按安全要求不应进入原生白名单。
+class _ReservedAdapter extends _Adapter {
+  const _ReservedAdapter(this._id, this._label, this._aliases, this._package);
+  final String _id;
+  final String _label;
+  final List<String> _aliases;
+  final String _package;
+  @override
+  String get id => _id;
+  @override
+  String get label => _label;
+  @override
+  List<String> get aliases => _aliases;
+  @override
+  String get package => _package;
+  @override
+  bool get enabled => false;
+  @override
+  List<Map<String, dynamic>> steps(String contact, String body) => const [];
 }

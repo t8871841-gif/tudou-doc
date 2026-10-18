@@ -6,6 +6,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../services/action_service.dart';
 import '../services/agent_service.dart';
 import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
@@ -715,6 +716,19 @@ class _HomeScreenState extends State<HomeScreen>
       _statusLine = '正在分析目标并规划任务…';
     });
     _scrollDown();
+
+    // 有挂起确认（确认发送 / 选联系人）：用户原话直走 tryHandle，
+    // 跳过大模型规划与汇总——大模型会改写确认问句，“对”也到不了确认逻辑。
+    if (DeviceActions.hasPending) {
+      final direct = await DeviceActions.tryHandle(q);
+      if (direct != null) {
+        _reply(direct, '任务执行完毕。');
+        _maybeConsolidateMemory();
+        if (mounted) await _speak(direct);
+        return;
+      }
+      // tryHandle 返回 null：挂起已作废（用户说了别的事），继续走正常流程。
+    }
 
     final String answer;
     try {

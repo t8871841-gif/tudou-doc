@@ -61,6 +61,27 @@ class AgentService {
       } catch (e) {
         step.result = '执行出错: $e';
       }
+
+      // 某步留下了“等用户确认”（确认发送 / 选联系人）：停下，
+      // 后续步骤等用户答复后再说——别让下一步把确认当成新指令吃掉。
+      if (DeviceActions.hasPending) break;
+    }
+
+    // 设备动作的结果原样返回，跳过大模型汇总：
+    //  - 有挂起确认时，确认问句必须原样到用户；
+    //  - 只有一步设备动作时，结果本身就是完整回复，汇总只会改写甚至软化“没发成”。
+    // 多步混合任务仍走汇总。
+    if (DeviceActions.hasPending) {
+      for (var i = steps.length - 1; i >= 0; i--) {
+        if (steps[i].tool == 'device_action' && steps[i].result != null) {
+          return steps[i].result!;
+        }
+      }
+    }
+    if (steps.length == 1 &&
+        steps.first.tool == 'device_action' &&
+        steps.first.result != null) {
+      return steps.first.result!;
     }
 
     // 3. 汇总所有步骤的结果给用户
