@@ -1,14 +1,17 @@
 package com.jarvis.jarvis_app
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.CallLog
 import android.provider.Settings
 import android.provider.Telephony
 import android.view.accessibility.AccessibilityManager
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.example.jarvis.JarvisAccessibilityService
 import io.flutter.embedding.android.FlutterActivity
@@ -19,6 +22,12 @@ class MainActivity : FlutterActivity() {
     private val channel = "jarvis/sms"
     private val launcherChannel = "jarvis/launcher"
     private val accessibilityChannel = "com.example.jarvis/accessibility"
+    private val agentChannel = "com.jarvis.jarvis_app/agent"
+
+    // 真拨电话的待处理请求：申请权限是异步的，授权后自动重试拨号，不直接返回失败。
+    private var pendingCallPhone: String? = null
+    private var pendingCallResult: MethodChannel.Result? = null
+    private val agentCallRequestCode = 4242
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -99,6 +108,125 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        // ---------- Agent 循环：真拨电话 / 查通话记录 / 看屏 / 通用动作 ----------
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, agentChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "makeCall" -> {
+                        val phone = call.argument<String>("phoneNumber")
+                        if (phone.isNullOrEmpty()) {
+                            result.error("INVALID_ARGUMENT", "Phone number is null", null)
+                        } else {
+                            makeDirectCall(phone, result)
+                        }
+                    }
+                    "checkCallLog" -> {
+                        val phone = call.argument<String>("phoneNumber") ?: ""
+                        result.success(checkCallLog(phone))
+                    }
+                    "perceiveScreen" -> {
+                        result.success(JarvisAccessibilityService.perceiveScreenTree())
+                    }
+                    "performAction" -> {
+                        val actionType = call.argument<String>("actionType") ?: ""
+                        val targetText = call.argument<String>("targetText") ?: ""
+                        val inputText = call.argument<String>("inputText")
+                        result.success(
+                            JarvisAccessibilityService.performAgentAction(
+                                actionType, targetText, inputText
+                            )
+                        )
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /** 真拨电话（ACTION_CALL）。无权限时先申请，授权后自动重试，不直接返回失败。 */
+    private fun makeDirectCall(phoneNumber: String, result: MethodChannel.Result) {
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.CALL_PHONE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingCallPhone = phoneNumber
+            pendingCallResult = result
+            // 通话记录权限一起申请：拨出后要查通话记录核实。
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_CALL_LOG),
+                agentCallRequestCode
+            )
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$phoneNumber")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            result.success(true)
+        } catch (e: Exception) {
+            result.error("CALL_FAILED", e.message, null)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != agentCallRequestCode) return
+        val phone = pendingCallPhone
+        val res = pendingCallResult
+        pendingCallPhone = null
+        pendingCallResult = null
+        if (phone == null || res == null) return
+        val idx = permissions.indexOf(Manifest.permission.CALL_PHONE)
+        val granted = idx >= 0 && grantResults.getOrNull(idx) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            makeDirectCall(phone, res)
+        } else {
+            res.error("PERMISSION_DENIED", "CALL_PHONE permission denied", null)
+        }
+    }
+
+    /**
+     * 查最近 120 秒的通话记录里有没有拨给 [phone] 的记录。
+     * 返回 granted（有没有通话记录权限）+ found（查到 / 没查到）。
+     * 无权限时不撒谎：granted=false，Dart 侧如实说“无法核实”。
+     */
+    private fun checkCallLog(phone: String): Map<String, Any> {
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.READ_CALL_LOG
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return mapOf("granted" to false, "found" to false)
+        }
+        val want = phone.replace(Regex("\\D"), "").takeLast(11)
+        if (want.isEmpty()) return mapOf("granted" to true, "found" to false)
+        val since = System.currentTimeMillis() - 120_000L
+        val cursor = try {
+            contentResolver.query(
+                CallLog.Calls.CONTENT_URI,
+                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE),
+                "${CallLog.Calls.DATE} >= ?",
+                arrayOf(since.toString()),
+                "${CallLog.Calls.DATE} DESC"
+            )
+        } catch (_: Exception) {
+            null
+        } ?: return mapOf("granted" to true, "found" to false)
+        cursor.use {
+            val numIdx = it.getColumnIndex(CallLog.Calls.NUMBER)
+            while (it.moveToNext()) {
+                val num = (it.getString(numIdx) ?: "")
+                    .replace(Regex("\\D"), "").takeLast(11)
+                if (num.isNotEmpty() && num == want) {
+                    return mapOf("granted" to true, "found" to true)
+                }
+            }
+        }
+        return mapOf("granted" to true, "found" to false)
     }
 
     private fun isAccessibilityEnabled(): Boolean {

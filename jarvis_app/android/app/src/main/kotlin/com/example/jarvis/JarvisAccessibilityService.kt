@@ -10,6 +10,8 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Jarvis 跨应用自动化引擎。
@@ -131,6 +133,28 @@ class JarvisAccessibilityService : AccessibilityService() {
                 return
             }
             awaiter = cb
+        }
+
+        // ---------------- Agent 循环：看屏导出 + 通用动作（新增，任务引擎原样保留） ----------------
+        // 注意：这两条不经过任务模式的武装窗口（Agent 循环按步拉取，无法预先武装），
+        // 安全边界与任务引擎一致：白名单（HARD_WHITELIST + 默认短信 App）+
+        // 点击黑名单（FORBIDDEN_CLICK）+ 不碰密码/验证码输入（FORBIDDEN_INPUT）+ 不按坐标点。
+        // 看屏导出仅供当次决策，不保存、不回传聊天内容。
+
+        /** 导出当前屏幕节点树 JSON（白名单外 App 返回 "{}"）。 */
+        fun perceiveScreenTree(): String {
+            val svc = instance ?: return "{}"
+            return svc.dumpScreenTree()
+        }
+
+        /** 通用动作：click（点文字）/ input（向可编辑框填字）/ back（返回）。 */
+        fun performAgentAction(
+            actionType: String,
+            targetText: String,
+            inputText: String?
+        ): Boolean {
+            val svc = instance ?: return false
+            return svc.runAgentAction(actionType, targetText, inputText)
         }
 
         // ---------------- 步骤解析 ----------------
@@ -672,6 +696,168 @@ class JarvisAccessibilityService : AccessibilityService() {
         try {
             node.recycle()
         } catch (_: Exception) {
+        }
+    }
+
+    // ---------------- Agent 循环：看屏导出 + 通用动作 ----------------
+
+    /** 导出当前屏幕节点树 JSON。白名单外 App / 无根节点 → "{}"。 */
+    private fun dumpScreenTree(): String {
+        val root = rootInActiveWindow ?: return "{}"
+        try {
+            val pkg = root.packageName?.toString() ?: return "{}"
+            if (pkg !in HARD_WHITELIST + extraWhitelist) return "{}"
+            return dumpNode(root, 0, intArrayOf(0)).toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "dump tree failed", e)
+            return "{}"
+        } finally {
+            recycleCompat(root)
+        }
+    }
+
+    /**
+     * 递归导出节点。边界：深度 ≤20、总节点 ≤400、只导可见节点、
+     * 密码框文字掩码、文字截断 80 字符（与任务引擎 matches() 的 80 字符上限一致）。
+     * 本函数只读自己取到的子节点并在循环内回收；传入的 node 由调用方回收。
+     */
+    private fun dumpNode(
+        node: AccessibilityNodeInfo,
+        depth: Int,
+        count: IntArray
+    ): JSONObject {
+        val obj = JSONObject()
+        if (depth > 20 || count[0] >= 400) return obj
+        count[0]++
+        obj.put("class", node.className?.toString()?.substringAfterLast('.') ?: "")
+        val text = node.text?.toString() ?: ""
+        obj.put("text", if (node.isPassword) "[PROTECTED]" else text.take(80))
+        obj.put("desc", (node.contentDescription?.toString() ?: "").take(40))
+        val id = node.viewIdResourceName ?: ""
+        obj.put("viewId", id.substringAfterLast('/').take(60))
+        obj.put("clickable", node.isClickable)
+        obj.put("editable", node.isEditable)
+        val rect = Rect().also { node.getBoundsInScreen(it) }
+        obj.put("bounds", JSONArray().apply {
+            put(rect.left)
+            put(rect.top)
+            put(rect.right)
+            put(rect.bottom)
+        })
+        val children = JSONArray()
+        for (i in 0 until node.childCount) {
+            if (count[0] >= 400) break
+            val child = node.getChild(i) ?: continue
+            try {
+                if (child.isVisibleToUser) children.put(dumpNode(child, depth + 1, count))
+            } finally {
+                recycleCompat(child)
+            }
+        }
+        obj.put("children", children)
+        return obj
+    }
+
+    /** 通用动作（Agent 慢路径用）。白名单外 App 一律拒绝。 */
+    private fun runAgentAction(
+        actionType: String,
+        targetText: String,
+        inputText: String?
+    ): Boolean {
+        val root = rootInActiveWindow ?: return false
+        try {
+            val pkg = root.packageName?.toString() ?: return false
+            if (pkg !in HARD_WHITELIST + extraWhitelist) return false
+            return when (actionType) {
+                "click" -> {
+                    if (targetText.isEmpty()) return false
+                    val node = findAgentNode(root, targetText, editableOnly = false)
+                        ?: return false
+                    try {
+                        // 复用任务引擎的带黑名单点击（黑名单 + 向上最多爬 4 层）。
+                        clickGuarded(node) == ClickResult.OK
+                    } finally {
+                        recycleCompat(node)
+                    }
+                }
+                "input" -> {
+                    if (targetText.isEmpty() || inputText == null) return false
+                    val node = findAgentNode(root, targetText, editableOnly = true)
+                        ?: return false
+                    try {
+                        val hint = node.contentDescription?.toString().orEmpty() +
+                            node.viewIdResourceName.orEmpty()
+                        // 不向密码 / 验证码输入框填内容。
+                        if (node.isPassword || FORBIDDEN_INPUT.containsMatchIn(hint)) {
+                            return false
+                        }
+                        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                        val args = Bundle().apply {
+                            putCharSequence(
+                                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                inputText
+                            )
+                        }
+                        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    } finally {
+                        recycleCompat(node)
+                    }
+                }
+                "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
+                else -> false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "agent action failed", e)
+            return false
+        } finally {
+            recycleCompat(root)
+        }
+    }
+
+    /**
+     * BFS 找可见节点：先精确相等（text / desc），再子串。
+     * 返回的节点由调用方回收；其余取到的节点在这里统一回收。
+     */
+    private fun findAgentNode(
+        root: AccessibilityNodeInfo,
+        target: String,
+        editableOnly: Boolean
+    ): AccessibilityNodeInfo? {
+        val obtained = ArrayList<AccessibilityNodeInfo>()
+        try {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            var visited = 0
+            var containsHit: AccessibilityNodeInfo? = null
+            while (queue.isNotEmpty() && visited < MAX_NODES) {
+                val node = queue.removeFirst()
+                visited++
+                if (node.isVisibleToUser && (!editableOnly || isEditNode(node))) {
+                    val text = node.text?.toString()?.trim().orEmpty()
+                    val desc = node.contentDescription?.toString()?.trim().orEmpty()
+                    if (text == target || desc == target) {
+                        obtained.remove(node) // 调用方回收，不在这里重复回收
+                        return node
+                    }
+                    if (containsHit == null &&
+                        (text.contains(target) || desc.contains(target))
+                    ) {
+                        containsHit = node
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    obtained.add(child)
+                    queue.add(child)
+                }
+            }
+            if (containsHit != null) {
+                obtained.remove(containsHit)
+                return containsHit
+            }
+            return null
+        } finally {
+            obtained.forEach { recycleCompat(it) }
         }
     }
 }

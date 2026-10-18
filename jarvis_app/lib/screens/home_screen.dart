@@ -12,6 +12,8 @@ import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
 import '../services/memory_service.dart';
 import '../services/settings_store.dart';
+import '../services/skill_store.dart';
+import '../services/task_board.dart';
 import '../widgets/hud_painters.dart';
 import 'settings_screen.dart';
 
@@ -211,6 +213,14 @@ class _HomeScreenState extends State<HomeScreen>
         for (final m in _memory.chat) _Msg(m['role']!, m['text']!),
       ]);
     });
+    // 任务黑板：App 重启后提醒未完成任务，可说“刚才那件事继续”续跑。
+    final board = await TaskBoard.load();
+    if (board != null && board.status != TaskStatus.completed) {
+      _set(() {
+        _messages.add(_Msg(
+            'assistant', '发现未完成任务「${board.goal}」，说“刚才那件事继续”可以续跑。'));
+      });
+    }
     unawaited(_warmUpAsr());
   }
 
@@ -679,6 +689,13 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   /// 使用 Agent 智能体调度系统处理用户指令（支持联网、跨应用、任务拆解）
+  /// 确认链的答复是否表示这步没跑通（发送失败 / 已取消 / 没找到人…）。
+  /// 只用于“确认解决后要不要继续黑板剩余步骤”的判断；误判偏向“不继续”（安全侧）。
+  bool _confirmReplyFailed(String reply) {
+    return RegExp(r'没能确认|没发成|发送失败|失败|没找到|没有发送|已取消|打不开|权限被拒绝|读取通讯录失败')
+        .hasMatch(reply);
+  }
+
   Future<void> _ask(String q) async {
     FocusScope.of(context).unfocus();
     var memCmd = MemoryService.parseCommand(q);
@@ -717,6 +734,48 @@ class _HomeScreenState extends State<HomeScreen>
     });
     _scrollDown();
 
+    // 任务黑板续跑：“刚才那件事继续”——从黑板当前步接着跑。
+    // 必须放在挂起确认分支之前：否则续跑口令会被当成确认答复吃掉。
+    if (q.contains('刚才那件事继续')) {
+      // 还有待确认的操作时，先解决确认，别把续跑当成新任务。
+      if (DeviceActions.hasPending) {
+        _reply('还有一个待确认的操作，请先回复“确认”或“取消”。', '任务执行完毕。');
+        if (mounted) await _speak('还有一个待确认的操作，请先回复“确认”或“取消”。');
+        return;
+      }
+      final board = await TaskBoard.load();
+      if (board != null &&
+          board.status != TaskStatus.completed &&
+          board.hasRemaining) {
+        final String answer;
+        try {
+          answer = await AgentService.resumeBoard(
+            settings: _settings,
+            board: board,
+            history: hist,
+            onProgress: (status) {
+              if (mounted) {
+                setState(() {
+                  _statusLine = status;
+                });
+              }
+            },
+          );
+        } catch (e) {
+          _reply('执行失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。',
+              '智能体执行失败。');
+          return;
+        }
+        _reply(answer, '任务执行完毕。');
+        _maybeConsolidateMemory();
+        if (mounted) await _speak(answer);
+        return;
+      }
+      _reply('没有未完成的任务。', '任务执行完毕。');
+      if (mounted) await _speak('没有未完成的任务。');
+      return;
+    }
+
     // 有挂起确认（确认发送 / 选联系人）：用户原话直走 tryHandle，
     // 跳过大模型规划与汇总——大模型会改写确认问句，“对”也到不了确认逻辑。
     if (DeviceActions.hasPending) {
@@ -725,6 +784,60 @@ class _HomeScreenState extends State<HomeScreen>
         _reply(direct, '任务执行完毕。');
         _maybeConsolidateMemory();
         if (mounted) await _speak(direct);
+        // 确认链已解决（没有新的挂起）：结算黑板当前步。
+        // 还有新挂起（例如选完联系人后又弹出拨号确认）时不结算，等下一句答复。
+        if (!DeviceActions.hasPending) {
+          final board = await TaskBoard.load();
+          if (board != null &&
+              board.status == TaskStatus.waitingConfirmation) {
+            if (_confirmReplyFailed(direct)) {
+              // 这步没跑通：黑板记 failed（不清板，可续跑），不继续剩余步骤。
+              final tStep = board.currentStep;
+              if (tStep != null) tStep.error = direct;
+              board.status = TaskStatus.failed;
+              await SkillStore.recordFailure(board.goal);
+              await board.save();
+            } else {
+              if (board.currentStepIndex < board.steps.length) {
+                board.steps[board.currentStepIndex].isCompleted = true;
+                board.currentStepIndex++;
+              }
+              if (board.currentStepIndex >= board.steps.length) {
+                // 全部步骤跑完：沉淀 skill，清黑板。
+                board.status = TaskStatus.completed;
+                await board.save();
+                await SkillStore.recordSuccess(board.goal, board.steps);
+                await TaskBoard.clear();
+              } else {
+                // 还有剩余步骤：继续跑，结果追加回复。
+                board.status = TaskStatus.ongoing;
+                await board.save();
+                final String cont;
+                try {
+                  cont = await AgentService.resumeBoard(
+                    settings: _settings,
+                    board: board,
+                    history: hist,
+                    onProgress: (status) {
+                      if (mounted) {
+                        setState(() {
+                          _statusLine = status;
+                        });
+                      }
+                    },
+                  );
+                } catch (e) {
+                  _reply('执行失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。',
+                      '智能体执行失败。');
+                  return;
+                }
+                _reply(cont, '任务执行完毕。');
+                _maybeConsolidateMemory();
+                if (mounted) await _speak(cont);
+              }
+            }
+          }
+        }
         return;
       }
       // tryHandle 返回 null：挂起已作废（用户说了别的事），继续走正常流程。

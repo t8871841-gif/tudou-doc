@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.SET_ALARM"/>
     <!-- Device actions: call / message by contact name -->
     <uses-permission android:name="android.permission.READ_CONTACTS"/>
+    <!-- Agent 真智能：预览确认后真拨（CALL_PHONE）+ 拨出后查通话记录核实（READ_CALL_LOG） -->
+    <uses-permission android:name="android.permission.CALL_PHONE"/>
+    <uses-permission android:name="android.permission.READ_CALL_LOG"/>
     <!-- Device actions: read SMS inbox -->
     <uses-permission android:name="android.permission.READ_SMS"/>
     <application

@@ -10,7 +10,8 @@ import 'package:url_launcher/url_launcher.dart';
 /// through to LLM chat).
 ///
 /// 安全与诚实原则：
-///  - 打电话只打开拨号盘（tel:），不直接拨出；
+///  - 打电话：先复述确认，用户确认后才真拨（ACTION_CALL）；拨出后查通话记录核实；
+///    真拨失败时回落到打开拨号盘，让用户手动点拨打；
 ///  - 微信 / QQ 等跨应用发消息：先复述确认，用户确认后才执行；
 ///    由原生无障碍引擎在“白名单 App”里一步步操作（每步等界面就绪，超时即失败），
 ///    发完回查界面核实，核实成功才说“已发送”，否则如实说“没发成 / 没能确认”和卡在哪一步；
@@ -27,6 +28,8 @@ class DeviceActions {
   static const _launcherChannel = MethodChannel('jarvis/launcher');
   static const _accessibilityChannel =
       MethodChannel('com.example.jarvis/accessibility');
+  // Agent 通道：真拨电话（ACTION_CALL）+ 查通话记录核实 + 看屏 / 通用动作。
+  static const _agentChannel = MethodChannel('com.jarvis.jarvis_app/agent');
 
   static Future<bool> _isAccessibilityEnabled() async {
     try {
@@ -390,15 +393,57 @@ class DeviceActions {
         forCall: true, onPick: (c) => _dial(c.phone, c.name));
   }
 
-  /// 仍然只打开拨号盘，不直接拨出。
+  /// 查到人 / 拿到号码后，先复述确认；用户确认后才真拨（ACTION_CALL）。
+  /// 拨出后查通话记录核实，核实结果如实汇报。
   static Future<String> _dial(String phone, String? name) async {
-    final uri = Uri(scheme: 'tel', path: phone);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-      final who = name != null ? '$name $phone' : phone;
-      return '已打开拨号盘，号码 $who，点拨打即可接通。';
+    final who = name != null ? '$name $phone' : phone;
+    _pending = _Pending(null, (_) => _directDial(phone, name));
+    return '准备给 $who 拨打电话，确认请回复“确认”，取消请回复“取消”。';
+  }
+
+  /// 真拨出。失败时回落到打开拨号盘（旧行为），让用户手动点拨打。
+  static Future<String> _directDial(String phone, String? name) async {
+    final who = name != null ? '$name $phone' : phone;
+    final ok = await _makeDirectCall(phone);
+    if (!ok) {
+      final uri = Uri(scheme: 'tel', path: phone);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri);
+        return '直接拨号失败，已打开拨号盘，号码 $who，点拨打即可接通。';
+      }
+      return '拨号失败：既拨不出去，也打不开拨号盘，请检查电话权限。';
     }
-    return '打不开拨号盘，请检查电话权限。';
+    // 拨出去了：查通话记录核实。没权限时如实说无法核实，不谎称失败。
+    await Future.delayed(const Duration(seconds: 2));
+    final logged = await _checkCallLog(phone);
+    if (logged == null) {
+      return '已给 $who 拨出电话（通话记录权限未授予，无法核实）。';
+    }
+    if (logged) return '已给 $who 拨出电话，通话记录已确认。';
+    return '已给 $who 拨出电话，未在通话记录里找到（可能对方未接通或记录有延迟）。';
+  }
+
+  static Future<bool> _makeDirectCall(String phone) async {
+    try {
+      final ok =
+          await _agentChannel.invokeMethod<bool>('makeCall', {'phoneNumber': phone});
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 返回 null = 没有通话记录权限（或查询失败）；true/false = 查到 / 没查到。
+  static Future<bool?> _checkCallLog(String phone) async {
+    try {
+      final res = await _agentChannel
+          .invokeMethod<Map>('checkCallLog', {'phoneNumber': phone});
+      if (res == null) return null;
+      if (res['granted'] != true) return null;
+      return res['found'] == true;
+    } catch (_) {
+      return null;
+    }
   }
 
   // ======================================================================
