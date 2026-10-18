@@ -36,7 +36,7 @@ class AsrService {
   // (the main "how fast do I react" knob, lower = snappier but may cut
   // slow speakers off); rule3: hard cap on one utterance's length.
   static const _rule1 = 2.4;
-  static const _rule2 = 1.0;
+  static const _rule2 = 3.0;
   static const _rule3 = 20.0;
 
   final _rec = AudioRecorder();

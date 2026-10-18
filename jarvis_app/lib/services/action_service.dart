@@ -70,6 +70,7 @@ class DeviceActions {
     '微信': ['com.tencent.mm'],
     '支付宝': ['com.eg.android.AlipayGphone'],
     '抖音': ['com.ss.android.ugc.aweme'],
+    '抖音极速版': ['com.ss.android.ugc.aweme.lite'],
     '快手': ['com.smile.gifmaker'],
     '淘宝': ['com.taobao.taobao'],
     '京东': ['com.jingdong.app.mall'],
@@ -88,6 +89,9 @@ class DeviceActions {
     '小红书': ['com.xingin.xhs'],
     '网易云音乐': ['com.netease.cloudmusic'],
     'QQ音乐': ['com.tencent.qqmusic'],
+    'Salt Player': ['com.salt.music'],
+    '盐播放器': ['com.salt.music'],
+    '天气': ['com.meizu.weather', 'com.meizu.flyme.weather'],
     '酷狗': ['com.kugou.android'],
     '酷我': ['cn.kuwo.player'],
     '喜马拉雅': ['com.ximalaya.ting.android'],
@@ -120,7 +124,7 @@ class DeviceActions {
     '时钟': ['com.meizu.flyme.calendar', 'com.android.deskclock'],
     '闹钟': ['com.meizu.flyme.calendar', 'com.android.deskclock'],
     '计算器': ['com.meizu.flyme.calculator', 'com.android.calculator2'],
-    '音乐': ['com.meizu.media.music', 'com.android.music'],
+    '音乐': ['com.salt.music', 'com.meizu.media.music', 'com.android.music'],
     '浏览器': ['com.meizu.media.browser', 'com.android.browser'],
     '地图': ['com.autonavi.minimap'],
     '邮件': ['com.meizu.flyme.email', 'com.android.email'],
@@ -170,6 +174,8 @@ class DeviceActions {
         await _tryRefuse(t) ??
         await _tryReadSms(t) ??
         await _tryAlarm(t) ??
+        await _tryFlashlight(t) ??
+        await _tryLocalSearch(t) ??
         await _tryOpenApp(t);
   }
 
@@ -538,9 +544,9 @@ class DeviceActions {
     // 没点名 App 时，必须出现“微信/短信/信息/消息…”这类词才算发消息，避免误伤“给我发个红包”。
     final chan = app != null ? '(?:$_channelWords)?' : '(?:$_channelWords)';
 
-    // A：给<名字>发<微信/信息…>[，说]<正文>
+    // A：给<名字>发/留言<微信/信息…>[，说]<正文>
     final a = RegExp('^$_lead' +
-            r'给(.{1,12}?)发(?:送)?' +
+            r'给(.{1,12}?)(?:发(?:送)?|留言)' +
             _fill +
             chan +
             r'[，,：:\s]*(?:说|讲|道|告诉他|告诉她|告诉)?[，,：:\s]*(.*)$')
@@ -550,8 +556,8 @@ class DeviceActions {
           _cleanRecipient(a.group(1)!), _cleanBody(a.group(2) ?? ''));
     }
 
-    // B：发<微信/信息…>给<名字>[，说]<正文>
-    final b = RegExp('^$_lead' + r'发(?:送)?' + _fill + chan + r'(?:给|到)(.+)$')
+    // B：发/留言<微信/信息…>给<名字>[，说]<正文>
+    final b = RegExp('^$_lead' + r'(?:发(?:送)?|留言)' + _fill + chan + r'(?:给|到)(.+)$')
         .firstMatch(s);
     if (b != null) {
       final nb = _splitNameBody(b.group(1)!);
@@ -571,7 +577,7 @@ class DeviceActions {
       final isQuestion =
           RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(s0);
       if (!isQuestion &&
-          RegExp(r'发(?:送)?' + _fill + r'(?:' + _channelWords + r')')
+          RegExp(r'(?:发(?:送)?|留言)' + _fill + r'(?:' + _channelWords + r')')
               .hasMatch(s0)) {
         return '要发给谁、发什么内容？例如：在微信上给张三发消息，晚上我回家吃饭。';
       }
@@ -985,6 +991,160 @@ class DeviceActions {
     }
   }
 
+  // ---------- 慢路径预开目标 App ----------
+
+  /// 慢路径启动前快开目标 App（直接拉起，秒开，不进慢循环）：
+  /// 只认白名单 App（与原生 HARD_WHITELIST 一致），长名优先（“微信读书”先于“微信”）。
+  /// 打开成功返回 true；找不到 App 名 / 打开失败返回 false（调用方继续慢路径）。
+  static const _slowTargetApps = <String, List<String>>{
+    '微信': ['com.tencent.mm'],
+    'QQ': ['com.tencent.mobileqq'],
+    'WhatsApp': ['com.whatsapp'],
+    '支付宝': ['com.eg.android.AlipayGphone'],
+    '高德地图': ['com.autonavi.minimap'],
+    '高德': ['com.autonavi.minimap'],
+    '抖音极速版': ['com.ss.android.ugc.aweme.lite'],
+    '天气': ['com.meizu.weather', 'com.meizu.flyme.weather'],
+    'Salt Player': ['com.salt.music'],
+    '盐播放器': ['com.salt.music'],
+    '音乐': ['com.salt.music'],
+    '电话': ['com.meizu.flyme.dialer', 'com.android.dialer'],
+    '短信': ['com.meizu.flyme.mms', 'com.android.mms'],
+  };
+
+  static Future<bool> openAppForTask(String text) async {
+    final keys = _slowTargetApps.keys.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    for (final key in keys) {
+      if (!text.contains(key)) continue;
+      for (final pkg in _slowTargetApps[key]!) {
+        if (await _openPackage(pkg)) return true;
+      }
+      // 找到了 App 名但没打开（可能没装）：别继续匹配更短的名字，避免开错 App。
+      return false;
+    }
+    // 任务关键词 → App：导航 / 路线 → 高德地图。
+    if (text.contains('导航') || text.contains('路线')) {
+      for (final pkg in _slowTargetApps['高德地图']!) {
+        if (await _openPackage(pkg)) return true;
+      }
+    }
+    return false;
+  }
+
+  // ---------- 手电筒 ----------
+
+  static Future<String?> _tryFlashlight(String t) async {
+    if (!t.contains('手电') && !t.contains('电筒') && !t.contains('闪光灯')) {
+      return null;
+    }
+    // 疑问句（“手电筒怎么开”）不是指令：交给闲聊回答。
+    if (RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(t)) return null;
+    final off =
+        t.contains('关闭') || t.contains('关掉') || t.contains('关手电') || t.contains('灭');
+    final enable = !off;
+    // 开手电需要相机权限（CameraManager.setTorchMode 要求 CAMERA）。
+    var st = await Permission.camera.status;
+    if (!st.isGranted) st = await Permission.camera.request();
+    if (!st.isGranted) {
+      return '开手电需要相机权限，请在设置里允许 Jarvis 使用相机后再试。';
+    }
+    try {
+      final ok = await _launcherChannel
+          .invokeMethod<bool>('setTorch', {'enabled': enable});
+      if (ok == true) return enable ? '手电筒已打开。' : '手电筒已关闭。';
+    } catch (_) {}
+    return '手电筒${enable ? '打开' : '关闭'}失败，请检查相机权限或设备是否带闪光灯。';
+  }
+
+  // ---------- 本地搜索：图片 / 文档 / 音乐 / 视频 ----------
+
+  static Future<String?> _tryLocalSearch(String t) async {
+    // 必须有“搜 / 找” + 类型词；“打开文件管理”这类交给 _tryOpenApp。
+    if (!t.contains('搜') && !t.contains('找')) return null;
+    if (t.contains('打开') || t.contains('启动') || t.contains('开')) return null;
+    if (RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(t)) return null;
+    String? kind;
+    List<String> kindWords;
+    if (t.contains('视频') || t.contains('录像') || t.contains('影片')) {
+      kind = 'video';
+      kindWords = ['视频', '录像', '影片'];
+    } else if (t.contains('图片') || t.contains('照片') || t.contains('相片')) {
+      kind = 'image';
+      kindWords = ['图片', '照片', '相片'];
+    } else if (t.contains('音乐') || t.contains('歌曲') || t.contains('音频')) {
+      kind = 'audio';
+      kindWords = ['音乐', '歌曲', '音频'];
+    } else if (t.contains('文档') || t.contains('文件') || t.contains('资料')) {
+      kind = 'document';
+      kindWords = ['文档', '文件', '资料'];
+    } else {
+      return null;
+    }
+    final label =
+        kind == 'video' ? '视频' : kind == 'image' ? '图片' : kind == 'audio' ? '音乐' : '文档';
+    final keyword = _extractSearchKeyword(t, kindWords);
+    // 媒体权限：文档无专属权限，直接查（MediaStore 只返回能看见的）。
+    Permission? perm;
+    if (kind == 'image') perm = Permission.photos;
+    if (kind == 'video') perm = Permission.videos;
+    if (kind == 'audio') perm = Permission.audio;
+    if (perm != null) {
+      var st = await perm.status;
+      if (!st.isGranted) st = await perm.request();
+      if (!st.isGranted) return '搜本地$label需要相册 / 媒体权限，请在设置里允许后再试。';
+    }
+    try {
+      final raw = await _launcherChannel.invokeMethod<List>(
+          'searchLocalMedia', {'kind': kind, 'keyword': keyword});
+      final items = (raw ?? []).cast<Map>();
+      if (items.isEmpty) {
+        return keyword.isEmpty
+            ? '手机上没有$label。'
+            : '没找到“$keyword”相关的$label。';
+      }
+      final buf = StringBuffer(
+          '找到 ${items.length} 个$label${keyword.isEmpty ? '（按最新排序）' : '（含“$keyword”）'}：');
+      for (var i = 0; i < items.length; i++) {
+        final m = items[i];
+        final name = (m['name'] as String?) ?? '';
+        final date = DateTime.fromMillisecondsSinceEpoch(
+            (m['date'] as int? ?? 0));
+        final when = '${date.month}月${date.day}日';
+        final size = _formatSize((m['size'] as int? ?? 0));
+        final extra = (m['extra'] as String?) ?? '';
+        buf.write('\n${i + 1}. $name（$when，$size）${extra.isEmpty ? '' : ' $extra'}');
+      }
+      return buf.toString();
+    } catch (_) {
+      return '本地搜索失败，请稍后再试。';
+    }
+  }
+
+  /// 去掉“搜 / 找 / 手机上 / 一下 / 我的”等套话和类型词，剩下的是关键词。
+  /// 没关键词 = 列最新的。
+  static String _extractSearchKeyword(String t, List<String> kindWords) {
+    var s = t;
+    for (final w in ['搜一下', '搜索', '查找', '搜', '找', '一下', '手机上', '手机里', '手机中', '本地', '帮我', '请', '给我', '我的', '一张', '一个', '一份', '一首', '一段', '一条', '这个', '那个', '一些', '所有']) {
+      s = s.replaceAll(w, '');
+    }
+    for (final w in kindWords) {
+      s = s.replaceAll(w, '');
+    }
+    s = s
+        .replaceAll(RegExp(r'^[的在里上中了\s]+'), '')
+        .replaceAll(RegExp(r'[的\s]+$'), '')
+        .replaceAll(RegExp(r'[\s，。,.！？!?、：:]+'), '')
+        .trim();
+    return s;
+  }
+
+  static String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+
   // ---------- Open app ----------
 
   static Future<String?> _tryOpenApp(String t) async {
@@ -1007,8 +1167,21 @@ class DeviceActions {
       }
     }
     if (name == null) {
-      // "打开XXX" with unknown XXX: let the LLM answer instead of failing.
-      return null;
+      // 不在内置表里：只有明确说了“打开 / 启动 / 开一下”才按名字匹配已安装 App；
+      // 光一个“开”（如“开车去…”）不是打开 App，别误判。
+      if (!t.contains('打开') && !t.contains('启动') && !t.contains('开一下')) {
+        return null;
+      }
+      final raw = _extractOpenAppName(t);
+      if (raw == null) return null;
+      try {
+        final ok = await _launcherChannel.invokeMethod<bool>(
+          'openAppByName',
+          {'name': raw},
+        );
+        if (ok == true) return '已打开 $raw。';
+      } catch (_) {}
+      return '$raw 似乎没安装。';
     }
     for (final pkg in _appPackages[name]!) {
       try {
@@ -1029,6 +1202,19 @@ class DeviceActions {
       }
     }
     return '$name 似乎没安装。';
+  }
+  /// 从“打开XXX / 启动XXX / 开XXX”里取出 XXX；取不出（只有“打开一下”）返回 null。
+  static String? _extractOpenAppName(String t) {
+    var s = t.replaceFirst(RegExp(r'^(请|帮我|麻烦|我要|我想|帮忙)+'), '');
+    final m = RegExp(r'(?:打开|启动|开一下|开)\s*(.+)$').firstMatch(s);
+    if (m == null) return null;
+    var name = m.group(1)!.trim();
+    name = name
+        .replaceAll(RegExp(r'(一下|吧|啊|了|呢|嘛)+$'), '')
+        .replaceAll(RegExp(r'[\s，。,.！？!?、：:]+$'), '')
+        .trim();
+    if (name.isEmpty) return null;
+    return name;
   }
 }
 

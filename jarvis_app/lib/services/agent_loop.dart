@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
 import 'settings_store.dart';
 
@@ -16,17 +18,38 @@ class AgentLoop {
   static const int maxAttempts = 2;
 
   /// 看屏：返回无障碍节点树 JSON。失败 / 空数据直接抛，调用方记步骤失败。
+  /// 原生侧的结构化错误分开说，不混成一句：“服务未开启”和“前台 App 不在白名单”是两回事。
   static Future<String> perceiveScreen() async {
+    String text;
     try {
       final String? result = await _channel.invokeMethod('perceiveScreen');
-      if (result == null || result.trim().isEmpty || result.trim() == '{}') {
-        throw Exception('无障碍感知返回空数据（服务未开启或前台不是白名单 App）');
-      }
-      return result;
+      text = (result ?? '').trim();
     } catch (e) {
-      if (e is Exception) rethrow;
       throw Exception('感知屏幕失败：$e');
     }
+    if (text.isEmpty || text == '{}') {
+      throw Exception('看屏失败：当前界面没有可读的屏幕内容。');
+    }
+    // 结构化错误（{"error": ...}）才按错误处理；正常节点树只是恰好也是 JSON。
+    String? errorKind;
+    String? errorPkg;
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is Map<String, dynamic> && decoded['error'] is String) {
+        errorKind = decoded['error'] as String;
+        errorPkg = decoded['pkg']?.toString();
+      }
+    } catch (_) {
+      // 解析失败 = 正常节点树，不是错误。
+    }
+    if (errorKind == 'service_off') {
+      throw Exception('无障碍服务未开启：请在系统设置 > 无障碍里打开“Jarvis 跨应用全自动引擎”。');
+    }
+    if (errorKind == 'not_whitelisted') {
+      throw Exception(
+          '前台 App 不在白名单里，无法看屏${(errorPkg ?? '').isEmpty ? '' : '（当前：$errorPkg）'}。');
+    }
+    return text;
   }
 
   /// 动手一步。actionType: 'click' | 'input' | 'back'。

@@ -46,7 +46,19 @@ class JarvisAccessibilityService : AccessibilityService() {
             "com.tencent.mm", // 微信
             "com.tencent.mobileqq", // QQ
             "com.whatsapp",
-            "com.whatsapp.w4b"
+            "com.whatsapp.w4b",
+            // 用户常用 App（2026-10-18 要求扩白名单）：
+            // 支付宝只许看屏点输；转账/支付/红包/密码等点击黑名单（FORBIDDEN_CLICK）原样拦截。
+            "com.eg.android.AlipayGphone", // 支付宝
+            "com.autonavi.minimap", // 高德地图
+            "com.ss.android.ugc.aweme.lite", // 抖音极速版
+            "com.meizu.weather", // 魅族自带天气
+            "com.meizu.flyme.weather", // 魅族天气（候选包名，未装则不命中）
+            "com.salt.music", // Salt Player（音乐）
+            "com.meizu.flyme.dialer", // 电话（魅族）
+            "com.android.dialer", // 电话（AOSP）
+            "com.meizu.flyme.mms", // 短信（魅族；另有动态默认短信 App 补充）
+            "com.android.mms" // 短信（AOSP）
         )
 
         /** 点击黑名单：这些字眼出现在被点控件上，一律拒绝。 */
@@ -141,9 +153,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         // 点击黑名单（FORBIDDEN_CLICK）+ 不碰密码/验证码输入（FORBIDDEN_INPUT）+ 不按坐标点。
         // 看屏导出仅供当次决策，不保存、不回传聊天内容。
 
-        /** 导出当前屏幕节点树 JSON（白名单外 App 返回 "{}"）。 */
+        /** 导出当前屏幕节点树 JSON。结构化错误（Dart 侧分开报错，不混成一句）：
+         *  服务未开启 → {"error":"service_off"}；
+         *  前台不在白名单 → {"error":"not_whitelisted","pkg":"..."}；
+         *  无根节点 → "{}"。 */
         fun perceiveScreenTree(): String {
-            val svc = instance ?: return "{}"
+            val svc = instance ?: return """{"error":"service_off"}"""
             return svc.dumpScreenTree()
         }
 
@@ -701,12 +716,14 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     // ---------------- Agent 循环：看屏导出 + 通用动作 ----------------
 
-    /** 导出当前屏幕节点树 JSON。白名单外 App / 无根节点 → "{}"。 */
+    /** 导出当前屏幕节点树 JSON。白名单外 App → 结构化错误（带当前包名）；无根节点 → "{}"。 */
     private fun dumpScreenTree(): String {
         val root = rootInActiveWindow ?: return "{}"
         try {
             val pkg = root.packageName?.toString() ?: return "{}"
-            if (pkg !in HARD_WHITELIST + extraWhitelist) return "{}"
+            if (pkg !in HARD_WHITELIST + extraWhitelist) {
+                return """{"error":"not_whitelisted","pkg":"$pkg"}"""
+            }
             return dumpNode(root, 0, intArrayOf(0)).toString()
         } catch (e: Exception) {
             Log.w(TAG, "dump tree failed", e)

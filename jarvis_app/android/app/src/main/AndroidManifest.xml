@@ -12,6 +12,13 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG"/>
     <!-- Device actions: read SMS inbox -->
     <uses-permission android:name="android.permission.READ_SMS"/>
+    <!-- Device actions: flashlight (CameraManager.setTorchMode requires CAMERA) -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera.flash" android:required="false"/>
+    <!-- Device actions: local media search (images / video / audio) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
     <application
         android:label="Jarvis"
         android:name="${applicationName}"

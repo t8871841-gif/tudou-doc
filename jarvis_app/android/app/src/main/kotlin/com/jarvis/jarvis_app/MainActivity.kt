@@ -6,8 +6,11 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.provider.CallLog
+import android.provider.MediaStore
 import android.provider.Settings
 import android.provider.Telephony
 import android.view.accessibility.AccessibilityManager
@@ -47,6 +50,22 @@ class MainActivity : FlutterActivity() {
                     "openApp" -> {
                         val pkg = call.argument<String>("package") ?: ""
                         result.success(openApp(pkg))
+                    }
+                    // 所有 App 秒开：按名字匹配已安装 App（内置表里没有的名字走这里）。
+                    "openAppByName" -> {
+                        val name = call.argument<String>("name") ?: ""
+                        result.success(openAppByName(name))
+                    }
+                    // 手电筒：CameraManager.setTorchMode（需要 CAMERA 权限，Dart 侧先申请）。
+                    "setTorch" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        result.success(setTorch(enabled))
+                    }
+                    // 本地搜索：图片 / 视频 / 音乐 / 文档（MediaStore，只返回能看见的）。
+                    "searchLocalMedia" -> {
+                        val kind = call.argument<String>("kind") ?: ""
+                        val keyword = call.argument<String>("keyword") ?: ""
+                        result.success(searchLocalMedia(kind, keyword))
                     }
                     else -> result.notImplemented()
                 }
@@ -279,9 +298,9 @@ class MainActivity : FlutterActivity() {
     /// ACTION_MAIN + CATEGORY_LAUNCHER intent and hand it to
     /// android_intent_plus: that plugin strips the package when
     /// resolveActivity(MATCH_DEFAULT_ONLY) fails (launcher
-    /// activities don't declare CATEGORY_DEFAULT), which turns the
-    /// launch into an implicit intent and pops a system chooser
-    /// ("打开方式") instead of opening the app.
+    /// activities don't declare CATEGORY_DEFAULT), which turns
+    /// the launch into an implicit intent and pops a system
+    /// chooser ("打开方式") instead of opening the app.
     private fun openApp(pkg: String): Boolean {
         if (pkg.isEmpty()) return false
         val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return false
@@ -292,6 +311,150 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             false
         }
+    }
+
+    /**
+     * 按名字打开已安装 App（“打开XXX”且 XXX 不在内置表里时走这里，所有 App 都秒开）。
+     * 先精确匹配启动器 App 名（去空格、忽略大小写），再唯一包含匹配；
+     * 包含匹配有多个命中时不开，避免开错 App。
+     */
+    private fun openAppByName(name: String): Boolean {
+        val query = name.trim()
+        if (query.isEmpty()) return false
+        val apps = try {
+            packageManager.queryIntentActivities(
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+            )
+        } catch (e: Exception) {
+            return false
+        }
+        val norm = { s: String -> s.replace(Regex("[\\s　]"), "").lowercase() }
+        val q = norm(query)
+        var match = apps.firstOrNull {
+            norm(it.loadLabel(packageManager).toString()) == q
+        }
+        if (match == null) {
+            val hits = apps.filter {
+                norm(it.loadLabel(packageManager).toString()).contains(q)
+            }
+            if (hits.size == 1) match = hits.first()
+        }
+        if (match == null) return false
+        return openApp(match.activityInfo.packageName)
+    }
+
+    /** 手电筒开关。后置闪光灯优先；无闪光灯 / 相机被占用 / 无权限时返回 false。 */
+    private fun setTorch(enabled: Boolean): Boolean {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            ?: return false
+        return try {
+            val ids = cm.cameraIdList
+            val backFlash = ids.firstOrNull { id ->
+                val c = cm.getCameraCharacteristics(id)
+                c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true &&
+                    c.get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+            }
+            val anyFlash = backFlash ?: ids.firstOrNull { id ->
+                cm.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            } ?: return false
+            cm.setTorchMode(anyFlash, enabled)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 本地搜索（MediaStore）：image / video / audio / document。
+     * keyword 为空 = 列最新的 20 个；否则按文件名 LIKE 匹配。
+     * document 按常见文档 MIME 过滤；无 MANAGE_EXTERNAL_STORAGE 时只返回能看见的，如实返回。
+     */
+    private fun searchLocalMedia(kind: String, keyword: String): List<Map<String, Any>> {
+        val uri = when (kind) {
+            "image" -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            "video" -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            "audio" -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            "document" -> MediaStore.Files.getContentUri("external")
+            else -> return emptyList()
+        }
+        val projection = mutableListOf(
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.MIME_TYPE
+        )
+        if (kind == "audio") {
+            projection.add(MediaStore.Audio.Media.TITLE)
+            projection.add(MediaStore.Audio.Media.ARTIST)
+        }
+        val sel = StringBuilder()
+        val args = mutableListOf<String>()
+        if (kind == "document") {
+            sel.append("${MediaStore.MediaColumns.MIME_TYPE} IN (")
+            val mimes = listOf(
+                "application/pdf",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "text/plain",
+                "application/rtf",
+                "application/vnd.oasis.opendocument.text",
+                "application/vnd.oasis.opendocument.spreadsheet",
+                "application/vnd.oasis.opendocument.presentation"
+            )
+            sel.append(mimes.joinToString(",") { "?" })
+            sel.append(")")
+            args.addAll(mimes)
+        }
+        if (keyword.isNotEmpty()) {
+            if (sel.isNotEmpty()) sel.append(" AND ")
+            sel.append("${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?")
+            args.add("%$keyword%")
+        }
+        val cursor = try {
+            contentResolver.query(
+                uri,
+                projection.toTypedArray(),
+                if (sel.isEmpty()) null else sel.toString(),
+                if (args.isEmpty()) null else args.toTypedArray(),
+                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+            )
+        } catch (e: Exception) {
+            null
+        } ?: return emptyList()
+        val out = mutableListOf<Map<String, Any>>()
+        cursor.use {
+            val nameIdx = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+            val dateIdx = it.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+            val sizeIdx = it.getColumnIndex(MediaStore.MediaColumns.SIZE)
+            val titleIdx = if (kind == "audio") {
+                it.getColumnIndex(MediaStore.Audio.Media.TITLE)
+            } else -1
+            val artistIdx = if (kind == "audio") {
+                it.getColumnIndex(MediaStore.Audio.Media.ARTIST)
+            } else -1
+            while (it.moveToNext() && out.size < 20) {
+                val map = mutableMapOf<String, Any>(
+                    "name" to (if (nameIdx >= 0) it.getString(nameIdx) ?: "" else ""),
+                    "date" to (if (dateIdx >= 0) it.getLong(dateIdx) * 1000L else 0L),
+                    "size" to (if (sizeIdx >= 0) it.getLong(sizeIdx) else 0L)
+                )
+                if (kind == "audio") {
+                    val title = if (titleIdx >= 0) it.getString(titleIdx) ?: "" else ""
+                    val artist = if (artistIdx >= 0) it.getString(artistIdx) ?: "" else ""
+                    val extra = listOf(artist, title).filter { s -> s.isNotEmpty() }
+                        .joinToString(" - ")
+                    if (extra.isNotEmpty()) map["extra"] = extra
+                }
+                out.add(map)
+            }
+        }
+        return out
     }
 
     private fun getInboxSms(limit: Int): List<Map<String, Any>> {

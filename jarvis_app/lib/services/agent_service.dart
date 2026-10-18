@@ -360,6 +360,10 @@ class AgentService {
         final result = await DeviceActions.tryHandle(step.argument);
         if (result != null) return _StepOutcome(result, true);
         try {
+          // 慢路径启动前：先快路径打开目标 App（直接拉起，秒开，不进慢循环）。
+          // 这样第一步看屏时前台已经是目标 App（白名单内），不会空数据失败。
+          // 找不到目标 App（如纯思考任务）时返回 false，慢路径照常跑。
+          await DeviceActions.openAppForTask(step.argument);
           final slow = await AgentLoop.runSlowStep(
             settings: settings,
             goal: step.argument,
