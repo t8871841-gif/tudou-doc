@@ -4,6 +4,9 @@ import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'llm_service.dart';
+import 'settings_store.dart';
+
 /// Device actions: call / message / cross-app message / read SMS / alarm / open app.
 /// Chinese commands only. Returns a reply string when handled,
 /// null when the text is not a device-action command (caller falls
@@ -60,6 +63,12 @@ class DeviceActions {
   static bool get hasPending {
     final p = _pending;
     return p != null && DateTime.now().isBefore(p.expires);
+  }
+
+  /// 取消挂起的确认 / 选人（供“停 / 取消”打断用）。只把 _pending 置空，
+  /// 不动确认逻辑本身；挂起的操作尚未执行，取消是安全的。
+  static void cancelPending() {
+    _pending = null;
   }
 
   // Chinese app name -> candidate package names, tried in order.
@@ -151,7 +160,8 @@ class DeviceActions {
   static bool _busy = false;
   static _Pending? _pending;
 
-  static Future<String?> tryHandle(String text) async {
+  static Future<String?> tryHandle(String text,
+      {JarvisSettings? settings}) async {
     final t = text.trim();
     if (t.isEmpty) return null;
 
@@ -176,6 +186,11 @@ class DeviceActions {
         await _tryAlarm(t) ??
         await _tryFlashlight(t) ??
         await _tryLocalSearch(t) ??
+        await _tryBrightness(t) ??
+        await _tryBluetooth(t) ??
+        await _tryCalendarEvent(t) ??
+        await _tryCalculator(t) ??
+        await _tryTranslate(t, settings) ??
         await _tryOpenApp(t);
   }
 
@@ -1145,6 +1160,359 @@ class DeviceActions {
     return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
   }
 
+  // ---------- 亮度 ----------
+
+  static Future<String?> _tryBrightness(String t) async {
+    // 疑问句不是指令，交给闲聊。
+    if (RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(t)) return null;
+    String? mode;
+    var percent = 0;
+    final setMatch =
+        RegExp(r'亮度\s*(?:调(?:到|至|成))?\s*(\d{1,3})\s*[%％]?').firstMatch(t);
+    if (setMatch != null) {
+      mode = 'set';
+      percent = int.parse(setMatch.group(1)!).clamp(1, 100);
+    } else if (t.contains('最亮') || t.contains('最高亮度')) {
+      mode = 'set';
+      percent = 100;
+    } else if (t.contains('最暗') || t.contains('最低亮度')) {
+      mode = 'set';
+      percent = 5;
+    } else if (t.contains('调亮') ||
+        t.contains('亮一点') ||
+        t.contains('亮一些') ||
+        t.contains('提高亮度') ||
+        t.contains('调高亮度')) {
+      mode = 'up';
+    } else if (t.contains('调暗') ||
+        t.contains('暗一点') ||
+        t.contains('暗一些') ||
+        t.contains('降低亮度') ||
+        t.contains('调低亮度')) {
+      mode = 'down';
+    } else {
+      return null;
+    }
+    try {
+      final res = await _launcherChannel.invokeMethod<String>(
+          'setBrightness', {'mode': mode, 'percent': percent});
+      if (res == 'ok') {
+        return mode == 'set'
+            ? '亮度已调到 $percent%。'
+            : mode == 'up'
+                ? '亮度已调亮。'
+                : '亮度已调暗。';
+      }
+      if (res == 'need_auth') {
+        try {
+          await _launcherChannel.invokeMethod('openWriteSettings');
+        } catch (_) {}
+        return '改亮度需要“修改系统设置”权限，已打开授权页，请允许后重说一次。';
+      }
+    } catch (_) {}
+    return '调亮度失败，请检查权限或设备支持。';
+  }
+
+  // ---------- 蓝牙 ----------
+
+  static Future<String?> _tryBluetooth(String t) async {
+    if (!t.contains('蓝牙')) return null;
+    if (RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(t)) return null;
+    bool? enable;
+    if (t.contains('打开蓝牙') ||
+        t.contains('开启蓝牙') ||
+        t.contains('开蓝牙') ||
+        t.contains('蓝牙打开') ||
+        t.contains('蓝牙开') ||
+        t.contains('打开一下蓝牙')) {
+      enable = true;
+    } else if (t.contains('关闭蓝牙') ||
+        t.contains('关掉蓝牙') ||
+        t.contains('关蓝牙') ||
+        t.contains('蓝牙关闭') ||
+        t.contains('蓝牙关') ||
+        t.contains('关闭一下蓝牙')) {
+      enable = false;
+    } else {
+      return null;
+    }
+    try {
+      var st = await Permission.bluetoothConnect.status;
+      if (!st.isGranted) st = await Permission.bluetoothConnect.request();
+      if (!st.isGranted) {
+        return '开关蓝牙需要蓝牙权限，请在设置里允许后再试。';
+      }
+    } catch (_) {
+      // 权限申请异常（如旧系统无此权限）：继续尝试，原生侧会如实返回失败。
+    }
+    try {
+      final ok = await _launcherChannel
+          .invokeMethod<bool>('setBluetooth', {'enabled': enable});
+      if (ok == true) return enable ? '蓝牙已打开。' : '蓝牙已关闭。';
+    } catch (_) {}
+    return '蓝牙${enable ? '打开' : '关闭'}失败，请检查蓝牙权限或设备是否支持蓝牙。';
+  }
+
+  // ---------- 日程：写进系统日历（打开日历让用户确认，不直接写） ----------
+
+  static Future<String?> _tryCalendarEvent(String t) async {
+    if (!t.contains('日程')) return null;
+    if (RegExp(r'怎么|如何|怎样|什么|为什么|吗|\?|？').hasMatch(t)) return null;
+    // 必须带时间才算“记日程”；“打开日历”这类没有时间的交给 _tryOpenApp。
+    final nt = _normalizeTimeText(t);
+    var dayOffset = 0;
+    if (nt.contains('后天')) {
+      dayOffset = 2;
+    } else if (nt.contains('明天')) {
+      dayOffset = 1;
+    }
+    final monthDay =
+        RegExp(r'(\d{1,2})\s*[月]\s*(\d{1,2})\s*[日号]').firstMatch(nt);
+    final timeMatch =
+        RegExp(r'(\d{1,2})\s*[点时:：钟]\s*(\d{1,2})?\s*[分]?').firstMatch(nt);
+    if (timeMatch == null) return null;
+    var hour = int.parse(timeMatch.group(1)!);
+    final minute = int.parse(timeMatch.group(2) ?? '0');
+    var period = '';
+    for (final p in ['凌晨', '早上', '上午', '中午', '下午', '晚上', '今晚', '夜里', '半夜']) {
+      if (nt.contains(p)) {
+        period = p;
+        break;
+      }
+    }
+    if ((period == '下午' ||
+            period == '晚上' ||
+            period == '今晚' ||
+            period == '夜里' ||
+            period == '中午') &&
+        hour < 12) {
+      hour += 12;
+    }
+    if ((period == '凌晨' || period == '半夜') && hour == 12) hour = 0;
+    if (hour > 23 || minute > 59) return null;
+    final now = DateTime.now();
+    var day = now.add(Duration(days: dayOffset));
+    if (monthDay != null) {
+      final m = int.parse(monthDay.group(1)!);
+      final d = int.parse(monthDay.group(2)!);
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        day = DateTime(now.year, m, d);
+        if (day.isBefore(DateTime(now.year, now.month, now.day))) {
+          day = DateTime(now.year + 1, m, d);
+        }
+      }
+    }
+    var begin = DateTime(day.year, day.month, day.day, hour, minute);
+    if (monthDay == null && dayOffset == 0 && begin.isBefore(now)) {
+      begin = begin.add(const Duration(days: 1));
+    }
+    final end = begin.add(const Duration(hours: 1));
+    // 标题：去掉日程 / 时间 / 套话，剩下的是事。
+    var title = t;
+    for (final w in [
+      '日程',
+      '添加',
+      '新建',
+      '创建一个',
+      '创建',
+      '记一个',
+      '记一下',
+      '记',
+      '安排',
+      '约',
+      '加一个',
+      '加',
+      '提醒',
+      '请',
+      '帮我',
+      '麻烦',
+      '把',
+      '一下',
+      '吧',
+      '啊',
+      '了',
+      '呢'
+    ]) {
+      title = title.replaceAll(w, '');
+    }
+    title = title
+        .replaceAll(RegExp(r'(今天|明天|后天|凌晨|早上|上午|中午|下午|晚上|今晚|夜里|半夜)'), '')
+        .replaceAll(RegExp(r'\d{1,2}\s*[月]\s*\d{1,2}\s*[日号]?'), '')
+        .replaceAll(RegExp(r'\d{1,2}\s*[点时:：钟]\s*\d{0,2}\s*[分]?'), '')
+        .replaceAll(RegExp(r'[零一二两三四五六七八九十]+[点时分]'), '')
+        .replaceAll(RegExp(r'[\s，。,.！？!?、：:]+'), '')
+        .trim();
+    if (title.isEmpty) title = 'Jarvis 日程';
+    try {
+      final intent = AndroidIntent(
+        action: 'android.intent.action.INSERT',
+        data: 'content://com.android.calendar/events',
+        arguments: <String, dynamic>{
+          'title': title,
+          'beginTime': begin.millisecondsSinceEpoch,
+          'endTime': end.millisecondsSinceEpoch,
+          'allDay': false,
+        },
+      );
+      await intent.launch();
+      final hh = begin.hour.toString().padLeft(2, '0');
+      final mm = begin.minute.toString().padLeft(2, '0');
+      return '已打开系统日历，日程“$title”定在 ${begin.month}月${begin.day}日 $hh:$mm，点确认即可保存。';
+    } catch (_) {
+      return '打不开系统日历，请检查日历应用。';
+    }
+  }
+
+  // ---------- 计算器：纯 Dart 安全表达式求值（无 eval，无新依赖） ----------
+
+  /// 安全求值：只支持数字、+ - * / × ÷ %（百分）、括号、小数点。
+  /// 返回 null = 不是合法算式（调用方不拦截，继续往下走）。
+  static double? evaluateExpression(String expr) {
+    try {
+      var s = expr
+          .replaceAll('×', '*')
+          .replaceAll('÷', '/')
+          .replaceAll('（', '(')
+          .replaceAll('）', ')')
+          .replaceAll('，', '')
+          .replaceAll(',', '')
+          .replaceAll(' ', '')
+          .replaceAll('=', '');
+      // 百分号当“除以 100”：50% -> (50/100)。
+      s = s.replaceAllMapped(
+          RegExp(r'(\d+(?:\.\d+)?)%'), (m) => '(${m.group(1)}/100)');
+      if (s.isEmpty || !RegExp(r'^[0-9+\-*/().]+$').hasMatch(s)) return null;
+      final parser = _ExprParser(s);
+      final v = parser.parse();
+      if (!parser.atEnd || v.isNaN || v.isInfinite) return null;
+      return v;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 格式化计算结果：整数不带小数；小数最多 6 位，去尾零。
+  static String formatNumber(double v) {
+    if (v == v.truncateToDouble()) return v.truncate().toString();
+    return v
+        .toStringAsFixed(6)
+        .replaceAll(RegExp(r'0+$'), '')
+        .replaceAll(RegExp(r'\.$'), '');
+  }
+
+  static Future<String?> _tryCalculator(String t) async {
+    String? expr;
+    final m1 = RegExp(r'^(请|帮我|麻烦)?(算一下|计算|算算|帮我算)\s*(.+)$')
+        .firstMatch(t);
+    if (m1 != null) {
+      expr = m1.group(3);
+    } else {
+      final m2 =
+          RegExp(r'^(.+?)(等于多少|得多少|是多少)\s*[?？]?$').firstMatch(t);
+      if (m2 != null &&
+          RegExp(r'[0-9+\-*/×÷%().（）]').hasMatch(m2.group(1)!)) {
+        expr = m2.group(1);
+      }
+    }
+    if (expr == null) return null;
+    expr = expr
+        .replaceAll(RegExp(r'(等于多少|得多少|是多少)\s*[?？]?$'), '')
+        .replaceAll(RegExp(r'[?？]$'), '')
+        .trim();
+    final v = evaluateExpression(expr);
+    if (v == null) return null;
+    return '$expr = ${formatNumber(v)}';
+  }
+
+  // ---------- 翻译：走用户配置的大模型，不接新 API ----------
+
+  static const _translateTargets = <String, String>{
+    '英文': '英语',
+    '英语': '英语',
+    '中文': '中文',
+    '汉语': '中文',
+    '日文': '日语',
+    '日语': '日语',
+    '韩文': '韩语',
+    '韩语': '韩语',
+    '法文': '法语',
+    '法语': '法语',
+    '德文': '德语',
+    '德语': '德语',
+    '西班牙文': '西班牙语',
+    '西班牙语': '西班牙语',
+    '俄文': '俄语',
+    '俄语': '俄语',
+  };
+
+  static Future<String?> _tryTranslate(
+      String t, JarvisSettings? settings) async {
+    if (!t.contains('翻译')) return null;
+    if (RegExp(r'怎么|如何|怎样|为什么|吗|\?|？|是什么意思|怎么说').hasMatch(t)) {
+      return null;
+    }
+    String? text;
+    var target = '英语';
+    final m1 =
+        RegExp(r'^(请|帮我|麻烦)?把(.+?)翻译成([^。.,，：:]+)[。.,，]?$')
+            .firstMatch(t);
+    final m2 =
+        RegExp(r'^(请|帮我|麻烦)?翻译(.+?)成([^。.,，：:]+)[。.,，]?$')
+            .firstMatch(t);
+    final m3 =
+        RegExp(r'^(请|帮我|麻烦)?翻译[：:，, ]*(.+)$').firstMatch(t);
+    if (m1 != null) {
+      text = m1.group(2)!.trim();
+      target = _translateTargets[m1.group(3)!.trim()] ?? m1.group(3)!.trim();
+    } else if (m2 != null) {
+      text = m2.group(2)!.trim();
+      target = _translateTargets[m2.group(3)!.trim()] ?? m2.group(3)!.trim();
+    } else if (m3 != null) {
+      final rest = m3.group(1)!.trim();
+      // “翻译成英文：你好”：成 + 目标 + 内容。
+      final m4 = RegExp(r'^成(.+?)[：:，, ]+(.+)$').firstMatch(rest);
+      if (m4 != null) {
+        target =
+            _translateTargets[m4.group(1)!.trim()] ?? m4.group(1)!.trim();
+        text = m4.group(2)!.trim();
+      } else if (rest.startsWith('成')) {
+        return null; // “翻译成英文”没给内容：不拦截，交给聊天。
+      } else {
+        text = rest;
+      }
+    } else {
+      return null;
+    }
+    if (text == null) return null;
+    text = text
+        .replaceFirst(RegExp(r'^(一下|这句|这段|这段话)'), '')
+        .replaceAll(RegExp(r'[。.,，]?$'), '')
+        .trim();
+    // “翻译这句话”没给实质内容（指代前文）：不拦截，交给聊天（大模型看历史能接上）。
+    if (text.isEmpty || text == '话') return null;
+    if (text.length > 500) return '要翻译的文字太长（超过 500 字），请分段发。';
+    if (settings == null) return null; // 没配置时不拦截，交给正常聊天。
+    try {
+      final out = await LlmService.ask(
+        settings: settings,
+        question: text,
+        history: [
+          {
+            'role': 'system',
+            'content':
+                '你是一个翻译引擎。把用户的话翻译成$target，只输出译文，不要任何解释、不要引号、不要 Markdown。'
+          },
+        ],
+        withMemory: false,
+      );
+      final trimmed = out.trim();
+      if (trimmed.isEmpty) return '翻译失败，请稍后再试。';
+      return trimmed;
+    } catch (_) {
+      return '翻译失败，请检查网络与模型配置。';
+    }
+  }
+
   // ---------- Open app ----------
 
   static Future<String?> _tryOpenApp(String t) async {
@@ -1446,4 +1814,65 @@ class _ReservedAdapter extends _Adapter {
   bool get enabled => false;
   @override
   List<Map<String, dynamic>> steps(String contact, String body) => const [];
+}
+
+/// 递归下降表达式解析器：expr := term (('+'|'-') term)*；
+/// term := factor (('*'|'/') factor)*；factor := number | '(' expr ')' | '-' factor。
+/// 只认 evaluateExpression 预处理过的干净字符串（数字、+-*/、括号、小数点）。
+class _ExprParser {
+  _ExprParser(this.s);
+  final String s;
+  int i = 0;
+
+  bool get atEnd => i >= s.length;
+
+  double parse() => _expr();
+
+  double _expr() {
+    var v = _term();
+    while (i < s.length && (s[i] == '+' || s[i] == '-')) {
+      final op = s[i++];
+      final rhs = _term();
+      v = op == '+' ? v + rhs : v - rhs;
+    }
+    return v;
+  }
+
+  double _term() {
+    var v = _factor();
+    while (i < s.length && (s[i] == '*' || s[i] == '/')) {
+      final op = s[i++];
+      final rhs = _factor();
+      if (op == '/' && rhs == 0) throw const FormatException('除零');
+      v = op == '*' ? v * rhs : v / rhs;
+    }
+    return v;
+  }
+
+  double _factor() {
+    if (i < s.length && s[i] == '-') {
+      i++;
+      return -_factor();
+    }
+    if (i < s.length && s[i] == '(') {
+      i++;
+      final v = _expr();
+      if (i >= s.length || s[i] != ')') {
+        throw const FormatException('括号不匹配');
+      }
+      i++;
+      return v;
+    }
+    final start = i;
+    while (i < s.length && (_isDigit(s[i]) || s[i] == '.')) {
+      i++;
+    }
+    if (start == i) throw const FormatException('非法字符');
+    return double.parse(s.substring(start, i));
+  }
+
+  static bool _isDigit(String ch) {
+    final c = ch.codeUnitAt(0);
+    return c >= 48 && c <= 57;
+  }
 }

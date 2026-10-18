@@ -2,6 +2,7 @@ package com.jarvis.jarvis_app
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.bluetooth.BluetoothManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.net.Uri
+import android.os.Build
 import android.provider.CallLog
 import android.provider.MediaStore
 import android.provider.Settings
@@ -66,6 +68,30 @@ class MainActivity : FlutterActivity() {
                         val kind = call.argument<String>("kind") ?: ""
                         val keyword = call.argument<String>("keyword") ?: ""
                         result.success(searchLocalMedia(kind, keyword))
+                    }
+                    // 亮度：写系统亮度（需 WRITE_SETTINGS，Dart 侧先判授权）。
+                    "setBrightness" -> {
+                        val mode = call.argument<String>("mode") ?: "set"
+                        val percent = call.argument<Int>("percent") ?: 0
+                        result.success(setBrightness(mode, percent))
+                    }
+                    "openWriteSettings" -> {
+                        try {
+                            startActivity(Intent(
+                                Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                                Uri.parse("package:$packageName")
+                            ).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            })
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    // 蓝牙：开关（需 BLUETOOTH_CONNECT，Dart 侧先申请）。
+                    "setBluetooth" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        result.success(setBluetooth(enabled))
                     }
                     else -> result.notImplemented()
                 }
@@ -362,6 +388,53 @@ class MainActivity : FlutterActivity() {
             cm.setTorchMode(anyFlash, enabled)
             true
         } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 写系统亮度。mode: set（percent 1..100）/ up（+20%）/ down（-20%）。
+     * 返回 "ok" / "need_auth"（未授予 WRITE_SETTINGS）/ "error"。
+     */
+    private fun setBrightness(mode: String, percent: Int): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !Settings.System.canWrite(this)
+        ) {
+            return "need_auth"
+        }
+        return try {
+            val resolver = contentResolver
+            val current = try {
+                Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS)
+            } catch (_: Exception) {
+                128
+            }
+            val target = when (mode) {
+                "up" -> (current + 51).coerceIn(10, 255)
+                "down" -> (current - 51).coerceIn(10, 255)
+                else -> ((percent.coerceIn(1, 100)) * 255 / 100).coerceIn(10, 255)
+            }
+            Settings.System.putInt(
+                resolver, Settings.System.SCREEN_BRIGHTNESS_MODE,
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+            )
+            Settings.System.putInt(
+                resolver, Settings.System.SCREEN_BRIGHTNESS, target
+            )
+            "ok"
+        } catch (_: Exception) {
+            "error"
+        }
+    }
+
+    /** 蓝牙开关。无蓝牙硬件 / 调用失败返回 false。 */
+    private fun setBluetooth(enabled: Boolean): Boolean {
+        return try {
+            val manager =
+                getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val adapter = manager?.adapter ?: return false
+            if (enabled) adapter.enable() else adapter.disable()
+        } catch (_: Exception) {
             false
         }
     }

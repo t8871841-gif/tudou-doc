@@ -19,6 +19,11 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+    <!-- Device actions: brightness (WRITE_SETTINGS, granted via system settings) -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"/>
+    <!-- Device actions: bluetooth on/off (BLUETOOTH_CONNECT is runtime on Android 12+) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
     <application
         android:label="Jarvis"
         android:name="${applicationName}"

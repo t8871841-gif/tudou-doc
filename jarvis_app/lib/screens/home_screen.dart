@@ -734,6 +734,57 @@ class _HomeScreenState extends State<HomeScreen>
     });
     _scrollDown();
 
+    // 打断 / 改指令：必须在续跑 / 挂起确认分支之前。
+    // “停”只在有进行中任务（黑板 ongoing / waitingConfirmation）或挂起确认时拦截，
+    // 避免正常聊天里的“算了 / 不用了”误杀；“改成”只在有任务（任何状态）或挂起确认时拦截，
+    // 避免“改成英文”这类改写请求被当成换任务。
+    final qNoWake = q
+        .replaceFirst(
+            RegExp(r'^(贾维斯|jarvis)[，,、 ]*', caseSensitive: false), '')
+        .trim();
+    final boardForInterrupt = await TaskBoard.load();
+    final hasActiveTask = DeviceActions.hasPending ||
+        (boardForInterrupt != null &&
+            (boardForInterrupt.status == TaskStatus.ongoing ||
+                boardForInterrupt.status == TaskStatus.waitingConfirmation));
+    final stopMatch = RegExp(
+            r'^(先)?(停|停止|停下|停一下|取消|不用了|算了|别做了|不要了|不用做了|stop)[。！!~，, ]*$',
+            caseSensitive: false)
+        .hasMatch(qNoWake);
+    if (stopMatch && hasActiveTask) {
+      await TaskBoard.clear();
+      DeviceActions.cancelPending();
+      _reply('已停。', '任务已停止。');
+      if (mounted) await _speak('已停。');
+      return;
+    }
+    final changeEmpty = RegExp(r'^(改成|换成|改为|换为|改一下|换一下)\s*[。！!~，, ]*$')
+        .hasMatch(qNoWake);
+    if (changeEmpty &&
+        (DeviceActions.hasPending || boardForInterrupt != null)) {
+      _reply('要改成什么？请说完整，例如：改成给李四打电话。', '任务执行完毕。');
+      if (mounted) await _speak('要改成什么？请说完整，例如：改成给李四打电话。');
+      return;
+    }
+    final changeMatch =
+        RegExp(r'^(改成|换成|改为|换为|改一下|换一下)\s*[：:，, ]*(.+)$')
+            .firstMatch(qNoWake);
+    if (changeMatch != null &&
+        (DeviceActions.hasPending || boardForInterrupt != null)) {
+      final newGoal = changeMatch
+          .group(2)!
+          .trim()
+          .replaceAll(RegExp(r'[。！!~，, ]+$'), '');
+      if (newGoal.isEmpty) {
+        _reply('要改成什么？请说完整，例如：改成给李四打电话。', '任务执行完毕。');
+        if (mounted) await _speak('要改成什么？请说完整，例如：改成给李四打电话。');
+        return;
+      }
+      await TaskBoard.clear();
+      DeviceActions.cancelPending();
+      q = newGoal;
+    }
+
     // 任务黑板续跑：“刚才那件事继续”——从黑板当前步接着跑。
     // 必须放在挂起确认分支之前：否则续跑口令会被当成确认答复吃掉。
     if (q.contains('刚才那件事继续')) {
@@ -779,7 +830,8 @@ class _HomeScreenState extends State<HomeScreen>
     // 有挂起确认（确认发送 / 选联系人）：用户原话直走 tryHandle，
     // 跳过大模型规划与汇总——大模型会改写确认问句，“对”也到不了确认逻辑。
     if (DeviceActions.hasPending) {
-      final direct = await DeviceActions.tryHandle(q);
+      final direct =
+          await DeviceActions.tryHandle(q, settings: _settings);
       if (direct != null) {
         _reply(direct, '任务执行完毕。');
         _maybeConsolidateMemory();

@@ -106,6 +106,7 @@ class AgentService {
       userGoal: userGoal,
       history: history,
       steps: steps,
+      allCompleted: board.status == TaskStatus.completed,
       onProgress: onProgress,
     );
   }
@@ -141,6 +142,7 @@ class AgentService {
       userGoal: board.goal,
       history: history,
       steps: steps,
+      allCompleted: board.status == TaskStatus.completed,
       onProgress: onProgress,
     );
   }
@@ -226,6 +228,7 @@ class AgentService {
     required String userGoal,
     required List<Map<String, String>> history,
     required List<AgentStep> steps,
+    required bool allCompleted,
     required Function(String statusMessage) onProgress,
   }) async {
     if (DeviceActions.hasPending) {
@@ -250,7 +253,47 @@ class AgentService {
       history: history,
     );
 
-    return finalAnswer;
+    return _appendSelfCheck(
+      settings: settings,
+      userGoal: userGoal,
+      steps: steps,
+      finalAnswer: finalAnswer,
+      allCompleted: allCompleted,
+    );
+  }
+
+  /// 反思校验：仅限多步黑板任务且全部步骤完成时，追加一次大模型调用，
+  /// 自检是否达成目标、还缺什么。缺信息时用一句问句向用户追问。
+  /// 调用失败则静默跳过，不影响答复；不改黑板状态机。
+  static Future<String> _appendSelfCheck({
+    required JarvisSettings settings,
+    required String userGoal,
+    required List<AgentStep> steps,
+    required String finalAnswer,
+    required bool allCompleted,
+  }) async {
+    if (!allCompleted || steps.length < 2) return finalAnswer;
+    try {
+      final sb = StringBuffer();
+      sb.writeln('用户的原始目标是：$userGoal\n');
+      sb.writeln('已执行的步骤及结果：');
+      for (var s in steps) {
+        sb.writeln('- 步骤 ${s.stepId} (${s.description}):${s.result}');
+      }
+      final check = await LlmService.ask(
+        settings: settings,
+        question:
+            '${sb}请自检：以上结果是否真正满足用户目标？如果还缺信息或某步没做到位，用一两句话说明，并用一句问句向用户追问缺的条件。只输出自检结论，不要复述步骤。',
+        history: const [],
+        withMemory: false,
+      );
+      final t = check.trim();
+      if (t.isEmpty) return finalAnswer;
+      final short = t.length > 300 ? '${t.substring(0, 300)}…' : t;
+      return '$finalAnswer\n\n自检：$short';
+    } catch (_) {
+      return finalAnswer;
+    }
   }
 
   /// 慢路径看屏决策：把节点树给大模型，拿回下一步动作。
@@ -319,7 +362,7 @@ class AgentService {
 每个步骤包含：
 "step_id": 数字序号
 "description": 步骤的中文描述
-"tool": 可选 "device_action"（用于发短信、打电话、打开地图等跨应用操作）、"web_search"（用于联网查天气、查新闻等）、或 "llm_reasoning"（纯思考写作）
+"tool": 可选 "device_action"（用于发短信、打电话、打开地图、调亮度、开关蓝牙、记日程、翻译等设备/工具操作）、"web_search"（用于联网查天气、查新闻等）、"calculator"（纯算术，argument 写算式本身，如 128*3+45）、或 "llm_reasoning"（纯思考写作）
 "argument": 传递给工具的具体指令或关键词
 例如：
 [
@@ -357,7 +400,8 @@ class AgentService {
   }) async {
     switch (step.tool) {
       case 'device_action':
-        final result = await DeviceActions.tryHandle(step.argument);
+        final result =
+            await DeviceActions.tryHandle(step.argument, settings: settings);
         if (result != null) return _StepOutcome(result, true);
         try {
           // 慢路径启动前：先快路径打开目标 App（直接拉起，秒开，不进慢循环）。
@@ -381,6 +425,13 @@ class AgentService {
         } catch (e) {
           return _StepOutcome('联网查询失败：$e', false);
         }
+      case 'calculator':
+        final v = DeviceActions.evaluateExpression(step.argument);
+        if (v == null) {
+          return _StepOutcome('计算失败：表达式无效（${step.argument}）', false);
+        }
+        return _StepOutcome(
+            '${step.argument} = ${DeviceActions.formatNumber(v)}', true);
       case 'llm_reasoning':
       default:
         return _StepOutcome('已完成思考与文本处理：${step.argument}', true);
