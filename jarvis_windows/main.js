@@ -3,7 +3,7 @@ const http=require('http'),fs=require('fs'),path=require('path'),{spawn}=require
 const T={'.html':'text/html; charset=utf-8','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm','.json':'application/json'};
 /* ---------- 配置与记忆（只在主进程，页面拿不到密钥） ---------- */
 const cfgPath=path.join(__dirname,'config.json'),dataDir=path.join(__dirname,'data'),memPath=path.join(dataDir,'memory.json');
-const cfg=()=>{try{return JSON.parse(fs.readFileSync(cfgPath,'utf8'))}catch{return{}}};
+const cfg=()=>{try{return JSON.parse(fs.readFileSync(cfgPath,'utf8').replace(/^\uFEFF/,''))}catch{return{}}};
 fs.mkdirSync(dataDir,{recursive:true});
 let mem={facts:[],hist:[]};try{mem=JSON.parse(fs.readFileSync(memPath,'utf8'))}catch{}
 const save=()=>fs.writeFileSync(memPath,JSON.stringify(mem,null,1));
@@ -41,9 +41,9 @@ function startStt(win){
   if(process.platform!=='win32')return;
   const p=spawn('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'stt.ps1'),cfg().sttCulture||'zh-CN'],{windowsHide:true});
   let buf='';p.stdout.setEncoding('utf8');
-  p.stdout.on('data',d=>{buf+=d;let i;while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i).trim();buf=buf.slice(i+1);
+  p.stdout.on('data',d=>{if(win.isDestroyed())return;buf+=d;let i;while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i).trim();buf=buf.slice(i+1);
     if(l.startsWith('T:'))win.webContents.send('stt',l.slice(2));else if(l)win.webContents.send('stt-state',l)}});
-  p.stderr.on('data',d=>win.webContents.send('stt-state','ERR:'+String(d).slice(0,160)));
+  p.stderr.on('data',d=>{if(win.isDestroyed())return;win.webContents.send('stt-state','ERR:'+String(d).slice(0,160))});
   app.on('quit',()=>p.kill());
 }
 /* ---------- 本地静态服务（不公开 config 与 data） ---------- */

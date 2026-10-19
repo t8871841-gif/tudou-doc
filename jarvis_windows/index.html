@@ -13,10 +13,22 @@ html,body{height:100%;overflow:hidden;color:var(--c);cursor:none;font-family:Bah
 .col.f .flip{transform:rotateY(180deg)}
 .face{position:absolute;inset:0;backface-visibility:hidden;display:flex;flex-direction:column;gap:2.4vh;transform-style:preserve-3d}
 .face.b{transform:rotateY(180deg)}
-.p{flex:1;padding:14px 16px;overflow:hidden;background:linear-gradient(135deg,rgba(20,90,120,.30),rgba(5,25,40,.55));
+.p{flex:1;padding:14px 16px;overflow:hidden;backface-visibility:hidden;background:linear-gradient(135deg,rgba(20,90,120,.30),rgba(5,25,40,.55));
  border:1px solid rgba(95,227,255,.35);backdrop-filter:blur(6px);transform:translateZ(var(--z,0px));animation:br 4s ease-in-out infinite;
  clip-path:polygon(0 0,calc(100% - 18px) 0,100% 18px,100% 100%,18px 100%,0 calc(100% - 18px))}
 .face .p:nth-child(2){--z:45px;animation-delay:-2s}
+.face.b .p{border-color:rgba(255,179,71,.45)}
+.hud{position:fixed;width:46px;height:46px;border:2px solid rgba(95,227,255,.55);pointer-events:none;z-index:5}
+.hud.tl{left:14px;top:14px;border-right:none;border-bottom:none}
+.hud.tr{right:14px;top:14px;border-left:none;border-bottom:none}
+.hud.bl{left:14px;bottom:14px;border-right:none;border-top:none}
+.hud.br{right:14px;bottom:14px;border-left:none;border-top:none}
+#tick{position:fixed;top:3px;left:0;right:0;overflow:hidden;white-space:nowrap;font-size:11px;letter-spacing:.25em;color:rgba(95,227,255,.6);pointer-events:none;z-index:5}
+#tick i{display:inline-block;animation:tk 40s linear infinite;font-style:normal}
+@keyframes tk{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+#helmetImg{position:fixed;left:50%;top:52%;transform:translate(-50%,-50%);height:72vh;display:none;pointer-events:none;z-index:4;animation:floaty 5s ease-in-out infinite}
+#helmetImg img{height:100%;display:block;filter:drop-shadow(0 0 34px rgba(95,227,255,.35)) drop-shadow(0 0 18px rgba(255,179,71,.25))}
+@keyframes floaty{50%{margin-top:-12px}}
 @keyframes br{50%{box-shadow:inset 0 0 30px rgba(95,227,255,.22);border-color:rgba(95,227,255,.75)}}
 h3{font-size:12px;font-weight:600;letter-spacing:.2em;opacity:.75;margin-bottom:8px}
 .big{font-size:clamp(28px,3.6vw,56px);font-weight:300;letter-spacing:.04em;text-shadow:0 0 14px rgba(95,227,255,.7)}
@@ -35,6 +47,9 @@ h3{font-size:12px;font-weight:600;letter-spacing:.2em;opacity:.75;margin-bottom:
 #ti{position:fixed;left:50%;top:4vh;transform:translateX(-50%);display:none;width:40vw;background:rgba(5,25,40,.85);border:1px solid var(--c);color:var(--c);padding:8px 12px;font:16px Bahnschrift,"Microsoft YaHei UI",sans-serif;cursor:text;outline:none}
 </style></head><body>
 <canvas id="gl"></canvas>
+<div class="hud tl"></div><div class="hud tr"></div><div class="hud bl"></div><div class="hud br"></div>
+<div id="tick"><i>ARC REACTOR 3.1 GJ/S · PWR 98% · COOLANT 36.5°C · SYS DIAG NOMINAL · UPLINK LOCKED · ARC REACTOR 3.1 GJ/S · PWR 98% · COOLANT 36.5°C · SYS DIAG NOMINAL · UPLINK LOCKED · </i></div>
+<div id="helmetImg"><img src="/helmet.png" onerror="this.dataset.err=1"></div>
 <div class="col" id="L"><div class="flip">
  <div class="face a"><div class="p"><h3>时间</h3><div class="big" id="clk">--:--:--</div><div class="sm" id="dt"></div></div>
   <div class="p"><h3>天气</h3><div class="big" id="wt">--</div><div class="sm" id="wd">获取中…</div></div></div>
@@ -101,6 +116,11 @@ const red=new THREE.MeshStandardMaterial({color:0xa5121a,metalness:.9,roughness:
 const gold=new THREE.MeshStandardMaterial({color:0xe0a622,metalness:1,roughness:.22,side:THREE.DoubleSide});
 helmet.add(new THREE.Mesh(new THREE.LatheGeometry(V([[0,-1.25],[.5,-1.2],[.78,-.9],[.88,-.3],[.86,.3],[.74,.85],[.42,1.2],[0,1.32]]),64),red));
 helmet.add(new THREE.Mesh(new THREE.LatheGeometry(V([[.865,-.95],[.927,-.5],[.917,0],[.9,.45],[.82,.7]]),32,-.78,1.56),gold));
+/* 面甲细节：金色下半脸壳 + 眼窝 + 耳盖 */
+helmet.add(new THREE.Mesh(new THREE.LatheGeometry(V([[0,-1.25],[.5,-1.2],[.78,-.9],[.88,-.3],[.87,.05],[.8,.15]]).map(p=>new THREE.Vector2(p.x*1.03,p.y)),64,-.9,1.8),gold));
+const dark=new THREE.MeshStandardMaterial({color:0x141414,metalness:.6,roughness:.5,side:THREE.DoubleSide});
+[-1,1].forEach(s=>{const o=new THREE.Mesh(new THREE.BoxGeometry(.44,.13,.06),dark);o.position.set(s*.3,.18,.885);o.rotation.set(0,s*.33,-s*.12);helmet.add(o);
+const cap=new THREE.Mesh(new THREE.CylinderGeometry(.26,.26,.12,24),gold);cap.rotation.z=Math.PI/2;cap.position.set(s*.88,-.05,0);helmet.add(cap)});
 const eyeM=new THREE.MeshBasicMaterial({color:0xcff8ff});
 [-1,1].forEach(s=>{const e=new THREE.Mesh(new THREE.BoxGeometry(.34,.07,.04),eyeM);e.position.set(s*.3,.18,.91);e.rotation.set(0,s*.33,-s*.12);helmet.add(e)});
 fetch('/models/helmet.glb',{method:'HEAD'}).then(r=>{if(!r.ok)return;new GLTFLoader().load('/models/helmet.glb',g=>{
@@ -110,7 +130,7 @@ fetch('/models/helmet.glb',{method:'HEAD'}).then(r=>{if(!r.ok)return;new GLTFLoa
 let speaking=false,page=0,level=0,muted=false,tracks=[],an,buf,hx=.5,handSeen=false,mx=0,my=0;
 addEventListener('mousemove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5});
 function flip(){page^=1;document.querySelectorAll('.col').forEach(c=>c.classList.toggle('f',!!page));
- helmet.visible=!!page;core.visible=sphere.visible=!page}
+ const noImg=$('#helmetImg img').dataset.err==='1';$('#helmetImg').style.display=(page&&!noImg)?'block':'none';helmet.visible=!!page&&noImg;core.visible=sphere.visible=!page}
 function toggleMute(){muted=!muted;tracks.forEach(t=>t.enabled=!muted);
  $('#mute').textContent=muted?'已静音':'监听中';$('#mute').className='big'+(muted?' muted':'')}
 addEventListener('keydown',e=>{if(e.target.id==='ti')return;if(e.code==='Space'||e.code==='ArrowRight')flip();if(e.key==='m'||e.key==='M')toggleMute()});
@@ -122,6 +142,7 @@ function loop(t){requestAnimationFrame(loop);const s=t/1000;
  core.scale.setScalar(1+Math.sin(s*1.6)*.05+level*.3);
  sphere.rotation.y=s*.15;sphere.rotation.x=Math.sin(s*.2)*.2;sphere.scale.setScalar(2.4*(1+level*.15+Math.sin(s*1.6)*.02));
  S.rotation.y+=(mx*.3-S.rotation.y)*.05;S.rotation.x+=(my*.2-S.rotation.x)*.05;
+ if(page){const hi=$('#helmetImg img');if(hi&&hi.dataset.err!=='1')hi.style.transform='perspective(900px) rotateY('+(mx*16)+'deg) rotateX('+(-my*10)+'deg)'}
  if(handSeen)helmet.rotation.y+=((.5-hx)*4-helmet.rotation.y)*.08;else helmet.rotation.y+=.006;
  helmet.position.y=Math.sin(s)*.05;
  /* 波形 */
@@ -130,7 +151,7 @@ function loop(t){requestAnimationFrame(loop);const s=t/1000;
  for(const [k,al] of [[1,1],[-1,.3]]){wg.beginPath();
   for(let i=0;i<=n;i++){let v=speaking?Math.sin(i*.35+s*10)*(.25+.2*Math.sin(s*7)):(an&&!muted)?(buf[Math.floor(i/n*(buf.length-1))]-128)/128:(muted?0:Math.sin(i*.25+s*2)*.02);
    if(k===1)rms+=v*v;const env=Math.sin(i/n*Math.PI),y=55+k*v*48*env*2.5;i?wg.lineTo(i*5,y):wg.moveTo(0,y)}
-  wg.strokeStyle=muted?'#ffb347':'#5fe3ff';wg.globalAlpha=al;wg.lineWidth=2;wg.shadowColor=wg.strokeStyle;wg.shadowBlur=10;wg.stroke()}
+  wg.strokeStyle=speaking?'#ffb347':'#5fe3ff';wg.globalAlpha=al;wg.lineWidth=2;wg.shadowColor=wg.strokeStyle;wg.shadowBlur=10;wg.stroke()}
  level+=(Math.min(1,Math.sqrt(rms/n)*6)-level)*.3;$('#lv').style.width=level*100+'%';
  R.render(S,C)}
 loop(0);
@@ -152,11 +173,12 @@ async function agenda(){let list=[];try{list=await (await fetch('/schedule.json'
 agenda();setInterval(agenda,60000);
 /* ---------- 摄像头 / 麦克风 / 手势 ---------- */
 (async()=>{try{
- const st=await navigator.mediaDevices.getUserMedia({audio:true,video:{width:640,height:480}});
+ const st=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+ try{const au=await navigator.mediaDevices.getUserMedia({audio:true});au.getAudioTracks().forEach(t=>st.addTrack(t))}catch(e){}
  const ac=new AudioContext();an=ac.createAnalyser();an.fftSize=1024;buf=new Uint8Array(an.fftSize);
- tracks=st.getAudioTracks();ac.createMediaStreamSource(new MediaStream(tracks)).connect(an);
+ tracks=st.getAudioTracks();if(tracks.length)ac.createMediaStreamSource(new MediaStream(tracks)).connect(an);
  const v=$('#cam');v.srcObject=new MediaStream(st.getVideoTracks());await v.play();hands(v)}
- catch(e){$('#st').textContent='摄像头/麦克风不可用：'+e.message}})();
+ catch(e){$('#st').textContent='摄像头不可用：'+e.message}})();
 const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 let hist=[],lastWave=0,lastFist=0,fistN=0;
 function gesture(lm){const w=lm[0],now=performance.now();hx=1-lm[9].x;
