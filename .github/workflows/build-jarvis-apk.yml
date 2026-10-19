@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FLUTTER_VERSION: '3.47.0'
@@ -91,8 +91,14 @@ jobs:
         timeout-minutes: 60
         run: cd jarvis_app && flutter build apk --release --target-platform android-arm64 --split-per-abi
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jarvis-apk
-          path: jarvis_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-          retention-days: 30
+      # Upload the APK to a GitHub Release instead of Actions artifacts
+      # (artifact storage quota is full; releases don't count against it).
+      - name: Upload APK to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "jarvis-apk-${{ github.run_number }}" \
+            jarvis_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+            --title "Jarvis APK #${{ github.run_number }}" \
+            --notes "Build from commit ${{ github.sha }} (run #${{ github.run_number }})." \
+            --prerelease
