@@ -1,0 +1,199 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>JARVIS</title>
+<script type="importmap">{"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/","@mediapipe/tasks-vision":"/node_modules/@mediapipe/tasks-vision/vision_bundle.mjs"}}</script>
+<style>
+:root{--c:#5fe3ff;--a:#ffb347}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;overflow:hidden;color:var(--c);cursor:none;font-family:Bahnschrift,"Microsoft YaHei UI",sans-serif;
+ background:radial-gradient(ellipse at 50% 45%,#08222f 0%,#030d14 55%,#010407 100%)}
+#gl{position:fixed;inset:0;width:100%;height:100%}
+.col{position:fixed;top:9vh;width:25vw;height:70vh;perspective:1400px;transform-style:preserve-3d}
+#L{left:2.5vw;transform:rotateY(16deg) translateZ(-40px)}
+#R{right:2.5vw;transform:rotateY(-16deg) translateZ(-40px)}
+.flip{position:absolute;inset:0;transform-style:preserve-3d;transition:transform 1s cubic-bezier(.6,0,.2,1)}
+.col.f .flip{transform:rotateY(180deg)}
+.face{position:absolute;inset:0;backface-visibility:hidden;display:flex;flex-direction:column;gap:2.4vh;transform-style:preserve-3d}
+.face.b{transform:rotateY(180deg)}
+.p{flex:1;padding:14px 16px;overflow:hidden;background:linear-gradient(135deg,rgba(20,90,120,.30),rgba(5,25,40,.55));
+ border:1px solid rgba(95,227,255,.35);backdrop-filter:blur(6px);transform:translateZ(var(--z,0px));animation:br 4s ease-in-out infinite;
+ clip-path:polygon(0 0,calc(100% - 18px) 0,100% 18px,100% 100%,18px 100%,0 calc(100% - 18px))}
+.face .p:nth-child(2){--z:45px;animation-delay:-2s}
+@keyframes br{50%{box-shadow:inset 0 0 30px rgba(95,227,255,.22);border-color:rgba(95,227,255,.75)}}
+h3{font-size:12px;font-weight:600;letter-spacing:.2em;opacity:.75;margin-bottom:8px}
+.big{font-size:clamp(28px,3.6vw,56px);font-weight:300;letter-spacing:.04em;text-shadow:0 0 14px rgba(95,227,255,.7)}
+.sm{font-size:13px;opacity:.8;line-height:1.7}
+.row{display:flex;justify-content:space-between;font-size:13px;margin-top:6px}
+.bar{height:6px;margin-top:4px;background:rgba(95,227,255,.14)}.bar i{display:block;height:100%;width:0;background:var(--c);box-shadow:0 0 8px var(--c);transition:width .8s}
+.ev{font-size:14px;padding:5px 0;border-bottom:1px solid rgba(95,227,255,.15);display:flex;gap:12px}.ev b{font-weight:400;width:48px}.ev.n{color:var(--a)}
+#scan{position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(95,227,255,.05) 0 1px,transparent 1px 3px),radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.65))}
+#scan:after{content:"";position:absolute;left:0;right:0;height:18vh;background:linear-gradient(transparent,rgba(95,227,255,.09),transparent);animation:sw 6s linear infinite}
+@keyframes sw{from{top:-20vh}to{top:100vh}}
+#wave{position:fixed;left:50%;bottom:4vh;width:42vw;height:11vh;transform:translateX(-50%)}
+#st{position:fixed;left:50%;bottom:2vh;transform:translateX(-50%);font-size:12px;letter-spacing:.3em;opacity:.7}
+#cam{width:100%;height:120px;object-fit:cover;transform:scaleX(-1);opacity:.45;margin-top:6px}
+.muted{color:var(--a)}
+#sub{position:fixed;left:50%;bottom:16vh;transform:translateX(-50%);width:44vw;text-align:center;font-size:17px;line-height:1.7;white-space:pre-wrap;text-shadow:0 0 12px rgba(95,227,255,.6)}
+#ti{position:fixed;left:50%;top:4vh;transform:translateX(-50%);display:none;width:40vw;background:rgba(5,25,40,.85);border:1px solid var(--c);color:var(--c);padding:8px 12px;font:16px Bahnschrift,"Microsoft YaHei UI",sans-serif;cursor:text;outline:none}
+</style></head><body>
+<canvas id="gl"></canvas>
+<div class="col" id="L"><div class="flip">
+ <div class="face a"><div class="p"><h3>时间</h3><div class="big" id="clk">--:--:--</div><div class="sm" id="dt"></div></div>
+  <div class="p"><h3>天气</h3><div class="big" id="wt">--</div><div class="sm" id="wd">获取中…</div></div></div>
+ <div class="face b"><div class="p"><h3>日程</h3><div id="ev"></div></div>
+  <div class="p"><h3>记忆</h3><div class="big" id="mc">0 条</div><div class="sm" id="mf"></div></div></div>
+</div></div>
+<div class="col" id="R"><div class="flip">
+ <div class="face a"><div class="p"><h3>系统状态</h3>
+   <div class="row"><span>CPU</span><span id="cp">--</span></div><div class="bar"><i id="cb"></i></div>
+   <div class="row"><span>内存</span><span id="mp">--</span></div><div class="bar"><i id="mb"></i></div>
+   <div class="sm" style="margin-top:10px" id="up"></div></div>
+  <div class="p"><h3>网络</h3><div class="big" id="net">--</div><div class="sm" id="nd"></div></div></div>
+ <div class="face b"><div class="p"><h3>手势</h3><div class="big" id="gs">待机</div><video id="cam" muted playsinline></video></div>
+  <div class="p"><h3>语音</h3><div class="big" id="mute">监听中</div><div class="bar"><i id="lv"></i></div></div></div>
+</div></div>
+<canvas id="wave" width="900" height="110"></canvas><div id="sub">说“贾维斯”唤醒，或按 / 键打字</div><input id="ti" placeholder="输入后回车"><div id="st">J.A.R.V.I.S  ONLINE</div><div id="scan"></div>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {FilesetResolver,HandLandmarker} from '@mediapipe/tasks-vision';
+const CFG={city:'新乡',lat:35.3,lon:113.9};
+const $=s=>document.querySelector(s);
+/* ---------- 3D ---------- */
+const R=new THREE.WebGLRenderer({canvas:$('#gl'),antialias:true,alpha:true});R.setPixelRatio(Math.min(devicePixelRatio,2));
+const S=new THREE.Scene(),C=new THREE.PerspectiveCamera(45,1,.1,100);C.position.z=7;
+const fit=()=>{R.setSize(innerWidth,innerHeight);C.aspect=innerWidth/innerHeight;C.updateProjectionMatrix()};addEventListener('resize',fit);fit();
+function ringTex({r=.9,ticks=60,major=5,arcs=[[0,360]],text=false,w=3}){
+ const N=1024,c=document.createElement('canvas');c.width=c.height=N;const g=c.getContext('2d');g.translate(N/2,N/2);
+ g.strokeStyle=g.fillStyle='#5fe3ff';const R0=N/2*r;
+ g.lineWidth=w;arcs.forEach(([a,b])=>{g.beginPath();g.arc(0,0,R0,a*Math.PI/180,b*Math.PI/180);g.stroke()});
+ for(let i=0;i<ticks;i++){const a=i/ticks*Math.PI*2,L=i%major?10:22;g.lineWidth=i%major?1.5:3;g.beginPath();
+  g.moveTo(Math.cos(a)*(R0-4),Math.sin(a)*(R0-4));g.lineTo(Math.cos(a)*(R0-4-L),Math.sin(a)*(R0-4-L));g.stroke()}
+ if(text){g.font='15px Consolas';g.textAlign='center';g.globalAlpha=.7;
+  for(let i=0;i<48;i++){g.save();g.rotate(i/48*Math.PI*2+Math.PI/2);
+   g.fillText(Math.floor(Math.random()*65536).toString(16).padStart(4,'0').toUpperCase(),0,-(R0-36));g.restore()}}
+ return new THREE.CanvasTexture(c)}
+const reactor=new THREE.Group();S.add(reactor);const rings=[];
+function addRing(o,size,speed,z,op){const m=new THREE.Mesh(new THREE.PlaneGeometry(size,size),
+ new THREE.MeshBasicMaterial({map:ringTex(o),transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,opacity:op}));
+ m.position.z=z;m.userData={speed,op,o};reactor.add(m);rings.push(m);return m}
+addRing({r:.98,ticks:120,major:10,w:2},6.4,.05,-.8,.5);
+const dataRing=addRing({r:.9,ticks:72,major:6,arcs:[[10,120],[140,250],[270,350]],text:true,w:4},5.4,-.12,-.4,.85);
+addRing({r:.92,ticks:36,major:3,arcs:[[0,80],[100,170],[190,300]],w:8},4.2,.3,0,.7);
+addRing({r:.9,ticks:90,major:9,w:2},3.2,-.5,.4,.9);
+addRing({r:.85,ticks:24,major:4,arcs:[[20,100],[160,250],[290,340]],w:10},2.3,.9,.8,.9);
+function coreTex(){const N=512,c=document.createElement('canvas');c.width=c.height=N;const g=c.getContext('2d');g.translate(N/2,N/2);
+ const gr=g.createRadialGradient(0,0,0,0,0,N/2);gr.addColorStop(0,'rgba(255,255,255,1)');gr.addColorStop(.25,'rgba(150,240,255,.9)');
+ gr.addColorStop(.6,'rgba(40,160,210,.25)');gr.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=gr;g.fillRect(-N/2,-N/2,N,N);
+ g.strokeStyle='rgba(200,252,255,.9)';g.lineWidth=3;for(let i=0;i<10;i++){g.save();g.rotate(i/10*Math.PI*2);g.strokeRect(-12,-170,24,54);g.restore()}
+ g.beginPath();g.arc(0,0,120,0,7);g.stroke();return new THREE.CanvasTexture(c)}
+const core=new THREE.Mesh(new THREE.PlaneGeometry(2.4,2.4),new THREE.MeshBasicMaterial({map:coreTex(),transparent:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+core.position.z=1;reactor.add(core);
+const N=3500,pos=new Float32Array(N*3);
+for(let i=0;i<N;i++){const y=1-2*(i+.5)/N,r=Math.sqrt(1-y*y),t=i*2.399963;pos.set([Math.cos(t)*r,y,Math.sin(t)*r],i*3)}
+const pg=new THREE.BufferGeometry();pg.setAttribute('position',new THREE.BufferAttribute(pos,3));
+const sphere=new THREE.Points(pg,new THREE.PointsMaterial({color:0x7defff,size:.025,transparent:true,opacity:.7,blending:THREE.AdditiveBlending,depthWrite:false}));
+reactor.add(sphere);
+/* helmet */
+const helmet=new THREE.Group();helmet.visible=false;S.add(helmet);
+S.add(new THREE.AmbientLight(0x6688aa,.9));
+const l1=new THREE.PointLight(0x5fe3ff,60,0,2);l1.position.set(-4,2,4);const l2=new THREE.PointLight(0xffc27a,55,0,2);l2.position.set(4,-1,5);S.add(l1,l2);
+const V=a=>a.map(([x,y])=>new THREE.Vector2(x,y));
+const red=new THREE.MeshStandardMaterial({color:0xa5121a,metalness:.9,roughness:.28,side:THREE.DoubleSide});
+const gold=new THREE.MeshStandardMaterial({color:0xe0a622,metalness:1,roughness:.22,side:THREE.DoubleSide});
+helmet.add(new THREE.Mesh(new THREE.LatheGeometry(V([[0,-1.25],[.5,-1.2],[.78,-.9],[.88,-.3],[.86,.3],[.74,.85],[.42,1.2],[0,1.32]]),64),red));
+helmet.add(new THREE.Mesh(new THREE.LatheGeometry(V([[.865,-.95],[.927,-.5],[.917,0],[.9,.45],[.82,.7]]),32,-.78,1.56),gold));
+const eyeM=new THREE.MeshBasicMaterial({color:0xcff8ff});
+[-1,1].forEach(s=>{const e=new THREE.Mesh(new THREE.BoxGeometry(.34,.07,.04),eyeM);e.position.set(s*.3,.18,.91);e.rotation.set(0,s*.33,-s*.12);helmet.add(e)});
+fetch('/models/helmet.glb',{method:'HEAD'}).then(r=>{if(!r.ok)return;new GLTFLoader().load('/models/helmet.glb',g=>{
+ helmet.clear();const b=new THREE.Box3().setFromObject(g.scene),k=2.6/b.getSize(new THREE.Vector3()).length();
+ g.scene.scale.setScalar(k);g.scene.position.sub(b.getCenter(new THREE.Vector3()).multiplyScalar(k));helmet.add(g.scene)})}).catch(()=>{});
+/* ---------- 状态 ---------- */
+let speaking=false,page=0,level=0,muted=false,tracks=[],an,buf,hx=.5,handSeen=false,mx=0,my=0;
+addEventListener('mousemove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5});
+function flip(){page^=1;document.querySelectorAll('.col').forEach(c=>c.classList.toggle('f',!!page));
+ helmet.visible=!!page;core.visible=sphere.visible=!page}
+function toggleMute(){muted=!muted;tracks.forEach(t=>t.enabled=!muted);
+ $('#mute').textContent=muted?'已静音':'监听中';$('#mute').className='big'+(muted?' muted':'')}
+addEventListener('keydown',e=>{if(e.target.id==='ti')return;if(e.code==='Space'||e.code==='ArrowRight')flip();if(e.key==='m'||e.key==='M')toggleMute()});
+/* ---------- 循环 ---------- */
+const wc=$('#wave'),wg=wc.getContext('2d');let lastTex=0;
+function loop(t){requestAnimationFrame(loop);const s=t/1000;
+ rings.forEach(m=>{m.rotation.z+=m.userData.speed*.01;m.material.opacity+=(m.userData.op*(page?.3:1)-m.material.opacity)*.06});
+ if(t-lastTex>1500&&!page){lastTex=t;dataRing.material.map.dispose();dataRing.material.map=ringTex(dataRing.userData.o)}
+ core.scale.setScalar(1+Math.sin(s*1.6)*.05+level*.3);
+ sphere.rotation.y=s*.15;sphere.rotation.x=Math.sin(s*.2)*.2;sphere.scale.setScalar(2.4*(1+level*.15+Math.sin(s*1.6)*.02));
+ S.rotation.y+=(mx*.3-S.rotation.y)*.05;S.rotation.x+=(my*.2-S.rotation.x)*.05;
+ if(handSeen)helmet.rotation.y+=((.5-hx)*4-helmet.rotation.y)*.08;else helmet.rotation.y+=.006;
+ helmet.position.y=Math.sin(s)*.05;
+ /* 波形 */
+ let rms=0;if(an&&!muted){an.getByteTimeDomainData(buf)}
+ wg.clearRect(0,0,900,110);const n=180;
+ for(const [k,al] of [[1,1],[-1,.3]]){wg.beginPath();
+  for(let i=0;i<=n;i++){let v=speaking?Math.sin(i*.35+s*10)*(.25+.2*Math.sin(s*7)):(an&&!muted)?(buf[Math.floor(i/n*(buf.length-1))]-128)/128:(muted?0:Math.sin(i*.25+s*2)*.02);
+   if(k===1)rms+=v*v;const env=Math.sin(i/n*Math.PI),y=55+k*v*48*env*2.5;i?wg.lineTo(i*5,y):wg.moveTo(0,y)}
+  wg.strokeStyle=muted?'#ffb347':'#5fe3ff';wg.globalAlpha=al;wg.lineWidth=2;wg.shadowColor=wg.strokeStyle;wg.shadowBlur=10;wg.stroke()}
+ level+=(Math.min(1,Math.sqrt(rms/n)*6)-level)*.3;$('#lv').style.width=level*100+'%';
+ R.render(S,C)}
+loop(0);
+/* ---------- 面板数据 ---------- */
+const p2=n=>String(n).padStart(2,'0');
+setInterval(()=>{const d=new Date();$('#clk').textContent=`${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+ $('#dt').textContent=d.toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'})},250);
+setInterval(()=>{const s=window.sys?.read();if(!s)return;
+ $('#cp').textContent=(s.cpu*100|0)+'%';$('#cb').style.width=s.cpu*100+'%';$('#mp').textContent=(s.mem*100|0)+'%';$('#mb').style.width=s.mem*100+'%';
+ $('#up').textContent=`${s.host} · ${s.cores} 核 · 已运行 ${(s.up/3600).toFixed(1)} 小时`;
+  const c=navigator.connection;$('#net').textContent=navigator.onLine?'在线':'离线';$('#nd').textContent=c?`${c.effectiveType} · 下行 ${c.downlink} Mbps · 延迟 ${c.rtt} ms`:''},1000);
+const wm=c=>c===0?'晴':c<3?'多云':c===3?'阴':c<50?'雾':c<60?'毛毛雨':c<70?'雨':c<80?'雪':c<90?'阵雨':'雷暴';
+async function weather(){try{const j=await (await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CFG.lat}&longitude=${CFG.lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code`)).json();const c=j.current;
+ $('#wt').textContent=Math.round(c.temperature_2m)+'°C';$('#wd').textContent=`${CFG.city} · ${wm(c.weather_code)} · 湿度 ${c.relative_humidity_2m}% · 风速 ${c.wind_speed_10m} km/h`}catch{$('#wd').textContent='天气获取失败'}}
+weather();setInterval(weather,600000);
+async function agenda(){let list=[];try{list=await (await fetch('/schedule.json')).json()}catch{}
+ const d=new Date(),cur=p2(d.getHours())+':'+p2(d.getMinutes());let nx=false;
+ $('#ev').innerHTML=list.map(e=>{const n=!nx&&e.time>=cur;if(n)nx=true;return`<div class="ev${n?' n':''}"><b>${e.time}</b>${e.title}</div>`}).join('')||'<div class="sm">今日无日程</div>'}
+agenda();setInterval(agenda,60000);
+/* ---------- 摄像头 / 麦克风 / 手势 ---------- */
+(async()=>{try{
+ const st=await navigator.mediaDevices.getUserMedia({audio:true,video:{width:640,height:480}});
+ const ac=new AudioContext();an=ac.createAnalyser();an.fftSize=1024;buf=new Uint8Array(an.fftSize);
+ tracks=st.getAudioTracks();ac.createMediaStreamSource(new MediaStream(tracks)).connect(an);
+ const v=$('#cam');v.srcObject=new MediaStream(st.getVideoTracks());await v.play();hands(v)}
+ catch(e){$('#st').textContent='摄像头/麦克风不可用：'+e.message}})();
+const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+let hist=[],lastWave=0,lastFist=0,fistN=0;
+function gesture(lm){const w=lm[0],now=performance.now();hx=1-lm[9].x;
+ const ext=[[8,6],[12,10],[16,14],[20,18]].filter(([t,p])=>d(lm[t],w)>d(lm[p],w)*1.05).length;
+ if(ext===0){if(++fistN===8&&now-lastFist>1500){lastFist=now;toggleMute()}}else fistN=0;
+ if(ext>=3){hist.push([now,lm[9].x]);hist=hist.filter(h=>now-h[0]<700);const xs=hist.map(h=>h[1]);
+  const range=Math.max(...xs)-Math.min(...xs);let sw=0;
+  for(let i=2;i<xs.length;i++){const a=xs[i-1]-xs[i-2],b=xs[i]-xs[i-1];if(Math.abs(b)>.004&&a*b<0)sw++}
+  if(range>.22&&sw>=2&&now-lastWave>1400){lastWave=now;hist=[];flip()}}else hist=[];
+ $('#gs').textContent=ext===0?'握拳':ext>=3?'张开手掌':'检测到手'}
+async function hands(v){try{
+ const fs=await FilesetResolver.forVisionTasks('/node_modules/@mediapipe/tasks-vision/wasm');
+ const hl=await HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'/models/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:1});
+ const tick=()=>{if(v.readyState>=2){const lm=hl.detectForVideo(v,performance.now()).landmarks[0];handSeen=!!lm;if(lm)gesture(lm);else $('#gs').textContent='待机'}setTimeout(tick,33)};tick()
+}catch(e){$('#gs').textContent='未启用';$('#st').textContent='手势模型缺失：见 README 第 3 步'}}
+
+/* ---------- 语音对话 + 记忆 ---------- */
+const cjk=t=>t.replace(/(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/g,'').trim();
+const WAKE=/(贾维斯|嘉维斯|加维斯|贾维思|jarvis)[，,。\s]*/i;
+let awake=0,busy=false,lastEnd=0;const sub=$('#sub'),ti=$('#ti');
+speechSynthesis.getVoices();
+const say=t=>new Promise(res=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang='zh-CN';
+ u.voice=speechSynthesis.getVoices().find(v=>/zh-CN|Huihui|Xiaoxiao|Yunxi/i.test(v.lang+v.name))||null;u.rate=1.05;u.pitch=.9;
+ speaking=true;u.onend=u.onerror=()=>{speaking=false;lastEnd=Date.now();res()};speechSynthesis.speak(u)});
+async function refreshMem(){try{const f=await jarvis.mem();$('#mc').textContent=f.length+' 条';$('#mf').innerHTML=f.slice(-6).reverse().map(x=>'· '+x).join('<br>')}catch{}}
+async function handle(raw,viaText){
+ if(busy)return;let t=cjk(raw);const wake=WAKE.test(t);
+ if(!viaText&&!wake&&Date.now()>awake)return;
+ t=t.replace(WAKE,'').trim();
+ if(!t){awake=Date.now()+15000;sub.textContent='我在。';await say('我在。');return}
+ busy=true;sub.textContent='你：'+t;$('#st').textContent='思考中…';
+ try{const a=await jarvis.ask(t);sub.textContent='你：'+t+'\nJARVIS：'+a;$('#st').textContent='J.A.R.V.I.S  ONLINE';await say(a)}
+ catch(e){sub.textContent='出错：'+e.message;$('#st').textContent='J.A.R.V.I.S  ONLINE'}
+ busy=false;awake=Date.now()+15000;refreshMem();setTimeout(refreshMem,5000)}
+jarvis.onSpeech(t=>{if(speaking||muted||Date.now()-lastEnd<1200)return;handle(t,false)});
+jarvis.onState(s=>{if(s.startsWith('READY'))$('#st').textContent='语音识别就绪 '+s.slice(6);else if(s.startsWith('ERR'))sub.textContent='语音识别不可用：'+s.slice(4)});
+addEventListener('keydown',e=>{if(e.key==='/'&&e.target!==ti){e.preventDefault();ti.style.display='block';ti.focus()}
+ else if(e.target===ti&&e.key==='Enter'){const v=ti.value.trim();ti.value='';ti.style.display='none';ti.blur();if(v)handle(v,true)}});
+refreshMem();
+</script></body></html>

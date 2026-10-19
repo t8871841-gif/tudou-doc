@@ -1,0 +1,2 @@
+{"name":"jarvis-desktop","version":"0.1.0","main":"main.js","scripts":{"start":"electron ."},
+"dependencies":{"three":"^0.170.0","@mediapipe/tasks-vision":"^0.10.18"},"devDependencies":{"electron":"^33.0.0"}}

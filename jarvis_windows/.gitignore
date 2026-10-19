@@ -1,0 +1,5 @@
+node_modules/
+models/*.task
+models/*.glb
+data/
+config.json
