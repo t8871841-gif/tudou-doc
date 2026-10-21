@@ -20,6 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # #43 失败教训：runner 磁盘被预装软件占满，assembleRelease 中途 No space left。
+      # 开工前先清掉用不上的大件（dotnet/ghc/boost/工具缓存/模拟器与旧 NDK），腾出空间。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/ndk
+          df -h .
+
       # Offline ASR models are NOT committed to the repo (the release
       # tarball is ~500MB). Download the sherpa-onnx streaming
       # zipformer bilingual model from the official release and
