@@ -11,6 +11,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.CallLog
 import android.provider.MediaStore
 import android.provider.Settings
@@ -34,8 +35,53 @@ class MainActivity : FlutterActivity() {
     private var pendingCallResult: MethodChannel.Result? = null
     private val agentCallRequestCode = 4242
 
+    private lateinit var systemBridge: SystemBridge
+    private lateinit var localLlm: LocalLlmBridge
+
+    companion object {
+        const val EXTRA_ACTION = "jarvis_action"
+        const val EXTRA_TEXT = "jarvis_text"
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // 默认助手 / 磁贴 / 提醒点击带进来的入口事件（暂存到 Dart 就绪后投递）。
+        if (::systemBridge.isInitialized) systemBridge.handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (::systemBridge.isInitialized) systemBridge.handleIntent(intent)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (::localLlm.isInitialized) localLlm.onActivityResult(requestCode, resultCode, data)
+    }
+
+    // Jarvis 在前台时隐藏悬浮球，离开前台才显示。
+    override fun onStart() {
+        super.onStart()
+        OrbController.setAppForeground(true)
+    }
+
+    override fun onStop() {
+        OrbController.setAppForeground(false)
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (::systemBridge.isInitialized) systemBridge.release()
+        if (::localLlm.isInitialized) localLlm.release()
+        super.onDestroy()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        systemBridge = SystemBridge(this).also { it.register(flutterEngine) }
+        localLlm = LocalLlmBridge(this).also { it.register(flutterEngine) }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

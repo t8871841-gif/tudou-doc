@@ -2,6 +2,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 
 import '../services/edge_tts_service.dart';
+import '../services/local_llm_service.dart';
+import '../services/native_bridge.dart';
 import '../services/memory_service.dart';
 import '../services/settings_store.dart';
 
@@ -39,6 +41,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _speak = widget.settings.speakReplies;
   late bool _particles = widget.settings.particles;
   late bool _autoMem = widget.settings.autoMemory;
+  late final TextEditingController _searchKey =
+      TextEditingController(text: widget.settings.searchApiKey);
+  late final TextEditingController _searchUrl =
+      TextEditingController(text: widget.settings.searchEndpoint);
+  late final TextEditingController _city =
+      TextEditingController(text: widget.settings.homeCity);
+  late final TextEditingController _whitelist =
+      TextEditingController(text: widget.settings.userWhitelist);
+  late bool _keepAlive = widget.settings.keepAlive;
+  late bool _continuous = widget.settings.continuousChat;
+  late bool _brief = widget.settings.morningBrief;
+  late String _briefTime = widget.settings.morningBriefTime;
+  late bool _orb = widget.settings.floatingOrb;
+  late bool _localOn = widget.settings.localEnabled;
+  late String _localPath = widget.settings.localModelPath;
+  bool _importing = false;
 
   final _player = AudioPlayer();
   bool _previewing = false;
@@ -56,6 +74,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _model.dispose();
     _key.dispose();
     _sys.dispose();
+    _searchKey.dispose();
+    _searchUrl.dispose();
+    _city.dispose();
+    _whitelist.dispose();
     _player.dispose();
     super.dispose();
   }
@@ -72,6 +94,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.settings.speakReplies = _speak;
     widget.settings.particles = _particles;
     widget.settings.autoMemory = _autoMem;
+    widget.settings.searchApiKey = _searchKey.text.trim();
+    widget.settings.searchEndpoint = _searchUrl.text.trim();
+    widget.settings.homeCity = _city.text.trim();
+    widget.settings.userWhitelist = _whitelist.text;
+    widget.settings.keepAlive = _keepAlive;
+    widget.settings.continuousChat = _continuous;
+    widget.settings.morningBrief = _brief;
+    widget.settings.morningBriefTime = _briefTime;
+    widget.settings.floatingOrb = _orb;
+    widget.settings.localEnabled = _localOn && _localPath.isNotEmpty;
+    widget.settings.localModelPath = _localPath;
     try {
       await widget.settings.save();
     } catch (e) {
@@ -177,6 +210,140 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     return ok == true;
+  }
+
+  Widget _switch(String title, String sub, bool v, ValueChanged<bool> f) =>
+      SwitchListTile(
+          title: Text(title, style: const TextStyle(color: Colors.white)),
+          subtitle: Text(sub,
+              style: const TextStyle(color: Colors.white60, fontSize: 12)),
+          value: v,
+          activeThumbColor: _accent,
+          onChanged: f);
+
+  Future<void> _pickBriefTime() async {
+    final parts = _briefTime.split(':');
+    final t = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay(
+            hour: int.tryParse(parts.first) ?? 7,
+            minute: parts.length > 1 ? (int.tryParse(parts[1]) ?? 30) : 30));
+    if (t != null) {
+      setState(() => _briefTime =
+          '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}');
+    }
+  }
+
+  Future<void> _importLocalModel() async {
+    setState(() => _importing = true);
+    final p = await LocalLlmService.importModel();
+    if (!mounted) return;
+    setState(() {
+      _importing = false;
+      if (p != null) {
+        _localPath = p;
+        _localOn = true;
+      }
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(p != null ? '模型已导入，保存设置后生效。' : '没有导入模型（已取消或复制失败）。')));
+  }
+
+  Widget _extraSections() {
+    final modelName = _localPath.isEmpty ? '未导入' : _localPath.split('/').last;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      _section(title: '端侧小模型（简单任务本地答）', children: [
+        _switch('启用本地小模型', '寒暄闲聊、晨报润色走本地，零流量零延迟；规划、看屏、联网综合、记忆整理一律走云端；断网时聊天也能兜底',
+            _localOn, (v) => setState(() => _localOn = v)),
+        Text('当前模型：$modelName',
+            style: const TextStyle(color: Colors.white70, fontSize: 13)),
+        const SizedBox(height: 8),
+        OutlinedButton(
+            onPressed: _importing ? null : _importLocalModel,
+            child: Text(_importing ? '正在复制模型…（文件较大，请稍等）' : '选择模型文件（.task / .bin）')),
+        const SizedBox(height: 6),
+        const Text(
+            '需要 MediaPipe LLM 格式的模型（如 Qwen2.5 0.5B/1.5B、Gemma 3 1B 的 .task 文件，约 0.5~1.5GB）。'
+            '文件名含 qwen 按 ChatML 模板，其余按 Gemma 模板。模型只存在本机私有目录。',
+            style: TextStyle(color: Colors.white60, fontSize: 12)),
+      ]),
+      const SizedBox(height: 16),
+      _section(title: '联网搜索与天气', children: [
+        TextField(
+            controller: _searchKey,
+            obscureText: true,
+            style: const TextStyle(color: Colors.white),
+            decoration: _dec('搜索 API Key（可选）',
+                helper: '填博查(Bocha)等兼容接口的 Key，中文搜索更准；留空只能查百科')),
+        const SizedBox(height: 12),
+        TextField(
+            controller: _searchUrl,
+            style: const TextStyle(color: Colors.white),
+            decoration: _dec('搜索接口地址', hint: 'https://api.bochaai.com/v1/web-search')),
+        const SizedBox(height: 12),
+        TextField(
+            controller: _city,
+            style: const TextStyle(color: Colors.white),
+            decoration: _dec('默认城市', helper: '定位不可用时用它查天气，如：北京')),
+      ]),
+      const SizedBox(height: 16),
+      _section(title: '常驻与入口', children: [
+        _switch('后台常驻待命', '前台服务 + 常驻通知，熄屏也能听“贾维斯”（耗电会增加）', _keepAlive,
+            (v) => setState(() => _keepAlive = v)),
+        _switch('悬浮球', 'Jarvis 在后台时，在任意界面显示一个小球：点一下开始听，长按打开，可拖动吸边（需先开启无障碍服务；建议同时开启“后台常驻待命”）',
+            _orb, (v) async {
+          if (v) {
+            final r = await NativeBridge.orbSetEnabled(true);
+            if (r == 'need_service') {
+              await NativeBridge.orbSetEnabled(false);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('请先在系统无障碍里开启“Jarvis 跨应用全自动引擎”，再回来打开悬浮球。')));
+              }
+              await NativeBridge.openAccessibilitySettings();
+              return;
+            }
+          } else {
+            await NativeBridge.orbSetEnabled(false);
+          }
+          if (mounted) setState(() => _orb = v);
+        }),
+        _switch('连续对话', '语音提问后自动继续听，不用再喊唤醒词', _continuous,
+            (v) => setState(() => _continuous = v)),
+        const SizedBox(height: 4),
+        Wrap(spacing: 8, children: [
+          OutlinedButton(
+              onPressed: NativeBridge.openAssistantSettings,
+              child: const Text('设为默认助手（电源键唤起）')),
+          OutlinedButton(
+              onPressed: NativeBridge.requestIgnoreBattery,
+              child: const Text('忽略电池优化')),
+          OutlinedButton(
+              onPressed: NativeBridge.openNotificationAccess,
+              child: const Text('授权读取通知')),
+        ]),
+        const SizedBox(height: 6),
+        const Text('“默认助手”需在系统页里把 Jarvis 选为数字助理；快捷设置里也可以添加 Jarvis 磁贴。',
+            style: TextStyle(color: Colors.white60, fontSize: 12)),
+      ]),
+      const SizedBox(height: 16),
+      _section(title: '主动提醒', children: [
+        _switch('每日晨报', '每天定时在通知栏提醒，点开后播报天气、日程和待办', _brief,
+            (v) => setState(() => _brief = v)),
+        if (_brief)
+          OutlinedButton(
+              onPressed: _pickBriefTime, child: Text('晨报时间：$_briefTime')),
+      ]),
+      const SizedBox(height: 16),
+      _section(title: '看屏白名单（高级）', children: [
+        TextField(
+            controller: _whitelist,
+            maxLines: 3,
+            style: const TextStyle(color: Colors.white),
+            decoration: _dec('额外允许看屏的 App 包名，每行一个',
+                helper: '内置名单之外的 App。含 bank/pay/wallet/settings 的包名会被原生层拒绝；点击黑名单（转账、付款、验证码等）始终生效。')),
+      ]),
+    ]);
   }
 
   /// 长期记忆：查看 / 删除单条 / 清空；对话记录清空。修改立即生效，不需要点“保存设置”。
@@ -401,6 +568,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Text('默认语速已调慢；速度和声音都可以在这里改。语音识别由系统服务处理。',
                 style: TextStyle(color: Colors.white60, fontSize: 12)),
           ]),
+          const SizedBox(height: 16),
+          _extraSections(),
           const SizedBox(height: 16),
           _memorySection(),
           const SizedBox(height: 20),

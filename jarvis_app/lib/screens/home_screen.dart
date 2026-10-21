@@ -1,15 +1,20 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' show ImageFilter;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../services/action_service.dart';
 import '../services/agent_service.dart';
 import '../services/asr_service.dart';
 import '../services/edge_tts_service.dart';
+import '../services/local_llm_service.dart';
+import '../services/native_bridge.dart';
+import '../services/tool_service.dart';
 import '../services/memory_service.dart';
 import '../services/settings_store.dart';
 import '../services/skill_store.dart';
@@ -94,6 +99,15 @@ class _HomeScreenState extends State<HomeScreen>
   double _micLevel = 0; // 0..1 from speech_to_text sound-level callback
   final _rnd = math.Random();
   final List<_Msg> _messages = [];
+  // ---- v2：流式回答 / 连续对话 / 入口事件 ----
+  String _streamBuf = '';
+  String _sentBuf = '';
+  StreamController<String>? _sentenceCtl;
+  int _streamMsgIndex = -1;
+  Future<void>? _streamSpeakDone;
+  int _askGen = 0; // 每次提问 +1：被打断的旧回答不许再写界面
+  bool _voiceTurn = false; // 这一轮是语音提问（决定是否自动继续听）
+  Map<String, dynamic>? _pendingLaunch;
   final _memory = MemoryService.instance;
   int _turnsSinceMemory = 0; // 距离上次整理长期记忆已过几轮
   bool _consolidating = false;
@@ -206,7 +220,6 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _init() async {
     await _settings.load();
     await _memory.load();
-    _settings.memoryContext = _memory.contextBlock();
     _set(() {
       // 恢复上次的对话（插到最前面，避免和开机问候冲突）。
       _messages.insertAll(0, [
@@ -222,6 +235,9 @@ class _HomeScreenState extends State<HomeScreen>
       });
     }
     unawaited(_warmUpAsr());
+    NativeBridge.init(onLaunch: _onLaunchAction, onOrbTap: _onOrbTap);
+    unawaited(_applySettingsSideEffects(startup: true));
+    await NativeBridge.ready(); // 原生会把启动时暂存的入口事件（默认助手 / 磁贴 / 提醒）投递过来
   }
 
   @override
@@ -320,6 +336,7 @@ class _HomeScreenState extends State<HomeScreen>
     final abort = _speakAbort;
     if (abort != null && !abort.isCompleted) abort.complete();
     unawaited(_player.stop().catchError((_) {}));
+    unawaited(NativeBridge.ttsStop());
   }
 
   /// 逐字流式显示最新回复（与语音播报同步的打字机效果）。
@@ -354,47 +371,91 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _speak(String text) async {
-    final clean = text.trim();
-    if (clean.isEmpty || !_settings.speakReplies || _muted) return;
+    var clean = text.trim();
+    if (clean.isEmpty) return;
+    if (clean.length > 1200) clean = '${clean.substring(0, 1200)}…';
+    await _speakStream(Stream<String>.fromIterable(_splitForTts(clean)));
+  }
 
+  /// 按句拆开：第一句先合成先播，后面的边播边预合成（首句延迟低）。
+  List<String> _splitForTts(String t) {
+    final parts = t
+        .split(RegExp(r'(?<=[。！？!?；;\n])'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final out = <String>[];
+    for (final p in parts) {
+      if (out.isNotEmpty && out.last.length < 8) {
+        out[out.length - 1] = '${out.last}$p';
+      } else {
+        out.add(p);
+      }
+    }
+    return out.isEmpty ? [t] : out;
+  }
+
+  /// 逐句播报：收到一句就开始合成（预取），按顺序播放；
+  /// Edge 失败的那一句改用系统 TTS 兜底，不会整段静音。
+  Future<void> _speakStream(Stream<String> sentences) async {
+    if (!_settings.speakReplies || _muted) {
+      await sentences.drain<void>();
+      if (mounted && _state == JarvisState.speaking) {
+        _set(() => _state = JarvisState.idle);
+      }
+      return;
+    }
     final seq = ++_speakSeq;
     final prev = _speakAbort;
     if (prev != null && !prev.isCompleted) prev.complete();
     final abort = _speakAbort = Completer<void>();
-    // Only own the status when nothing else (thinking / listening) does.
     final ownsState =
         _state == JarvisState.idle || _state == JarvisState.speaking;
     if (ownsState) _set(() => _state = JarvisState.speaking);
-    try {
-      await _player.stop();
-      final short =
-          clean.length > 1200 ? '${clean.substring(0, 1200)}…' : clean;
-      // Edge only: no system-TTS fallback. If Edge fails (e.g. no
-      // network), the reply stays silent but visible in chat.
-      final mp3 = await EdgeTtsService.synthesize(
-        short,
+    final queue = StreamController<(String, Future<Uint8List?>)>();
+    final sub = sentences.listen((s) {
+      final audio = EdgeTtsService.synthesize(
+        s,
         voice: _settings.edgeVoice,
         rate: _settings.rate,
         pitch: _settings.pitch,
-      );
-      if (seq != _speakSeq || !mounted) return; // superseded / cancelled
-      // Subscribe before play() so a short clip can't finish unnoticed.
-      final done = _player.onPlayerComplete.first..ignore();
-      await _player.play(BytesSource(mp3));
-      // Safety net only (the old text.length/8 limit cut long replies off).
-      // _stopSpeaking() ends the wait immediately via [abort].
-      await Future.any<void>([
-        done.timeout(Duration(seconds: 20 + short.length ~/ 2)),
-        abort.future,
-      ]);
+      ).then<Uint8List?>((v) => v).catchError((_) => null);
+      queue.add((s, audio));
+    }, onDone: () {
+      if (!queue.isClosed) queue.close();
+    }, onError: (_) {
+      if (!queue.isClosed) queue.close();
+    });
+    try {
+      await _player.stop();
+      await for (final item in queue.stream) {
+        if (seq != _speakSeq || !mounted) break;
+        final mp3 = await item.$2;
+        if (seq != _speakSeq || !mounted) break;
+        if (mp3 != null && mp3.isNotEmpty) {
+          final done = _player.onPlayerComplete.first..ignore();
+          await _player.play(BytesSource(mp3));
+          await Future.any<void>([
+            done.timeout(Duration(seconds: 20 + item.$1.length ~/ 2)),
+            abort.future,
+          ]);
+        } else {
+          await Future.any<void>([
+            NativeBridge.ttsSpeak(item.$1, _settings.rate, _settings.pitch),
+            abort.future,
+          ]);
+        }
+      }
     } catch (_) {
-      // Swallow: Edge failure must never crash the chat flow.
+      // Edge / 播放失败不许拖垮聊天流程。
+    } finally {
+      await sub.cancel();
+      if (!queue.isClosed) await queue.close();
       if (seq == _speakSeq) {
         try {
           await _player.stop();
         } catch (_) {}
       }
-    } finally {
       if (ownsState &&
           seq == _speakSeq &&
           mounted &&
@@ -402,6 +463,194 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() => _state = JarvisState.idle);
       }
     }
+  }
+
+  // ---------- 流式回答 ----------
+
+  void _onStreamDelta(String d) {
+    if (!mounted || d.isEmpty) return;
+    if (_sentenceCtl == null) {
+      _typewriterRun++; // 作废打字机：流式本身就是逐字出
+      _streamBuf = '';
+      _sentBuf = '';
+      final ctl = _sentenceCtl = StreamController<String>();
+      _set(() {
+        _messages.add(const _Msg('assistant', ''));
+        _streamMsgIndex = _messages.length - 1;
+        _state = JarvisState.speaking;
+        _isSpeakingWithAnimation = false;
+      });
+      _streamSpeakDone = _speakStream(ctl.stream);
+    }
+    _streamBuf += d;
+    _sentBuf += d;
+    _set(() {
+      if (_streamMsgIndex >= 0 && _streamMsgIndex < _messages.length) {
+        _messages[_streamMsgIndex] = _Msg('assistant', _streamBuf);
+      }
+      _displayedOutputText = _streamBuf;
+    });
+    _drainSentences();
+  }
+
+  void _drainSentences() {
+    final ctl = _sentenceCtl;
+    if (ctl == null || ctl.isClosed) return;
+    while (true) {
+      var cut = -1;
+      final m = RegExp(r'[。！？!?；;\n]').firstMatch(_sentBuf);
+      if (m != null) {
+        cut = m.end;
+      } else if (_sentBuf.length > 60) {
+        final c = _sentBuf.lastIndexOf(RegExp(r'[，,、]'));
+        if (c > 10) cut = c + 1;
+      }
+      if (cut <= 0) break;
+      final sentence = _sentBuf.substring(0, cut).trim();
+      _sentBuf = _sentBuf.substring(cut);
+      if (sentence.length >= 2) ctl.add(sentence);
+    }
+  }
+
+  /// 流结束：补播尾巴（含自检等非流式追加部分），把消息定稿，等播完。
+  Future<void> _finishStream(String answer) async {
+    final ctl = _sentenceCtl;
+    if (ctl == null) return;
+    var tail = _sentBuf;
+    if (answer.length > _streamBuf.length && answer.startsWith(_streamBuf)) {
+      tail += answer.substring(_streamBuf.length);
+    }
+    if (tail.trim().length >= 2 && !ctl.isClosed) ctl.add(tail.trim());
+    _sentBuf = '';
+    if (!ctl.isClosed) await ctl.close();
+    final idx = _streamMsgIndex;
+    final done = _streamSpeakDone;
+    _sentenceCtl = null;
+    _streamBuf = '';
+    _streamMsgIndex = -1;
+    _streamSpeakDone = null;
+    _set(() {
+      if (idx >= 0 && idx < _messages.length) {
+        _messages[idx] = _Msg('assistant', answer);
+      }
+      _displayedOutputText = answer;
+      _isSpeakingWithAnimation = false;
+      _statusLine = '任务执行完毕。';
+    });
+    _scrollDown();
+    _persistChat();
+    unawaited(NativeBridge.orbBubble(answer));
+    if (done != null) await done;
+  }
+
+  void _abortStream() {
+    final ctl = _sentenceCtl;
+    _sentenceCtl = null;
+    _streamBuf = '';
+    _sentBuf = '';
+    _streamMsgIndex = -1;
+    _streamSpeakDone = null;
+    if (ctl != null && !ctl.isClosed) unawaited(ctl.close());
+  }
+
+  // ---------- 入口事件（默认助手 / 快捷磁贴 / 提醒 / 晨报） ----------
+
+  String _orbSent = '';
+
+  /// 把当前状态同步给悬浮球（只在变化时发一次）。
+  void _syncOrb() {
+    final s = switch (_state) {
+      JarvisState.listening => 'listening',
+      JarvisState.thinking => 'thinking',
+      JarvisState.speaking => 'speaking',
+      _ => 'idle',
+    };
+    if (s == _orbSent) return;
+    _orbSent = s;
+    unawaited(NativeBridge.orbState(s));
+  }
+
+  /// 悬浮球被点：待命 → 开始听；聆听中 → 结束本轮；播报中 → 打断；思考中不处理。
+  void _onOrbTap() {
+    if (!mounted) return;
+    switch (_state) {
+      case JarvisState.idle:
+        unawaited(_runLaunchAction('assist', ''));
+      case JarvisState.listening:
+        _endListening();
+      case JarvisState.speaking:
+        _stopSpeaking();
+        _set(() => _state = JarvisState.idle);
+      default:
+        break;
+    }
+  }
+
+  void _onLaunchAction(Map<String, dynamic> m) {
+    if (!mounted) return;
+    if (_state == JarvisState.booting) {
+      _pendingLaunch = m; // 先静默进主界面，进完再处理
+      unawaited(_enterApp(silent: true));
+      return;
+    }
+    unawaited(_runLaunchAction(
+        m['action']?.toString() ?? '', m['text']?.toString() ?? ''));
+  }
+
+  Future<void> _runLaunchAction(String action, String text) async {
+    switch (action) {
+      case 'assist':
+        if (_state == JarvisState.idle) {
+          if (_asr.isRunning) await _asr.stop();
+          await _startActiveListening();
+        }
+      case 'reminder':
+        final msg = text.trim().isEmpty ? '时间到了' : text.trim();
+        _reply('提醒：$msg', '提醒时间到。');
+        await _speak('提醒您：$msg');
+      case 'morning_brief':
+        await _runBrief();
+    }
+  }
+
+  Future<void> _runBrief() async {
+    if (_state == JarvisState.thinking) return;
+    _set(() {
+      _state = JarvisState.thinking;
+      _statusLine = '正在准备今天的晨报…';
+    });
+    try {
+      final text = await ToolService.briefing(_settings);
+      _reply(text, '晨报已准备好。');
+      if (mounted) await _speak(text);
+    } catch (e) {
+      _reply('晨报生成失败：$e', '晨报失败。');
+    }
+  }
+
+  /// 设置变化 / 启动时同步原生侧：看屏白名单、晨报定时、前台服务常驻。
+  Future<void> _applySettingsSideEffects({bool startup = false}) async {
+    await NativeBridge.setUserWhitelist(_settings.userWhitelistPackages);
+    unawaited(NativeBridge.orbSetEnabled(_settings.floatingOrb));
+    if (_settings.morningBrief) {
+      final parts = _settings.morningBriefTime.split(':');
+      final h = int.tryParse(parts.first) ?? 7;
+      final m = parts.length > 1 ? (int.tryParse(parts[1]) ?? 30) : 30;
+      if (!startup) await Permission.notification.request();
+      await NativeBridge.scheduleDailyBrief(h, m);
+    } else {
+      await NativeBridge.cancelDailyBrief();
+    }
+    if (_settings.keepAlive) {
+      if (!startup) await Permission.notification.request();
+      if (await NativeBridge.startKeepAlive()) {
+        if (!_wakeEnabled) _set(() => _wakeEnabled = true);
+        if (_state == JarvisState.idle) _resumeWake();
+      }
+    } else {
+      await NativeBridge.stopKeepAlive();
+    }
+    if (!_settings.localEnabled) unawaited(LocalLlmService.unload());
   }
 
   /// Mic level (already 0..1 from AsrService) for the reactor bars.
@@ -465,6 +714,7 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_asr.stop());
     if (rest.length >= 2) {
       _set(() {});
+      _voiceTurn = true;
       unawaited(_send(rest));
     } else {
       unawaited(_onWakeWord());
@@ -486,9 +736,11 @@ class _HomeScreenState extends State<HomeScreen>
         _wakeMode = false;
       });
       if (wasListening) await _asr.stop();
+      if (_settings.keepAlive) unawaited(NativeBridge.stopKeepAlive());
       return;
     }
     _set(() => _wakeEnabled = true);
+    if (_settings.keepAlive) unawaited(NativeBridge.startKeepAlive());
     if (_muted) {
       _notice('当前已静音，取消静音后语音唤醒才会生效。');
       return;
@@ -539,6 +791,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
     _listenTimer?.cancel();
     unawaited(_asr.stop());
+    _voiceTurn = true;
     unawaited(_send(q));
   }
 
@@ -564,6 +817,7 @@ class _HomeScreenState extends State<HomeScreen>
       _set(() => _state = JarvisState.idle);
       await _asr.stop();
       if (text.isNotEmpty) {
+        _voiceTurn = true;
         unawaited(_send(text));
       } else {
         _resumeWake();
@@ -617,6 +871,7 @@ class _HomeScreenState extends State<HomeScreen>
     _scrollDown();
     _persistChat();
     _startSyncedSpeechAnimation(text);
+    unawaited(NativeBridge.orbBubble(text));
   }
 
   /// 把对话记录保存到本机（后台，失败不影响使用）。
@@ -684,7 +939,18 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       await _ask(q);
     } finally {
-      _resumeWake(); // back to wake-word standby once the exchange is over
+      final cont = _voiceTurn && _settings.continuousChat;
+      _voiceTurn = false;
+      if (cont &&
+          mounted &&
+          !_muted &&
+          _state == JarvisState.idle &&
+          !_asr.isRunning) {
+        // 免唤醒连续对话：说完自动继续听；静音约 7 秒没人说话会自动回到待命。
+        unawaited(_startActiveListening());
+      } else {
+        _resumeWake(); // back to wake-word standby once the exchange is over
+      }
     }
   }
 
@@ -721,7 +987,9 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     final hist = _buildHistory();
+    final gen = ++_askGen;
     _stopSpeaking();
+    _abortStream();
     _listenTimer?.cancel();
     unawaited(_asr.stop());
     setState(() {
@@ -903,20 +1171,30 @@ class _HomeScreenState extends State<HomeScreen>
         userGoal: q,
         history: hist,
         onProgress: (status) {
-          if (mounted) {
+          if (mounted && gen == _askGen) {
             setState(() {
               _statusLine = status; // 实时显示底层子任务执行步骤
             });
           }
         },
+        onDelta: (d) {
+          if (gen == _askGen) _onStreamDelta(d);
+        },
       );
     } catch (e) {
+      if (gen != _askGen) return; // 已被新提问打断
+      _abortStream();
       _reply('执行失败：$e\n\n请检查设置里的接口地址、模型、Key 和网络。',
           '智能体执行失败。');
       return;
     }
-    _reply(answer, '任务执行完毕。');
+    if (gen != _askGen) return; // 回答期间用户又问了新问题：旧回答作废
     _maybeConsolidateMemory();
+    if (_sentenceCtl != null) {
+      await _finishStream(answer); // 已经边出字边播了，只做定稿和补播
+      return;
+    }
+    _reply(answer, '任务执行完毕。');
     if (mounted) await _speak(answer);
   }
 
@@ -942,7 +1220,8 @@ class _HomeScreenState extends State<HomeScreen>
         MaterialPageRoute(
             builder: (_) => SettingsScreen(settings: _settings)));
     await _settings.load();
-    _settings.memoryContext = _memory.contextBlock();
+    LocalLlmService.resetFailure();
+    unawaited(_applySettingsSideEffects());
     if (mounted) {
       setState(() {
         // 在设置里清空了对话记录：主页同步清屏。
@@ -957,7 +1236,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ---------- Boot (HTML: tap to wake) ----------
 
-  Future<void> _enterApp() async {
+  Future<void> _enterApp({bool silent = false}) async {
     if (_state != JarvisState.booting) return;
     // 有历史对话 = 老朋友回来了：恢复记录，只说一句简短问候。
     final returning = _messages.isNotEmpty;
@@ -970,8 +1249,18 @@ class _HomeScreenState extends State<HomeScreen>
       if (!returning) _messages.add(_Msg('assistant', welcome));
     });
     if (returning) _scrollDown();
-    _startSyncedSpeechAnimation(welcome);
-    await _speak(welcome);
+    if (!silent) {
+      _startSyncedSpeechAnimation(welcome);
+      await _speak(welcome);
+    }
+    final launch = _pendingLaunch;
+    _pendingLaunch = null;
+    if (launch != null) {
+      await _runLaunchAction(
+          launch['action']?.toString() ?? '', launch['text']?.toString() ?? '');
+    } else {
+      _resumeWake(); // 常驻待命：进主界面后立刻开始听唤醒词
+    }
   }
 
   // ---------- Build ----------
@@ -979,6 +1268,7 @@ class _HomeScreenState extends State<HomeScreen>
 // 2. 升级后的 build 方法（深空径向渐变背景）
   @override
   Widget build(BuildContext context) {
+    _syncOrb(); // 悬浮球状态跟随（只在变化时发）
     if (_state == JarvisState.booting) return _bootScreen();
     final themeColor = getActiveThemeColor(_state, 0);
     final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;

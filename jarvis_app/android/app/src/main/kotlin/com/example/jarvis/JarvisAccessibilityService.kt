@@ -10,6 +10,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.jarvis.jarvis_app.OrbController
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -125,6 +126,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
 
         /** MainActivity 在启动任务前补充“系统默认短信 App”包名（只增加短信类，其余仍受硬白名单约束）。 */
+        /** 用户在设置里额外允许“看屏”的包名。含 bank/pay/wallet/settings 等的一律拒绝。仅用于看屏与通用动作，不扩大任务引擎。 */
+        @Volatile
+        var userWhitelist: Set<String> = emptySet()
+            private set
+
+        private val USER_DENY = Regex(
+            "settings|packageinstaller|permissioncontroller|bank|wallet|pay|finance|security",
+            RegexOption.IGNORE_CASE
+        )
+
+        fun setUserWhitelist(pkgs: Set<String>) {
+            userWhitelist = pkgs.filter { !USER_DENY.containsMatchIn(it) }.toSet()
+        }
+
         fun setExtraWhitelist(pkgs: Set<String>) {
             instance?.extraWhitelist = pkgs
         }
@@ -265,16 +280,19 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        OrbController.attach(this) // 悬浮球：开关记在 SharedPreferences，服务起来就自动恢复
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         finishTask("cancelled", "无障碍服务已断开")
+        OrbController.detach()
         instance = null
         disarm()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        OrbController.detach()
         instance = null
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -721,7 +739,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return "{}"
         try {
             val pkg = root.packageName?.toString() ?: return "{}"
-            if (pkg !in HARD_WHITELIST + extraWhitelist) {
+            if (pkg !in HARD_WHITELIST + extraWhitelist + userWhitelist) {
                 return """{"error":"not_whitelisted","pkg":"$pkg"}"""
             }
             return dumpNode(root, 0, intArrayOf(0)).toString()
@@ -754,6 +772,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         obj.put("viewId", id.substringAfterLast('/').take(60))
         obj.put("clickable", node.isClickable)
         obj.put("editable", node.isEditable)
+        obj.put("scrollable", node.isScrollable)
         val rect = Rect().also { node.getBoundsInScreen(it) }
         obj.put("bounds", JSONArray().apply {
             put(rect.left)
@@ -784,8 +803,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return false
         try {
             val pkg = root.packageName?.toString() ?: return false
-            if (pkg !in HARD_WHITELIST + extraWhitelist) return false
+            if (pkg !in HARD_WHITELIST + extraWhitelist + userWhitelist) return false
             return when (actionType) {
+                "scroll" -> scrollOnce(root, targetText == "up")
                 "click" -> {
                     if (targetText.isEmpty()) return false
                     val node = findAgentNode(root, targetText, editableOnly = false)
@@ -828,6 +848,34 @@ class JarvisAccessibilityService : AccessibilityService() {
             return false
         } finally {
             recycleCompat(root)
+        }
+    }
+
+    /** 在当前窗口里找第一个可见的可滚动容器并滚一屏（up=向上翻，否则向下）。 */
+    private fun scrollOnce(root: AccessibilityNodeInfo, up: Boolean): Boolean {
+        val obtained = ArrayList<AccessibilityNodeInfo>()
+        try {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            var visited = 0
+            while (queue.isNotEmpty() && visited < MAX_NODES) {
+                val node = queue.removeFirst()
+                visited++
+                if (node.isVisibleToUser && node.isScrollable) {
+                    return node.performAction(
+                        if (up) AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                        else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    )
+                }
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    obtained.add(child)
+                    queue.add(child)
+                }
+            }
+            return false
+        } finally {
+            obtained.forEach { recycleCompat(it) }
         }
     }
 

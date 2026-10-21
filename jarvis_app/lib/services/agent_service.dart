@@ -24,10 +24,10 @@ class AgentStep {
 
   factory AgentStep.fromJson(Map<String, dynamic> json) {
     return AgentStep(
-      stepId: json['step_id'] ?? 1,
-      description: json['description'] ?? '',
-      tool: json['tool'] ?? 'llm_reasoning',
-      argument: json['argument'] ?? '',
+      stepId: (json['step_id'] is num) ? (json['step_id'] as num).toInt() : 1,
+      description: (json['description'] ?? '').toString(),
+      tool: (json['tool'] ?? 'device_action').toString(),
+      argument: (json['argument'] ?? '').toString(),
     );
   }
 }
@@ -49,8 +49,15 @@ class AgentService {
     required String userGoal,
     required List<Map<String, String>> history,
     required Function(String statusMessage) onProgress,
+    void Function(String delta)? onDelta,
   }) async {
-    onProgress('正在分析目标并规划任务...');
+    // 0) 快路径优先：本地正则能直接办的指令不再先过一次大模型规划（省 1~3 秒）。
+    //    复合指令（“…然后…”）仍交给规划器拆步骤。
+    if (_fastPathAllowed(userGoal)) {
+      final fast = await DeviceActions.tryHandle(userGoal, settings: settings);
+      if (fast != null) return fast;
+    }
+    onProgress('正在分析…');
 
     List<AgentStep> steps;
     final matched = await SkillStore.matchSkill(userGoal);
@@ -67,17 +74,20 @@ class AgentService {
                 argument: e.value.argument,
               ))
           .toList();
+    } else if (!needsTools(userGoal)) {
+      // 闲聊 / 知识问答：不规划，直接答（可流式；简单的由本地小模型答）。
+      return _chat(settings, userGoal, history, onDelta);
     } else {
       try {
         steps = await _planSteps(settings, userGoal, history);
       } catch (e) {
         onProgress('任务规划失败，转为常规问答...');
-        return await LlmService.ask(settings: settings, question: userGoal, history: history);
+        return _chat(settings, userGoal, history, onDelta);
       }
     }
 
     if (steps.isEmpty) {
-      return await LlmService.ask(settings: settings, question: userGoal, history: history);
+      return _chat(settings, userGoal, history, onDelta);
     }
 
     // 2. 建黑板并执行（黑板每步落盘；中途被打断 / App 重启都能续跑）。
@@ -108,7 +118,49 @@ class AgentService {
       steps: steps,
       allCompleted: board.status == TaskStatus.completed,
       onProgress: onProgress,
+      onDelta: onDelta,
     );
+  }
+
+  /// 快路径优先的闸门：太长、复合指令、或只是句子里带个“开”字的闲聊
+  /// （“我开始学淘宝运营”不能被当成“打开淘宝”）都不走快路径，交给规划 / 聊天。
+  static bool _fastPathAllowed(String q) {
+    final t = q.trim();
+    if (t.isEmpty || t.length > 60) return false;
+    if (_compound.hasMatch(t)) return false;
+    if (t.contains('开') &&
+        !RegExp(r'打开|启动|开一下|开启|开关|^(请|帮我|麻烦|给我)?[，, ]*开').hasMatch(t)) {
+      return false;
+    }
+    return true;
+  }
+
+  /// 复合指令连接词：出现就不走“快路径优先”。
+  static final _compound = RegExp(r'然后|接着|之后|再(给|去|帮|把|查|发|打)|并且|同时|顺便|完了|而且');
+
+  /// 需要工具 / 联网 / 设备操作的指令才规划；其余当聊天，省一次规划调用。
+  static bool needsTools(String q) => RegExp(
+          r'打开|启动|发(送)?(信息|消息|短信|微信|邮件)|打电话|拨打|设置|设定|调(整)?亮度|导航|路线|提醒|订(票|酒店|餐)|买|点(外卖|赞)|转发|截图|帮我(去|在|把|查|找|订|买|点)|'
+          r'联网|上网|搜(索|一下)?|查(一下|询|查|找)|最新|实时|新闻|热搜|股价|股票|汇率|比分|赛程|油价|多少钱|价格|现在几点|\d+\s*[*+/×÷-]\s*\d+')
+      .hasMatch(q);
+
+  /// 聊天回答：有 onDelta 就流式（边出字边播），否则一次性。
+  static Future<String> _chat(JarvisSettings settings, String goal,
+      List<Map<String, String>> history, void Function(String)? onDelta,
+      {LlmPurpose purpose = LlmPurpose.chat}) async {
+    if (onDelta == null) {
+      return LlmService.ask(
+          settings: settings, question: goal, history: history, purpose: purpose);
+    }
+    final sb = StringBuffer();
+    await for (final d in LlmService.askStream(
+        settings: settings, question: goal, history: history, purpose: purpose)) {
+      sb.write(d);
+      onDelta(d);
+    }
+    final t = sb.toString().trim();
+    if (t.isEmpty) throw StateError('模型未返回文字内容。');
+    return t;
   }
 
   /// “刚才那件事继续”：从黑板当前步接着跑（App 重启后也行）。
@@ -174,7 +226,7 @@ class AgentService {
 
       _StepOutcome outcome;
       try {
-        outcome = await _executeStep(step, settings: settings);
+        outcome = await _executeStep(step, settings: settings, all: steps);
       } catch (e) {
         outcome = _StepOutcome('执行出错: $e', false);
       }
@@ -230,6 +282,7 @@ class AgentService {
     required List<AgentStep> steps,
     required bool allCompleted,
     required Function(String statusMessage) onProgress,
+    void Function(String delta)? onDelta,
   }) async {
     if (DeviceActions.hasPending) {
       for (var i = steps.length - 1; i >= 0; i--) {
@@ -247,11 +300,8 @@ class AgentService {
     // 汇总所有步骤的结果给用户
     onProgress('正在汇总执行结果...');
     final summaryPrompt = _buildSummaryPrompt(userGoal, steps);
-    final finalAnswer = await LlmService.ask(
-      settings: settings,
-      question: summaryPrompt,
-      history: history,
-    );
+    final finalAnswer = await _chat(settings, summaryPrompt, history, onDelta,
+        purpose: LlmPurpose.summary);
 
     return _appendSelfCheck(
       settings: settings,
@@ -286,6 +336,7 @@ class AgentService {
             '${sb}请自检：以上结果是否真正满足用户目标？如果还缺信息或某步没做到位，用一两句话说明，并用一句问句向用户追问缺的条件。只输出自检结论，不要复述步骤。',
         history: const [],
         withMemory: false,
+        purpose: LlmPurpose.reason,
       );
       final t = check.trim();
       if (t.isEmpty) return finalAnswer;
@@ -305,6 +356,7 @@ class AgentService {
     required String goal,
     required String currentStep,
     required String screenTree,
+    String progress = '',
   }) async {
     // 节点树可能很大：截断到 6000 字符，避免 token 爆掉。
     final tree = screenTree.length > 6000
@@ -322,11 +374,14 @@ class AgentService {
 ''';
     final response = await LlmService.ask(
       settings: settings,
-      question: '目标：$goal\n当前步骤：$currentStep\n屏幕节点树：\n$tree',
+      question: '目标：$goal\n当前步骤：$currentStep\n已做动作：$progress\n屏幕节点树：\n$tree',
       history: [
         {'role': 'system', 'content': systemPrompt},
       ],
       withMemory: false,
+      plain: false,
+      temperature: 0.2,
+      purpose: LlmPurpose.decide,
     );
     final cleaned = response.replaceAll(RegExp(r'```json|```'), '').trim();
     final start = cleaned.indexOf('{');
@@ -339,7 +394,7 @@ class AgentService {
       throw Exception('大模型决策返回的不是 JSON 对象');
     }
     final action = decoded['action']?.toString() ?? '';
-    if (action != 'click' && action != 'input' && action != 'back') {
+    if (!const {'click', 'input', 'back', 'scroll', 'done'}.contains(action)) {
       throw Exception('大模型决策的 action 非法：$action');
     }
     return {
@@ -347,6 +402,7 @@ class AgentService {
       'target': decoded['target']?.toString() ?? '',
       'inputText': decoded['inputText']?.toString(),
       'expect': decoded['expect']?.toString() ?? '',
+      'finish_after': decoded['finish_after'] == true,
     };
   }
 
@@ -378,9 +434,13 @@ class AgentService {
         {'role': 'system', 'content': systemPrompt},
         ...history,
       ],
+      plain: false,
+      temperature: 0.2,
+      purpose: LlmPurpose.plan,
     );
 
-    String cleanJson = response.replaceAll('json', '').replaceAll('', '').trim();
+    // 只去掉 Markdown 代码围栏，不碰正文里的“json”字样。
+    String cleanJson = response.replaceAll(RegExp(r'```(?:json)?'), '').trim();
     int start = cleanJson.indexOf('[');
     int end = cleanJson.lastIndexOf(']');
     if (start != -1 && end != -1) {
@@ -397,9 +457,48 @@ class AgentService {
   static Future<_StepOutcome> _executeStep(
     AgentStep step, {
     required JarvisSettings settings,
+    List<AgentStep> all = const [],
   }) async {
     switch (step.tool) {
+      case 'web_search':
+        try {
+          return _StepOutcome(
+              await WebSearchService.search(step.argument, settings: settings), true);
+        } catch (e) {
+          return _StepOutcome('联网查询失败：$e', false);
+        }
+      case 'web_page':
+        try {
+          return _StepOutcome(await WebSearchService.readPage(step.argument), true);
+        } catch (e) {
+          return _StepOutcome('读取网页失败：$e', false);
+        }
+      case 'calculator':
+        final v = DeviceActions.evaluateExpression(step.argument);
+        if (v == null) {
+          return _StepOutcome('计算失败：表达式无效（${step.argument}）', false);
+        }
+        return _StepOutcome(
+            '${step.argument} = ${DeviceActions.formatNumber(v)}', true);
+      case 'llm_reasoning':
+        // 真的让大模型思考：带上前面步骤的结果。
+        try {
+          final ctx = all
+              .where((s) => s != step && s.result != null)
+              .map((s) => '- ${s.description}：${s.result}')
+              .join('\n');
+          final r = await LlmService.ask(
+            settings: settings,
+            question: ctx.isEmpty ? step.argument : '${step.argument}\n\n前面步骤的结果：\n$ctx',
+            history: const [],
+            purpose: LlmPurpose.reason,
+          );
+          return _StepOutcome(r, true);
+        } catch (e) {
+          return _StepOutcome('思考步骤失败：$e', false);
+        }
       case 'device_action':
+      default:
         final result =
             await DeviceActions.tryHandle(step.argument, settings: settings);
         if (result != null) return _StepOutcome(result, true);
@@ -418,23 +517,6 @@ class AgentService {
         } catch (e) {
           return _StepOutcome('慢路径执行失败：$e', false);
         }
-      case 'web_search':
-        try {
-          return _StepOutcome(
-              await WebSearchService.search(step.argument), true);
-        } catch (e) {
-          return _StepOutcome('联网查询失败：$e', false);
-        }
-      case 'calculator':
-        final v = DeviceActions.evaluateExpression(step.argument);
-        if (v == null) {
-          return _StepOutcome('计算失败：表达式无效（${step.argument}）', false);
-        }
-        return _StepOutcome(
-            '${step.argument} = ${DeviceActions.formatNumber(v)}', true);
-      case 'llm_reasoning':
-      default:
-        return _StepOutcome('已完成思考与文本处理：${step.argument}', true);
     }
   }
 

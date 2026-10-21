@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'llm_service.dart';
 import 'settings_store.dart';
+import 'tool_service.dart';
 
 /// Device actions: call / message / cross-app message / read SMS / alarm / open app.
 /// Chinese commands only. Returns a reply string when handled,
@@ -179,6 +180,12 @@ class DeviceActions {
     // 否则消息正文里带“打电话”（“发信息说我打电话给你”）会被当成拨号。
     // “拒绝类”放发消息/打电话之后：只在不是合法发消息/打电话指令时才判拒绝，
     // 否则消息正文里的“点赞/验证码”会被误判（“发消息说别点赞了”）。
+    // v2 新增工具（提醒/计时器/音量/天气/日程/通知…）。发消息、打电话类指令不抢，
+    // 否则消息正文里的“提醒我…”会被当成提醒。
+    if (!RegExp(r'发(信息|消息|短信|微信|邮件)|打电话|拨打|打给|发给|回复').hasMatch(t)) {
+      final tool = await ToolService.tryHandle(t, settings ?? JarvisSettings());
+      if (tool != null) return tool;
+    }
     return await _tryMessage(t) ??
         await _tryCall(t) ??
         await _tryRefuse(t) ??
