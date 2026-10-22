@@ -76,7 +76,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         )
         private val FORBIDDEN_INPUT = Regex("密码|验证码|password|passcode", RegexOption.IGNORE_CASE)
 
-        @Volatile private var instance: JarvisAccessibilityService? = null
+        @Volatile var instance: JarvisAccessibilityService? = null
         @Volatile private var armedUntil = 0L
         @Volatile private var allowedPackages: Set<String> = emptySet()
         @Volatile private var state = "idle" // idle | armed | clicked | timeout
@@ -169,10 +169,6 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         fun setExtraWhitelist(pkgs: Set<String>) {
             instance?.extraWhitelist = pkgs
-        }
-
-        fun cancelTask() {
-            instance?.finishTask("cancelled", "已取消")
         }
 
         /** 等待当前任务结束；任务已结束则立即回调上一次结果。回调在主线程。 */
