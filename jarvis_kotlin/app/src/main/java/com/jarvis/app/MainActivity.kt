@@ -30,6 +30,7 @@ class MainActivity : Activity() {
 
     companion object {
         const val EXTRA_ACTION = "jarvis_action"
+        const val EXTRA_TEXT = "jarvis_text"
     }
 
     private lateinit var statusView: TextView
