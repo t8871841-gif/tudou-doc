@@ -42,6 +42,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-jk-
 
+      - name: Download sherpa-onnx AAR + offline ASR models
+        run: |
+          mkdir -p app/libs app/src/main/assets/asr /tmp/asr-model
+          curl -sL -o app/libs/sherpa-onnx-1.12.23.aar \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar
+          curl -sL -o /tmp/asr-model.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2
+          tar -xjf /tmp/asr-model.tar.bz2 -C /tmp/asr-model
+          find /tmp/asr-model -name 'encoder-epoch-99-avg-1.int8.onnx' -exec cp {} app/src/main/assets/asr/ \;
+          find /tmp/asr-model -name 'decoder-epoch-99-avg-1.onnx' -exec cp {} app/src/main/assets/asr/ \;
+          find /tmp/asr-model -name 'joiner-epoch-99-avg-1.int8.onnx' -exec cp {} app/src/main/assets/asr/ \;
+          find /tmp/asr-model -name 'tokens.txt' -exec cp {} app/src/main/assets/asr/ \;
+          ls -la app/libs/ app/src/main/assets/asr/
+          test -f app/libs/sherpa-onnx-1.12.23.aar
+          test -f app/src/main/assets/asr/encoder-epoch-99-avg-1.int8.onnx
+          test -f app/src/main/assets/asr/decoder-epoch-99-avg-1.onnx
+          test -f app/src/main/assets/asr/joiner-epoch-99-avg-1.int8.onnx
+          test -f app/src/main/assets/asr/tokens.txt
+          rm -rf /tmp/asr-model /tmp/asr-model.tar.bz2
+
       - name: Build debug APK
         run: |
           chmod +x gradlew
