@@ -9,6 +9,7 @@ import net.kuafuai.andee.R
 import net.kuafuai.andee.asr.AsrEngine
 import net.kuafuai.andee.asr.GoogleAsr
 import net.kuafuai.andee.asr.HuoshanAsr
+import net.kuafuai.andee.asr.OfflineAsr
 import net.kuafuai.andee.audio.AudioFocusGate
 import net.kuafuai.andee.audio.AudioIO
 import net.kuafuai.andee.config.VoiceConfig
