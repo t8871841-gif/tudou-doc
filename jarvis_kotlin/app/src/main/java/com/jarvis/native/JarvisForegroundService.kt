@@ -13,9 +13,9 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 
 /**
- * 常驻待命前台服务（类型 microphone）。作用只有一个：提高进程优先级，
- * 让 Flutter 侧的离线唤醒词识别熄屏、切后台后也不被系统杀掉。
- * 不在这里录音、不做识别；麦克风由 Dart 侧 AsrService 使用。
+ * 常驻待命前台服务（类型 microphone）。作用：提高进程优先级，让唤醒词轮询
+ * （JarvisAgent 的降级版唤醒词监听，见该文件顶部注释）熄屏 / 切后台后不被系统杀掉；
+ * 启动成功后顺带把 JarvisAgent（二期对话+语音总调度）接上。
  */
 class JarvisForegroundService : Service() {
     companion object {
@@ -59,6 +59,8 @@ class JarvisForegroundService : Service() {
                 startForeground(NOTIF_ID, n)
             }
             running = true
+            // 二期：常驻服务起来后接上对话/语音总调度（原来这里是 Dart 侧 AsrService 的事）。
+            JarvisAgent.start(this)
         } catch (e: Exception) {
             // 没有录音权限 / 系统拒绝：不常驻，Dart 侧会看到 running=false。
             running = false
