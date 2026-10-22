@@ -41,8 +41,16 @@ class SystemBridge(private val activity: Activity) {
     fun register(engine: FlutterEngine) {
         val ch = MethodChannel(engine.dartExecutor.binaryMessenger, "jarvis/system")
         channel = ch
-        OrbController.eventSink = { type ->
-            activity.runOnUiThread { channel?.invokeMethod("onOrbEvent", mapOf("type" to type)) }
+        // 带回执：Dart 回 true = 已处理；其余（false / 报错 / 没实现）一律当“没处理”，由 OrbController 兜底拉起 App。
+        OrbController.eventSink = { type, cb ->
+            activity.runOnUiThread {
+                val c = channel
+                if (c == null) cb(false) else c.invokeMethod("onOrbEvent", mapOf("type" to type), object : MethodChannel.Result {
+                    override fun success(r: Any?) { cb(r == true) }
+                    override fun error(code: String, msg: String?, details: Any?) { cb(false) }
+                    override fun notImplemented() { cb(false) }
+                })
+            }
         }
         ch.setMethodCallHandler { call, result ->
             try {
@@ -54,6 +62,7 @@ class SystemBridge(private val activity: Activity) {
     }
 
     fun release() {
+        JarvisNotificationListener.sink = null
         OrbController.dartAlive = false
         OrbController.eventSink = null
         try {
@@ -195,9 +204,79 @@ class SystemBridge(private val activity: Activity) {
                 OrbController.showBubble(call.argument<String>("text") ?: "")
                 result.success(true)
             }
+            "estop" -> {
+                OrbController.emergencyStop(notifyDart = false)
+                result.success(true)
+            }
+            "captureScreen" -> {
+                val svc = JarvisAccessibilityService.instance
+                if (svc == null) result.success(mapOf("error" to "service_off"))
+                else svc.captureScreen { m -> activity.runOnUiThread { result.success(m) } }
+            }
+            "tapXY" -> {
+                val svc = JarvisAccessibilityService.instance
+                if (svc == null) result.success(mapOf("ok" to false, "reason" to "service_off"))
+                else svc.tapXY(
+                    (call.argument<Number>("x") ?: 0).toFloat(), (call.argument<Number>("y") ?: 0).toFloat()
+                ) { ok, why -> activity.runOnUiThread { result.success(mapOf("ok" to ok, "reason" to why)) } }
+            }
+            "swipeScreen" -> {
+                val svc = JarvisAccessibilityService.instance
+                if (svc == null) result.success(mapOf("ok" to false, "reason" to "service_off"))
+                else svc.swipeScreen(call.argument<Boolean>("down") ?: true) { ok, why ->
+                    activity.runOnUiThread { result.success(mapOf("ok" to ok, "reason" to why)) }
+                }
+            }
+            "battery" -> {
+                val bm = activity.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
+                val st = activity.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val plugged = (st?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+                result.success(
+                    mapOf(
+                        "level" to bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY),
+                        "charging" to plugged
+                    )
+                )
+            }
+            "announceEnable" -> {
+                val on = call.argument<Boolean>("on") ?: false
+                JarvisNotificationListener.announceOn = on
+                val push: (Map<String, Any>) -> Unit = { m ->
+                    activity.runOnUiThread { channel?.invokeMethod("onNotification", m) }
+                }
+                JarvisNotificationListener.sink = if (on) push else null
+                result.success(true)
+            }
+            "selfCheck" -> result.success(selfCheck())
             "openAccessibilitySettings" -> result.success(startSafe(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
             else -> result.notImplemented()
         }
+    }
+
+    /** 功能自检：原生侧能直接判断的项；Dart 侧补充本地模型 / 唤醒监听。 */
+    private fun selfCheck(): Map<String, Any?> {
+        fun granted(p: String) = ContextCompat.checkSelfPermission(activity, p) == PackageManager.PERMISSION_GRANTED
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val nm = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val enabledListeners = Settings.Secure.getString(activity.contentResolver, "enabled_notification_listeners") ?: ""
+        val assistant = try { Settings.Secure.getString(activity.contentResolver, "assistant") ?: "" } catch (e: Exception) { null }
+        return mapOf(
+            "sdk" to Build.VERSION.SDK_INT,
+            "brand" to "${Build.MANUFACTURER} ${Build.MODEL}",
+            "accessibility" to JarvisAccessibilityService.isRunning(),
+            "notificationAccess" to enabledListeners.contains(activity.packageName),
+            "keepAlive" to JarvisForegroundService.running,
+            "defaultAssistant" to when {
+                assistant == null -> "unknown"
+                assistant.contains(activity.packageName) -> "yes"
+                else -> "no"
+            },
+            "orbEnabled" to OrbController.isEnabled(),
+            "batteryIgnoring" to pm.isIgnoringBatteryOptimizations(activity.packageName),
+            "mic" to granted(Manifest.permission.RECORD_AUDIO),
+            "postNotifications" to (Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS) || nm.areNotificationsEnabled()),
+            "lastCaptureError" to JarvisAccessibilityService.lastCaptureError
+        )
     }
 
     private fun startSafe(i: Intent): Boolean = try {

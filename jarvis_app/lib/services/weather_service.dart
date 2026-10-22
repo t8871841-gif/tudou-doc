@@ -14,6 +14,21 @@ class WeatherService {
   };
   static String desc(num? c) => _wmo[c?.toInt()] ?? '天气未知';
 
+  /// 地名 → (纬度, 经度)。查不到返回 null（出发提醒的路程粗估用）。
+  static Future<(double, double)?> geocode(String name) async {
+    try {
+      final g = Uri.parse('https://geocoding-api.open-meteo.com/v1/search'
+          '?name=${Uri.encodeQueryComponent(name)}&count=1&language=zh&format=json');
+      final gr = await http.get(g).timeout(const Duration(seconds: 10));
+      final res = (jsonDecode(utf8.decode(gr.bodyBytes)) as Map)['results'] as List?;
+      if (res == null || res.isEmpty) return null;
+      final r = res.first as Map;
+      return ((r['latitude'] as num).toDouble(), (r['longitude'] as num).toDouble());
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<String> byCity(String city) async {
     try {
       final g = Uri.parse('https://geocoding-api.open-meteo.com/v1/search'

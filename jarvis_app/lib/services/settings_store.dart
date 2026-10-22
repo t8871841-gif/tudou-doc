@@ -49,6 +49,36 @@ class JarvisSettings {
   bool morningBrief = false; // 每天定时晨报
   String morningBriefTime = '07:30';
   String userWhitelist = ''; // 额外允许“看屏”的 App 包名，每行一个
+  // ---- v3 视觉看屏 ----
+  bool visionEnabled = false; // 截图 + 多模态模型
+  String visionModel = ''; // 空 = 复用上面的模型
+  String visionBaseUrl = ''; // 空 = 复用上面的接口地址
+  String visionApiKey = ''; // 空 = 复用上面的 Key
+  String visionCoord = 'pixel'; // pixel | norm1000（Qwen-VL 系用 0~1000 归一化坐标）
+
+  bool get visionConfigured =>
+      visionEnabled && (visionApiKey.trim().isNotEmpty || apiKey.trim().isNotEmpty);
+  String get visionBase => visionBaseUrl.trim().isEmpty ? baseUrl : visionBaseUrl;
+  String get visionKey => visionApiKey.trim().isEmpty ? apiKey : visionApiKey;
+  String get visionModelName => visionModel.trim().isEmpty ? model : visionModel.trim();
+
+  // ---- v3 语音唤醒 ----
+  bool bargeIn = true; // 打断说话（降级版）：播报时开口即停
+  // ---- v3 主动性 ----
+  bool announceOn = false; // 来电 / 短信 / 通知播报
+  bool announceSms = true;
+  bool announceCall = true;
+  bool announceWeChat = false;
+  String announceExtraPkgs = ''; // 额外播报的 App 包名，每行一个
+  String announceSenders = ''; // 只播这些联系人 / 发件人（逗号分隔，空 = 全部）
+  String quietStart = '22:00'; // 勿扰时段内不播报
+  String quietEnd = '07:00';
+  bool departRemind = false; // 日程出发提醒
+  int departLeadMin = 30; // 固定提前量（分钟）
+
+  bool wakeEnabled = false; // 开着唤醒词待命（主界面唤醒词胶囊同步）
+  int wakeSensitivity = 1; // 0 严格 / 1 标准 / 2 宽松
+
   bool floatingOrb = false; // 悬浮球（需要无障碍服务）
   bool localEnabled = false; // 端侧小模型：简单任务本地答，复杂任务上云
   String localModelPath = ''; // 端侧模型文件（App 私有目录内）
@@ -93,6 +123,26 @@ class JarvisSettings {
         await _storage.read(key: 'jarvis_brief_time') ?? '07:30';
     userWhitelist = await _storage.read(key: 'jarvis_user_whitelist') ?? '';
     floatingOrb = (await _storage.read(key: 'jarvis_orb')) == 'true';
+    wakeEnabled = (await _storage.read(key: 'jarvis_wake_on')) == 'true';
+    Future<String> r(String k, String d) async => await _storage.read(key: k) ?? d;
+    announceOn = (await r('jarvis_ann_on', 'false')) == 'true';
+    announceSms = (await r('jarvis_ann_sms', 'true')) == 'true';
+    announceCall = (await r('jarvis_ann_call', 'true')) == 'true';
+    announceWeChat = (await r('jarvis_ann_wx', 'false')) == 'true';
+    announceExtraPkgs = await r('jarvis_ann_pkgs', '');
+    announceSenders = await r('jarvis_ann_senders', '');
+    quietStart = await r('jarvis_quiet_s', '22:00');
+    quietEnd = await r('jarvis_quiet_e', '07:00');
+    departRemind = (await r('jarvis_depart', 'false')) == 'true';
+    departLeadMin = (int.tryParse(await r('jarvis_depart_lead', '30')) ?? 30).clamp(10, 120);
+    bargeIn = (await _storage.read(key: 'jarvis_barge')) != 'false';
+    wakeSensitivity =
+        (int.tryParse(await _storage.read(key: 'jarvis_wake_sens') ?? '1') ?? 1).clamp(0, 2);
+    visionEnabled = (await _storage.read(key: 'jarvis_v_on')) == 'true';
+    visionModel = await _storage.read(key: 'jarvis_v_model') ?? '';
+    visionBaseUrl = await _storage.read(key: 'jarvis_v_base') ?? '';
+    visionApiKey = await _storage.read(key: 'jarvis_v_key') ?? '';
+    visionCoord = await _storage.read(key: 'jarvis_v_coord') ?? 'pixel';
     localEnabled = (await _storage.read(key: 'jarvis_local_on')) == 'true';
     localModelPath = await _storage.read(key: 'jarvis_local_path') ?? '';
   }
@@ -136,6 +186,26 @@ class JarvisSettings {
     await _storage.write(key: 'jarvis_user_whitelist', value: userWhitelist);
     await _storage.write(
         key: 'jarvis_orb', value: floatingOrb ? 'true' : 'false');
+    await _storage.write(key: 'jarvis_wake_on', value: wakeEnabled ? 'true' : 'false');
+    Future<void> w(String k, String v) => _storage.write(key: k, value: v);
+    String b(bool v) => v ? 'true' : 'false';
+    await w('jarvis_ann_on', b(announceOn));
+    await w('jarvis_ann_sms', b(announceSms));
+    await w('jarvis_ann_call', b(announceCall));
+    await w('jarvis_ann_wx', b(announceWeChat));
+    await w('jarvis_ann_pkgs', announceExtraPkgs);
+    await w('jarvis_ann_senders', announceSenders);
+    await w('jarvis_quiet_s', quietStart);
+    await w('jarvis_quiet_e', quietEnd);
+    await w('jarvis_depart', b(departRemind));
+    await w('jarvis_depart_lead', '$departLeadMin');
+    await _storage.write(key: 'jarvis_barge', value: bargeIn ? 'true' : 'false');
+    await _storage.write(key: 'jarvis_wake_sens', value: '$wakeSensitivity');
+    await _storage.write(key: 'jarvis_v_on', value: visionEnabled ? 'true' : 'false');
+    await _storage.write(key: 'jarvis_v_model', value: visionModel.trim());
+    await _storage.write(key: 'jarvis_v_base', value: visionBaseUrl.trim());
+    await _storage.write(key: 'jarvis_v_key', value: visionApiKey.trim());
+    await _storage.write(key: 'jarvis_v_coord', value: visionCoord);
     await _storage.write(
         key: 'jarvis_local_on', value: localEnabled ? 'true' : 'false');
     await _storage.write(key: 'jarvis_local_path', value: localModelPath);

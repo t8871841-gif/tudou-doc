@@ -11,6 +11,23 @@ import 'task_board.dart';
 ///  - 参数提取失败 → 不匹配（宁可不复用，也不拿错参数乱执行）；
 ///  - 只存步骤模板和核实标准，不存密码、私聊内容、验证码；
 ///  - 失败两次自动停用（App 改版导致步骤失效时，不会一直拿旧步骤撞墙）。
+/// v3：看屏流程里的一步——界面动作 + 这一步的核验点（动作后屏幕上应出现的文字）。
+/// 注意：不存密码 / 验证码；target / input / expect 里的变量已换成 {占位符}。
+class UiStep {
+  String action; // click | input | scroll | back
+  String target;
+  String input;
+  String expect;
+  UiStep(this.action, this.target, this.input, this.expect);
+
+  UiStep copy() => UiStep(action, target, input, expect);
+
+  Map<String, dynamic> toJson() => {'a': action, 't': target, 'i': input, 'e': expect};
+
+  factory UiStep.fromJson(Map<String, dynamic> j) => UiStep(j['a']?.toString() ?? '',
+      j['t']?.toString() ?? '', j['i']?.toString() ?? '', j['e']?.toString() ?? '');
+}
+
 class Skill {
   /// 意图：'call' | 'message' | 'navigate' | 'generic'。
   String intent;
@@ -28,6 +45,12 @@ class Skill {
   bool isActive;
   DateTime updatedAt;
 
+  /// v3：成功的看屏流程（界面步骤 + 每步核验点）。空 = 这个 skill 只有规划步骤（v2 行为）。
+  List<UiStep> uiSteps;
+
+  /// v3：带变量的目标模板，如“在X里给{p1}发{p2}”。仅 generic 意图使用；为空时仍按整句 goalKey 匹配。
+  String goalPattern;
+
   Skill({
     required this.intent,
     required this.goalKey,
@@ -36,7 +59,10 @@ class Skill {
     this.failureCount = 0,
     this.isActive = true,
     DateTime? updatedAt,
-  }) : updatedAt = updatedAt ?? DateTime.now();
+    List<UiStep>? uiSteps,
+    this.goalPattern = '',
+  })  : updatedAt = updatedAt ?? DateTime.now(),
+        uiSteps = uiSteps ?? [];
 
   Map<String, dynamic> toJson() => {
         'intent': intent,
@@ -46,6 +72,8 @@ class Skill {
         'failureCount': failureCount,
         'isActive': isActive,
         'updatedAt': updatedAt.toIso8601String(),
+        'uiSteps': uiSteps.map((s) => s.toJson()).toList(),
+        'goalPattern': goalPattern,
       };
 
   factory Skill.fromJson(Map<String, dynamic> json) {
@@ -67,7 +95,24 @@ class Skill {
           (json['failureCount'] is num) ? (json['failureCount'] as num).toInt() : 0,
       isActive: json['isActive'] != false,
       updatedAt: parseTime(json['updatedAt']),
+      uiSteps: (json['uiSteps'] as List?)
+              ?.map((s) => UiStep.fromJson(
+                  s is Map ? Map<String, dynamic>.from(s) : <String, dynamic>{}))
+              .toList() ??
+          [],
+      goalPattern: json['goalPattern']?.toString() ?? '',
     );
+  }
+
+  /// 把看屏步骤里的 {占位符} 换成这次的真实参数（回放前调用）。
+  List<UiStep> instantiateUi(Map<String, String> params) {
+    String fill(String t) {
+      var r = t;
+      params.forEach((k, v) => r = r.replaceAll('{$k}', v));
+      return r;
+    }
+
+    return uiSteps.map((s) => UiStep(s.action, fill(s.target), fill(s.input), fill(s.expect))).toList();
   }
 
   /// 把模板里的 {占位符} 换成这次任务的真实参数，生成可执行步骤。
@@ -140,7 +185,14 @@ class SkillStore {
     final skills = await loadSkills();
     for (final skill in skills) {
       if (!skill.isActive || skill.intent != intent) continue;
-      if (intent == 'generic' && skill.goalKey != goal.trim()) continue;
+      if (intent == 'generic') {
+        if (skill.goalPattern.isNotEmpty) {
+          // v3：带变量的模板——从当前原话里取变量值；命不中就退回“整句相同”才复用
+          final pm = _matchPattern(skill.goalPattern, goal.trim());
+          if (pm != null) return MatchedSkill(skill, pm);
+        }
+        if (skill.goalKey != goal.trim()) continue;
+      }
       return MatchedSkill(skill, params);
     }
     return null;
@@ -155,15 +207,24 @@ class SkillStore {
         ? steps // 参数提不出来：原样存（generic 整句匹配时用）
         : steps.map((s) => _templatize(s, params)).toList();
     final skills = await loadSkills();
-    final index = skills.indexWhere((s) =>
-        s.intent == intent &&
-        (intent != 'generic' || s.goalKey == goal.trim()));
+    final index = _findIndex(skills, intent, goal);
     if (index >= 0) {
-      skills[index]
-        ..steps = templates
-        ..failureCount = 0
-        ..isActive = true
-        ..updatedAt = DateTime.now();
+      final byPattern = skills[index].goalPattern.isNotEmpty &&
+          skills[index].goalKey != goal.trim() &&
+          _matchPattern(skills[index].goalPattern, goal.trim()) != null;
+      if (byPattern) {
+        // 这次是用变量模板复用成功的：只复位失败计数，不拿这次的具体值覆盖模板。
+        skills[index]
+          ..failureCount = 0
+          ..isActive = true
+          ..updatedAt = DateTime.now();
+      } else {
+        skills[index]
+          ..steps = templates
+          ..failureCount = 0
+          ..isActive = true
+          ..updatedAt = DateTime.now();
+      }
     } else {
       skills.add(Skill(
         intent: intent,
@@ -179,9 +240,7 @@ class SkillStore {
   static Future<void> recordFailure(String goal) async {
     final intent = _extractIntent(goal);
     final skills = await loadSkills();
-    final index = skills.indexWhere((s) =>
-        s.intent == intent &&
-        (intent != 'generic' || s.goalKey == goal.trim()));
+    final index = _findIndex(skills, intent, goal);
     if (index >= 0) {
       skills[index].failureCount++;
       if (skills[index].failureCount >= 2) {
@@ -191,6 +250,108 @@ class SkillStore {
       await saveSkills(skills);
     }
   }
+
+  // ---------------- v3：看屏流程固化（在现有 SkillStore 上扩展） ----------------
+
+  static int _findIndex(List<Skill> skills, String intent, String goal) {
+    return skills.indexWhere((s) =>
+        s.intent == intent &&
+        (intent != 'generic' ||
+            s.goalKey == goal.trim() ||
+            (s.goalPattern.isNotEmpty && _matchPattern(s.goalPattern, goal.trim()) != null)));
+  }
+
+  /// 模板（含 {p1}…）→ 正则，从原话里取变量值；对不上返回 null。
+  static Map<String, String>? _matchPattern(String pattern, String goal) {
+    final ph = RegExp(r'\{(\w+)\}');
+    final names = ph.allMatches(pattern).map((m) => m.group(1)!).toList();
+    if (names.isEmpty) return pattern == goal ? <String, String>{} : null;
+    final parts = pattern.split(ph);
+    final re = RegExp('^${parts.map(RegExp.escape).join('(.+?)')}\$');
+    final m = re.firstMatch(goal);
+    if (m == null) return null;
+    final out = <String, String>{};
+    for (var i = 0; i < names.length && i + 1 <= m.groupCount; i++) {
+      out.putIfAbsent(names[i], () => m.group(i + 1)!.trim());
+    }
+    return out;
+  }
+
+  static final _secret = RegExp(r'验证码|密码|口令|\d{6,}');
+
+  /// 任务成功后，判断这次的看屏轨迹值不值得询问用户保存：
+  /// 至少 2 步、整个任务只有 1 个看屏步骤、不是回放出来的、不含密码 / 验证码类内容。
+  static List<UiStep>? buildUiOffer(List<UiStep> trace,
+      {required int slowSteps, required bool replayed}) {
+    if (trace.length < 2 || slowSteps != 1 || replayed) return null;
+    if (trace.any((s) => _secret.hasMatch(s.input) || _secret.hasMatch(s.target))) return null;
+    return trace.map((s) => s.copy()).toList();
+  }
+
+  /// 把看屏流程挂到已存在的 skill 上（recordSuccess 已在任务成功时建好）。
+  /// 参数化：call / message / navigate 沿用既有参数名（{contact}{body}{destination}）；
+  /// generic：流程里“打进去的文字”且原话里也有的词（≥2 字）变成 {p1}{p2}…，目标句式同步模板化，
+  /// 规划步骤里的同一批词也换成占位符，保证复用时整条链路用的是新值。
+  /// 返回变量说明文字（给用户确认）；找不到对应 skill 返回 null。
+  static Future<String?> attachUiSteps(String goal, List<UiStep> trace) async {
+    final intent = _extractIntent(goal);
+    final skills = await loadSkills();
+    final index = _findIndex(skills, intent, goal);
+    if (index < 0) return null;
+    final sk = skills[index];
+    final tokens = <String, String>{};
+    final params = _extractParams(goal, intent);
+    if (intent != 'generic' && params != null) {
+      tokens.addAll(params);
+    } else {
+      // 保守：只把“打进去的文字（input）”当变量。点击的目标（按钮 / 列表项名）保持字面量写进模板，
+      // 这样换了别的值就匹配不上、不会复用，而不是拿旧的点击目标去乱点。
+      var n = 0;
+      for (final s in trace) {
+        final v = s.input;
+        if (v.length >= 2 && goal.contains(v) && !tokens.containsValue(v)) {
+          tokens['p${++n}'] = v;
+        }
+      }
+    }
+    String sub(String t) {
+      var r = t;
+      tokens.forEach((k, v) {
+        if (v.length >= 2) r = r.replaceAll(v, '{$k}');
+      });
+      return r;
+    }
+
+    sk.uiSteps = trace.map((s) => UiStep(s.action, sub(s.target), sub(s.input), sub(s.expect))).toList();
+    if (intent == 'generic' && tokens.isNotEmpty) {
+      sk.goalPattern = sub(goal.trim());
+      sk.steps = sk.steps
+          .map((st) => TaskStep(description: sub(st.description), tool: st.tool, argument: sub(st.argument)))
+          .toList();
+    }
+    sk.failureCount = 0;
+    sk.isActive = true;
+    sk.updatedAt = DateTime.now();
+    await saveSkills(skills);
+    return tokens.isEmpty
+        ? '没有变量：只有原话完全相同才会复用'
+        : '变量 ${tokens.entries.map((e) => '{${e.key}}=${e.value}').join('，')}';
+  }
+
+  /// 回放失败：丢掉过期的界面步骤（规划步骤保留），下次任务成功后会重新询问是否保存。
+  static Future<void> invalidateUiSteps(Skill skill) async {
+    final skills = await loadSkills();
+    final i = skills.indexWhere((s) => s.intent == skill.intent && s.goalKey == skill.goalKey);
+    if (i >= 0) {
+      skills[i].uiSteps = [];
+      skills[i].updatedAt = DateTime.now();
+      await saveSkills(skills);
+    }
+  }
+
+  /// 设置页“已学会的流程”：带界面步骤的 skill。
+  static Future<List<Skill>> uiSkills() async =>
+      (await loadSkills()).where((s) => s.uiSteps.isNotEmpty).toList();
 
   /// 供 App 内查看 / 删除（用户可手动清理错学的 skill）。
   static Future<void> deleteSkill(String intent, {String? goalKey}) async {
@@ -267,5 +428,37 @@ class SkillStore {
       tool: step.tool,
       argument: arg,
     );
+  }
+}
+
+
+/// 一次任务期间的看屏轨迹（AgentLoop 写，任务成功后决定是否询问保存）。纯内存，不持久化。
+class UiTrace {
+  static String goal = '';
+  static final List<UiStep> steps = [];
+  static int slowSteps = 0; // 本次任务里走看屏慢路径的步骤数
+  static bool replayed = false; // 本次是技能回放（回放成功不再提示保存）
+  static MatchedSkill? matched; // 本次命中的 skill（可能带界面步骤）
+  static List<UiStep>? offer; // 等用户确认保存的候选
+  static String offerGoal = '';
+
+  static void begin(String g) {
+    goal = g;
+    steps.clear();
+    slowSteps = 0;
+    replayed = false;
+    matched = null;
+    offer = null; // 新任务开始：旧的保存询问作废
+  }
+
+  static void add(UiStep s) => steps.add(s);
+
+  /// 用户确认保存。返回变量说明；没有候选 / 找不到 skill 返回 null。
+  static Future<String?> saveOffer() async {
+    final o = offer;
+    if (o == null) return null;
+    final r = await SkillStore.attachUiSteps(offerGoal, o);
+    offer = null;
+    return r;
   }
 }

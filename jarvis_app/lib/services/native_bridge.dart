@@ -7,13 +7,24 @@ class NativeBridge {
   /// 注册原生 → Dart 的入口事件（默认助手唤起 / 磁贴 / 提醒点击 / 晨报点击）。
   static void init({
     required void Function(Map<String, dynamic>) onLaunch,
-    void Function()? onOrbTap,
+    bool Function()? onOrbTap,
+    void Function()? onEstop,
+    void Function(Map<String, dynamic>)? onNotification,
   }) {
     _ch.setMethodCallHandler((call) async {
       if (call.method == 'onLaunchAction' && call.arguments is Map) {
         onLaunch(Map<String, dynamic>.from(call.arguments as Map));
       } else if (call.method == 'onOrbEvent' && call.arguments is Map) {
-        if ((call.arguments as Map)['type'] == 'tap') onOrbTap?.call();
+        // 回执：true = Dart 已处理（开始聆听 / 有反馈）；原生收不到 true 会兜底拉起 App。
+        final t = (call.arguments as Map)['type'];
+        if (t == 'tap') return onOrbTap?.call() ?? false;
+        if (t == 'estop') {
+          onEstop?.call(); // 原生已处理球的反馈和原生任务取消；这里取消 Dart 侧 agent / 播报 / 聆听
+          return true;
+        }
+      } else if (call.method == 'onNotification' && call.arguments is Map) {
+        onNotification?.call(Map<String, dynamic>.from(call.arguments as Map));
+        return true;
       }
       return null;
     });
@@ -96,6 +107,41 @@ class NativeBridge {
       (await _call<String>('orbSetEnabled', {'on': on})) ?? 'error';
   static Future<void> orbState(String state) => _call<bool>('orbState', {'state': state});
   static Future<void> orbBubble(String text) => _call<bool>('orbBubble', {'text': text});
+  /// Dart 发起的急停：通知原生（取消原生任务、球变红、气泡“已停止”）。不会回环通知 Dart。
+  static Future<void> estop() => _call<bool>('estop');
+
+  /// 截图：返回 {b64,w,h,sw,sh,pkg,sig} 或 {error: self|blocked_app|unknown_app|secure_window|unsupported|service_off|capture_failed, pkg?}
+  static Future<Map<String, dynamic>> captureScreen() async {
+    final r = await _call<Map<dynamic, dynamic>>('captureScreen');
+    return r == null ? {'error': 'capture_failed'} : Map<String, dynamic>.from(r);
+  }
+
+  /// 坐标点击 / 滑动：返回 {ok, reason}
+  static Future<Map<String, dynamic>> tapXY(double x, double y) async {
+    final r = await _call<Map<dynamic, dynamic>>('tapXY', {'x': x, 'y': y});
+    return r == null ? {'ok': false, 'reason': 'error'} : Map<String, dynamic>.from(r);
+  }
+
+  static Future<Map<String, dynamic>> swipeScreen(bool down) async {
+    final r = await _call<Map<dynamic, dynamic>>('swipeScreen', {'down': down});
+    return r == null ? {'ok': false, 'reason': 'error'} : Map<String, dynamic>.from(r);
+  }
+
+  /// 通知播报开关：开了，原生通知监听才会把新通知推给 Dart。
+  static Future<void> announceEnable(bool on) => _call<bool>('announceEnable', {'on': on});
+
+  /// 电量与是否充电（待命耗电实测用；不需要权限）。
+  static Future<Map<String, dynamic>?> battery() async {
+    final r = await _call<Map<dynamic, dynamic>>('battery');
+    return r == null ? null : Map<String, dynamic>.from(r);
+  }
+
+  /// 功能自检里原生能直接判断的项。
+  static Future<Map<String, dynamic>> selfCheck() async {
+    final r = await _call<Map<dynamic, dynamic>>('selfCheck');
+    return r == null ? <String, dynamic>{} : Map<String, dynamic>.from(r);
+  }
+
   static Future<void> openAccessibilitySettings() => _call<bool>('openAccessibilitySettings');
 
   // 入口

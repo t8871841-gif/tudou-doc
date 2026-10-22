@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'action_service.dart';
+import 'agent_control.dart';
+import 'audit_log.dart';
 import 'agent_loop.dart';
 import 'llm_service.dart';
 import 'settings_store.dart';
@@ -51,18 +53,34 @@ class AgentService {
     required Function(String statusMessage) onProgress,
     void Function(String delta)? onDelta,
   }) async {
+    AgentControl.reset(); // 新任务：清除上一次的急停信号
+    AuditLog.beginTask(userGoal);
+    UiTrace.begin(userGoal);
+    AgentLoop.notice = onProgress;
     // 0) 快路径优先：本地正则能直接办的指令不再先过一次大模型规划（省 1~3 秒）。
     //    复合指令（“…然后…”）仍交给规划器拆步骤。
     if (_fastPathAllowed(userGoal)) {
       final fast = await DeviceActions.tryHandle(userGoal, settings: settings);
-      if (fast != null) return fast;
+      if (fast != null) {
+        AuditLog.log('本机指令：$userGoal', detail: fast);
+        return fast;
+      }
     }
     onProgress('正在分析…');
 
     List<AgentStep> steps;
     final matched = await SkillStore.matchSkill(userGoal);
+    UiTrace.matched = matched;
     if (matched != null) {
       onProgress('命中技能库，使用熟练流程…');
+      if (matched.skill.uiSteps.isNotEmpty) {
+        // 执行前把变量替换好，并明示给用户（不许悄悄套用别的值）
+        final vars = matched.parameters.isEmpty
+            ? '无变量'
+            : matched.parameters.entries.map((e) => '${e.key}=${e.value}').join('，');
+        onProgress('已学会的看屏流程，变量：$vars');
+        AuditLog.log('命中已学会的看屏流程', detail: vars);
+      }
       steps = matched.skill
           .instantiate(matched.parameters)
           .asMap()
@@ -108,10 +126,16 @@ class AgentService {
       settings: settings,
       onProgress: onProgress,
     );
+    if (AgentControl.stopped) {
+      AuditLog.log('急停：任务被中断', ok: false);
+      return '已急停，任务已中断，后面的步骤没有再执行。';
+    }
 
     // 3. 收尾：挂起确认时原样返回；单步设备动作原样返回；其余走汇总。
     //    （收尾逻辑与上一版逐字一致——确认问句不许进大模型汇总。）
-    return _finishBoard(
+    AuditLog.log(board.status == TaskStatus.completed ? '任务完成' : '任务未完成',
+        ok: board.status == TaskStatus.completed);
+    final answer = await _finishBoard(
       settings: settings,
       userGoal: userGoal,
       history: history,
@@ -120,6 +144,17 @@ class AgentService {
       onProgress: onProgress,
       onDelta: onDelta,
     );
+    // 技能固化：成功的多步看屏流程，询问用户要不要记住（用户说“记住这个流程 / 以后都这样做”才保存）。
+    if (board.status == TaskStatus.completed) {
+      final offer = SkillStore.buildUiOffer(List.of(UiTrace.steps),
+          slowSteps: UiTrace.slowSteps, replayed: UiTrace.replayed);
+      if (offer != null) {
+        UiTrace.offer = offer;
+        UiTrace.offerGoal = userGoal;
+        return '$answer\n（这次是看屏一步步完成的。要记成技能、下次直接照做，说“记住这个流程”即可。）';
+      }
+    }
+    return answer;
   }
 
   /// 快路径优先的闸门：太长、复合指令、或只是句子里带个“开”字的闲聊
@@ -171,6 +206,9 @@ class AgentService {
     required Function(String statusMessage) onProgress,
   }) async {
     if (!board.hasRemaining) return '这个任务已经做完了。';
+    AgentControl.reset();
+    AuditLog.beginTask(board.goal);
+    UiTrace.begin(board.goal);
     // 从黑板恢复步骤（已完成步骤的 result 记“已完成”，汇总时不再重跑）。
     final steps = board.steps.asMap().entries.map((e) {
       final ts = e.value;
@@ -232,6 +270,14 @@ class AgentService {
       }
       step.result = outcome.text;
       tStep.attempts++;
+      if (AgentControl.stopped) {
+        // 急停：真停。不记 skill 失败（不是技能的错），不再执行后面的步骤。
+        tStep.error = '已急停';
+        board.status = TaskStatus.failed;
+        await board.save();
+        break;
+      }
+      AuditLog.log('步骤：${step.description}', ok: outcome.ok, detail: outcome.text);
 
       // 某步留下了“等用户确认”（确认发送 / 选联系人）：停下，
       // 后续步骤等用户答复后再说——别让下一步把确认当成新指令吃掉。

@@ -1,6 +1,12 @@
 package com.example.jarvis
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
+import android.graphics.Path
+import android.util.Base64
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executors
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
@@ -8,11 +14,13 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jarvis.jarvis_app.OrbController
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 
 /**
  * Jarvis 跨应用自动化引擎。
@@ -135,6 +143,25 @@ class JarvisAccessibilityService : AccessibilityService() {
             "settings|packageinstaller|permissioncontroller|bank|wallet|pay|finance|security",
             RegexOption.IGNORE_CASE
         )
+
+        /** v3：用户急停 → 取消原生任务引擎正在跑的任务（来源：悬浮球双击 / 音量键组合 / Dart）。 */
+        fun cancelTask() {
+            val s = instance ?: return
+            s.handler.post { s.finishTask("cancelled", "用户急停") }
+        }
+
+        /** v3：截图 / 坐标点击的安全黑名单（比看屏白名单更严：银行、支付、钱包、系统设置、安装器一律拒绝）。 */
+        private val SHOT_DENY = Regex(
+            "settings|packageinstaller|permissioncontroller|bank|wallet|pay|finance|security|alipay|unionpay|icbc|ccb|abchina|cmbchina",
+            RegexOption.IGNORE_CASE
+        )
+
+        fun isShotBlocked(pkg: String): Boolean = pkg.isEmpty() || SHOT_DENY.containsMatchIn(pkg)
+
+        @Volatile
+        var lastCaptureError: String = ""
+
+        fun isRunning(): Boolean = instance != null
 
         fun setUserWhitelist(pkgs: Set<String>) {
             userWhitelist = pkgs.filter { !USER_DENY.containsMatchIn(it) }.toSet()
@@ -299,6 +326,145 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    // ---------- v3：视觉通道（截图 / 坐标点击 / 滑动） ----------
+    private val shotExecutor = Executors.newSingleThreadExecutor()
+
+    fun foregroundPackage(): String {
+        val p = rootInActiveWindow?.packageName?.toString()
+        if (!p.isNullOrEmpty()) return p
+        try {
+            for (w in windows) {
+                if (w.isActive) {
+                    val pk = w.root?.packageName?.toString()
+                    if (!pk.isNullOrEmpty()) return pk
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return ""
+    }
+
+    /**
+     * 截图（API 30+）。降级与保护：
+     *  - 前台是 Jarvis 自己 / 银行支付钱包系统设置类 / 无法确认前台 App → 直接拒绝，不截图；
+     *  - FLAG_SECURE 窗口系统会拒绝 → 返回 secure_window；
+     *  - 结果缩到最长边 1280、JPEG 70%，并附 16x16 灰度签名（本地判断“屏幕变没变”，不上云）。
+     */
+    @android.annotation.SuppressLint("NewApi")
+    fun captureScreen(done: (Map<String, Any?>) -> Unit) {
+        if (Build.VERSION.SDK_INT < 30) {
+            done(mapOf("error" to "unsupported")); return
+        }
+        val pkg = foregroundPackage()
+        if (pkg == packageName) {
+            done(mapOf("error" to "self", "pkg" to pkg)); return
+        }
+        if (isShotBlocked(pkg)) {
+            done(mapOf("error" to if (pkg.isEmpty()) "unknown_app" else "blocked_app", "pkg" to pkg)); return
+        }
+        try {
+            takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    shotExecutor.execute {
+                        try {
+                            val hw = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                            val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                            result.hardwareBuffer.close()
+                            if (bmp == null) {
+                                lastCaptureError = "capture_failed"
+                                done(mapOf("error" to "capture_failed")); return@execute
+                            }
+                            val sw = bmp.width
+                            val sh = bmp.height
+                            val scale = minOf(1f, 1280f / maxOf(sw, sh))
+                            val out = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (sw * scale).toInt(), (sh * scale).toInt(), true) else bmp
+                            val bos = ByteArrayOutputStream()
+                            out.compress(Bitmap.CompressFormat.JPEG, 70, bos)
+                            val tiny = Bitmap.createScaledBitmap(bmp, 16, 16, true)
+                            val sig = StringBuilder()
+                            for (y in 0 until 16) for (x in 0 until 16) {
+                                val px = tiny.getPixel(x, y)
+                                val g = (((px shr 16) and 0xFF) + ((px shr 8) and 0xFF) + (px and 0xFF)) / 3 / 16
+                                sig.append(Integer.toHexString(g))
+                            }
+                            lastCaptureError = ""
+                            done(
+                                mapOf(
+                                    "b64" to Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP),
+                                    "w" to out.width, "h" to out.height, "sw" to sw, "sh" to sh,
+                                    "pkg" to pkg, "sig" to sig.toString()
+                                )
+                            )
+                        } catch (t: Throwable) {
+                            lastCaptureError = "capture_failed"
+                            done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
+                        }
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    val e = if (errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW) "secure_window" else "capture_failed"
+                    lastCaptureError = e
+                    done(mapOf("error" to e, "code" to errorCode))
+                }
+            })
+        } catch (t: Throwable) {
+            lastCaptureError = "capture_failed"
+            done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
+        }
+    }
+
+    /** 按屏幕坐标点击。只在“非黑名单 且 在看屏白名单内”的前台 App 里允许。 */
+    fun tapXY(x: Float, y: Float, done: (Boolean, String) -> Unit) {
+        val pkg = foregroundPackage()
+        if (isShotBlocked(pkg)) { done(false, "blocked_app"); return }
+        if (pkg !in HARD_WHITELIST + extraWhitelist + userWhitelist) { done(false, "not_whitelisted"); return }
+        val path = Path().apply { moveTo(x, y) }
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build()
+        val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) { done(true, "") }
+            override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
+        }, null)
+        if (!ok) done(false, "dispatch_failed")
+    }
+
+    /** 竖向滑动一屏。down=true：内容向下翻（手指从下往上划）。同样受黑名单 + 白名单约束。 */
+    fun swipeScreen(down: Boolean, done: (Boolean, String) -> Unit) {
+        val pkg = foregroundPackage()
+        if (isShotBlocked(pkg)) { done(false, "blocked_app"); return }
+        if (pkg !in HARD_WHITELIST + extraWhitelist + userWhitelist) { done(false, "not_whitelisted"); return }
+        val m = resources.displayMetrics
+        val x = m.widthPixels / 2f
+        val y1 = m.heightPixels * (if (down) 0.72f else 0.28f)
+        val y2 = m.heightPixels * (if (down) 0.28f else 0.72f)
+        val path = Path().apply { moveTo(x, y1); lineTo(x, y2) }
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 320)).build()
+        val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) { done(true, "") }
+            override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
+        }, null)
+        if (!ok) done(false, "dispatch_failed")
+    }
+
+    // ---------- v3：音量键组合急停 ----------
+    private var volUpAt = 0L
+    private var volDownAt = 0L
+
+    /** 音量 + 和 − 在 600ms 内同按 = 急停。不拦截按键（返回 false），音量照常变化。 */
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val now = SystemClock.uptimeMillis()
+            if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) volUpAt = now
+            if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) volDownAt = now
+            if (volUpAt > 0 && volDownAt > 0 && abs(volUpAt - volDownAt) < 600) {
+                volUpAt = 0
+                volDownAt = 0
+                OrbController.emergencyStop()
+            }
+        }
+        return false
+    }
 
     // ---------------- 旧模式：事件驱动，只点“发送” ----------------
 

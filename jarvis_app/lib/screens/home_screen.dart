@@ -11,7 +11,14 @@ import 'package:permission_handler/permission_handler.dart';
 import '../services/action_service.dart';
 import '../services/agent_service.dart';
 import '../services/asr_service.dart';
+import '../services/agent_control.dart';
+import '../services/app_status.dart';
+import '../services/announce_service.dart';
+import '../services/audit_log.dart';
+import '../services/departure_service.dart';
 import '../services/edge_tts_service.dart';
+import '../services/skill_store.dart';
+import '../services/standby_meter.dart';
 import '../services/local_llm_service.dart';
 import '../services/native_bridge.dart';
 import '../services/tool_service.dart';
@@ -235,7 +242,12 @@ class _HomeScreenState extends State<HomeScreen>
       });
     }
     unawaited(_warmUpAsr());
-    NativeBridge.init(onLaunch: _onLaunchAction, onOrbTap: _onOrbTap);
+    NativeBridge.init(
+      onLaunch: _onLaunchAction,
+      onOrbTap: _onOrbTap,
+      onEstop: () => _emergencyStop(fromNative: true),
+      onNotification: _onNotification,
+    );
     unawaited(_applySettingsSideEffects(startup: true));
     await NativeBridge.ready(); // 原生会把启动时暂存的入口事件（默认助手 / 磁贴 / 提醒）投递过来
   }
@@ -412,8 +424,14 @@ class _HomeScreenState extends State<HomeScreen>
     final ownsState =
         _state == JarvisState.idle || _state == JarvisState.speaking;
     if (ownsState) _set(() => _state = JarvisState.speaking);
+    _spokenNorm = '';
+    _bargeFired = false;
+    _bargeSince = null;
+    final monitor = ownsState && _settings.bargeIn && !_muted;
+    if (monitor) unawaited(_startBargeMonitor(seq));
     final queue = StreamController<(String, Future<Uint8List?>)>();
     final sub = sentences.listen((s) {
+      _spokenNorm += _norm(s);
       final audio = EdgeTtsService.synthesize(
         s,
         voice: _settings.edgeVoice,
@@ -450,6 +468,7 @@ class _HomeScreenState extends State<HomeScreen>
       // Edge / 播放失败不许拖垮聊天流程。
     } finally {
       await sub.cancel();
+      if (monitor && !_bargeFired) await _stopBargeMonitor();
       if (!queue.isClosed) await queue.close();
       if (seq == _speakSeq) {
         try {
@@ -463,6 +482,94 @@ class _HomeScreenState extends State<HomeScreen>
         setState(() => _state = JarvisState.idle);
       }
     }
+  }
+
+  // ---------- 打断说话（v3 第 6 条，降级版，实现等级 B）----------
+  // 做不到完整 AEC，所以：播报时开着识别器（record 的 echoCancel / noiseSuppress 走平台回声消除），
+  // 用文本比对把“自己正在播的内容”从识别结果里过滤掉；检测到用户在说别的 → 停播并接着聆听。
+  //  · 说“停 / 别说了 / 够了…”：识别到即停（目标 ≈1 秒内）；
+  //  · 说别的：要连续识别到“非回声”内容约 0.35 秒以上才算持续说话，避免咳嗽 / 杂音误触发。
+  // 局限：平台 AEC 是否生效取决于机型 / ROM；喇叭很响或回声被识别成与播报不相似的文字时，可能误触发或漏触发。
+  String _spokenNorm = '';
+  bool _bargeFired = false;
+  bool _bargeMonitoring = false;
+  DateTime? _bargeSince;
+
+  static String _norm(String t) =>
+      t.toLowerCase().replaceAll(RegExp(r'[^\u4e00-\u9fa5a-z0-9]'), '');
+
+  /// 识别结果是不是我们自己正在播的内容（子串，或双字片段 ≥75% 出现在已播文本里）。
+  bool _looksLikeEcho(String n) {
+    if (_spokenNorm.contains(n)) return true;
+    if (n.length < 4) return false;
+    var hit = 0, tot = 0;
+    for (var i = 0; i + 2 <= n.length; i++) {
+      tot++;
+      if (_spokenNorm.contains(n.substring(i, i + 2))) hit++;
+    }
+    return tot > 0 && hit / tot >= 0.75;
+  }
+
+  Future<void> _startBargeMonitor(int seq) async {
+    if (_asr.isRunning) return;
+    if (!await _ensureAsr()) return;
+    if (seq != _speakSeq || _state != JarvisState.speaking) return;
+    final ok = await _asr.start(
+      onLevel: _onSoundLevel,
+      onPartial: _onBargePartial,
+      onEndpoint: _onBargeEndpoint,
+    );
+    if (!ok) return;
+    if (!_bargeFired && (seq != _speakSeq || _state != JarvisState.speaking)) {
+      await _asr.stop(); // 播报已经结束了，别留着麦克风
+      return;
+    }
+    _bargeMonitoring = true;
+  }
+
+  Future<void> _stopBargeMonitor() async {
+    if (!_bargeMonitoring) return;
+    _bargeMonitoring = false;
+    await _asr.stop();
+  }
+
+  void _onBargePartial(String t) {
+    if (!mounted || _bargeFired || _state != JarvisState.speaking) return;
+    final n = _norm(t);
+    if (n.isEmpty) return;
+    final stopWord = RegExp(r'^(停|停下|别说了|够了|等一下|暂停|闭嘴)$').hasMatch(n);
+    if (!stopWord) {
+      if (n.length < 2 || _looksLikeEcho(n)) {
+        _bargeSince = null; // 回声 / 杂音：重新计时
+        return;
+      }
+      final now = DateTime.now();
+      _bargeSince ??= now;
+      if (now.difference(_bargeSince!) < const Duration(milliseconds: 350)) return; // 要持续说话才算
+    }
+    _bargeFired = true;
+    AppStatus.bargeCount++;
+    _askGen++; // 作废还在生成的回答
+    _stopSpeaking();
+    _abortStream();
+    _set(() => _state = JarvisState.listening);
+    unawaited(AuditLog.log('打断播报', detail: stopWord ? '说了停止词' : '用户开口'));
+  }
+
+  void _onBargeEndpoint(String text) {
+    if (!mounted || !_bargeFired) return; // 没触发打断：这是播报回声的整句，忽略
+    final t = text.trim();
+    _bargeFired = false;
+    _bargeMonitoring = false;
+    unawaited(_asr.stop());
+    final stopWord = RegExp(r'^(停|停下|别说了|够了|等一下|暂停|闭嘴)[。！!，, ]*$').hasMatch(t);
+    _set(() => _state = JarvisState.idle);
+    if (t.isEmpty || stopWord) {
+      _resumeWake();
+      return;
+    }
+    _voiceTurn = true;
+    unawaited(_send(t.replaceFirst(RegExp(r'^(贾维斯|jarvis)[，,、 ]*', caseSensitive: false), '')));
   }
 
   // ---------- 流式回答 ----------
@@ -565,25 +672,76 @@ class _HomeScreenState extends State<HomeScreen>
       JarvisState.speaking => 'speaking',
       _ => 'idle',
     };
+    AppStatus.wakeListening = _wakeMode;
+    AppStatus.asrRunning = _asr.isRunning;
     if (s == _orbSent) return;
     _orbSent = s;
     unawaited(NativeBridge.orbState(s));
   }
 
-  /// 悬浮球被点：待命 → 开始听；聆听中 → 结束本轮；播报中 → 打断；思考中不处理。
-  void _onOrbTap() {
-    if (!mounted) return;
+  /// 悬浮球被点（原生要求回执）：返回 true = 已处理。每个状态都有可见反馈（球变色 / 气泡），
+  /// 不许静默；返回 false 时原生会兜底拉起 Jarvis 再聆听。
+  bool _onOrbTap() {
+    if (!mounted) return false;
     switch (_state) {
+      case JarvisState.booting:
+        _pendingLaunch = {'action': 'assist', 'text': ''};
+        unawaited(_enterApp(silent: true));
+        unawaited(NativeBridge.orbBubble('我在听…'));
+        return true;
       case JarvisState.idle:
+        unawaited(NativeBridge.orbBubble('我在听…'));
         unawaited(_runLaunchAction('assist', ''));
+        return true;
       case JarvisState.listening:
         _endListening();
+        unawaited(NativeBridge.orbBubble('收到，处理中…'));
+        return true;
       case JarvisState.speaking:
         _stopSpeaking();
         _set(() => _state = JarvisState.idle);
+        unawaited(NativeBridge.orbBubble('已打断'));
+        return true;
+      case JarvisState.thinking:
+        unawaited(NativeBridge.orbBubble('正在处理，请稍等…'));
+        return true;
       default:
-        break;
+        return false;
     }
+  }
+
+  /// 一键急停：真停。取消 agent 循环信号、作废进行中的回答、停播报 / 聆听、清挂起确认。
+  /// fromNative=true：原生侧已处理球的反馈和原生任务取消，不再回调原生。
+  void _emergencyStop({bool fromNative = false}) {
+    AgentControl.stopAll();
+    _askGen++; // 作废正在进行的回答
+    _stopSpeaking();
+    _abortStream();
+    _listenTimer?.cancel();
+    unawaited(_asr.stop());
+    DeviceActions.cancelPending();
+    unawaited(AuditLog.log('用户急停', detail: fromNative ? '悬浮球双击 / 音量键组合' : '界面触发'));
+    if (!fromNative) unawaited(NativeBridge.estop());
+    if (!mounted) return;
+    _set(() {
+      _state = JarvisState.idle;
+      _wakeMode = false;
+      _statusLine = '已停止。';
+    });
+    _reply('已停止。', '已急停。');
+  }
+
+  /// 通知到达（原生通知监听推送）：规则（总开关 / 来源 / 勿扰 / 联系人 / 验证码）在 AnnounceService 里，
+  /// 这里只负责：空闲时才播（不打断正在进行的对话），播之前写审计日志。
+  void _onNotification(Map<String, dynamic> ev) {
+    if (!mounted || _muted) return;
+    unawaited(() async {
+      final text = await AnnounceService.decide(_settings, ev);
+      if (text == null || !mounted || _state != JarvisState.idle) return;
+      unawaited(AuditLog.log('播报通知', detail: text));
+      _reply(text, '来电 / 消息播报');
+      await _speak(text);
+    }());
   }
 
   void _onLaunchAction(Map<String, dynamic> m) {
@@ -621,6 +779,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
     try {
       final text = await ToolService.briefing(_settings);
+      if (_settings.departRemind) unawaited(DepartureService.schedule(_settings));
       _reply(text, '晨报已准备好。');
       if (mounted) await _speak(text);
     } catch (e) {
@@ -632,6 +791,12 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _applySettingsSideEffects({bool startup = false}) async {
     await NativeBridge.setUserWhitelist(_settings.userWhitelistPackages);
     unawaited(NativeBridge.orbSetEnabled(_settings.floatingOrb));
+    unawaited(NativeBridge.announceEnable(_settings.announceOn));
+    if (_settings.departRemind) {
+      unawaited(DepartureService.schedule(_settings).then((n) {
+        if (n > 0) AuditLog.log('已排程出发提醒 $n 条', ok: true);
+      }));
+    }
     if (_settings.morningBrief) {
       final parts = _settings.morningBriefTime.split(':');
       final h = int.tryParse(parts.first) ?? 7;
@@ -640,6 +805,19 @@ class _HomeScreenState extends State<HomeScreen>
       await NativeBridge.scheduleDailyBrief(h, m);
     } else {
       await NativeBridge.cancelDailyBrief();
+    }
+    // 设置里的“语音唤醒”开关 ↔ 主界面唤醒胶囊保持一致
+    if (_settings.wakeEnabled && !_wakeEnabled) {
+      _set(() => _wakeEnabled = true);
+      if (_state == JarvisState.idle) _resumeWake();
+    } else if (!_settings.wakeEnabled && _wakeEnabled && !_settings.keepAlive) {
+      final wasListening = _wakeMode;
+      _set(() {
+        _wakeEnabled = false;
+        _wakeMode = false;
+      });
+      if (wasListening) await _asr.stop();
+      unawaited(StandbyMeter.end());
     }
     if (_settings.keepAlive) {
       if (!startup) await Permission.notification.request();
@@ -700,19 +878,72 @@ class _HomeScreenState extends State<HomeScreen>
     }
     if (_state == JarvisState.idle && _wakeEnabled) {
       _set(() => _wakeMode = true);
+      unawaited(StandbyMeter.begin()); // 开始 / 保持待命耗电样本
+    }
+  }
+
+  // ---------- 唤醒词：灵敏度 + 误唤醒控制（v3 第 5 条）----------
+  // 实现方式：离线识别器持续解码，命中“贾维斯”文本才唤醒（不是专用 KWS 模型，耗电高于专用方案，
+  // 实测见 功能自检 > 唤醒监听）。控制策略：
+  //  ① 灵敏度：严格（须在句首且整句短）/ 标准（句首附近）/ 宽松（任意位置，容忍更多误听）；
+  //  ② 冷却：刚唤醒 3 秒、刚误唤醒 8 秒内忽略唤醒词；
+  //  ③ 唤醒后 ~5 秒没有有效指令（空白 / 只有“嗯啊”）自动回待命，并记一次误唤醒；
+  //  ④ 10 分钟内误唤醒 ≥3 次，自动临时调到“严格”10 分钟。
+  static final _wakeStrict = RegExp(r'(贾维斯|jarvis)', caseSensitive: false);
+  static final _wakeLoose = RegExp(
+      r'(贾|嘉|加|假|甲|家)\s*(维|为|围|韦)\s*(斯|思|丝|司)|j\s*a\s*r\s*v\s*i\s*s',
+      caseSensitive: false);
+  static final _filler = RegExp(r'^[嗯啊呃哦额唉哎诶哈呀吧吗么，。、！!？?\s]+$');
+
+  DateTime _wakeCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _tightenUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  final List<DateTime> _falseWakes = [];
+  bool _fromWake = false; // 本轮聆听由唤醒词触发
+
+  int get _effWakeSens =>
+      DateTime.now().isBefore(_tightenUntil) ? 0 : _settings.wakeSensitivity;
+
+  RegExp get _activeWakeRe => switch (_effWakeSens) {
+        0 => _wakeStrict,
+        2 => _wakeLoose,
+        _ => _wakeRe,
+      };
+
+  void _registerFalseWake() {
+    _fromWake = false;
+    final now = DateTime.now();
+    _wakeCooldownUntil = now.add(const Duration(seconds: 8));
+    _falseWakes
+      ..add(now)
+      ..removeWhere((t) => now.difference(t) > const Duration(minutes: 10));
+    AppStatus.falseWakeCount++;
+    unawaited(AuditLog.log('误唤醒：唤醒后没有有效指令，已回到待命', ok: false));
+    if (_falseWakes.length >= 3 && !now.isBefore(_tightenUntil)) {
+      _tightenUntil = now.add(const Duration(minutes: 10));
+      AppStatus.tightenUntil = _tightenUntil;
+      _falseWakes.clear();
+      unawaited(AuditLog.log('误唤醒较多，临时调到严格 10 分钟'));
+      _notice('误唤醒较多，已临时把唤醒灵敏度调到“严格”10 分钟。');
     }
   }
 
   void _onWakeUtterance(String text) {
     if (!mounted || !_wakeMode) return;
-    final m = _wakeRe.firstMatch(text);
+    final m = _activeWakeRe.firstMatch(text);
     if (m == null) return;
+    final sens = _effWakeSens;
+    if (DateTime.now().isBefore(_wakeCooldownUntil)) return;
+    if (sens != 2 && m.start > (sens == 0 ? 3 : 6)) return; // 别人聊天里提到不算
+    if (sens == 0 && text.length > 30) return;
+    _wakeCooldownUntil = DateTime.now().add(const Duration(seconds: 3));
+    AppStatus.wakeCount++;
+    AppStatus.lastWakeAt = DateTime.now();
     // "贾维斯，打开微信" in one breath: what follows is the question.
     final rest =
         text.substring(m.end).replaceFirst(RegExp(r'^[\s，,。.、！!？?]+'), '');
     _wakeMode = false;
     unawaited(_asr.stop());
-    if (rest.length >= 2) {
+    if (rest.length >= 2 && !_filler.hasMatch(rest)) {
       _set(() {});
       _voiceTurn = true;
       unawaited(_send(rest));
@@ -724,7 +955,8 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _onWakeWord() async {
     _set(() {}); // refresh status (_wakeMode is already false)
     _notice('已唤醒，Jarvis 在听。');
-    await _startActiveListening();
+    unawaited(NativeBridge.orbBubble('我在听…')); // 后台唤醒时给悬浮球一个可见反馈
+    await _startActiveListening(fromWake: true);
   }
 
   /// Wake-word capsule toggle (HTML chip): on -> standby, off -> stop.
@@ -737,9 +969,14 @@ class _HomeScreenState extends State<HomeScreen>
       });
       if (wasListening) await _asr.stop();
       if (_settings.keepAlive) unawaited(NativeBridge.stopKeepAlive());
+      _settings.wakeEnabled = false;
+      unawaited(_settings.save());
+      unawaited(StandbyMeter.end());
       return;
     }
     _set(() => _wakeEnabled = true);
+    _settings.wakeEnabled = true;
+    unawaited(_settings.save());
     if (_settings.keepAlive) unawaited(NativeBridge.startKeepAlive());
     if (_muted) {
       _notice('当前已静音，取消静音后语音唤醒才会生效。');
@@ -748,8 +985,9 @@ class _HomeScreenState extends State<HomeScreen>
     _resumeWake(); // no-op while busy; resumes automatically afterwards
   }
 
-  Future<void> _startActiveListening() async {
+  Future<void> _startActiveListening({bool fromWake = false}) async {
     if (_muted) return;
+    _fromWake = fromWake;
     if (!await _ensureAsr()) return;
     _stopSpeaking(); // don't let our own TTS leak into the recogniser
     _emptyEndpoints = 0;
@@ -767,6 +1005,14 @@ class _HomeScreenState extends State<HomeScreen>
           _recognized = t;
           _input.text = t;
         });
+        // 唤醒后有人真的在说话：别再按“误唤醒”短超时收尾，改回正常 60 秒。
+        if (_fromWake && t.trim().length >= 2 && !_filler.hasMatch(t.trim())) {
+          _fromWake = false;
+          _listenTimer?.cancel();
+          _listenTimer = Timer(const Duration(seconds: 60), () {
+            if (_state == JarvisState.listening) _endListening();
+          });
+        }
       },
       onEndpoint: _onActiveEndpoint,
     );
@@ -776,19 +1022,27 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     _listenTimer?.cancel();
-    _listenTimer = Timer(const Duration(seconds: 60), () {
-      if (_state == JarvisState.listening) _endListening();
+    // 唤醒词触发的聆听：10 秒内没人说话就当误唤醒回待命；其他入口保持 60 秒。
+    _listenTimer = Timer(Duration(seconds: fromWake ? 10 : 60), () {
+      if (_state == JarvisState.listening) {
+        if (_fromWake) _registerFalseWake();
+        _endListening();
+      }
     });
   }
 
   void _onActiveEndpoint(String text) {
     if (!mounted || _state != JarvisState.listening) return;
     final q = text.trim();
-    if (q.isEmpty) {
-      // ~2.4 s of silence per empty endpoint: give up after three.
-      if (++_emptyEndpoints >= 3) _endListening();
+    if (q.isEmpty || _filler.hasMatch(q)) {
+      // ~2.4 s of silence per empty endpoint: give up after three (after a wake word: two, ~5 s).
+      if (++_emptyEndpoints >= (_fromWake ? 2 : 3)) {
+        if (_fromWake) _registerFalseWake();
+        _endListening();
+      }
       return;
     }
+    _fromWake = false;
     _listenTimer?.cancel();
     unawaited(_asr.stop());
     _voiceTurn = true;
@@ -841,6 +1095,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
     });
     if (mute) {
+      unawaited(StandbyMeter.end()); // 静音时待命暂停，样本作废
       _listenTimer?.cancel();
       unawaited(_asr.stop());
       _stopSpeaking();
@@ -986,6 +1241,35 @@ class _HomeScreenState extends State<HomeScreen>
       if (mounted) await _speak(reply);
       return;
     }
+    // 技能固化：成功的看屏流程，用户说“记住这个流程 / 以后都这样做”才保存。
+    if (RegExp(r'^(请)?(记住|保存)(这个|这次|刚才那个)?(流程|技能|操作)[。！!]?$|^以后都(这样|这么)(做|办)[。！!]?$')
+        .hasMatch(q.trim())) {
+      _stopSpeaking();
+      _listenTimer?.cancel();
+      unawaited(_asr.stop());
+      setState(() {
+        _messages.add(_Msg('user', q));
+        _input.clear();
+        _recognized = '';
+        _wakeMode = false;
+      });
+      final String reply;
+      if (UiTrace.offer == null) {
+        reply = '现在没有可以记住的看屏流程。做完一个多步看屏任务后，再说“记住这个流程”。';
+      } else {
+        final r = await UiTrace.saveOffer();
+        if (r == null) {
+          reply = '没能保存：找不到对应的技能记录。';
+        } else {
+          unawaited(AuditLog.log('保存看屏技能', ok: true, detail: r));
+          reply = '好的，已记住。$r。下次说同样的话（只换变量），我会按步骤直接做，每一步都核验；'
+              '对不上就停下告诉你，再改用看屏代理重做。';
+        }
+      }
+      _reply(reply, '技能已更新。');
+      if (mounted) await _speak(reply);
+      return;
+    }
     final hist = _buildHistory();
     final gen = ++_askGen;
     _stopSpeaking();
@@ -1020,6 +1304,7 @@ class _HomeScreenState extends State<HomeScreen>
             caseSensitive: false)
         .hasMatch(qNoWake);
     if (stopMatch && hasActiveTask) {
+      AgentControl.stopAll();
       await TaskBoard.clear();
       DeviceActions.cancelPending();
       _reply('已停。', '任务已停止。');
@@ -1101,6 +1386,7 @@ class _HomeScreenState extends State<HomeScreen>
       final direct =
           await DeviceActions.tryHandle(q, settings: _settings);
       if (direct != null) {
+        unawaited(AuditLog.log('确认环节：$q', ok: !_confirmReplyFailed(direct), detail: direct));
         _reply(direct, '任务执行完毕。');
         _maybeConsolidateMemory();
         if (mounted) await _speak(direct);

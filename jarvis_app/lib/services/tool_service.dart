@@ -1,7 +1,9 @@
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'audit_log.dart';
 import 'llm_service.dart';
+import 'vision_service.dart';
 import 'native_bridge.dart';
 import 'settings_store.dart';
 import 'weather_service.dart';
@@ -40,6 +42,7 @@ class ToolService {
     if (t.isEmpty) return null;
     final opening = RegExp(r'^(请|帮我)?(打开|启动|开一下)').hasMatch(t);
     return await _brief(t, settings) ??
+        await _look(t, settings) ??
         await _reminder(t) ??
         await _timer(t) ??
         await _volume(t) ??
@@ -50,6 +53,27 @@ class ToolService {
         await _calendar(t) ??
         await _notifications(t) ??
         await _clipboard(t);
+  }
+
+  // ---------- 看一眼屏幕回答问题（视觉，v3）----------
+
+  static Future<String?> _look(String t, JarvisSettings s) async {
+    if (!RegExp(r'(屏幕|这上面|界面|页面|这张图|这个图|这里).{0,8}(写了?什么|是什么|有什么|说了?什么|讲什么|在哪|怎么样)|'
+            r'^(帮我)?看(一下|一眼|看)(这个|当前)?(屏幕|界面|页面)|这个(按钮|图标|东西).{0,4}在哪|帮我看看(这|屏幕)')
+        .hasMatch(t)) {
+      return null;
+    }
+    if (!VisionService.usable(s)) {
+      return '看屏幕回答问题需要先在设置里开启“视觉看屏”，并确认所配模型支持图片输入。';
+    }
+    try {
+      return await VisionService.ask(s, t);
+    } on VisionBlocked catch (e) {
+      AuditLog.log('看屏幕被拒绝', ok: false, detail: e.reason);
+      return e.message;
+    } catch (e) {
+      return '看屏幕失败：$e';
+    }
   }
 
   // ---------- 时间解析 ----------

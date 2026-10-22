@@ -2,6 +2,9 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 
 import '../services/edge_tts_service.dart';
+import '../services/skill_store.dart';
+import 'audit_screen.dart';
+import 'diagnostics_screen.dart';
 import '../services/local_llm_service.dart';
 import '../services/native_bridge.dart';
 import '../services/memory_service.dart';
@@ -54,6 +57,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _brief = widget.settings.morningBrief;
   late String _briefTime = widget.settings.morningBriefTime;
   late bool _orb = widget.settings.floatingOrb;
+  late bool _wakeOn = widget.settings.wakeEnabled;
+  late bool _annOn = widget.settings.announceOn;
+  late bool _annSms = widget.settings.announceSms;
+  late bool _annCall = widget.settings.announceCall;
+  late bool _annWx = widget.settings.announceWeChat;
+  late final TextEditingController _annPkgs = TextEditingController(text: widget.settings.announceExtraPkgs);
+  late final TextEditingController _annSenders = TextEditingController(text: widget.settings.announceSenders);
+  late String _quietS = widget.settings.quietStart;
+  late String _quietE = widget.settings.quietEnd;
+  late bool _depart = widget.settings.departRemind;
+  late int _departLead = widget.settings.departLeadMin;
+  late bool _barge = widget.settings.bargeIn;
+  late int _wakeSens = widget.settings.wakeSensitivity;
+  late bool _vOn = widget.settings.visionEnabled;
+  late final TextEditingController _vModel = TextEditingController(text: widget.settings.visionModel);
+  late final TextEditingController _vBase = TextEditingController(text: widget.settings.visionBaseUrl);
+  late final TextEditingController _vKey = TextEditingController(text: widget.settings.visionApiKey);
+  late String _vCoord = widget.settings.visionCoord;
   late bool _localOn = widget.settings.localEnabled;
   late String _localPath = widget.settings.localModelPath;
   bool _importing = false;
@@ -103,6 +124,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.settings.morningBrief = _brief;
     widget.settings.morningBriefTime = _briefTime;
     widget.settings.floatingOrb = _orb;
+    widget.settings.wakeEnabled = _wakeOn;
+    widget.settings.announceOn = _annOn;
+    widget.settings.announceSms = _annSms;
+    widget.settings.announceCall = _annCall;
+    widget.settings.announceWeChat = _annWx;
+    widget.settings.announceExtraPkgs = _annPkgs.text;
+    widget.settings.announceSenders = _annSenders.text;
+    widget.settings.quietStart = _quietS;
+    widget.settings.quietEnd = _quietE;
+    widget.settings.departRemind = _depart;
+    widget.settings.departLeadMin = _departLead;
+    widget.settings.bargeIn = _barge;
+    widget.settings.wakeSensitivity = _wakeSens;
+    widget.settings.visionEnabled = _vOn;
+    widget.settings.visionModel = _vModel.text.trim();
+    widget.settings.visionBaseUrl = _vBase.text.trim();
+    widget.settings.visionApiKey = _vKey.text.trim();
+    widget.settings.visionCoord = _vCoord;
     widget.settings.localEnabled = _localOn && _localPath.isNotEmpty;
     widget.settings.localModelPath = _localPath;
     try {
@@ -247,6 +286,184 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(p != null ? '模型已导入，保存设置后生效。' : '没有导入模型（已取消或复制失败）。')));
+  }
+
+  Future<void> _pickQuiet(bool start) async {
+    final cur = (start ? _quietS : _quietE).split(':');
+    final t = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay(
+            hour: int.tryParse(cur.first) ?? 22, minute: cur.length > 1 ? (int.tryParse(cur[1]) ?? 0) : 0));
+    if (t == null) return;
+    final v = '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    setState(() => start ? _quietS = v : _quietE = v);
+  }
+
+  /// 主动性（v3 第 7 条）：来电 / 短信 / 通知播报 + 日程出发提醒。
+  Widget _proactiveSection() {
+    return _section(title: '主动播报与出发提醒', children: [
+      _switch('来电 / 短信 / 通知播报', '需要“通知读取”授权；要在后台播报需同时开启“后台常驻待命”。验证码类只提示、不读内容。勿扰时段内不播报',
+          _annOn, (v) => setState(() => _annOn = v)),
+      if (_annOn) ...[
+        _switch('短信', '', _annSms, (v) => setState(() => _annSms = v)),
+        _switch('来电', '靠拨号器的来电通知识别；不同 ROM 的拨号器包名不同，没播的话在下面补包名', _annCall, (v) => setState(() => _annCall = v)),
+        _switch('微信', '', _annWx, (v) => setState(() => _annWx = v)),
+        TextField(
+            controller: _annPkgs,
+            maxLines: 2,
+            style: const TextStyle(color: Colors.white),
+            decoration: _dec('额外播报的 App 包名，每行一个')),
+        const SizedBox(height: 10),
+        TextField(
+            controller: _annSenders,
+            style: const TextStyle(color: Colors.white),
+            decoration: _dec('只播这些联系人 / 发件人（逗号分隔，留空 = 全部）')),
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, children: [
+          OutlinedButton(onPressed: () => _pickQuiet(true), child: Text('勿扰开始 $_quietS')),
+          OutlinedButton(onPressed: () => _pickQuiet(false), child: Text('勿扰结束 $_quietE')),
+        ]),
+      ],
+      _switch('日程出发提醒', '读未来 24 小时有地点的日程，提前提醒“该出发了”：有定位且能查到地点时按直线距离粗估路程，否则按固定提前量并在提醒里标明。每天需要打开过 Jarvis（点晨报通知即可）才会排程',
+          _depart, (v) => setState(() => _depart = v)),
+      if (_depart)
+        Row(children: [
+          const Text('固定提前量', style: TextStyle(color: Colors.white70)),
+          Expanded(
+            child: Slider(
+              value: _departLead.toDouble(),
+              min: 10,
+              max: 120,
+              divisions: 22,
+              label: '$_departLead 分钟',
+              onChanged: (v) => setState(() => _departLead = v.round()),
+            ),
+          ),
+          Text('$_departLead 分钟', style: const TextStyle(color: Colors.white70)),
+        ]),
+    ]);
+  }
+
+  /// 语音唤醒（v3 第 5 条）。
+  Widget _wakeSection() {
+    return _section(title: '语音：唤醒与打断', children: [
+      _switch('语音唤醒待命', '开着时持续离线监听“贾维斯”，喊一声就开始聆听。要在熄屏 / 其他 App 前台时也能唤醒，需同时开启上面的“后台常驻待命”',
+          _wakeOn, (v) => setState(() => _wakeOn = v)),
+      const SizedBox(height: 4),
+      const Text('唤醒灵敏度', style: TextStyle(color: Colors.white70, fontSize: 13)),
+      const SizedBox(height: 6),
+      SegmentedButton<int>(
+        segments: const [
+          ButtonSegment(value: 0, label: Text('严格')),
+          ButtonSegment(value: 1, label: Text('标准')),
+          ButtonSegment(value: 2, label: Text('宽松')),
+        ],
+        selected: {_wakeSens},
+        onSelectionChanged: (v) => setState(() => _wakeSens = v.first),
+      ),
+      const SizedBox(height: 6),
+      const Text('严格：“贾维斯”须在句首且整句较短；标准：在句首附近；宽松：句中任意位置，并容忍更多误听。'
+          '唤醒后约 5 秒没有有效指令会自动回到待命；10 分钟内误唤醒 3 次会临时调到严格。'
+          '点悬浮球、电源键助手入口与唤醒词互不影响。',
+          style: TextStyle(color: Colors.white60, fontSize: 12)),
+      _switch('打断说话（降级版）', '播报时开口说话（或说“停”）即停播并聆听。不是完整回声消除：用平台回声消除 + 文本比对过滤自己的声音，喇叭很响或机型不支持时可能误触发 / 漏触发',
+          _barge, (v) => setState(() => _barge = v)),
+      const SizedBox(height: 6),
+      const Text('实现方式：离线语音识别持续解码并匹配“贾维斯”，不是专用唤醒词模型，待命耗电会高于专用方案。真实耗电请在 功能自检 > 唤醒监听 里看实测折算值。',
+          style: TextStyle(color: Colors.white38, fontSize: 12)),
+    ]);
+  }
+
+  /// 视觉看屏（v3 第 4 项）：截图 + 多模态模型。Key 默认复用上面的模型配置。
+  Widget _visionSection() {
+    return _section(title: '视觉看屏（截图 + 多模态模型）', children: [
+      _switch('启用视觉看屏', '界面读不到文字、或树里点不到目标时，截图发给下面配置的模型兜底；也支持“看一眼屏幕，这上面写了什么”。银行 / 支付 / 钱包 / 系统设置类界面永不截图',
+          _vOn, (v) => setState(() => _vOn = v)),
+      TextField(
+          controller: _vModel,
+          style: const TextStyle(color: Colors.white),
+          decoration: _dec('视觉模型（留空 = 同上面的模型）', helper: '所配模型必须支持图片输入')),
+      const SizedBox(height: 10),
+      TextField(
+          controller: _vBase,
+          style: const TextStyle(color: Colors.white),
+          decoration: _dec('视觉接口地址（留空 = 同上）')),
+      const SizedBox(height: 10),
+      TextField(
+          controller: _vKey,
+          obscureText: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: _dec('视觉 Key（留空 = 同上）')),
+      const SizedBox(height: 10),
+      DropdownButtonFormField<String>(
+        value: _vCoord,
+        dropdownColor: const Color(0xFF141B33),
+        decoration: _dec('坐标格式'),
+        style: const TextStyle(color: Colors.white),
+        items: const [
+          DropdownMenuItem(value: 'pixel', child: Text('像素坐标（多数模型）')),
+          DropdownMenuItem(value: 'norm1000', child: Text('0~1000 归一化（Qwen-VL 系）')),
+        ],
+        onChanged: (v) => setState(() => _vCoord = v ?? 'pixel'),
+      ),
+      const SizedBox(height: 6),
+      const Text('坐标点击只在“不在黑名单 且 在看屏白名单内”的 App 里允许；短视频 / 游戏类 App 需先把包名加到“看屏白名单”。升级后要把无障碍服务关掉再打开一次，截图和手势权限才会生效。',
+          style: TextStyle(color: Colors.white60, fontSize: 12)),
+    ]);
+  }
+
+  /// 已学会的看屏流程（v3 第 8 条）：查看、删除。
+  Future<void> _skillsDialog() async {
+    final l = await SkillStore.uiSkills();
+    if (!mounted) return;
+    await showDialog<void>(
+        context: context,
+        builder: (c) => StatefulBuilder(
+            builder: (c, setD) => AlertDialog(
+                  title: const Text('已学会的看屏流程'),
+                  content: SizedBox(
+                    width: double.maxFinite,
+                    child: l.isEmpty
+                        ? const Text('还没有。做完一个多步看屏任务后说“记住这个流程”即可保存。')
+                        : ListView(shrinkWrap: true, children: [
+                            for (final sk in List.of(l))
+                              ListTile(
+                                dense: true,
+                                title: Text(sk.goalPattern.isNotEmpty ? sk.goalPattern : sk.goalKey,
+                                    style: const TextStyle(fontSize: 13)),
+                                subtitle: Text('${sk.uiSteps.length} 步${sk.isActive ? '' : ' · 已停用（连续失败）'}'),
+                                trailing: IconButton(
+                                    tooltip: '删除这条流程（保留规划步骤）',
+                                    icon: const Icon(Icons.close, size: 18),
+                                    onPressed: () async {
+                                      await SkillStore.invalidateUiSteps(sk);
+                                      l.remove(sk);
+                                      setD(() {});
+                                    }),
+                              ),
+                          ]),
+                  ),
+                  actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('关闭'))],
+                )));
+  }
+
+  /// 功能自检 / 操作日志入口（v3）。
+  Widget _toolsSection() {
+    return _section(title: '自检与记录', children: [
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        OutlinedButton(
+            onPressed: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => DiagnosticsScreen(settings: widget.settings))),
+            child: const Text('功能自检')),
+        OutlinedButton(
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AuditScreen())),
+            child: const Text('操作日志')),
+        OutlinedButton(onPressed: _skillsDialog, child: const Text('已学会的流程')),
+      ]),
+      const SizedBox(height: 6),
+      const Text('急停：双击悬浮球，或同时按音量 + 和 −，会立即中断当前任务、看屏动作和播报。',
+          style: TextStyle(color: Colors.white60, fontSize: 12)),
+    ]);
   }
 
   Widget _extraSections() {
@@ -570,6 +787,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ]),
           const SizedBox(height: 16),
           _extraSections(),
+          const SizedBox(height: 16),
+          _wakeSection(),
+          const SizedBox(height: 16),
+          _proactiveSection(),
+          const SizedBox(height: 16),
+          _visionSection(),
+          const SizedBox(height: 16),
+          _toolsSection(),
           const SizedBox(height: 16),
           _memorySection(),
           const SizedBox(height: 20),

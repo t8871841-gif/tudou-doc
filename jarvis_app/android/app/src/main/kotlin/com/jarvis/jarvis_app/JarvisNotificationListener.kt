@@ -14,6 +14,13 @@ class JarvisNotificationListener : NotificationListenerService() {
         private val buf = CopyOnWriteArrayList<Map<String, Any>>()
 
         fun recent(limit: Int): List<Map<String, Any>> = buf.takeLast(limit).reversed()
+
+        /** v3：Dart 开了“播报”时，新通知实时推给 Dart（Dart 决定播不播）。关着时不推，也不落盘。 */
+        @Volatile
+        var announceOn = false
+
+        @Volatile
+        var sink: ((Map<String, Any>) -> Unit)? = null
     }
 
     override fun onListenerConnected() {
@@ -28,9 +35,11 @@ class JarvisNotificationListener : NotificationListenerService() {
     }
 
     private fun add(sbn: StatusBarNotification) {
-        if (sbn.packageName == packageName || sbn.isOngoing) return
+        if (sbn.packageName == packageName) return
         val n = sbn.notification ?: return
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+        // 来电通知常带 ONGOING 标志，按类别放行；其他常驻通知（音乐、下载进度等）照旧忽略。
+        if (sbn.isOngoing && n.category != Notification.CATEGORY_CALL) return
         val ex = n.extras ?: return
         val title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = (ex.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: ex.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty()
@@ -42,7 +51,9 @@ class JarvisNotificationListener : NotificationListenerService() {
         }
         val last = buf.lastOrNull()
         if (last != null && last["pkg"] == sbn.packageName && last["title"] == title.take(60) && last["text"] == text.take(200)) return
-        buf.add(mapOf("pkg" to sbn.packageName, "app" to label, "title" to title.take(60), "text" to text.take(200), "time" to sbn.postTime))
+        val m = mapOf<String, Any>("pkg" to sbn.packageName, "app" to label, "title" to title.take(60), "text" to text.take(200), "time" to sbn.postTime)
+        buf.add(m)
+        if (announceOn) sink?.invoke(m)
         while (buf.size > 60) buf.removeAt(0)
     }
 }
