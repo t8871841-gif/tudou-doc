@@ -1,4 +1,4 @@
-package com.jarvis.native
+package com.jarvis.app
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -146,7 +146,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         /** v3：用户急停 → 取消原生任务引擎正在跑的任务（来源：悬浮球双击 / 音量键组合 / 对话急停）。 */
         fun cancelTask() {
             TakeoverBorder.hide()
-            com.jarvis.native.vision.ScreenVisionAgent.cancelInFlight()
+            com.jarvis.app.vision.ScreenVisionAgent.cancelInFlight()
             val s = instance ?: return
             s.handler.post { s.finishTask("cancelled", "用户急停") }
         }

@@ -1,12 +1,12 @@
-package com.jarvis.native
+package com.jarvis.app
 
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import com.jarvis.native.asr.OfflineAsrSession
-import com.jarvis.native.net.AgnesClient
-import com.jarvis.native.tts.EdgeTts
-import com.jarvis.native.vision.ScreenVisionAgent
+import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.tts.EdgeTts
+import com.jarvis.app.vision.ScreenVisionAgent
 
 /**
  * 二期新增：对话 + 语音的总调度。接管 OrbController 的 eventSink/dartAlive

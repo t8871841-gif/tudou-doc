@@ -1,4 +1,4 @@
-package com.jarvis.native
+package com.jarvis.app
 
 import android.accessibilityservice.AccessibilityService
 import android.animation.ValueAnimator

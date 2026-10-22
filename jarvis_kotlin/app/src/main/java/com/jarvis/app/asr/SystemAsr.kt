@@ -1,4 +1,4 @@
-package com.jarvis.native.asr
+package com.jarvis.app.asr
 
 import android.content.Context
 import android.content.Intent

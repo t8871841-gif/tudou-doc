@@ -1,4 +1,4 @@
-package com.jarvis.native
+package com.jarvis.app
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -21,7 +21,7 @@ class JarvisForegroundService : Service() {
     companion object {
         const val CHANNEL_ID = "jarvis_keepalive"
         const val NOTIF_ID = 7001
-        const val ACTION_STOP = "com.jarvis.native.STOP_KEEPALIVE"
+        const val ACTION_STOP = "com.jarvis.app.STOP_KEEPALIVE"
 
         @Volatile
         var running = false

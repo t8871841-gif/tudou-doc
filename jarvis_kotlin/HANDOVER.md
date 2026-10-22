@@ -1,7 +1,7 @@
 # 交接说明（给继续开发的 AI）
 
 ## 项目
-Jarvis 纯 Kotlin 版。包名 `com.jarvis.native`，目录 `jarvis_kotlin/`。
+Jarvis 纯 Kotlin 版。包名 `com.jarvis.app`，目录 `jarvis_kotlin/`。
 背景：原 v3 是 Flutter 版（仓库 `jarvis_app/`），真机体验差（悬浮球不灵、无障碍不稳），
 用户拍板改纯 Kotlin 原生重写。功能与人格是 Jarvis 自己的，只借鉴 Andee 的工程做法。
 

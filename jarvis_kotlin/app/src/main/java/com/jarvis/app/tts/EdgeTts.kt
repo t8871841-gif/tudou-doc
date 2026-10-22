@@ -1,4 +1,4 @@
-package com.jarvis.native.tts
+package com.jarvis.app.tts
 
 import android.content.Context
 import android.media.AudioAttributes

@@ -1,7 +1,7 @@
-package com.jarvis.native.net
+package com.jarvis.app.net
 
 import android.content.Context
-import com.jarvis.native.JarvisPrefs
+import com.jarvis.app.JarvisPrefs
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType

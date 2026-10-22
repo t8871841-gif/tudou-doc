@@ -1,4 +1,4 @@
-package com.jarvis.native.vision
+package com.jarvis.app.vision
 
 import android.graphics.Bitmap
 import android.graphics.Canvas

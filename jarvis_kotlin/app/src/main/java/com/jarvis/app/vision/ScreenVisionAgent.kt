@@ -1,4 +1,4 @@
-package com.jarvis.native.vision
+package com.jarvis.app.vision
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -6,10 +6,10 @@ import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
-import com.jarvis.native.AuditLog
-import com.jarvis.native.JarvisAccessibilityService
-import com.jarvis.native.TakeoverBorder
-import com.jarvis.native.net.AgnesClient
+import com.jarvis.app.AuditLog
+import com.jarvis.app.JarvisAccessibilityService
+import com.jarvis.app.TakeoverBorder
+import com.jarvis.app.net.AgnesClient
 import org.json.JSONObject
 import kotlin.math.abs
 

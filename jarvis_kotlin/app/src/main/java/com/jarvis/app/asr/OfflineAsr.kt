@@ -1,4 +1,4 @@
-package com.jarvis.native.asr
+package com.jarvis.app.asr
 
 import android.content.Context
 import android.util.Log
@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
  * 移植自参考实现（原 net.kuafuai.andee.asr.OfflineAsr）：sherpa-onnx 流式 zipformer
  * 中英双语离线识别，和之前 Flutter 版 Jarvis 用的同一套模型。逻辑基本没改，只是：
  *   - 去掉了未用到的 VoiceConfig 构造参数；
- *   - 包名从 net.kuafuai.andee.asr 改成 com.jarvis.native.asr。
+ *   - 包名从 net.kuafuai.andee.asr 改成 com.jarvis.app.asr。
  *
  * 这个类本身只管"喂 PCM 进去、吐文字出来"，不摸麦克风——采集音频、判断"用户说完了没有"
  * 是 [OfflineAsrSession] 的活，两层分开是为了跟 SystemAsr 的降级版保持同一种调用方式

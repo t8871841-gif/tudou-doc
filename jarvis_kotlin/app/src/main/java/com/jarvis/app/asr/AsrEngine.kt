@@ -1,4 +1,4 @@
-package com.jarvis.native.asr
+package com.jarvis.app.asr
 
 /**
  * 移植自参考实现（原 net.kuafuai.andee.asr.AsrEngine，仅改包名，逻辑未改动）。

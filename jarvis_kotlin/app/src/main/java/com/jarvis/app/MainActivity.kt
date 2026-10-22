@@ -1,4 +1,4 @@
-package com.jarvis.native
+package com.jarvis.app
 
 import android.Manifest
 import android.app.Activity
@@ -20,7 +20,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
-import com.jarvis.native.asr.OfflineAsrSession
+import com.jarvis.app.asr.OfflineAsrSession
 
 /**
  * 纯 Kotlin 版主界面：连接状态自检（无障碍/悬浮窗/电池豁免/常驻服务/悬浮球/

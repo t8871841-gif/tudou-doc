@@ -8,5 +8,5 @@ v3 版 Jarvis 从 Flutter 改为纯 Kotlin 原生实现的新工程（2026-10-22
 - 三期：看屏跨应用借鉴 Andee 的做法（节点树优先、网格标定、准星放大、
   同位置点击防呆），慢慢打磨；v3 的急停/审计/自检/技能库逐项搬回。
 
-包名 com.jarvis.native，可与 Flutter 版 Jarvis、原版 Andee 并排安装。
+包名 com.jarvis.app，可与 Flutter 版 Jarvis、原版 Andee 并排安装。
 构建：推 jk-v* 标签触发 GitHub Actions，产物发 Release jarvis-kotlin-apk-<run号>。
