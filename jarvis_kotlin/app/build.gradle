@@ -31,12 +31,15 @@ android {
 
 dependencies {
     implementation libs.androidx.core.ktx
-    // 二期新增：Agnes 对话(REST) 与 Edge TTS(WebSocket) 共用的 HTTP/WS 客户端。
+    // 二期新增：Agnes 对话(REST) 用的 HTTP 客户端（Edge TTS 后来改成了手写 TLS socket，不走这个）。
     // 来源：Maven Central，com.squareup.okhttp3:okhttp，版本 4.12.0（选最后一个仍支持 Java 8/无需 okio3 以上额外配置的稳定版）。
     implementation libs.okhttp
-    // 唤醒词/离线识别正式方案是 sherpa-onnx（流式 zipformer），但其 Android AAR 不在
-    // Maven Central/阿里云镜像里直接可解析——官方发布方式是从 GitHub Releases 下载预编译 aar
-    // 放到 app/libs/ 下，再 implementation files('libs/sherpa-onnx.aar')。本次交付环境没有
-    // 公网访问权限，无法下载验证，所以这行先留空：你们那边把 aar 放进 app/libs/ 后取消下面注释。
-    // implementation files('libs/sherpa-onnx.aar')
+    // 三期-B：sherpa-onnx 1.12.23（流式 zipformer 离线识别）。官方只发布 GitHub Releases 的
+    // 预编译 aar，不在 Maven Central/阿里云镜像里，需要你们自己下载放到 app/libs/ 下（不进 git）：
+    //   https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar
+    // 本次交付环境没有公网访问权限，这个 aar 没法替你们下载/验证，文件名必须完全一致，否则下面这行会报
+    // "找不到文件"。另外还需要把中英双语流式 zipformer 模型的 4 个文件放进
+    // app/src/main/assets/asr/（文件名见 asr/OfflineAsr.kt 里的 ENCODER/DECODER/JOINER/TOKENS 常量），
+    // 下载地址见 V3_CHANGES.md。这两样东西缺一样，这个模块要么编译不过要么运行时报错，不会假装能用。
+    implementation files('libs/sherpa-onnx-1.12.23.aar')
 }

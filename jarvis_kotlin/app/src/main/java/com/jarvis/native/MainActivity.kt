@@ -20,7 +20,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
-import com.jarvis.native.asr.SystemAsr
+import com.jarvis.native.asr.OfflineAsrSession
 
 /**
  * 纯 Kotlin 版主界面：连接状态自检（无障碍/悬浮窗/电池豁免/常驻服务/悬浮球/
@@ -100,6 +100,7 @@ class MainActivity : Activity() {
         root.addView(btn("刷新状态") { refresh() })
         root.addView(detailView)
         buildVoiceSettingsSection(root)
+        buildAuditSection(root)
 
         setContentView(ScrollView(this).apply { addView(root) })
 
@@ -132,7 +133,7 @@ class MainActivity : Activity() {
         })
 
         val wakeBox = CheckBox(this).apply {
-            text = "开启唤醒词「贾维斯」（降级版：系统识别轮询，见自检详情）"
+            text = "开启唤醒词「贾维斯」（离线识别轮询，非专用低功耗 KWS，见自检详情）"
             isChecked = JarvisPrefs.isWakeEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked ->
                 JarvisPrefs.setWakeEnabled(this@MainActivity, checked)
@@ -163,6 +164,36 @@ class MainActivity : Activity() {
             isChecked = JarvisPrefs.isBargeInEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> JarvisPrefs.setBargeInEnabled(this@MainActivity, checked) }
         })
+    }
+
+    /** 第 2 条「操作审计日志」：默认收起，不占屏幕——点开才看，符合"每屏只做一件事"的精简原则。 */
+    private fun buildAuditSection(root: LinearLayout) {
+        val section = TextView(this).apply {
+            text = "操作审计日志"
+            textSize = 18f
+            setPadding(0, dp(24), 0, dp(8))
+        }
+        root.addView(section)
+        val logView = TextView(this).apply {
+            textSize = 11f
+            setPadding(0, dp(8), 0, 0)
+            visibility = View.GONE
+        }
+        root.addView(btn("显示/隐藏日志") {
+            if (logView.visibility == View.VISIBLE) {
+                logView.visibility = View.GONE
+            } else {
+                val lines = AuditLog.readRecent(this)
+                logView.text = if (lines.isEmpty()) "暂无记录" else lines.joinToString("\n\n")
+                logView.visibility = View.VISIBLE
+            }
+        })
+        root.addView(btn("清空日志") {
+            AuditLog.clear(this)
+            logView.text = "暂无记录"
+            toast("已清空")
+        })
+        root.addView(logView)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -245,8 +276,8 @@ class MainActivity : Activity() {
             appendLine("悬浮球：${if (OrbController.isEnabled()) "已开启" else "已关闭"}")
             val keyOk = JarvisPrefs.getAgnesKey(this@MainActivity).isNotBlank()
             appendLine("Agnes 对话 Key：${if (keyOk) "已配置" else "未配置（对话会报错）"}")
-            appendLine("系统语音识别：${if (SystemAsr.isAvailable(this@MainActivity)) "可用" else "不可用（本机没有可用的识别服务，听写/唤醒词都用不了）"}")
-            appendLine("语音合成：Edge TTS，需联网，无需 Key")
+            appendLine("离线语音识别(sherpa-onnx)：${if (OfflineAsrSession.isAvailable(this@MainActivity)) "模型文件已就位" else "缺模型文件(assets/asr 下没放齐 4 个文件)，听写/唤醒词都用不了"}")
+            appendLine("语音合成：Edge TTS（云扬），需联网，无需 Key")
             if (a11y) append("无障碍详情：${JarvisAccessibilityService.status()}")
         }
         orbButton.text = if (OrbController.isEnabled()) "关闭悬浮球" else "开启悬浮球"

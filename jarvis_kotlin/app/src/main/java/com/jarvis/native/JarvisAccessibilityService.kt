@@ -143,8 +143,10 @@ class JarvisAccessibilityService : AccessibilityService() {
             RegexOption.IGNORE_CASE
         )
 
-        /** v3：用户急停 → 取消原生任务引擎正在跑的任务（来源：悬浮球双击 / 音量键组合 / Dart）。 */
+        /** v3：用户急停 → 取消原生任务引擎正在跑的任务（来源：悬浮球双击 / 音量键组合 / 对话急停）。 */
         fun cancelTask() {
+            TakeoverBorder.hide()
+            com.jarvis.native.vision.ScreenVisionAgent.cancelInFlight()
             val s = instance ?: return
             s.handler.post { s.finishTask("cancelled", "用户急停") }
         }
@@ -303,11 +305,13 @@ class JarvisAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         OrbController.attach(this) // 悬浮球：开关记在 SharedPreferences，服务起来就自动恢复
+        TakeoverBorder.attach(this) // 三期：看屏代理接管时的彩光边框
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         finishTask("cancelled", "无障碍服务已断开")
         OrbController.detach()
+        TakeoverBorder.detach()
         instance = null
         disarm()
         // 返回 true 允许系统在被 ROM 回收后自动重绑（Flyme 等系统杀无障碍时更易自恢复）
@@ -316,6 +320,7 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         OrbController.detach()
+        TakeoverBorder.detach()
         instance = null
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -569,6 +574,15 @@ class JarvisAccessibilityService : AccessibilityService() {
         awaiter = null
         cb?.invoke(result)
         Log.d(TAG, "task finished: $status @ $stepName ($detail)")
+        // 第 2 条「操作审计日志」：跨应用任务引擎每结束一次任务，记一条完整链路（脱敏后落盘）。
+        try {
+            AuditLog.append(
+                this, "跨应用任务（${t.pkgs.joinToString(",")}）",
+                "执行到第 ${t.idx} 步「$stepName」",
+                "$status：$detail"
+            )
+        } catch (_: Exception) {
+        }
     }
 
     private fun advance(t: Task) {

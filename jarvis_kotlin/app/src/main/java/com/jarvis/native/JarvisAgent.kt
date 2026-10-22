@@ -3,9 +3,10 @@ package com.jarvis.native
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import com.jarvis.native.asr.SystemAsr
+import com.jarvis.native.asr.OfflineAsrSession
 import com.jarvis.native.net.AgnesClient
 import com.jarvis.native.tts.EdgeTts
+import com.jarvis.native.vision.ScreenVisionAgent
 
 /**
  * 二期新增：对话 + 语音的总调度。接管 OrbController 的 eventSink/dartAlive
@@ -74,7 +75,9 @@ object JarvisAgent {
         genSeq++
         AgnesClient.cancelInFlight()
         EdgeTts.stop()
-        SystemAsr.stop()
+        OfflineAsrSession.stop()
+        ScreenVisionAgent.cancelInFlight()
+        TakeoverBorder.hide()
         setState(ctx, "idle")
         maybeStartWakeLoop()
     }
@@ -94,7 +97,7 @@ object JarvisAgent {
             onUserUtterance(ctx, mySeq, prefilledText)
             return
         }
-        SystemAsr.listenOnce(
+        OfflineAsrSession.listenOnce(
             ctx,
             onPartial = { /* 本阶段不需要处理中途文字 */ },
             onFinal = { text -> main.post { if (mySeq == genSeq) onUserUtterance(ctx, mySeq, text) } },
@@ -109,8 +112,30 @@ object JarvisAgent {
         )
     }
 
+    // 三期新增：两类问法在进 Agnes 聊天之前先分流到视觉看屏通道。
+    private val TAP_INTENT = Regex("^(帮我)?点(一下|击)?\\s*(.+)$")
+    private val SCREEN_QUESTION = Regex("(屏幕上|这上面|这是什么|这是啥|这个(按钮|图标|东西)|这上边)")
+
     private fun onUserUtterance(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq) return
+        val tapMatch = TAP_INTENT.find(text)
+        if (tapMatch != null && tapMatch.groupValues[3].isNotBlank()) {
+            val target = tapMatch.groupValues[3].trim()
+            setState(ctx, "thinking")
+            ScreenVisionAgent.locateAndTap(ctx, target, "语音指令：点击$target") { ok, detail ->
+                if (mySeq != genSeq) return@locateAndTap
+                speakReply(ctx, mySeq, if (ok) "好的，点了" else "没点成：$detail")
+            }
+            return
+        }
+        if (SCREEN_QUESTION.containsMatchIn(text)) {
+            setState(ctx, "thinking")
+            ScreenVisionAgent.describeScreen(ctx, text,
+                onResult = { answer -> if (mySeq == genSeq) speakReply(ctx, mySeq, answer) },
+                onError = { msg -> if (mySeq == genSeq) speakReply(ctx, mySeq, "看屏失败：$msg") }
+            )
+            return
+        }
         setState(ctx, "thinking")
         AgnesClient.ask(
             ctx, text,
@@ -149,7 +174,7 @@ object JarvisAgent {
     }
 
     /**
-     * 第 6 条「打断说话」降级版：没有做完整回声消除(AEC)，用系统识别在播报期间监听，
+     * 第 6 条「打断说话」降级版：没有做完整回声消除(AEC)，用离线识别在播报期间监听，
      * 一旦收到非空的中途识别文字就认为"用户在开口"，立即停播并转入听。
      * 已知局限：没有 AEC，扬声器播报的声音本身可能被麦克风拾取触发误判，
      * 真机联调如果经常被自己的播报打断自己，先把"打断说话"开关关掉，或改用听筒/耳机测试。
@@ -158,7 +183,7 @@ object JarvisAgent {
         // 留 500ms 起播缓冲，避免刚开口的瞬间杂音立刻触发。
         main.postDelayed({
             if (mySeq != genSeq || state != "speaking") return@postDelayed
-            SystemAsr.listenOnce(
+            OfflineAsrSession.listenOnce(
                 ctx,
                 onPartial = { txt ->
                     if (mySeq == genSeq && state == "speaking" && txt.trim().length >= 2) {
@@ -176,13 +201,14 @@ object JarvisAgent {
         }, 500)
     }
 
-    // ---------- 第 5 条：唤醒词（降级版，详见 SystemAsr 顶部注释） ----------
+    // ---------- 第 5 条：唤醒词（仍是降级版——真离线 ASR 已接上，但不是专门的低功耗 KWS） ----------
 
     /**
-     * 离线 KWS 做不到时的降级：常驻服务在跑、设置里开了唤醒词开关、当前 idle 且没有别的环节在用麦克风时，
-     * 反复用系统识别短轮询，命中"贾维斯"关键词就直接进入听。
-     * 耗电未实测（沙盒环境无法跑真机），预期会比真正的离线 KWS 更费电——如果连续待命发热/掉电明显，
-     * 先把灵敏度调低或直接关掉这个开关，等接上真正的离线 KWS 方案再启用。
+     * 三期-B 换上 sherpa-onnx 真离线识别后，这里的唤醒词本质上还是"反复跑一次完整的流式识别、
+     * 看文字里有没有命中关键词"，不是专门为常驻监听设计的轻量级关键词唤醒模型(KWS)——
+     * 识别器本身常驻在内存里（首次用时才加载,之后复用），比之前砸系统在线识别省电一些，
+     * 但持续跑 zipformer 编解码仍然比真正的 KWS 耗电，具体耗电数据同样没有真机实测。
+     * 如果连续待命发热/掉电明显，先把灵敏度调低或直接关掉这个开关。
      */
     fun maybeStartWakeLoop() {
         val ctx = appCtx ?: return
@@ -203,7 +229,7 @@ object JarvisAgent {
             wakeLoopRunning = false
             return
         }
-        SystemAsr.listenOnce(
+        OfflineAsrSession.listenOnce(
             ctx,
             onPartial = { },
             onFinal = { text -> main.post { onWakeResult(ctx, mySeq, text) } },

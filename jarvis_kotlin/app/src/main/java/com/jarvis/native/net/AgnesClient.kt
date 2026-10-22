@@ -40,6 +40,67 @@ object AgnesClient {
 
     private val history = mutableListOf<Pair<String, String>>() // role to content
 
+    /**
+     * 三期新增：单轮多模态问答（看屏用）——带一张图片，不进滚动对话历史（看屏问答与日常聊天分开计数）。
+     * 复用对话用的同一个 Key/模型配置（需求文档允许"复用设置里已有的模型配置"），
+     * 模型是否真支持图片输入取决于 Agnes 后端，这里按 OpenAI 多模态消息格式（image_url + data URL）发送；
+     * 如果 agnes-3.0-flash 不支持图片，这里会从服务端收到错误，上层按 onError 兜底提示，不会假装成功。
+     */
+    fun askVision(
+        ctx: Context, prompt: String, jpegBase64: String,
+        onResult: (String) -> Unit, onError: (String) -> Unit
+    ) {
+        val key = JarvisPrefs.getAgnesKey(ctx)
+        if (key.isBlank()) {
+            onError("未配置 Agnes API Key，请先去设置里填写")
+            return
+        }
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", prompt))
+            .put(
+                JSONObject().put("type", "image_url").put(
+                    "image_url",
+                    JSONObject().put("url", "data:image/jpeg;base64,$jpegBase64")
+                )
+            )
+        val messages = JSONArray()
+            .put(JSONObject().put("role", "user").put("content", content))
+        val body = JSONObject()
+            .put("model", MODEL)
+            .put("messages", messages)
+            .put("stream", false)
+            .put("temperature", 0.1)
+        val req = Request.Builder()
+            .url("$BASE_URL/chat/completions")
+            .addHeader("Authorization", "Bearer $key")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                onError("视觉模型请求失败：${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        onError("视觉模型返回错误：HTTP ${resp.code}（如果 agnes-3.0-flash 不支持图片输入，会一直报错，需要换一个支持多模态的模型）")
+                        return
+                    }
+                    try {
+                        val text = resp.body?.string().orEmpty()
+                        val json = JSONObject(text)
+                        val reply = json.getJSONArray("choices")
+                            .getJSONObject(0).getJSONObject("message").getString("content").trim()
+                        onResult(reply)
+                    } catch (e: Exception) {
+                        onError("解析视觉模型返回内容失败：${e.message}")
+                    }
+                }
+            }
+        })
+    }
+
     @Synchronized
     fun resetHistory() {
         history.clear()

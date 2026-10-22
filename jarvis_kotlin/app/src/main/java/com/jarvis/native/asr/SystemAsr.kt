@@ -10,17 +10,13 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 
 /**
- * 【降级 / 临时替代】需求文档要求用 sherpa-onnx 流式 zipformer 离线识别，并直接复用
- * 仓库 tudou-doc 历史提交 ae04c76 的 `asr/OfflineAsr.kt`。本次交付环境：
- *   1) 没有该仓库的访问权限，取不到那份已验证代码；
- *   2) 没有公网访问，无法下载 sherpa-onnx 的 AAR 和 onnx 模型文件做验证。
- * 所以二期先用 Android 系统自带的 SpeechRecognizer 顶上，保证"听"这一步能跑通联调；
- * 这不是真正离线识别（多数机型走 Google 在线识别，需要联网，且不满足需求文档"离线"的初衷），
- * 如实标注为降级版。等 sherpa-onnx 的 aar/模型文件就位后，按 OfflineAsr 的方式替换本类，
- * 上层 JarvisAgent 只认 listenOnce/startContinuous 这两个接口，替换时不用动调用方代码。
+ * 【已停用，只留着当应急备份】二期曾经用这个顶替 sherpa-onnx 离线识别（当时没有仓库权限也没有
+ * 公网下载模型/aar）。现在 `JarvisAgent`/`MainActivity` 都已经改接 `OfflineAsrSession`
+ * （真·sherpa-onnx 离线识别），这个类不再被任何地方引用。
  *
- * 魅族 Flyme 上部分版本可能没有可用的 RecognitionService，isAvailable() 会返回 false，
- * 此时自检页要如实显示"系统语音识别不可用"，不能假装能用。
+ * 留着不删是因为它不依赖 sherpa-onnx 的 aar/模型文件，装不上 sherpa-onnx 那套二进制依赖时，
+ * 可以临时把 `JarvisAgent.kt`/`MainActivity.kt` 里的 `OfflineAsrSession` 换回 `SystemAsr`
+ * （两者方法签名一致）应急联调；真正要用离线方案时还是以 `OfflineAsrSession` 为准。
  */
 object SystemAsr {
     private val main = Handler(Looper.getMainLooper())
