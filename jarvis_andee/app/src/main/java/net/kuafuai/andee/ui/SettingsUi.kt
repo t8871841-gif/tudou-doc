@@ -706,10 +706,10 @@ class SettingsUi(
             voiceBlock,
             "voice_provider",
             listOf(
-                // 火山 first, because the first option is the fallback when
-                // nothing is saved — and for every device that predates this
-                // row, 火山 is what it has been running. See
-                // [VoiceConfig.voiceProvider].
+                // Edge first in this fork: it is the shipped default (no
+                // key needed), and the first option is the fallback when
+                // nothing is saved. See [VoiceConfig.voiceProvider].
+                VoiceConfig.VOICE_EDGE to lctx.getString(R.string.settings_voice_provider_edge),
                 VoiceConfig.VOICE_HUOSHAN to lctx.getString(R.string.settings_voice_provider_huoshan),
                 VoiceConfig.VOICE_GOOGLE to lctx.getString(R.string.settings_voice_provider_google),
             ),

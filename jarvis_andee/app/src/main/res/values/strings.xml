@@ -100,6 +100,7 @@
     <string name="settings_voice_provider">语音服务商</string>
     <string name="settings_voice_provider_huoshan">火山</string>
     <string name="settings_voice_provider_google">谷歌</string>
+    <string name="settings_voice_provider_edge">微软 Edge（云扬 · 免费）</string>
     <string name="settings_google_api_key">Google API Key</string>
     <string name="settings_google_api_key_hint">Vertex Express Key,听和说都用它</string>
     <string name="settings_google_key_builtin">已内置(编译时写入),留空即用它</string>

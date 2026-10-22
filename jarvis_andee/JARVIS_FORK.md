@@ -9,4 +9,13 @@
   - `app/src/main/res/mipmap-*`：启动图标替换为 Jarvis 图标，删除原自适应图标 XML 与 webp。
   - `app/src/main/java/net/kuafuai/andee/config/VoiceConfig.kt`：默认大模型端点/模型改为机主自用的 Agnes 配置（不含任何 Key）。
   - `app/src/main/java/net/kuafuai/andee/brain/LocalPrompt.kt`：系统提示词中的自称由 Andee 改为 Jarvis，其余规则未动。
+- 二期（语音与人格）修改文件：
+  - 新增 `app/src/main/java/net/kuafuai/andee/tts/EdgeTts.kt`：微软 Edge 神经网络 TTS 引擎（云扬 zh-CN-YunyangNeural，免费、无需 Key），协议移植自机主 Flutter 版 Jarvis 已真机验证的实现（api.msedgeservices.com + Sec-MS-GEC），MP3 经 MediaCodec 解码为 PCM。
+  - `config/VoiceConfig.kt`：新增语音提供方 `edge`，并设为本分支默认（设置里可切换回火山/谷歌）。
+  - `tts/TtsController.kt`：引擎工厂新增 Edge 分支。
+  - `ui/SettingsUi.kt`：语音服务商选择器新增“微软 Edge（云扬 · 免费）”一项。
+  - `device/SelfCheck.kt`：自检对 Edge 提供方按“无需 Key”判定，连通性探测指向 Edge 主机。
+  - `res/values/strings.xml`、`values-en/strings.xml`：新增提供方名称字符串。
+  - `brain/LocalPrompt.kt`：人格补充——称呼用户为“先生”、默认中文交流、语气克制干练。
+- 注意：Edge 提供方只负责“说”（TTS）；“听”（ASR）仍沿用火山/谷歌路径，无火山 Key 时用打字交互。
 - 仓库根目录 `andee/` 保留上游原样副本，本目录的改动均在 git 历史中可查。

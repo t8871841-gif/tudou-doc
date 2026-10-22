@@ -900,10 +900,12 @@ object SelfCheck {
      */
     private fun voiceKey(context: Context): Finding {
         val cfg = VoiceConfig.load(context)
-        val has = if (cfg.voiceProvider == VoiceConfig.VOICE_GOOGLE) {
-            cfg.googleApiKey.isNotBlank()
-        } else {
-            cfg.apiKey.isNotBlank()
+        val has = when (cfg.voiceProvider) {
+            // Edge speaks with a public client token, not a user key:
+            // there is nothing to be missing.
+            VoiceConfig.VOICE_EDGE -> true
+            VoiceConfig.VOICE_GOOGLE -> cfg.googleApiKey.isNotBlank()
+            else -> cfg.apiKey.isNotBlank()
         }
         return Finding(
             id = "voice_key",
@@ -933,10 +935,10 @@ object SelfCheck {
      * it, synthesis posts to it.
      */
     private fun voiceReach(context: Context, probe: Boolean, online: Boolean): Finding {
-        val host = if (VoiceConfig.voiceProvider(context) == VoiceConfig.VOICE_GOOGLE) {
-            VOICE_HOST_GOOGLE
-        } else {
-            VOICE_HOST
+        val host = when (VoiceConfig.voiceProvider(context)) {
+            VoiceConfig.VOICE_GOOGLE -> VOICE_HOST_GOOGLE
+            VoiceConfig.VOICE_EDGE -> VOICE_HOST_EDGE
+            else -> VOICE_HOST
         }
         if (!probe || !online) {
             return Finding(
@@ -1457,6 +1459,9 @@ object SelfCheck {
      * that has to resolve and accept a connection.
      */
     private const val VOICE_HOST_GOOGLE = "aiplatform.googleapis.com"
+
+    /** The Edge TTS host (Jarvis fork) — where the 云扬 speaker connects. */
+    private const val VOICE_HOST_EDGE = "api.msedgeservices.com"
 
     private const val VOICE_PORT = 443
     private const val PROBE_CONNECT_S = 6L

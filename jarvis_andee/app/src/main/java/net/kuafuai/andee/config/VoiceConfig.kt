@@ -109,6 +109,9 @@ data class VoiceConfig(
         const val VOICE_HUOSHAN = "huoshan"
         const val VOICE_GOOGLE = "google"
 
+        /** The Jarvis fork's third provider: Microsoft Edge neural TTS （云扬）, free, no key. Speaking only — listening stays on whichever ASR the other providers use. */
+        const val VOICE_EDGE = "edge"
+
         /**
          * The Vertex endpoint, its Express-keyed surface.
          *
@@ -603,12 +606,11 @@ data class VoiceConfig(
             return when (saved) {
                 VOICE_GOOGLE -> VOICE_GOOGLE
                 VOICE_HUOSHAN -> VOICE_HUOSHAN
-                // Never chosen. A build packaged with a Google key is a build
-                // packaged *for* Google, so that is what it reads as; a build
-                // without one reads as 火山, which is what every build did
-                // before this setting existed. Either way the picker is one tap
-                // away, and a user's own choice always outranks this.
-                "" -> if (googleApiKeyDefault().isNotEmpty()) VOICE_GOOGLE else VOICE_HUOSHAN
+                VOICE_EDGE -> VOICE_EDGE
+                // Never chosen. This fork ships Edge （云扬） as the default
+                // speaker: it needs no key, so a fresh install can talk out
+                // of the box. A user's own choice always outranks this.
+                "" -> VOICE_EDGE
                 else -> VOICE_HUOSHAN
             }
         }
