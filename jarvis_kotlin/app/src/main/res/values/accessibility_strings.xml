@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="jarvis_a11y_description">仅在你让 Jarvis 发短信或 WhatsApp 消息之后的 20 秒内，自动点击“发送”按钮。平时不会读取、记录屏幕内容，也不会点击其他按钮。</string>
+</resources>
