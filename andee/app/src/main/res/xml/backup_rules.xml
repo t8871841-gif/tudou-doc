@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   The pre-Android-12 half of the same rule: nothing leaves the device.
+   See res/xml/data_extraction_rules.xml for why.
+
+   `minSdk` is 30, so this file governs exactly one API level (30) — 31 and up
+   read the other one. It is dead while `android:allowBackup="false"` stands, and
+   it is filled in anyway so that flipping that attribute does not quietly start
+   uploading the vault.
+
+   `device_root` is a real domain here too — the framework has carried
+   DEVICE_ROOT_TREE_TOKEN since device-protected storage landed — but AGP 8.3's
+   `FullBackupContent` lint check validates against a five-value list that
+   predates it and reports an error. `lintVitalRelease` runs on every release
+   build, so that false positive is what used to make `assembleRelease` fail.
+   See data_extraction_rules.xml, which needs the same ignore.
+-->
+<full-backup-content xmlns:tools="http://schemas.android.com/tools">
+    <exclude domain="root" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="device_root" path="." tools:ignore="FullBackupContent" />
+</full-backup-content>

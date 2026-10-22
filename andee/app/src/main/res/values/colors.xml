@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The theme's view of ui/Glass.kt. Every surface this app draws takes its
+      colours from Glass in code; these exist only for the few places the
+      platform paints for us from the theme (status bar, any stock widget an
+      Activity inflates). Keep them in step with Glass rather than inventing
+      a second palette.
+    -->
+    <color name="glass_base">#FF000000</color>
+    <color name="glass_tint">#FF4C6FFF</color>
+    <color name="glass_accent">#FF7FA5FF</color>
+    <color name="glass_label">#FFDCE1EA</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
