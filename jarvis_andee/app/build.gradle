@@ -136,6 +136,11 @@ dependencies {
     implementation 'org.java-websocket:Java-WebSocket:1.5.7'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
+    // Jarvis fork: offline ASR runtime (sherpa-onnx 1.12.23). The AAR is
+    // NOT in git — CI downloads it into app/libs/ before building
+    // (see .github/workflows/build-jarvis-andee-apk.yml).
+    implementation files('libs/sherpa-onnx-1.12.23.aar')
+
     // The robot dog's dongle is a plain USB-serial device (Arduino Nano:
     // CH340/CH9102/FTDI depending on the clone). 3.8.1 deliberately, not the
     // latest: 3.11.0 pulls kotlin-stdlib 2.2.x, whose metadata this project's

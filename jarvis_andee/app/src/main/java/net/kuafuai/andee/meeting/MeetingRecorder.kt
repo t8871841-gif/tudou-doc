@@ -481,10 +481,10 @@ class MeetingRecorder(
         // meeting is not a different kind of listening. Both engines suit a
         // segment exactly: audio goes in for as long as the segment lives,
         // and one final comes back when it is told the segment is over.
-        val asr: AsrEngine = if (VoiceConfig.voiceProvider(context) == VoiceConfig.VOICE_GOOGLE) {
-            GoogleAsr(VoiceConfig.load(context), this)
-        } else {
-            HuoshanAsr(VoiceConfig.load(context), this)
+        val asr: AsrEngine = when (VoiceConfig.voiceProvider(context)) {
+            VoiceConfig.VOICE_GOOGLE -> GoogleAsr(VoiceConfig.load(context), this)
+            VoiceConfig.VOICE_EDGE -> OfflineAsr(VoiceConfig.load(context), this, context)
+            else -> HuoshanAsr(VoiceConfig.load(context), this)
         }
 
         /** Reset by [rotate] when a replacement could not be opened. */

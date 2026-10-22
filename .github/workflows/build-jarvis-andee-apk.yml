@@ -45,6 +45,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-jande-
 
+      # Jarvis fork：离线识别运行时与模型（不进 git，构建时下载）。
+      # AAR 与 Flutter 版 Jarvis 用的 sherpa-onnx 同版本（1.12.23）；
+      # 模型为流式 zipformer 中英双语，只取 App 需要的 4 个文件。
+      - name: Download sherpa-onnx AAR + offline ASR models
+        run: |
+          mkdir -p jarvis_andee/app/libs jarvis_andee/app/src/main/assets/asr /tmp/asr-model
+          curl -sL -o jarvis_andee/app/libs/sherpa-onnx-1.12.23.aar \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar
+          curl -sL -o /tmp/asr-model.tar.bz2 \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2
+          tar -xjf /tmp/asr-model.tar.bz2 -C /tmp/asr-model
+          find /tmp/asr-model -name 'encoder-epoch-99-avg-1.int8.onnx' -exec cp {} jarvis_andee/app/src/main/assets/asr/ \;
+          find /tmp/asr-model -name 'decoder-epoch-99-avg-1.onnx' -exec cp {} jarvis_andee/app/src/main/assets/asr/ \;
+          find /tmp/asr-model -name 'joiner-epoch-99-avg-1.int8.onnx' -exec cp {} jarvis_andee/app/src/main/assets/asr/ \;
+          find /tmp/asr-model -name 'tokens.txt' -exec cp {} jarvis_andee/app/src/main/assets/asr/ \;
+          ls -la jarvis_andee/app/libs/ jarvis_andee/app/src/main/assets/asr/
+          test -f jarvis_andee/app/libs/sherpa-onnx-1.12.23.aar
+          test -f jarvis_andee/app/src/main/assets/asr/encoder-epoch-99-avg-1.int8.onnx
+          test -f jarvis_andee/app/src/main/assets/asr/decoder-epoch-99-avg-1.onnx
+          test -f jarvis_andee/app/src/main/assets/asr/joiner-epoch-99-avg-1.int8.onnx
+          test -f jarvis_andee/app/src/main/assets/asr/tokens.txt
+          rm -rf /tmp/asr-model /tmp/asr-model.tar.bz2
+
       # 个人自用构建：debug 包（debug 签名可直接安装）。无任何 Key 写入，
       # 大模型 Key 由使用者在 App 设置里自填。
       - name: Build debug APK

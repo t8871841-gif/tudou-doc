@@ -214,9 +214,13 @@ class AsrController(
 
         // Which service hears. The pick is a string and the failure direction
         // is 火山 — see [VoiceConfig.voiceProvider] — so an unrecognised value
-        // can only ever mean "keep doing what this device already did".
+        // can only ever mean "keep doing what this device already did". The
+        // Jarvis fork's Edge provider is the exception that proves the rule:
+        // it speaks through Edge but *hears* offline (sherpa-onnx), because
+        // Edge has no listening half to offer.
         val client: AsrEngine = when (cfg.voiceProvider) {
             VoiceConfig.VOICE_GOOGLE -> GoogleAsr(cfg, listener)
+            VoiceConfig.VOICE_EDGE -> OfflineAsr(cfg, listener, context)
             else -> HuoshanAsr(cfg, listener)
         }
         turnSilenceMs = client.silenceMs
