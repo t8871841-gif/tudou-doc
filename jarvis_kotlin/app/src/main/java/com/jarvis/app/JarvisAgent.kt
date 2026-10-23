@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.skill.SkillItem
@@ -185,16 +186,53 @@ object JarvisAgent {
             )
             return
         }
+        // 批五：问答路由——本地模型可用时，"优先本地"先本地答、答不出再云端；
+        // 否则云端优先，云端失败（断网/报错）再用本地兜底。本地只喂原话，不带记忆
+        // 注入（那颗 gemma3 上下文上限 1024，塞不下）。
         setState(ctx, "thinking")
+        val localReady = JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
+        if (localReady && JarvisPrefs.isLocalLlmPrefer(ctx)) {
+            scope.launch {
+                val local = LocalLlm.generate(ctx, text)
+                if (mySeq != genSeq) return@launch
+                if (!local.isNullOrBlank()) {
+                    speakReply(ctx, mySeq, local)
+                } else {
+                    askAgnes(ctx, mySeq, text, memoryContext, localTried = true)
+                }
+            }
+            return
+        }
+        askAgnes(ctx, mySeq, text, memoryContext, localTried = false)
+    }
+
+    private fun askAgnes(ctx: Context, mySeq: Int, text: String, memoryContext: String, localTried: Boolean) {
         AgnesClient.ask(
             ctx, text, memoryContext = memoryContext,
             onResult = { reply -> main.post { if (mySeq == genSeq) speakReply(ctx, mySeq, reply) } },
             onError = { msg ->
                 main.post {
                     if (mySeq != genSeq) return@post
-                    OrbController.showBubble("出错了：$msg")
-                    setState(ctx, "idle")
-                    maybeStartWakeLoop()
+                    val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
+                    if (!canFallback) {
+                        OrbController.showBubble("出错了：$msg")
+                        setState(ctx, "idle")
+                        maybeStartWakeLoop()
+                        return@post
+                    }
+                    // 云端失败 → 本地兜底：答出来就播，答不出再走原来的报错收尾
+                    scope.launch {
+                        val local = LocalLlm.generate(ctx, text)
+                        if (mySeq != genSeq) return@launch
+                        if (!local.isNullOrBlank()) {
+                            OrbController.showBubble("云端连不上，已用本地模型回答")
+                            speakReply(ctx, mySeq, local)
+                        } else {
+                            OrbController.showBubble("出错了：$msg")
+                            setState(ctx, "idle")
+                            maybeStartWakeLoop()
+                        }
+                    }
                 }
             }
         )

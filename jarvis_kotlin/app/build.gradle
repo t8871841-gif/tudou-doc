@@ -40,6 +40,9 @@ dependencies {
     implementation libs.room.ktx
     ksp libs.room.compiler
     implementation libs.kotlinx.coroutines.android
+    // 批五：端侧小模型运行时（MediaPipe LLM Inference），与旧 Flutter 版 LocalLlmBridge 同一版本 0.10.24，
+    // 只吃 .task 模型（用户自备导入，App 不内置不下载）；要求 minSdk 24，与本工程一致。
+    implementation libs.mediapipe.tasks.genai
     // sherpa-onnx 1.12.23（流式 zipformer 离线识别）预编译 aar，官方只发 GitHub Releases，
     // 由 CI 构建时下载放到 app/libs/（不进 git），文件名必须完全一致。
     implementation files('libs/sherpa-onnx-1.12.23.aar')

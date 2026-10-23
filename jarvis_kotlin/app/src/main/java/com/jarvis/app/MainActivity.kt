@@ -30,6 +30,7 @@ import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.hud.HudStageView
+import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.skill.SkillService
@@ -56,6 +57,7 @@ class MainActivity : Activity() {
     companion object {
         const val EXTRA_ACTION = "jarvis_action"
         const val EXTRA_TEXT = "jarvis_text"
+        const val REQ_PICK_MODEL = 5151
     }
 
     private lateinit var statusView: TextView
@@ -77,6 +79,7 @@ class MainActivity : Activity() {
     private lateinit var keyboardToggle: ImageButton
     private lateinit var memoryListContainer: LinearLayout
     private lateinit var skillListContainer: LinearLayout
+    private lateinit var localStatusView: TextView
 
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
@@ -338,15 +341,45 @@ class MainActivity : Activity() {
                 return@launch
             }
             val mem = MemoryService.getInjectableMemories(this@MainActivity)
-            AgnesClient.ask(this@MainActivity, text, memoryContext = mem,
-                onResult = { reply -> runOnUiThread { chatInFlight = false; addBubble(reply, mine = false) } },
-                onError = { e ->
+            // 批五：与语音同路的本地模型路由（优先本地先本地答，答不出再云端）
+            val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
+            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity)) {
+                val local = LocalLlm.generate(this@MainActivity, text)
+                if (!local.isNullOrBlank()) {
+                    chatInFlight = false
+                    addBubble(local, mine = false)
+                    return@launch
+                }
+                askChatAgnes(text, mem, localTried = true)
+                return@launch
+            }
+            askChatAgnes(text, mem, localTried = false)
+        }
+    }
+
+    private fun askChatAgnes(text: String, mem: String, localTried: Boolean) {
+        AgnesClient.ask(this, text, memoryContext = mem,
+            onResult = { reply -> runOnUiThread { chatInFlight = false; addBubble(reply, mine = false) } },
+            onError = { e ->
+                val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(this) && LocalLlm.isReady(this)
+                if (!canFallback) {
                     runOnUiThread {
                         chatInFlight = false
                         addBubble("出错了：$e（Key 在设置里填）", mine = false)
                     }
-                })
-        }
+                    return@ask
+                }
+                // 云端失败 → 本地兜底（批五），答不出再报原来的错
+                uiScope.launch {
+                    val local = LocalLlm.generate(this@MainActivity, text)
+                    chatInFlight = false
+                    if (!local.isNullOrBlank()) {
+                        addBubble("（云端连不上，本地模型答）$local", mine = false)
+                    } else {
+                        addBubble("出错了：$e（Key 在设置里填）", mine = false)
+                    }
+                }
+            })
     }
 
     // ---------- 底部：静音 / 麦克风 / 键盘切换 + 折叠输入行 ----------
@@ -436,6 +469,7 @@ class MainActivity : Activity() {
             refresh()
             refreshMemoryList()
             refreshSkillList()
+            refreshLocalStatus()
         }
     }
 
@@ -479,6 +513,7 @@ class MainActivity : Activity() {
         buildEntrySection(root)
         buildMemorySection(root)
         buildSkillSection(root)
+        buildLocalLlmSection(root)
         buildAuditSection(root)
         return ScrollView(this).apply { addView(root) }
     }
@@ -913,6 +948,107 @@ class MainActivity : Activity() {
                 })
                 skillListContainer.addView(row)
             }
+        }
+    }
+
+    /** 批五新增：「本地模型」分区——导入 .task、开关、优先本地、maxTokens、试答、删除。运行时是 LocalLlm（MediaPipe）。 */
+    private fun buildLocalLlmSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "本地模型（端侧小模型）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        localStatusView = TextView(this).apply { textSize = 12f; setTextColor(0x8AFFFFFF.toInt()) }
+        root.addView(localStatusView)
+        refreshLocalStatus()
+        root.addView(btn("导入模型文件（.task）") {
+            try {
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(i, REQ_PICK_MODEL)
+            } catch (e: Exception) {
+                toast("打不开文件选择器：${e.message}")
+            }
+        })
+        root.addView(CheckBox(this).apply {
+            text = "启用本地模型"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isLocalLlmEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setLocalLlmEnabled(this@MainActivity, checked) }
+        })
+        root.addView(CheckBox(this).apply {
+            text = "优先本地回答（关 = 只在云端失败时用本地兜底）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isLocalLlmPrefer(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setLocalLlmPrefer(this@MainActivity, checked) }
+        })
+        val tokensInput = EditText(this).apply {
+            hint = "maxTokens（256–1024，你的 gemma3 上限就是 1024）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(JarvisPrefs.getLocalMaxTokens(this@MainActivity).toString())
+        }
+        root.addView(tokensInput)
+        root.addView(btn("保存 maxTokens") {
+            val v = tokensInput.text.toString().trim().toIntOrNull()
+            if (v == null) {
+                toast("填个数字")
+            } else {
+                JarvisPrefs.setLocalMaxTokens(this@MainActivity, v)
+                tokensInput.setText(JarvisPrefs.getLocalMaxTokens(this@MainActivity).toString())
+                toast("已保存（实际生效值 ${JarvisPrefs.getLocalMaxTokens(this@MainActivity)}）")
+            }
+        })
+        val testInput = EditText(this).apply {
+            hint = "试答一句（如：给我讲个一句话笑话）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+        }
+        root.addView(testInput)
+        root.addView(btn("用本地模型试答") {
+            val q = testInput.text.toString().trim()
+            if (q.isEmpty()) {
+                toast("先写一句话")
+                return@btn
+            }
+            if (!LocalLlm.isReady(this@MainActivity)) {
+                toast("还没导入模型")
+                return@btn
+            }
+            toast("本地生成中，稍等…")
+            uiScope.launch {
+                val out = LocalLlm.generate(this@MainActivity, q)
+                toast(if (out.isNullOrBlank()) "本地模型没答出来（加载或生成失败）" else "本地答：${out.take(120)}")
+            }
+        })
+        root.addView(btn("删除已导入的模型") {
+            LocalLlm.deleteModel(this@MainActivity)
+            refreshLocalStatus()
+            toast("模型已删除")
+        })
+    }
+
+    private fun refreshLocalStatus() {
+        if (!::localStatusView.isInitialized) return
+        localStatusView.text = LocalLlm.statusText(this)
+    }
+
+    @Deprecated("文件选择器回调")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PICK_MODEL) return
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) return
+        toast("模型导入中，文件大请稍等…")
+        uiScope.launch {
+            val path = LocalLlm.importPicked(this@MainActivity, uri)
+            if (path != null) {
+                JarvisPrefs.setLocalLlmPath(this@MainActivity, path)
+                toast("模型已导入")
+            } else {
+                toast("导入失败，文件读不进来")
+            }
+            refreshLocalStatus()
         }
     }
 

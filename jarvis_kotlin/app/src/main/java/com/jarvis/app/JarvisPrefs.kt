@@ -49,6 +49,34 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_SKILL_ENABLED, on).apply()
     }
 
+    // ---------- 批五：端侧小模型（开关/模型路径/maxTokens/优先本地） ----------
+
+    private const val KEY_LOCAL_ENABLED = "local_llm_enabled"
+    private const val KEY_LOCAL_PATH = "local_llm_path"
+    private const val KEY_LOCAL_MAX_TOKENS = "local_llm_max_tokens"
+    private const val KEY_LOCAL_PREFER = "local_llm_prefer"
+
+    fun isLocalLlmEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_LOCAL_ENABLED, false)
+    fun setLocalLlmEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_LOCAL_ENABLED, on).apply()
+    }
+
+    fun getLocalLlmPath(ctx: Context): String = p(ctx).getString(KEY_LOCAL_PATH, "") ?: ""
+    fun setLocalLlmPath(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_LOCAL_PATH, v.trim()).apply()
+    }
+
+    /** 上限 1024：用户那颗 gemma3-tudou.task 的上下文上限就是 1024，超了模型加载失败（旧桥踩过）。 */
+    fun getLocalMaxTokens(ctx: Context): Int = p(ctx).getInt(KEY_LOCAL_MAX_TOKENS, 1024)
+    fun setLocalMaxTokens(ctx: Context, v: Int) {
+        p(ctx).edit().putInt(KEY_LOCAL_MAX_TOKENS, v.coerceIn(256, 1024)).apply()
+    }
+
+    fun isLocalLlmPrefer(ctx: Context): Boolean = p(ctx).getBoolean(KEY_LOCAL_PREFER, false)
+    fun setLocalLlmPrefer(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_LOCAL_PREFER, on).apply()
+    }
+
     private const val KEY_MUTED = "tts_muted"
 
     /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */
