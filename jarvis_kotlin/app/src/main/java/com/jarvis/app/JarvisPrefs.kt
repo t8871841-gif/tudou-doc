@@ -149,6 +149,19 @@ object JarvisPrefs {
 
     private const val KEY_MUTED = "tts_muted"
 
+    // 批八：语音引擎三档——auto（云扬优先，失败重试一次再落系统）/ edge（只云扬）/ system（只系统）。
+    // jk-v12 真机反馈两个声来回跳，先给用户一个能锁死的档位。
+    private const val KEY_TTS_ENGINE = "tts_engine"
+    fun getTtsEngine(ctx: Context): String = p(ctx).getString(KEY_TTS_ENGINE, "auto") ?: "auto"
+    fun setTtsEngine(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_TTS_ENGINE, v).apply()
+    }
+    fun ttsEngineLabel(v: String): String = when (v) {
+        "edge" -> "只用云扬"
+        "system" -> "只用系统"
+        else -> "自动"
+    }
+
     /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */
     fun isMuted(ctx: Context): Boolean = p(ctx).getBoolean(KEY_MUTED, false)
     fun setMuted(ctx: Context, on: Boolean) {

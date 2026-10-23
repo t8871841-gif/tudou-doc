@@ -130,6 +130,22 @@ object OfflineAsrSession {
             currentEngine?.sendAudio(ByteArray(0), true)
             return
         }
+        // 批八：给录音会话挂系统音频效果——回声消除（治播报回声误触发打断的关键一环）、
+        // 降噪、自动增益，设备支持才生效，不支持静默跳过。效果对象随 recorder 会话存活，
+        // recorder.release() 后由系统回收，这里不单独持有引用。
+        try {
+            val sid = recorder.audioSessionId
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                android.media.audiofx.AcousticEchoCanceler.create(sid)?.enabled = true
+            }
+            if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                android.media.audiofx.NoiseSuppressor.create(sid)?.enabled = true
+            }
+            if (android.media.audiofx.AutomaticGainControl.isAvailable()) {
+                android.media.audiofx.AutomaticGainControl.create(sid)?.enabled = true
+            }
+        } catch (_: Exception) {
+        }
         val t = Thread({
             val buf = ByteArray(CHUNK_BYTES)
             var spokeAny = false

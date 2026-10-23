@@ -73,7 +73,6 @@ class MainActivity : Activity() {
     private lateinit var bgView: HudBackgroundView
     private lateinit var statusEnView: TextView
     private lateinit var statusCnView: TextView
-    private lateinit var clockView: TextView
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
@@ -94,13 +93,20 @@ class MainActivity : Activity() {
     private var chatInFlight = false
 
     private val main = Handler(Looper.getMainLooper())
-    private val clockFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-    private var tickRunnable: Runnable? = null
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 批八：真全屏——隐藏系统状态栏（顶部下拉可临时唤出），此前主界面一直顶着状态栏不算全屏。
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        window.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
 
         val root = FrameLayout(this)
         root.addView(
@@ -116,14 +122,8 @@ class MainActivity : Activity() {
             micLevel = { OfflineAsrSession.currentLevel() }
         }
         root.addView(bgView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        root.addView(
-            GradientLayerView(
-                this,
-                intArrayOf(Color.argb(166, 0, 0, 0), Color.argb(0, 0, 0, 0), Color.argb(204, 0, 0, 0)),
-                floatArrayOf(0f, 0.5f, 1f), diagonal = false
-            ),
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-        )
+        // 批八：原先这里还盖着一层全屏黑色半透明渐变膜（上 65% 黑→中透明→下 80% 黑），
+        // 整个界面发朦就是它——按用户要求撤掉；背景的光晕+点阵（上一层）与底部玻璃框保留不动。
 
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(buildTopBar())
@@ -156,7 +156,6 @@ class MainActivity : Activity() {
         handleAssistIntent(intent)
         // 批二：常驻与否现在是"设置里记住的选择"，不再是每次开 App 都无条件偷偷启动。
         if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
-        startClock()
     }
 
     // ---------- 顶栏：status dot + SYSTEM ACTIVE ... 时钟 ----------
@@ -176,22 +175,7 @@ class MainActivity : Activity() {
             letterSpacing = 0.12f
         })
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
-        clockView = TextView(this@MainActivity).apply {
-            setTextColor(0x8AFFFFFF.toInt())
-            textSize = 11f
-            letterSpacing = 0.2f
-        }
-        addView(clockView)
-    }
-
-    private fun startClock() {
-        tickRunnable = object : Runnable {
-            override fun run() {
-                clockView.text = clockFmt.format(java.util.Date())
-                main.postDelayed(this, 1000)
-            }
-        }
-        main.post(tickRunnable!!)
+        // 批八：顶栏时钟按用户要求删除（连同每秒刷新），顶栏只留状态点 + SYSTEM ACTIVE。
     }
 
     // ---------- 舞台：HudStageView + 齿轮(设置) + 状态文字 + 唤醒词胶囊 ----------
@@ -347,6 +331,14 @@ class MainActivity : Activity() {
             if (ack != null) {
                 chatInFlight = false
                 addBubble(ack, mine = false)
+                return@launch
+            }
+            // 批八：打字路径与语音同路过本地指令层（打电话/打开应用），命中直接办、回执进气泡不朗读。
+            if (com.jarvis.app.command.LocalCommands.tryHandle(this@MainActivity, text) { reply ->
+                    runOnUiThread { addBubble(reply, mine = false) }
+                }
+            ) {
+                chatInFlight = false
                 return@launch
             }
             val mem = MemoryService.getInjectableMemories(this@MainActivity)
@@ -563,6 +555,9 @@ class MainActivity : Activity() {
         root.addView(btn("申请电池优化豁免") {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         })
+        root.addView(btn("申请通讯录权限（「打电话给…」指令要用）") {
+            requestPermissions(arrayOf(android.Manifest.permission.READ_CONTACTS), 6201)
+        })
         root.addView(btn("启动常驻服务") { startKeepAlive(manual = true) })
         root.addView(orbButton)
         root.addView(btn("测试：读取当前界面") {
@@ -639,6 +634,29 @@ class MainActivity : Activity() {
             JarvisPrefs.setVoice(this, selectedVoice)
             toast("已保存，先点“试听”确认效果")
         })
+        // 批八：语音引擎三档（治两个声来回跳）——自动/只用云扬/只用系统，点按循环切换。
+        val engineBtn = Button(this)
+        fun refreshEngineBtn() {
+            engineBtn.text = "语音引擎：${JarvisPrefs.ttsEngineLabel(JarvisPrefs.getTtsEngine(this))}（点按切换）"
+        }
+        engineBtn.setOnClickListener {
+            val next = when (JarvisPrefs.getTtsEngine(this)) {
+                "auto" -> "edge"
+                "edge" -> "system"
+                else -> "auto"
+            }
+            JarvisPrefs.setTtsEngine(this, next)
+            refreshEngineBtn()
+            toast(
+                when (next) {
+                    "edge" -> "只用云扬：断网时只出文字，不换系统声"
+                    "system" -> "只用系统语音：不依赖网络"
+                    else -> "自动：云扬失败重试一次，再落系统语音"
+                }
+            )
+        }
+        refreshEngineBtn()
+        root.addView(engineBtn)
 
         val wakeBox = CheckBox(this).apply {
             text = "开启唤醒词「贾维斯」（离线识别轮询，非专用低功耗 KWS，见自检详情）"
@@ -1313,7 +1331,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        tickRunnable?.let { main.removeCallbacks(it) }
         if (JarvisAgent.onStateChanged != null) JarvisAgent.onStateChanged = null
         JarvisAgent.onUserText = null
         JarvisAgent.onReplyText = null
@@ -1363,6 +1380,12 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 7 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             startKeepAlive(manual = true)
+        }
+        if (requestCode == 6201) {
+            toast(
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) "通讯录权限已给，「打电话给…」能用了"
+                else "没给通讯录权限，「打电话给…」用不了"
+            )
         }
         if (showingSettings) refresh()
     }

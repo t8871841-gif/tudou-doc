@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
@@ -184,6 +185,9 @@ object JarvisAgent {
     }
 
     private fun handleUtterance(ctx: Context, mySeq: Int, text: String, memoryContext: String, skill: SkillItem?) {
+        // 批八：本地指令层——「打电话给X」「打开X」先于技能与聊天执行，命中即办，
+        // 不再掉进大模型被学舌反问（jk-v12 真机反馈）。
+        if (LocalCommands.tryHandle(ctx, text) { reply -> speakReply(ctx, mySeq, reply) }) return
         if (skill != null) {
             setState(ctx, "thinking")
             SkillRunner.run(ctx, skill) { ok, detail ->
@@ -305,13 +309,18 @@ object JarvisAgent {
      * 真机联调如果经常被自己的播报打断自己，先把"打断说话"开关关掉，或改用听筒/耳机测试。
      */
     private fun startBargeInWatch(ctx: Context, mySeq: Int) {
-        // 留 500ms 起播缓冲，避免刚开口的瞬间杂音立刻触发。
+        // 批八收紧（jk-v12 真机反馈：自己播报的回声被麦克风拾到、2 个字就误判打断，
+        // 回复没播完就跳去聆听）：起播缓冲 500ms → 1200ms；判定改成「连续两次中间结果
+        // 都 ≥4 个字」才算真有人插话；录音端另有 AEC 回声消除配合（OfflineAsrSession）。
         main.postDelayed({
             if (mySeq != genSeq || state != "speaking") return@postDelayed
+            var strongHits = 0
             OfflineAsrSession.listenOnce(
                 ctx,
                 onPartial = { txt ->
-                    if (mySeq == genSeq && state == "speaking" && txt.trim().length >= 2) {
+                    if (mySeq != genSeq || state != "speaking") return@listenOnce
+                    if (txt.trim().length >= 4) strongHits++ else strongHits = 0
+                    if (strongHits >= 2) {
                         main.post {
                             if (mySeq != genSeq || state != "speaking") return@post
                             TtsRouter.stop()
@@ -323,7 +332,7 @@ object JarvisAgent {
                 onFinal = { /* 播报期间的识别只用来判断"有没有在说话"，最终结果走 beginListening 重新识别一次 */ },
                 onError = { /* 播报期间识别拿不到结果很正常（本来就没人说话），忽略 */ }
             )
-        }, 500)
+        }, 1200)
     }
 
     // ---------- 第 5 条：唤醒词（仍是降级版——真离线 ASR 已接上，但不是专门的低功耗 KWS） ----------
