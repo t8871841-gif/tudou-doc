@@ -11,9 +11,10 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * 天气数据工具（批十）：问天气不再让模型编——直连 Open-Meteo（免费、无需 Key）：
- * 地名 → 地理编码 → 实时+今日预报，拼成一句事实中文直接答。
- * 查不到（断网/无此地）回调 null，上层如实说没查到，不许落回模型编造。
+ * 天气数据工具（批十）：问天气不再让模型编——查真数据拼成一句事实中文直接答：
+ * 地名 → 地理编码（Nominatim/OSM 为主，Open-Meteo 编码兜底）→ Open-Meteo 预报
+ * （免费、无需 Key）。查不到（断网/无此地）回调 null，上层如实说没查到，
+ * 不许落回模型编造。
  */
 object WeatherTool {
 
@@ -43,27 +44,73 @@ object WeatherTool {
 
     /** 查 city 的天气，回调一句拼好的中文；任何失败回调 null。 */
     fun fetch(city: String, tomorrow: Boolean, cb: (String?) -> Unit) {
-        val geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name=${Uri.encode(city)}&count=1&language=zh&format=json"
-        client.newCall(Request.Builder().url(geoUrl).build()).enqueue(object : Callback {
+        // 地理编码先走 Nominatim（OSM）：实测 Open-Meteo 自带编码库中文城市覆盖差
+        // （搜「新乡」给的是重庆同名乡镇、河南省会级城市反而没有），Nominatim 能正确
+        // 给出新乡市/郑州市/波哥大的行政区划坐标。Nominatim 失败再落 Open-Meteo 编码兜底。
+        geocodeNominatim(city) { loc ->
+            if (loc != null) {
+                fetchForecast(city, loc.first, loc.second, tomorrow, cb)
+            } else {
+                geocodeOpenMeteo(city) { loc2 ->
+                    if (loc2 != null) fetchForecast(city, loc2.first, loc2.second, tomorrow, cb) else cb(null)
+                }
+            }
+        }
+    }
+
+    private fun geocodeNominatim(city: String, cb: (Pair<Double, Double>?) -> Unit) {
+        val url = "https://nominatim.openstreetmap.org/search?q=${Uri.encode(city)}&format=json&limit=5&accept-language=zh"
+        val req = Request.Builder().url(url)
+            .header("User-Agent", "Jarvis/1.0 (personal assistant app)")
+            .build()
+        client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) = cb(null)
             override fun onResponse(call: Call, resp: Response) {
-                val loc = try {
-                    val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("results")
-                    arr?.optJSONObject(0)
+                cb(try {
+                    val arr = org.json.JSONArray(resp.body?.string().orEmpty())
+                    var first: Pair<Double, Double>? = null
+                    var admin: Pair<Double, Double>? = null
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val p = o.optDouble("lat", Double.NaN) to o.optDouble("lon", Double.NaN)
+                        if (p.first.isNaN()) continue
+                        if (first == null) first = p
+                        if (o.optString("type") == "administrative") {
+                            admin = p
+                            break
+                        }
+                    }
+                    admin ?: first
                 } catch (_: Exception) {
                     null
-                }
-                if (loc == null) {
-                    cb(null)
-                    return
-                }
-                fetchForecast(
-                    cityName = loc.optString("name", city),
-                    lat = loc.optDouble("latitude", Double.NaN),
-                    lon = loc.optDouble("longitude", Double.NaN),
-                    tomorrow = tomorrow,
-                    cb = cb
-                )
+                })
+            }
+        })
+    }
+
+    private fun geocodeOpenMeteo(city: String, cb: (Pair<Double, Double>?) -> Unit) {
+        val url = "https://geocoding-api.open-meteo.com/v1/search?name=${Uri.encode(city)}&count=10&language=zh&format=json"
+        client.newCall(Request.Builder().url(url).build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) = cb(null)
+            override fun onResponse(call: Call, resp: Response) {
+                cb(try {
+                    val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("results")
+                    var best: Pair<Double, Double>? = null
+                    var bestPop = -1L
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val o = arr.optJSONObject(i) ?: continue
+                            val pop = o.optLong("population", 0)
+                            if (pop > bestPop) {
+                                bestPop = pop
+                                best = o.optDouble("latitude", Double.NaN) to o.optDouble("longitude", Double.NaN)
+                            }
+                        }
+                    }
+                    best?.takeIf { !it.first.isNaN() }
+                } catch (_: Exception) {
+                    null
+                })
             }
         })
     }
