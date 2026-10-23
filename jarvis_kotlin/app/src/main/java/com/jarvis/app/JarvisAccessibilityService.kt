@@ -76,6 +76,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         private val FORBIDDEN_INPUT = Regex("密码|验证码|password|passcode", RegexOption.IGNORE_CASE)
 
         @Volatile var instance: JarvisAccessibilityService? = null
+
+        /**
+         * 批九：任务循环（task/TaskLoop）运行期间把它的 ScreenController 注册到这里，
+         * onAccessibilityEvent 转发 noteEvent 喂它的界面静稳判定；没有任务在跑时为 null。
+         */
+        @Volatile var screenController: com.jarvis.app.screen.ScreenController? = null
         @Volatile private var armedUntil = 0L
         @Volatile private var allowedPackages: Set<String> = emptySet()
         @Volatile private var state = "idle" // idle | armed | clicked | timeout
@@ -306,12 +312,15 @@ class JarvisAccessibilityService : AccessibilityService() {
         instance = this
         OrbController.attach(this) // 悬浮球：开关记在 SharedPreferences，服务起来就自动恢复
         TakeoverBorder.attach(this) // 三期：看屏代理接管时的彩光边框
+        com.jarvis.app.screen.GroundingLog.init(this) // 批九：移植的落点记录（默认关，开后才真正初始化）
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         finishTask("cancelled", "无障碍服务已断开")
         OrbController.detach()
         TakeoverBorder.detach()
+        com.jarvis.app.screen.GroundingLog.shutdown() // 批九
+        screenController = null
         instance = null
         disarm()
         // 返回 true 允许系统在被 ROM 回收后自动重绑（Flyme 等系统杀无障碍时更易自恢复）
@@ -321,6 +330,8 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         OrbController.detach()
         TakeoverBorder.detach()
+        com.jarvis.app.screen.GroundingLog.shutdown() // 批九
+        screenController = null
         instance = null
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -470,6 +481,13 @@ class JarvisAccessibilityService : AccessibilityService() {
     // ---------------- 旧模式：事件驱动，只点“发送” ----------------
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // 批九：先喂任务循环的 ScreenController（界面静稳判定靠它），与下面旧模式互不影响。
+        if (event != null) {
+            try {
+                screenController?.noteEvent(event)
+            } catch (_: Exception) {
+            }
+        }
         if (event == null || task != null || !isArmed()) return
         val type = event.eventType
         if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&

@@ -28,7 +28,11 @@ object AgnesClient {
     private const val SYSTEM_PROMPT =
         "你是 Jarvis，用户的个人智能助理。自称 Jarvis，称呼用户\"先生\"。默认使用中文回答，" +
             "语气克制、干练、不啰嗦；你的回答会直接被朗读出来，所以不要使用markdown、列表符号、" +
-            "表情符号，只用适合语音播报的自然口语短句。遇到做不到或失败的事情直说，不要编造。"
+            "表情符号，只用适合语音播报的自然口语短句。遇到做不到或失败的事情直说，不要编造。" +
+            // 批九硬约束（jk-v14 真机：问天气被编出"晴朗，60 度"）：实时信息没来源就不许编。
+            "特别注意：天气、气温、时间日期、新闻、价格、汇率、股价、路况这类实时信息，" +
+            "你没有任何数据来源，不知道就是不知道，必须明说\"这个我查不到\"，绝对禁止编造具体数值、" +
+            "预报或看似确切的说法。记不清的事实同样不要装作确定。"
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -98,6 +102,72 @@ object AgnesClient {
                         onResult(reply)
                     } catch (e: Exception) {
                         onError("解析视觉模型返回内容失败：${e.message}")
+                    }
+                }
+            }
+        })
+    }
+
+    /**
+     * 批九新增：单轮调用，不进滚动对话历史（任务循环 task/TaskLoop 用）。
+     * 系统提示与用户内容都由调用方给；[jpegBase64] 非空时按多模态格式附图
+     * （任务循环每步的截图）。走对话同一套 Key/模型（agnes-3.0-flash），
+     * 回调在后台线程。任务循环有自己的步数序号管急停，这里不掺 cancelSeq。
+     */
+    fun askOnce(
+        ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
+        onResult: (String) -> Unit, onError: (String) -> Unit
+    ) {
+        val key = JarvisPrefs.getAgnesKey(ctx)
+        if (key.isBlank()) {
+            onError("未配置 Agnes API Key，请先去设置里填写")
+            return
+        }
+        val userContent: Any = if (jpegBase64.isNullOrBlank()) {
+            userText
+        } else {
+            JSONArray()
+                .put(JSONObject().put("type", "text").put("text", userText))
+                .put(
+                    JSONObject().put("type", "image_url").put(
+                        "image_url",
+                        JSONObject().put("url", "data:image/jpeg;base64,$jpegBase64")
+                    )
+                )
+        }
+        val messages = JSONArray()
+            .put(JSONObject().put("role", "system").put("content", systemPrompt))
+            .put(JSONObject().put("role", "user").put("content", userContent))
+        val body = JSONObject()
+            .put("model", MODEL)
+            .put("messages", messages)
+            .put("stream", false)
+            .put("temperature", 0.2)
+        val req = Request.Builder()
+            .url("$BASE_URL/chat/completions")
+            .addHeader("Authorization", "Bearer $key")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                onError("网络请求失败：${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        onError("Agnes 接口返回错误：HTTP ${resp.code}")
+                        return
+                    }
+                    try {
+                        val text = resp.body?.string().orEmpty()
+                        val json = JSONObject(text)
+                        val reply = json.getJSONArray("choices")
+                            .getJSONObject(0).getJSONObject("message").getString("content").trim()
+                        onResult(reply)
+                    } catch (e: Exception) {
+                        onError("解析 Agnes 返回内容失败：${e.message}")
                     }
                 }
             }

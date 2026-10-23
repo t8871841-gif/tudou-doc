@@ -367,3 +367,25 @@
 4. **悬浮球**：168dp → 120dp（用户改定）。
 5. **主界面**：onCreate 加全屏标志隐藏系统状态栏；顶栏时钟连同 startClock 一并删除；**撤全屏黑色半透明渐变膜**（盖在背景之上的第三层 GradientLayerView，上 65% 黑→下 80% 黑——整个界面发朦就是它）。按用户纠正：背景光晕+点阵保留、底部对话/输入区玻璃框保留，只撤整界面那层膜。
 - 本批未构建：代码入仓后打包发用户转 Claude 复核，意见回来再改/再构建（jk-v13 候选）。
+
+---
+
+## 批九：移植 Andee 跨应用引擎 + 多步任务循环（jk-v14 真机反馈后，用户下令实施，未构建未真机）
+
+背景：jk-v14 真机，用户说「在微信上给桑田发信息：晚上我回家吃饭」——现有意图一条没匹配上，整句掉进聊天被模型原样复述，微信没打开。查实：vision/ScreenVisionAgent 只有一次性 locateAndTap + describeScreen，没有多步任务能力；顺带发现问「今天天气如何」被模型编出「晴朗，60 度」（无任何天气数据源）。用户令：把 Andee 的无障碍跨应用代码直接复制过来。
+
+1. **移植 screen/ 包（源自仓库内 andee/ 原版，实现逻辑原样，只动接线层，文件头有移植横幅）**：
+   - `screen/ScreenController.kt`（3,722 行）：归一化坐标、网格 A1–H12 标定、zoom 瞄准、eid 定位、tap/swipe/输入/滚动/截图/弹窗与盲树防护，每步返回 JSONObject。接线改动：包名；marker 类型换本包 TapMarkerUi；reviveNote 前台包名改走 JarvisAccessibilityService.foregroundPackage()；annotate 的自家卡片分支改「dump 的 pkg 是 Jarvis 自己」判定（FullscreenCard 分支无对应设施整支删除）；模型可见文案 Andee→Jarvis；awaitHelper 删往 Andee 聊天记录加提示的一行（无此设施）；dumpUiTree 的 withShot 默认值改字面量 false（原 ToolSchemas 常量即 false）；screenshot 来源标记与 SHOT_MAX_SIDE 改字面量（"accessibility" / 1280，原 ScreenCapture 同值）。
+   - `screen/A11yIme.kt`（193 行，原样）：走无障碍服务自身 InputMethod 的输入通道（API 33+），是 ScreenController 输入的首选通道。为此 `res/xml/accessibility_service_config.xml` 的 accessibilityFlags 追加 `flagInputMethodEditor`。
+   - `screen/GroundingLog.kt`（384 行）：落点/截图配对记录，默认关；唯一外部依赖 VoiceConfig 换成 JarvisPrefs.isGroundingEnabled（新增 key `grounding_enabled`，默认 false，设置页暂无入口）。服务在 onServiceConnected init、onDestroy/onUnbind shutdown。
+   - `screen/TreeHelper.kt`（58 行，原样）：被「扣留」界面（withheld）的树助手唤醒，无 WRITE_SECURE_SETTINGS 时自动 no-op。
+   - `screen/TapMarkerUi.kt`（42 行，新写适配）：**绘制层未移植**——原版在屏幕上画落点圆环供模型核对，本类只保留同名接口与真实的落点状态记录（GroundingLog 要用），mark() 记坐标时间戳、revealNow() 为空操作。纯视觉反馈缺失，不影响动作执行与成败判定；移植绘制层时只需替换本类实现。
+2. **裁剪清单（没有静默编造替代实现）**：
+   - **ADBKeyboard 输入路线整链裁掉**：原版兜底通道靠第三方输入法 App 的广播 + ui/ImeSwitch 借还默认输入法，本工程没有这套设施。替换为新写 `typeViaSetText`：对焦点编辑节点 ACTION_SET_TEXT + 双路读回验证（读回纪律与原版一致，密码框拒填）。已知代价：原版记录里 SET_TEXT 进不了的少数自绘编辑器（如 CodeMirror 类），本站兜底同样进不去，会读回不一致如实报错——A11yIme 首选通道（commitText 正统路径）不受影响。ADB 三常量、CLIPBOARD_LABELS/PASTE_LABELS/SCROLL_TAG（原文件内本就未使用）一并移除。
+   - **ScreenCapture 未移植**（MediaProjection 截图兜底，需 Activity 授权流）：本工程已有 JarvisAccessibilityService.captureScreen 视觉通道；任务循环在前台包命中截图黑名单时直接不带图、只喂元素大纲。
+   - BodyCoreService（3,434 行）只借鉴循环结构，未整搬（它绑 Andee 的人格/配置/服务生命周期）。
+3. **任务循环 `task/TaskLoop.kt`（394 行，新建）**：任务原文 → 最多 12 步循环：ScreenController.dumpUiTree 取元素大纲（文本行：编号|控件|文字|[0-1000 中心]）+ screenshot 取带网格截图（黑名单包不取图）→ AgnesClient 新增 `askOnce`（单轮、不进聊天历史、可选附图）让模型只输出一个 JSON 动作 → 映射到 ScreenController 真实 API 执行（eid→tapByEid/longPressByEid；cell/x/y→tapAim/longPressAim，on 区分 screen/zoom；swipe→swipeNorm；type→typeText；submit→submitInput；zoom→zoomAim，放大图转 JPEG 作下一轮观察图；back/home→globalAction；openApp→LocalCommands.launchApp；wait 上限 3 秒）→ 结果摘要记 AuditLog 并带进下一轮提示。模型输出解析不了时带原因重试一次，再不行 fail 收尾并如实回报卡在哪一步；步数用完同样如实回报最后进展。执行期间 TakeoverBorder 亮起；急停双通道：Agent 的 genSeq（isAlive 回调）+ TaskLoop 自有 runSeq（hardResetToIdle 已接 cancelInFlight）。任务运行期间其 ScreenController 注册在 JarvisAccessibilityService.screenController，onAccessibilityEvent 转发 noteEvent 喂其界面静稳判定。
+4. **任务路由**：JarvisAgent.handleUtterance 在 LocalCommands 之后、TAP_INTENT 之前加 TaskLoop.looksLikeTask 保守判定（「在<应用>上/里给<人>发信息…」「给<人>发微信/信息…」「打开<应用>…给/发…」三组句式，需双信号、带问号直接放行）；技能匹配在上层对任务句式让行（不拿旧录像顶替现场执行）；LocalCommands 新增任务句式守卫（句中含「给…发信息/发消息/发微信/发短信/发送」时不按「打开X」吞掉）并抽出 `launchApp(ctx, name): String` 供循环复用。原句整句（含冒号后内容）作为任务交给循环。
+5. **聊天防编造**：AgnesClient 的 SYSTEM_PROMPT 与 LocalLlm.buildPrompt 的系统句各加同一条硬约束：天气/气温/时间/新闻/价格等实时信息没有数据来源时必须明说查不到，禁止编造具体数值。
+- 安全边界变化（如实记录）：任务循环走 ScreenController，不经旧任务引擎的 HARD_WHITELIST/FORBIDDEN_CLICK，靠 Andee 自带防护（弹窗守卫、同位置连点守卫、盲树必须先 zoom 才能点）+ 提示词硬规则（不输密码/验证码、不点付款/转账/删除）+ TaskLoop 的截图黑名单；typeViaSetText 对密码框拒填，但 A11yIme 首选通道是 commitText，若焦点恰在密码框仍可能写入——靠提示词规则拦，不做密码任务。
+- 未验：**未构建、未真机**。静态自查已做：括号配平、重复 import、重复函数签名、`$变量` 紧贴中文专项扫描（本批新代码零命中）、跨文件成员引用逐项核对（构造签名、tapAim/zoomAim/swipeNorm 等真实签名与调用逐一对齐）。风险点：Agnes 的 agnes-3.0-flash 看图能力未验证（不行则循环退化为纯元素大纲模式或失败）；flagInputMethodEditor 在 Flyme 上的行为未验证；悬浮球未做 ownArea 遮罩，可能出现在任务截图里；ScreenController 的 takeScreenshot 无 API 30 守卫（minSdk 24，目标机 Android 13 不受影响，低版本机型调用会崩）；TapMarkerUi 绘制未移植（见上）。

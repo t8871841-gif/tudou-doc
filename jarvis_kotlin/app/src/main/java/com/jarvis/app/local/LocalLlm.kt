@@ -41,7 +41,8 @@ object LocalLlm {
 
     /** 把用户的话套进 Gemma 指令模型的对话模板（jk-v11 真机教训：直喂原话会胡言乱语、复读数字串）。 */
     private fun buildPrompt(userText: String): String =
-        "<start_of_turn>user\n你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。\n\n$userText<end_of_turn>\n<start_of_turn>model\n"
+        // 批九硬约束（与 AgnesClient 同一条线）：本地模型同样不许编造实时信息。
+        "<start_of_turn>user\n你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。天气、气温、时间、新闻、价格这类实时信息你没有数据来源，查不到就明说查不到，绝对不要编造具体数值。\n\n$userText<end_of_turn>\n<start_of_turn>model\n"
 
     /** 清洗模型输出：砍模板残留、截断复读、数字垃圾直接判失败（返回 null 让上层回退云端）。 */
     private fun cleanOutput(raw: String): String? {

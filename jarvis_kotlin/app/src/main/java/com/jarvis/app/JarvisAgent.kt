@@ -114,6 +114,7 @@ object JarvisAgent {
         TtsRouter.stop()
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
+        com.jarvis.app.task.TaskLoop.cancelInFlight() // 批九：跨应用任务循环一并急停
         TakeoverBorder.hide()
         setState(ctx, "idle")
         maybeStartWakeLoop()
@@ -178,7 +179,15 @@ object JarvisAgent {
             val mem = MemoryService.getInjectableMemories(ctx)
             if (mySeq != genSeq) return@launch
             // 批四：技能命中先于视觉意图判定（命中即重播，不再走现场流程）
-            val skill = if (JarvisPrefs.isSkillEnabled(ctx)) SkillService.match(ctx, text) else null
+            // 批九：多步任务句式不参与技能匹配——它必须走任务循环现场执行，
+            // 不能被一段同名技能的旧录像顶替（见 handleUtterance 里的任务路由）。
+            val skill = if (JarvisPrefs.isSkillEnabled(ctx) &&
+                !com.jarvis.app.task.TaskLoop.looksLikeTask(text)
+            ) {
+                SkillService.match(ctx, text)
+            } else {
+                null
+            }
             if (mySeq != genSeq) return@launch
             handleUtterance(ctx, mySeq, text, mem, skill)
         }
@@ -188,6 +197,19 @@ object JarvisAgent {
         // 批八：本地指令层——「打电话给X」「打开X」先于技能与聊天执行，命中即办，
         // 不再掉进大模型被学舌反问（jk-v12 真机反馈）。
         if (LocalCommands.tryHandle(ctx, text) { reply -> speakReply(ctx, mySeq, reply) }) return
+        // 批九：多步跨应用任务句式（「在微信上给桑田发信息：…」）进任务循环
+        // （移植的 ScreenController + task/TaskLoop 步进驱动）。放在技能之后、
+        // TAP_INTENT 之前：技能匹配在上层已对任务句式让行（见 submitText 处），
+        // 到这里 skill 必为 null；单步「点一下X」仍归下面的 TAP_INTENT。
+        // jk-v14 的失败正是这类句式一条意图都没命中、掉进聊天被模型复述。
+        if (com.jarvis.app.task.TaskLoop.looksLikeTask(text)) {
+            setState(ctx, "thinking")
+            AuditLog.append(ctx, "任务路由", text, "命中多步任务句式，进任务循环")
+            com.jarvis.app.task.TaskLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
+                speakReply(ctx, mySeq, reply)
+            }
+            return
+        }
         if (skill != null) {
             setState(ctx, "thinking")
             SkillRunner.run(ctx, skill) { ok, detail ->

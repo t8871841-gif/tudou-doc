@@ -29,11 +29,17 @@ object LocalCommands {
     private val CALL_BARE = Regex("^(?:打电话|拨电话|拨号)$")
     private val OPEN_APP = Regex("^(?:打开|开启|启动|进入)\\s*(.+)$")
 
+    // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
+    // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
+    // 放行给 JarvisAgent 的任务路由（task/TaskLoop）。
+    private val TASK_SHAPED = Regex("给.{1,16}?(发信息|发消息|发微信|发短信|发送)")
+
     /** speak 是结果回报通道（语音路径走 Agent.speakReply，打字路径走加气泡）。 */
     fun tryHandle(ctx: Context, text: String, speak: (String) -> Unit): Boolean {
         val t = text.trim()
         if (t.isEmpty()) return false
         if (QUESTION_HINTS.any { t.contains(it) }) return false
+        if (TASK_SHAPED.containsMatchIn(t)) return false
 
         if (CALL_BARE.matches(t)) {
             openDialer(ctx, null)
@@ -114,12 +120,20 @@ object LocalCommands {
         return out.sortedBy { if (it.first == name) 0 else 1 }
     }
 
+    /** 批九：任务循环的 openApp 动作复用同一套按名找应用+拉起逻辑，返回结果描述（不播报）。 */
+    fun launchApp(ctx: Context, name: String): String = launchAppInternal(ctx, name.trim())
+
     private fun openApp(ctx: Context, rawName: String, speak: (String) -> Unit) {
         val name = rawName.removeSuffix("应用").removeSuffix("软件").trim()
         if (name.isBlank()) {
             speak("打开什么？说个应用名")
             return
         }
+        speak(launchAppInternal(ctx, name))
+    }
+
+    /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。 */
+    private fun launchAppInternal(ctx: Context, name: String): String {
         val pm = ctx.packageManager
         var best: Pair<String, String>? = null // (label, package)
         try {
@@ -139,23 +153,20 @@ object LocalCommands {
         }
         val found = best
         if (found == null) {
-            speak("没找到叫${name}的应用")
-            return
+            return "没找到叫${name}的应用"
         }
         val intent = pm.getLaunchIntentForPackage(found.second)
         if (intent == null) {
-            speak("${found.first}没有能打开的界面")
-            return
+            return "${found.first}没有能打开的界面"
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
             ctx.startActivity(intent)
         } catch (_: Exception) {
-            speak("打开${found.first}失败了")
-            return
+            return "打开${found.first}失败了"
         }
         AuditLog.append(ctx, "本地指令", "打开${found.first}", "已启动")
-        speak("正在打开${found.first}")
+        return "正在打开${found.first}"
     }
 
     private fun openDialer(ctx: Context, number: String?) {

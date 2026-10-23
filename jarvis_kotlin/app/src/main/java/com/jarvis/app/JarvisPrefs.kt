@@ -31,6 +31,12 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_BARGE_IN_ENABLED, on).apply()
     }
 
+    // ---------- 批九：GroundingLog（移植自 Andee）开关，默认关，设置页暂无入口 ----------
+
+    private const val KEY_GROUNDING_ENABLED = "grounding_enabled"
+
+    fun isGroundingEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_GROUNDING_ENABLED, false)
+
     // ---------- 批三：长期记忆总开关（记忆本体存独立 Room 库，与 Key 解耦） ----------
 
     private const val KEY_MEMORY_ENABLED = "memory_enabled"
