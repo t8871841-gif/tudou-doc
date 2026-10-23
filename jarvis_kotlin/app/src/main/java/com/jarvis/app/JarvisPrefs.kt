@@ -77,6 +77,76 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_LOCAL_PREFER, on).apply()
     }
 
+    // ---------- 批六：主动性（播报开关/勿扰/出发提醒；晨报时间在 ReminderScheduler 自己的存储里） ----------
+
+    private const val KEY_ANNOUNCE_ENABLED = "announce_enabled"
+    private const val KEY_ANNOUNCE_CALLS = "announce_calls"
+    private const val KEY_ANNOUNCE_SMS = "announce_sms"
+    private const val KEY_ANNOUNCE_APPS = "announce_apps_raw"
+    private const val KEY_DND_ENABLED = "dnd_enabled"
+    private const val KEY_DND_START = "dnd_start_min"
+    private const val KEY_DND_END = "dnd_end_min"
+    private const val KEY_DEPARTURE_ENABLED = "departure_enabled"
+    private const val KEY_DEPARTURE_LEAD = "departure_lead_min"
+
+    fun isAnnounceEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_ANNOUNCE_ENABLED, false)
+    fun setAnnounceEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_ANNOUNCE_ENABLED, on).apply()
+    }
+
+    fun isAnnounceCalls(ctx: Context): Boolean = p(ctx).getBoolean(KEY_ANNOUNCE_CALLS, true)
+    fun setAnnounceCalls(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_ANNOUNCE_CALLS, on).apply()
+    }
+
+    fun isAnnounceSms(ctx: Context): Boolean = p(ctx).getBoolean(KEY_ANNOUNCE_SMS, true)
+    fun setAnnounceSms(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_ANNOUNCE_SMS, on).apply()
+    }
+
+    fun getAnnounceAppsRaw(ctx: Context): String = p(ctx).getString(KEY_ANNOUNCE_APPS, "") ?: ""
+    fun setAnnounceAppsRaw(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_ANNOUNCE_APPS, v).apply()
+    }
+    fun announceAppsSet(ctx: Context): Set<String> =
+        getAnnounceAppsRaw(ctx).lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+    fun isDndEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_DND_ENABLED, true)
+    fun setDndEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_DND_ENABLED, on).apply()
+    }
+
+    fun getDndStartMin(ctx: Context): Int = p(ctx).getInt(KEY_DND_START, 22 * 60)
+    fun setDndStartMin(ctx: Context, v: Int) {
+        p(ctx).edit().putInt(KEY_DND_START, v.coerceIn(0, 1439)).apply()
+    }
+
+    fun getDndEndMin(ctx: Context): Int = p(ctx).getInt(KEY_DND_END, 8 * 60)
+    fun setDndEndMin(ctx: Context, v: Int) {
+        p(ctx).edit().putInt(KEY_DND_END, v.coerceIn(0, 1439)).apply()
+    }
+
+    /** 当前是否处于勿扰时段（支持跨夜，如 22:00–08:00）。 */
+    fun isDndActive(ctx: Context): Boolean {
+        if (!isDndEnabled(ctx)) return false
+        val s = getDndStartMin(ctx)
+        val e = getDndEndMin(ctx)
+        if (s == e) return false
+        val cal = java.util.Calendar.getInstance()
+        val now = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+        return if (s < e) now in s until e else now >= s || now < e
+    }
+
+    fun isDepartureEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_DEPARTURE_ENABLED, false)
+    fun setDepartureEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_DEPARTURE_ENABLED, on).apply()
+    }
+
+    fun getDepartureLeadMin(ctx: Context): Int = p(ctx).getInt(KEY_DEPARTURE_LEAD, 30)
+    fun setDepartureLeadMin(ctx: Context, v: Int) {
+        p(ctx).edit().putInt(KEY_DEPARTURE_LEAD, v.coerceIn(1, 720)).apply()
+    }
+
     private const val KEY_MUTED = "tts_muted"
 
     /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */

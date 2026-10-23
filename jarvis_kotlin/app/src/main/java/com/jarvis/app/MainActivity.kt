@@ -514,6 +514,8 @@ class MainActivity : Activity() {
         buildMemorySection(root)
         buildSkillSection(root)
         buildLocalLlmSection(root)
+        buildAnnounceSection(root)
+        buildBriefSection(root)
         buildAuditSection(root)
         return ScrollView(this).apply { addView(root) }
     }
@@ -1052,6 +1054,166 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun parseHhMm(s: String): Int? {
+        val p = s.trim().split(":")
+        if (p.size != 2) return null
+        val h = p[0].trim().toIntOrNull()
+        val m = p[1].trim().toIntOrNull()
+        if (h == null || m == null || h !in 0..23 || m !in 0..59) return null
+        return h * 60 + m
+    }
+
+    private fun fmtHhMm(min: Int): String = "%02d:%02d".format(min / 60, min % 60)
+
+    /** 批六新增：「主动播报」分区——总开关、来电/短信开关、播报应用名单、勿扰时段。决策在 proactive/Announcer。 */
+    private fun buildAnnounceSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "主动播报"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        root.addView(CheckBox(this).apply {
+            text = "启用主动播报（来电/短信/指定应用通知读出来）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isAnnounceEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setAnnounceEnabled(this@MainActivity, checked) }
+        })
+        root.addView(CheckBox(this).apply {
+            text = "播报来电"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isAnnounceCalls(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setAnnounceCalls(this@MainActivity, checked) }
+        })
+        root.addView(CheckBox(this).apply {
+            text = "播报短信"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isAnnounceSms(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setAnnounceSms(this@MainActivity, checked) }
+        })
+        root.addView(TextView(this).apply {
+            text = "其他应用通知只播下面名单里的（一行一个包名，如 com.tencent.mm）；验证码类永远不读。"
+            textSize = 12f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        })
+        val appsInput = EditText(this).apply {
+            hint = "播报应用包名，一行一个"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            minLines = 2
+            setText(JarvisPrefs.getAnnounceAppsRaw(this@MainActivity))
+        }
+        root.addView(appsInput)
+        root.addView(btn("保存播报应用名单") {
+            JarvisPrefs.setAnnounceAppsRaw(this@MainActivity, appsInput.text.toString())
+            toast("已保存")
+        })
+        root.addView(CheckBox(this).apply {
+            text = "勿扰时段不播"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isDndEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setDndEnabled(this@MainActivity, checked) }
+        })
+        val dndStart = EditText(this).apply {
+            hint = "勿扰开始（如 22:00）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            setText(fmtHhMm(JarvisPrefs.getDndStartMin(this@MainActivity)))
+        }
+        val dndEnd = EditText(this).apply {
+            hint = "勿扰结束（如 08:00）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            setText(fmtHhMm(JarvisPrefs.getDndEndMin(this@MainActivity)))
+        }
+        root.addView(dndStart)
+        root.addView(dndEnd)
+        root.addView(btn("保存勿扰时段") {
+            val s = parseHhMm(dndStart.text.toString())
+            val e = parseHhMm(dndEnd.text.toString())
+            if (s == null || e == null) {
+                toast("时间格式不对，写成 22:00 这样")
+            } else {
+                JarvisPrefs.setDndStartMin(this@MainActivity, s)
+                JarvisPrefs.setDndEndMin(this@MainActivity, e)
+                toast("已保存")
+            }
+        })
+    }
+
+    /** 批六新增：「晨报与出发提醒」分区——晨报开关/时间（调度在 ReminderScheduler）、试听、出发提醒（固定提前量降级版）。 */
+    private fun buildBriefSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "晨报与出发提醒"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        val briefStatus = TextView(this).apply { textSize = 12f; setTextColor(0x8AFFFFFF.toInt()) }
+        fun updateBriefStatus() {
+            briefStatus.text = if (ReminderScheduler.isBriefOn(this)) {
+                "晨报：每天 %02d:%02d".format(ReminderScheduler.briefHour(this), ReminderScheduler.briefMinute(this))
+            } else {
+                "晨报：关"
+            }
+        }
+        root.addView(briefStatus)
+        updateBriefStatus()
+        val briefTime = EditText(this).apply {
+            hint = "晨报时间（如 07:30）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            setText("%02d:%02d".format(ReminderScheduler.briefHour(this@MainActivity), ReminderScheduler.briefMinute(this@MainActivity)))
+        }
+        root.addView(briefTime)
+        root.addView(btn("开启/更新晨报") {
+            val t = parseHhMm(briefTime.text.toString())
+            if (t == null) {
+                toast("时间格式不对，写成 07:30 这样")
+            } else if (ReminderScheduler.scheduleDailyBrief(this@MainActivity, t / 60, t % 60)) {
+                updateBriefStatus()
+                toast("晨报已开启")
+            } else {
+                toast("晨报没排上（闹钟权限？）")
+            }
+        })
+        root.addView(btn("关闭晨报") {
+            ReminderScheduler.cancelDailyBrief(this@MainActivity)
+            updateBriefStatus()
+            toast("晨报已关闭")
+        })
+        root.addView(btn("现在试听一份晨报") {
+            val text = com.jarvis.app.proactive.BriefComposer.compose(this@MainActivity)
+            if (JarvisPrefs.isMuted(this@MainActivity)) {
+                toast(text.take(120))
+            } else {
+                toast("正在生成晨报语音…")
+                com.jarvis.app.tts.EdgeTts.speak(this@MainActivity, text, onStart = {}, onDone = {})
+            }
+        })
+        root.addView(CheckBox(this).apply {
+            text = "出发提醒（带地点的日程，按固定提前量提醒；没有路程估算）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isDepartureEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setDepartureEnabled(this@MainActivity, checked) }
+        })
+        val leadInput = EditText(this).apply {
+            hint = "提前分钟数（如 30）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(JarvisPrefs.getDepartureLeadMin(this@MainActivity).toString())
+        }
+        root.addView(leadInput)
+        root.addView(btn("保存提前量") {
+            val v = leadInput.text.toString().trim().toIntOrNull()
+            if (v == null) {
+                toast("填个数字")
+            } else {
+                JarvisPrefs.setDepartureLeadMin(this@MainActivity, v)
+                toast("已保存")
+            }
+        })
+        root.addView(btn("立即扫描今日日程排出发提醒") {
+            val n = com.jarvis.app.proactive.DeparturePlanner.scan(this@MainActivity)
+            toast(
+                when {
+                    !JarvisPrefs.isDepartureEnabled(this@MainActivity) -> "出发提醒没开"
+                    n == 0 -> "没派出新的（没有带地点且来得及的日程，或日历没授权）"
+                    else -> "已排上 $n 条出发提醒"
+                }
+            )
+        })
+    }
+
     /** 第 2 条「操作审计日志」：默认收起，不占屏幕——点开才看，符合"每屏只做一件事"的精简原则。 */
     private fun buildAuditSection(root: LinearLayout) {
         val section = TextView(this).apply {
@@ -1104,6 +1266,17 @@ class MainActivity : Activity() {
         if (intent?.getStringExtra(EXTRA_ACTION) == "assist") {
             if (::detailView.isInitialized) detailView.text = "已通过悬浮球/磁贴/数字助理唤起，已开始听。"
             JarvisAgent.triggerListenFromAssist(this)
+        }
+        // 批六：点开晨报/提醒/出发提醒的通知 → 正文进对话并朗读（静音时只显示）
+        val action = intent?.getStringExtra(EXTRA_ACTION)
+        if (action == "morning_brief" || action == "reminder") {
+            val body = intent.getStringExtra(EXTRA_TEXT).orEmpty()
+            if (body.isNotBlank() && ::chatList.isInitialized) {
+                addBubble(body, mine = false)
+                if (!JarvisPrefs.isMuted(this)) {
+                    com.jarvis.app.tts.EdgeTts.speak(this, body, onStart = {}, onDone = {})
+                }
+            }
         }
     }
 

@@ -51,7 +51,13 @@ class JarvisNotificationListener : NotificationListenerService() {
         }
         val last = buf.lastOrNull()
         if (last != null && last["pkg"] == sbn.packageName && last["title"] == title.take(60) && last["text"] == text.take(200)) return
-        val m = mapOf<String, Any>("pkg" to sbn.packageName, "app" to label, "title" to title.take(60), "text" to text.take(200), "time" to sbn.postTime)
+        // 批六：把类别标记进缓存，主动播报（Announcer）据此分来电/消息决策，不用猜包名。
+        val m = mapOf<String, Any>(
+            "pkg" to sbn.packageName, "app" to label, "title" to title.take(60), "text" to text.take(200),
+            "time" to sbn.postTime,
+            "call" to (n.category == Notification.CATEGORY_CALL),
+            "msg" to (n.category == Notification.CATEGORY_MESSAGE)
+        )
         buf.add(m)
         if (announceOn) sink?.invoke(m)
         while (buf.size > 60) buf.removeAt(0)

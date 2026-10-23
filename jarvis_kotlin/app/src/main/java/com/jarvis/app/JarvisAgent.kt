@@ -56,6 +56,10 @@ object JarvisAgent {
         // 批二：看屏白名单是用户在设置里填的，无障碍服务那边不会自己去读 SharedPreferences，
         // 每次 Agent 启动时同步一次（设置页保存时也会同步一次，见 MainActivity）。
         JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(app))
+        // 批六：接上通知监听的主动播报钩子（决策在 Announcer，含勿扰/验证码/开关）
+        com.jarvis.app.proactive.Announcer.attach(app)
+        // 批六：顺带扫一遍今日日程排出发提醒（幂等，同日程同 id 覆盖；晨报到点时也会扫）
+        com.jarvis.app.proactive.DeparturePlanner.scan(app)
         maybeStartWakeLoop()
     }
 

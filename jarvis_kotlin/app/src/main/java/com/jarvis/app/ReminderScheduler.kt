@@ -126,6 +126,10 @@ object ReminderScheduler {
         }
     }
 
+    fun isBriefOn(ctx: Context): Boolean = prefs(ctx).getBoolean("brief_on", false)
+    fun briefHour(ctx: Context): Int = prefs(ctx).getInt("brief_h", 7)
+    fun briefMinute(ctx: Context): Int = prefs(ctx).getInt("brief_m", 30)
+
     fun rescheduleBriefIfOn(ctx: Context) {
         val p = prefs(ctx)
         if (p.getBoolean("brief_on", false)) scheduleDailyBrief(ctx, p.getInt("brief_h", 7), p.getInt("brief_m", 30))
@@ -162,17 +166,25 @@ class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         val id = intent.getIntExtra("id", 0)
         val title = intent.getStringExtra("title") ?: "Jarvis 提醒"
-        val body = intent.getStringExtra("body") ?: ""
+        var body = intent.getStringExtra("body") ?: ""
         val kind = intent.getStringExtra("kind") ?: "reminder"
+        // 批六：晨报到点现组稿（日期/今日日程/提醒数），不再用预订时的占位文案；
+        // 顺带扫一遍今日日程排出发提醒（出发提醒的每日节奏挂在这里）。
+        if (kind == "brief") {
+            body = com.jarvis.app.proactive.BriefComposer.compose(ctx)
+            com.jarvis.app.proactive.DeparturePlanner.scan(ctx)
+        }
         ReminderScheduler.ensureChannel(ctx)
         val pi = PendingIntent.getActivity(
             ctx, id, ReminderScheduler.launchIntent(ctx, kind, body),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val n = ReminderScheduler.builder(ctx)
+        val nb = ReminderScheduler.builder(ctx)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(title).setContentText(body)
-            .setContentIntent(pi).setAutoCancel(true).build()
+            .setContentIntent(pi).setAutoCancel(true)
+        if (kind == "brief") nb.setStyle(android.app.Notification.BigTextStyle().bigText(body))
+        val n = nb.build()
         try {
             (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, n)
         } catch (_: Exception) {

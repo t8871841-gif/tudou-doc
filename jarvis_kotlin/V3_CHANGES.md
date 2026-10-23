@@ -333,3 +333,13 @@
 - 导入：设置页「本地模型」分区——ACTION_OPEN_DOCUMENT 选 .task（请求码 5151，同旧桥）→ 复制进 filesDir/models（文件名清洗）→ 路径存 Prefs；分区含启用开关、优先本地开关、maxTokens 保存、试答一句、删除模型、状态行（模型名+大小）。无新权限。
 - 路由（语音 Agent 与打字对话同路）：本地启用且模型就绪时——"优先本地"开：先本地生成（只喂原话，不带批三记忆注入：1024 上下文塞不下），答不出回云端；关：云端优先，Agnes 失败（断网/报错）才本地兜底，兜底成功时气泡注明"已用本地模型回答"，两头都失败才走原报错收尾。
 - 未做/未验：未加对话模板（与旧桥一致直接喂原话，如真机答非所问再议）；未构建、未真机验证——本地生成速度与 gemma3-tudou.task 的实际加载结果要等出包后用户导入实测。
+
+---
+
+## 对齐轮次 · 批六：主动性补完（第 7 项）——接一期留下的钩子，Muse 落地
+
+- 主动播报（新包 proactive/Announcer）：接上 JarvisNotificationListener 一期就留好的 announceOn/sink 钩子（此前无人接、是死钩子）。Listener 缓存 map 加了 call/msg 类别标记（来电/消息按系统通知类别判定，不猜包名）。决策顺序：总开关→静音→勿扰时段（默认 22:00–08:00，跨夜支持）→验证码类不读（关键词命中即跳过，沿用 v2 策略）→Agent 非 idle 时不插播→来电/短信独立开关、其他应用只播包名白名单内的。走 EdgeTts 播报并记审计。JarvisAgent.start 时 attach。
+- 晨报：调度本来就在 ReminderScheduler（一期，scheduleDailyBrief），本批补三件——①设置页开关/时间（新增 isBriefOn/briefHour/briefMinute 只读口）；②ReminderReceiver 到点用 proactive/BriefComposer 现组稿（日期星期+今日日历事件+待触发提醒数；没授权如实说看不到；**不编天气**，无数据源），通知改 BigText 展示全文；③点开晨报/提醒通知现在会把正文送进对话并朗读（handleAssistIntent 新增 morning_brief/reminder 消费，此前点了没反应）。
+- 出发提醒（降级版，需求原文允许）：proactive/DeparturePlanner 扫今日带地点的日程，按固定提前量（默认 30 分钟，设置可改）排 ReminderScheduler 提醒，文案明说"没有算路程"。**路程估算未做**（不接路线 API）。扫描时机：晨报到点 + Agent 启动 + 设置页手动按钮；同日程同 id 幂等覆盖。
+- 设置页新增「主动播报」「晨报与出发提醒」两分区。无新权限（READ_CALENDAR/通知使用权一期已备）。
+- 未验：未构建、未真机验证——播报时机、晨报闹钟在 Flyme 上的准点率、出发提醒扫描都需出包实测。
