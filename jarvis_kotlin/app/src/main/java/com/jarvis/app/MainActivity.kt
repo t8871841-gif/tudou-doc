@@ -567,7 +567,7 @@ class MainActivity : Activity() {
         })
     }
 
-    /** 批二新增：视觉看屏配置——开关、模型/接口/Key 覆盖（留空复用 Agnes）、坐标格式、看屏白名单。 */
+    /** 批二新增：视觉看屏配置——开关、模型/接口/Key 覆盖（留空复用 Agnes）、看屏白名单。（坐标格式已按用户要求删除：网格标定法用不上。） */
     private fun buildVisionSection(root: LinearLayout) {
         root.addView(TextView(this).apply {
             text = "视觉看屏（截图 + 多模态模型）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
@@ -587,24 +587,6 @@ class MainActivity : Activity() {
         val vKey = EditText(this).apply { hint = "视觉 Key（留空 = 同上）"; setTextColor(Color.WHITE); setText(JarvisPrefs.getVisionApiKey(this@MainActivity)) }
         root.addView(vModel); root.addView(vBase); root.addView(vKey)
 
-        root.addView(TextView(this).apply { text = "坐标格式"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0) })
-        var coordMode = JarvisPrefs.getVisionCoord(this)
-        val coordSpinner = android.widget.Spinner(this).apply {
-            val opts = listOf("pixel" to "像素坐标（多数模型）", "norm1000" to "0~1000 归一化（Qwen-VL 系）")
-            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, opts.map { it.second })
-            setSelection(opts.indexOfFirst { it.first == coordMode }.coerceAtLeast(0))
-            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) { coordMode = opts[pos].first }
-                override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
-            }
-        }
-        root.addView(coordSpinner)
-        root.addView(TextView(this).apply {
-            text = "本实现看屏用的是「网格标定法」（截图叠加格子号，模型只报格子+左中右），不是直接报像素/归一化坐标，" +
-                "所以这个设置目前存了但没真正影响取坐标的方式——先留着占位，等换成直接坐标输出的 prompt 再接上。"
-            textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, 0)
-        })
-
         val whitelistInput = EditText(this).apply {
             hint = "额外允许看屏点击的 App 包名，每行一个"
             setTextColor(Color.WHITE)
@@ -621,7 +603,6 @@ class MainActivity : Activity() {
             JarvisPrefs.setVisionModel(this, vModel.text.toString())
             JarvisPrefs.setVisionBaseUrl(this, vBase.text.toString())
             JarvisPrefs.setVisionApiKey(this, vKey.text.toString())
-            JarvisPrefs.setVisionCoord(this, coordMode)
             JarvisPrefs.setVisionWhitelistRaw(this, whitelistInput.text.toString())
             JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(this))
             toast("已保存")

@@ -76,7 +76,6 @@ object JarvisPrefs {
     private const val KEY_VISION_MODEL = "vision_model" // 留空 = 复用 Agnes 对话模型
     private const val KEY_VISION_BASE = "vision_base_url" // 留空 = 复用 Agnes 接口地址
     private const val KEY_VISION_KEY = "vision_api_key" // 留空 = 复用 Agnes Key
-    private const val KEY_VISION_COORD = "vision_coord" // "pixel" | "norm1000"，目前本实现的网格法暂不消费这个值，见下方说明
     private const val KEY_VISION_WHITELIST = "vision_whitelist" // 每行一个包名
 
     fun isVisionEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_VISION_ENABLED, true)
@@ -92,9 +91,6 @@ object JarvisPrefs {
 
     fun getVisionApiKey(ctx: Context): String = p(ctx).getString(KEY_VISION_KEY, "") ?: ""
     fun setVisionApiKey(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_KEY, v.trim()).apply() }
-
-    fun getVisionCoord(ctx: Context): String = p(ctx).getString(KEY_VISION_COORD, "pixel") ?: "pixel"
-    fun setVisionCoord(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_COORD, v).apply() }
 
     fun getVisionWhitelistRaw(ctx: Context): String = p(ctx).getString(KEY_VISION_WHITELIST, "") ?: ""
     fun setVisionWhitelistRaw(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_WHITELIST, v).apply() }
