@@ -50,9 +50,12 @@ object AgnesClient {
         ctx: Context, prompt: String, jpegBase64: String,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val key = JarvisPrefs.getAgnesKey(ctx)
+        // 批二：视觉模型/接口地址/Key 分别支持单独配置，留空则各自回退到 Agnes 对话的那一套。
+        val base = JarvisPrefs.getVisionBaseUrl(ctx).ifBlank { BASE_URL }
+        val model = JarvisPrefs.getVisionModel(ctx).ifBlank { MODEL }
+        val key = JarvisPrefs.getVisionApiKey(ctx).ifBlank { JarvisPrefs.getAgnesKey(ctx) }
         if (key.isBlank()) {
-            onError("未配置 Agnes API Key，请先去设置里填写")
+            onError("未配置视觉模型 Key（也没有配置 Agnes Key 可回退），请先去设置里填写")
             return
         }
         val content = JSONArray()
@@ -66,12 +69,12 @@ object AgnesClient {
         val messages = JSONArray()
             .put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject()
-            .put("model", MODEL)
+            .put("model", model)
             .put("messages", messages)
             .put("stream", false)
             .put("temperature", 0.1)
         val req = Request.Builder()
-            .url("$BASE_URL/chat/completions")
+            .url("$base/chat/completions")
             .addHeader("Authorization", "Bearer $key")
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -84,7 +87,7 @@ object AgnesClient {
             override fun onResponse(call: Call, response: okhttp3.Response) {
                 response.use { resp ->
                     if (!resp.isSuccessful) {
-                        onError("视觉模型返回错误：HTTP ${resp.code}（如果 agnes-3.0-flash 不支持图片输入，会一直报错，需要换一个支持多模态的模型）")
+                        onError("视觉模型返回错误：HTTP ${resp.code}（如果 $model 不支持图片输入，会一直报错，去设置里换一个支持多模态的视觉模型）")
                         return
                     }
                     try {

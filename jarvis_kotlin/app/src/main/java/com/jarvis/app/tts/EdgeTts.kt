@@ -47,8 +47,8 @@ object EdgeTts {
     private const val TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
     private const val CHROMIUM_MAJOR = "143"
     private const val DEFAULT_VOICE = "zh-CN-YunyangNeural" // "云扬"，需求文档点名的那个声音
-    private const val RATE_PCT = -2 // 参考实现调过的静息语速，-50%~+100% 这个刻度上的 -2%
-    private const val PITCH_HZ = 0
+    private const val DEFAULT_RATE_PCT = -2 // 参考实现调过的静息语速，-50%~+100% 这个刻度上的 -2%
+    private const val DEFAULT_PITCH_HZ = 0
     private const val SAMPLE_RATE = 24_000
 
     private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.UTF_8)
@@ -59,12 +59,16 @@ object EdgeTts {
     @Volatile private var socket: SSLSocket? = null
     @Volatile private var track: AudioTrack? = null
 
-    fun speak(ctx: Context, text: String, voice: String = DEFAULT_VOICE, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
+    fun speak(
+        ctx: Context, text: String, voice: String = DEFAULT_VOICE,
+        ratePct: Int = DEFAULT_RATE_PCT, pitchHz: Int = DEFAULT_PITCH_HZ,
+        onStart: () -> Unit, onDone: (Boolean) -> Unit
+    ) {
         stop()
         val seq = ++mySeq
-        val clean = text.replace(Regex("[\\r\\n]+"), " ").trim()
+        val clean = text.replace(Regex("[\r\n]+"), " ").trim()
         if (clean.isEmpty()) { onDone(false); return }
-        io.execute { runSynthesis(seq, clean, voice, onStart, onDone) }
+        io.execute { runSynthesis(seq, clean, voice, ratePct, pitchHz, onStart, onDone) }
     }
 
     /** 急停/打断：关掉在飞的 socket（唤醒读写阻塞立即抛异常）和播放轨道，不回调 onDone——调用方自己知道是主动打断。 */
@@ -84,7 +88,7 @@ object EdgeTts {
 
     private fun cancelled(seq: Int) = seq != mySeq
 
-    private fun runSynthesis(seq: Int, text: String, voice: String, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
+    private fun runSynthesis(seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
         val sentences = split(text)
         if (sentences.isEmpty()) { main.post { onDone(false) }; return }
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -112,7 +116,7 @@ object EdgeTts {
             t.play()
             for ((i, sentence) in sentences.withIndex()) {
                 if (cancelled(seq)) break
-                val mp3 = fetchMp3(seq, sentence, voice)
+                val mp3 = fetchMp3(seq, sentence, voice, ratePct, pitchHz)
                 if (cancelled(seq)) break
                 if (mp3.isEmpty()) {
                     if (i == 0) break // 第一句就没声音，当失败处理
@@ -141,7 +145,7 @@ object EdgeTts {
 
     // ---------- 协议部分：手写 TLS + WebSocket 帧，跟参考实现一致 ----------
 
-    private fun fetchMp3(seq: Int, sentence: String, voice: String): ByteArray {
+    private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): ByteArray {
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
         socket = ssl
         try {
@@ -186,7 +190,7 @@ object EdgeTts {
                 "Content-Type:application/ssml+xml\r\n" +
                 "X-Timestamp:${date}Z\r\n" +
                 "Path:ssml\r\n\r\n" +
-                ssml(sentence, voice)
+                ssml(sentence, voice, ratePct, pitchHz)
             sendTextFrame(out, ssmlMsg)
 
             val binAll = ByteArrayOutputStream()
@@ -237,10 +241,10 @@ object EdgeTts {
         return -1
     }
 
-    private fun ssml(text: String, voice: String): String {
+    private fun ssml(text: String, voice: String, ratePct: Int, pitchHz: Int): String {
         val esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        val rateStr = (if (RATE_PCT >= 0) "+" else "") + RATE_PCT + "%"
-        val pitchStr = (if (PITCH_HZ >= 0) "+" else "") + PITCH_HZ + "Hz"
+        val rateStr = (if (ratePct >= 0) "+" else "") + ratePct + "%"
+        val pitchStr = (if (pitchHz >= 0) "+" else "") + pitchHz + "Hz"
         return "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'>" +
             "<voice name='$voice'><prosody rate='$rateStr' pitch='$pitchStr'>$esc</prosody></voice></speak>"
     }

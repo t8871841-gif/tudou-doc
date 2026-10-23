@@ -46,6 +46,7 @@ object ScreenVisionAgent {
      * 看一眼屏幕回答问题：截图(受黑名单限制) → 问视觉模型 → 用自然语言回答，适合直接拿去 TTS 朗读。
      */
     fun describeScreen(ctx: Context, question: String, onResult: (String) -> Unit, onError: (String) -> Unit) {
+        if (!com.jarvis.app.JarvisPrefs.isVisionEnabled(ctx)) { onError("视觉看屏没开，去设置里开一下"); return }
         val mySeq = ++genSeq
         captureAllowed(ctx, { bmp, _, _ ->
             val b64 = GridOverlay.toJpegBase64(bmp, quality = 70)
@@ -63,6 +64,7 @@ object ScreenVisionAgent {
      * 连点防呆触发 / 网络出错等），不许静默失败。
      */
     fun locateAndTap(ctx: Context, targetDescription: String, taskLabel: String, onDone: (Boolean, String) -> Unit) {
+        if (!com.jarvis.app.JarvisPrefs.isVisionEnabled(ctx)) { onDone(false, "视觉看屏没开，去设置里开一下"); return }
         val mySeq = ++genSeq
         resetRepeatGuard()
         TakeoverBorder.show()

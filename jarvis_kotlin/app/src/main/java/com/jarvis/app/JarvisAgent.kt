@@ -41,6 +41,9 @@ object JarvisAgent {
         appCtx = app
         OrbController.dartAlive = true
         OrbController.eventSink = { event, ack -> onOrbEvent(app, event, ack) }
+        // 批二：看屏白名单是用户在设置里填的，无障碍服务那边不会自己去读 SharedPreferences，
+        // 每次 Agent 启动时同步一次（设置页保存时也会同步一次，见 MainActivity）。
+        JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(app))
         maybeStartWakeLoop()
     }
 
@@ -112,6 +115,7 @@ object JarvisAgent {
                 main.post {
                     if (mySeq != genSeq) return@post
                     OrbController.showBubble(if (fromWake) "没听清，继续待命" else "没听清：$msg")
+                    if (fromWake) noteFalseWake() // 唤醒了但没等到有效指令，算一次疑似误唤醒
                     setState(ctx, "idle")
                     maybeStartWakeLoop()
                 }
@@ -167,8 +171,10 @@ object JarvisAgent {
             maybeStartWakeLoop()
             return
         }
+        val voice = JarvisPrefs.getVoice(ctx).ifBlank { com.jarvis.app.tts.EdgeVoices.DEFAULT_ID }
         EdgeTts.speak(
-            ctx, reply,
+            ctx, reply, voice = voice,
+            ratePct = JarvisPrefs.getRatePct(ctx), pitchHz = JarvisPrefs.getPitchHz(ctx),
             onStart = {
                 main.post {
                     if (mySeq != genSeq) return@post
@@ -179,8 +185,13 @@ object JarvisAgent {
             onDone = { _ ->
                 main.post {
                     if (mySeq != genSeq) return@post
-                    setState(ctx, "idle")
-                    maybeStartWakeLoop()
+                    // 批二「连续对话」：开着的话说完答案直接继续听，不用再喊一次唤醒词。
+                    if (JarvisPrefs.isContinuousChat(ctx)) {
+                        beginListening(ctx, fromWake = false, prefilledText = null)
+                    } else {
+                        setState(ctx, "idle")
+                        maybeStartWakeLoop()
+                    }
                 }
             }
         )
@@ -221,7 +232,7 @@ object JarvisAgent {
      * 看文字里有没有命中关键词"，不是专门为常驻监听设计的轻量级关键词唤醒模型(KWS)——
      * 识别器本身常驻在内存里（首次用时才加载,之后复用），比之前砸系统在线识别省电一些，
      * 但持续跑 zipformer 编解码仍然比真正的 KWS 耗电，具体耗电数据同样没有真机实测。
-     * 如果连续待命发热/掉电明显，先把灵敏度调低或直接关掉这个开关。
+     * 如果连续待命发热/掉电明显，先把唤醒严格度调到"严格"或直接关掉这个开关。
      */
     fun maybeStartWakeLoop() {
         val ctx = appCtx ?: return
@@ -255,9 +266,40 @@ object JarvisAgent {
         )
     }
 
+    // 批二：10 分钟内 3 次"唤醒了但没等到有效指令"，临时把判定收紧到严格档，缓解误唤醒。
+    private val falseWakeTimes = ArrayList<Long>()
+    private fun noteFalseWake() {
+        val now = System.currentTimeMillis()
+        falseWakeTimes.removeAll { now - it > 10 * 60_000L }
+        falseWakeTimes.add(now)
+    }
+    private fun effectiveStrictness(ctx: Context): Int {
+        val now = System.currentTimeMillis()
+        falseWakeTimes.removeAll { now - it > 10 * 60_000L }
+        if (falseWakeTimes.size >= 3) return 0
+        return JarvisPrefs.getWakeStrictness(ctx)
+    }
+
+    private fun wakeHitIndex(text: String): Int {
+        for (w in WAKE_WORDS) {
+            val i = text.indexOf(w, ignoreCase = true)
+            if (i >= 0) return i
+        }
+        return -1
+    }
+
     private fun onWakeResult(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq || state != "idle") return
-        val hit = WAKE_WORDS.any { text.contains(it) }
+        val idx = wakeHitIndex(text)
+        val hit = when {
+            idx < 0 -> false
+            // 严格：「贾维斯」须在句首（容忍 1 个前导字符的识别误差）且整句短，像一句独立的唤醒指令。
+            effectiveStrictness(ctx) == 0 -> idx <= 1 && text.length <= 12
+            // 标准：在句首附近就行。
+            effectiveStrictness(ctx) == 1 -> idx <= 6
+            // 宽松：句中任意位置都算命中。
+            else -> true
+        }
         if (!hit) {
             main.postDelayed({ wakeTick(ctx, mySeq) }, 400)
             return

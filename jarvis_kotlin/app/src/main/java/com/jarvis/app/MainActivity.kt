@@ -128,7 +128,8 @@ class MainActivity : Activity() {
         onAgentStateChanged(JarvisAgent.currentState())
 
         handleAssistIntent(intent)
-        startKeepAlive(manual = false)
+        // 批二：常驻与否现在是"设置里记住的选择"，不再是每次开 App 都无条件偷偷启动。
+        if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
         startClock()
     }
 
@@ -446,6 +447,8 @@ class MainActivity : Activity() {
         root.addView(btn("刷新状态") { refresh() })
         root.addView(detail2)
         buildVoiceSettingsSection(root)
+        buildVisionSection(root)
+        buildEntrySection(root)
         buildAuditSection(root)
         return ScrollView(this).apply { addView(root) }
     }
@@ -471,6 +474,47 @@ class MainActivity : Activity() {
             toast("已保存")
         })
 
+        // ---- 播报声音：下拉选择 + 试听（批二新增） ----
+        root.addView(TextView(this).apply { text = "播报声音"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()) })
+        val savedVoice = JarvisPrefs.getVoice(this).ifBlank { com.jarvis.app.tts.EdgeVoices.DEFAULT_ID }
+        var selectedVoice = savedVoice
+        val voiceSpinner = android.widget.Spinner(this).apply {
+            adapter = android.widget.ArrayAdapter(
+                this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                com.jarvis.app.tts.EdgeVoices.LIST.map { it.label }
+            )
+            val idx = com.jarvis.app.tts.EdgeVoices.LIST.indexOfFirst { it.id == savedVoice }.coerceAtLeast(0)
+            setSelection(idx)
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                    selectedVoice = com.jarvis.app.tts.EdgeVoices.LIST[pos].id
+                }
+                override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+            }
+        }
+        root.addView(voiceSpinner)
+        val previewBtn = Button(this)
+        previewBtn.text = "试听"
+        previewBtn.setOnClickListener {
+            if (com.jarvis.app.tts.EdgeTts.isSpeaking()) {
+                com.jarvis.app.tts.EdgeTts.stop()
+                previewBtn.text = "试听"
+                return@setOnClickListener
+            }
+            previewBtn.text = "停止"
+            val label = com.jarvis.app.tts.EdgeVoices.labelFor(selectedVoice)
+            com.jarvis.app.tts.EdgeTts.speak(
+                this, "您好，我是 Jarvis，这是$label，现在的声音就是这样。",
+                voice = selectedVoice, ratePct = JarvisPrefs.getRatePct(this), pitchHz = JarvisPrefs.getPitchHz(this),
+                onStart = {}, onDone = { main.post { previewBtn.text = "试听" } }
+            )
+        }
+        root.addView(previewBtn)
+        root.addView(btn("保存声音选择") {
+            JarvisPrefs.setVoice(this, selectedVoice)
+            toast("已保存，先点“试听”确认效果")
+        })
+
         val wakeBox = CheckBox(this).apply {
             text = "开启唤醒词「贾维斯」（离线识别轮询，非专用低功耗 KWS，见自检详情）"
             setTextColor(0xB3FFFFFF.toInt())
@@ -483,21 +527,36 @@ class MainActivity : Activity() {
         }
         root.addView(wakeBox)
 
-        val sensLabel = TextView(this).apply { textSize = 12f; setTextColor(0xB3FFFFFF.toInt()) }
-        fun refreshSensLabel(v: Int) { sensLabel.text = "唤醒灵敏度：$v（越大越容易唤醒，也越容易误唤醒）" }
-        refreshSensLabel(JarvisPrefs.getWakeSensitivity(this))
-        root.addView(sensLabel)
-        root.addView(SeekBar(this).apply {
-            max = 100
-            progress = JarvisPrefs.getWakeSensitivity(this@MainActivity)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, v: Int, fromUser: Boolean) {
-                    refreshSensLabel(v)
-                    if (fromUser) JarvisPrefs.setWakeSensitivity(this@MainActivity, v)
+        // ---- 唤醒严格度：严格/标准/宽松三档（批二替换掉原来的 0..100 滑杆） ----
+        root.addView(TextView(this).apply {
+            text = "唤醒严格度"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        })
+        val strictRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val strictLabels = listOf("严格", "标准", "宽松")
+        val strictButtons = ArrayList<Button>()
+        fun paintStrict(sel: Int) {
+            strictButtons.forEachIndexed { i, b ->
+                b.alpha = if (i == sel) 1f else 0.5f
+            }
+        }
+        strictLabels.forEachIndexed { i, label ->
+            val b = Button(this).apply {
+                text = label
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener {
+                    JarvisPrefs.setWakeStrictness(this@MainActivity, i)
+                    paintStrict(i)
                 }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {}
-            })
+            }
+            strictButtons.add(b)
+            strictRow.addView(b)
+        }
+        paintStrict(JarvisPrefs.getWakeStrictness(this))
+        root.addView(strictRow)
+        root.addView(TextView(this).apply {
+            text = "严格：“贾维斯”须在句首且整句较短；标准：在句首附近；宽松：句中任意位置。" +
+                "唤醒后约 6 秒没有有效指令会自动回到待命；10 分钟内误唤醒 3 次会临时调到严格。"
+            textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, dp(8))
         })
 
         root.addView(CheckBox(this).apply {
@@ -505,6 +564,107 @@ class MainActivity : Activity() {
             setTextColor(0xB3FFFFFF.toInt())
             isChecked = JarvisPrefs.isBargeInEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> JarvisPrefs.setBargeInEnabled(this@MainActivity, checked) }
+        })
+    }
+
+    /** 批二新增：视觉看屏配置——开关、模型/接口/Key 覆盖（留空复用 Agnes）、坐标格式、看屏白名单。 */
+    private fun buildVisionSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "视觉看屏（截图 + 多模态模型）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        root.addView(CheckBox(this).apply {
+            text = "启用视觉看屏"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isVisionEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setVisionEnabled(this@MainActivity, checked) }
+        })
+        root.addView(TextView(this).apply {
+            text = "界面读不到文字、或点不到目标时，截图发给下面配置的模型兜底；银行/支付/钱包/系统设置类界面永不截图。"
+            textSize = 11f; setTextColor(0x8AFFFFFF.toInt())
+        })
+        val vModel = EditText(this).apply { hint = "视觉模型（留空 = 同对话模型）"; setTextColor(Color.WHITE); setText(JarvisPrefs.getVisionModel(this@MainActivity)) }
+        val vBase = EditText(this).apply { hint = "视觉接口地址（留空 = 同上）"; setTextColor(Color.WHITE); setText(JarvisPrefs.getVisionBaseUrl(this@MainActivity)) }
+        val vKey = EditText(this).apply { hint = "视觉 Key（留空 = 同上）"; setTextColor(Color.WHITE); setText(JarvisPrefs.getVisionApiKey(this@MainActivity)) }
+        root.addView(vModel); root.addView(vBase); root.addView(vKey)
+
+        root.addView(TextView(this).apply { text = "坐标格式"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0) })
+        var coordMode = JarvisPrefs.getVisionCoord(this)
+        val coordSpinner = android.widget.Spinner(this).apply {
+            val opts = listOf("pixel" to "像素坐标（多数模型）", "norm1000" to "0~1000 归一化（Qwen-VL 系）")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, opts.map { it.second })
+            setSelection(opts.indexOfFirst { it.first == coordMode }.coerceAtLeast(0))
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) { coordMode = opts[pos].first }
+                override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+            }
+        }
+        root.addView(coordSpinner)
+        root.addView(TextView(this).apply {
+            text = "本实现看屏用的是「网格标定法」（截图叠加格子号，模型只报格子+左中右），不是直接报像素/归一化坐标，" +
+                "所以这个设置目前存了但没真正影响取坐标的方式——先留着占位，等换成直接坐标输出的 prompt 再接上。"
+            textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, 0)
+        })
+
+        val whitelistInput = EditText(this).apply {
+            hint = "额外允许看屏点击的 App 包名，每行一个"
+            setTextColor(Color.WHITE)
+            minLines = 2; maxLines = 4
+            setText(JarvisPrefs.getVisionWhitelistRaw(this@MainActivity))
+        }
+        root.addView(TextView(this).apply { text = "看屏白名单（高级）"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0) })
+        root.addView(whitelistInput)
+        root.addView(TextView(this).apply {
+            text = "坐标点击只在“不在黑名单 且 在看屏白名单内”的 App 里允许；含 bank/pay/wallet/settings 的包名会被原生层拒绝。"
+            textSize = 11f; setTextColor(0x8AFFFFFF.toInt())
+        })
+        root.addView(btn("保存视觉看屏设置") {
+            JarvisPrefs.setVisionModel(this, vModel.text.toString())
+            JarvisPrefs.setVisionBaseUrl(this, vBase.text.toString())
+            JarvisPrefs.setVisionApiKey(this, vKey.text.toString())
+            JarvisPrefs.setVisionCoord(this, coordMode)
+            JarvisPrefs.setVisionWhitelistRaw(this, whitelistInput.text.toString())
+            JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(this))
+            toast("已保存")
+        })
+    }
+
+    /** 批二新增：常驻与入口——后台常驻待命开关、连续对话开关、几个系统设置快捷入口。 */
+    private fun buildEntrySection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "常驻与入口"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        root.addView(CheckBox(this).apply {
+            text = "后台常驻待命（前台服务 + 常驻通知，熄屏也能听“贾维斯”，耗电会增加）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isKeepAliveEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                JarvisPrefs.setKeepAliveEnabled(this@MainActivity, checked)
+                if (checked) startKeepAlive(manual = true)
+                // 关闭时不主动杀掉已经在跑的前台服务——只是不再"记住要常驻"，下次打开 App 不会自动再启动。
+            }
+        })
+        root.addView(CheckBox(this).apply {
+            text = "连续对话（语音回答说完自动继续听，不用再喊一次唤醒词）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isContinuousChat(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setContinuousChat(this@MainActivity, checked) }
+        })
+        val linkRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0) }
+        linkRow.addView(btn("设为默认助手") {
+            try {
+                startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+            } catch (e: Exception) {
+                toast("这台设备没有这个系统页面，去系统设置里手动找“默认数字助理”")
+            }
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
+        root.addView(linkRow)
+        root.addView(btn("授权读取通知（来电/短信播报要用）") {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        })
+        root.addView(TextView(this).apply {
+            text = "“默认助手”具体页面因 ROM 而异，找不到“贾维斯”选项就说明这台设备走的是另一条系统路径，" +
+                "暂时只能靠悬浮球/磁贴唤起。"
+            textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, 0)
         })
     }
 
