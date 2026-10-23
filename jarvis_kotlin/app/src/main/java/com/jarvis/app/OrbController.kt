@@ -499,7 +499,7 @@ object OrbController {
             if (!bearTried) {
                 bearTried = true
                 bearBmp = try {
-                    BitmapFactory.decodeResource(context.resources, R.drawable.orb_bear)
+                    BitmapFactory.decodeResource(context.resources, R.drawable.orb_ironman)
                 } catch (_: Throwable) {
                     null
                 }
