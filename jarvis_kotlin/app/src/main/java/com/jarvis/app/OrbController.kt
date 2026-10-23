@@ -132,7 +132,7 @@ object OrbController {
         val w = wm ?: return
         val d = s.resources.displayMetrics
         // 真机反馈：jk-v11 时 56dp 太小，jk-v12 放大到 168dp 又太大，用户改定 120dp
-        val size = (120 * d.density).toInt()
+        val size = (100 * d.density).toInt()
         val p = s.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val lp = WindowManager.LayoutParams(
             size, size, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -461,7 +461,7 @@ object OrbController {
             paint.shader = ringShader
             c.drawCircle(cx, cy, r1 - ringW / 2f, paint)
             c.restore()
-            // 球面：小熊头像（用户指定，Muse 默认头像）圆形裁切；状态靠外圈渐变环+脉冲表达
+            // 球面：钢铁侠头盔头像（用户 2026-10-24 指定新图，已按头盔位置裁成正方形）圆形裁切；状态靠外圈渐变环+脉冲表达（原小熊 orb_bear 保留在资源里未删）
             val bear = bearBitmap()
             if (bear != null) {
                 paint.reset(); paint.isAntiAlias = true
