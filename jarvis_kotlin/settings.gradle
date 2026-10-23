@@ -1,4 +1,14 @@
 pluginManagement {
+    // jk-v10 失败教训：KSP 的插件标记（com.google.devtools.ksp.gradle.plugin）在本构建环境
+    // 的插件仓库里解析不到（Gradle 求值阶段就挂，代码根本没开始编）。改走官方实现模块
+    // symbol-processing-gradle-plugin——它在 Maven Central / Google Maven 里有，绕开标记解析。
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == 'com.google.devtools.ksp') {
+                useModule("com.google.devtools.ksp:symbol-processing-gradle-plugin:${requested.version}")
+            }
+        }
+    }
     repositories {
         maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
         maven { url 'https://maven.aliyun.com/repository/google' }
