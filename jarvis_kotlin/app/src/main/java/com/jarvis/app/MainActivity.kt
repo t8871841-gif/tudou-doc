@@ -30,8 +30,13 @@ import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.hud.HudStageView
+import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
@@ -66,6 +71,10 @@ class MainActivity : Activity() {
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
+    private lateinit var memoryListContainer: LinearLayout
+
+    // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
+    private val uiScope = MainScope()
     private var showingSettings = false
     private var showInput = false
     private var chatInFlight = false
@@ -315,14 +324,24 @@ class MainActivity : Activity() {
         chatInFlight = true
         chatInput.text.clear()
         addBubble(text, mine = true)
-        AgnesClient.ask(this, text,
-            onResult = { reply -> runOnUiThread { chatInFlight = false; addBubble(reply, mine = false) } },
-            onError = { e ->
-                runOnUiThread {
-                    chatInFlight = false
-                    addBubble("出错了：${e.message ?: "未知错误"}（Key 在设置里填）", mine = false)
-                }
-            })
+        // 批三：打字对话与语音同路——先拦截显式记忆指令，未命中再带长期记忆提问。
+        uiScope.launch {
+            val ack = MemoryService.processExplicitMemory(this@MainActivity, text)
+            if (ack != null) {
+                chatInFlight = false
+                addBubble(ack, mine = false)
+                return@launch
+            }
+            val mem = MemoryService.getInjectableMemories(this@MainActivity)
+            AgnesClient.ask(this@MainActivity, text, memoryContext = mem,
+                onResult = { reply -> runOnUiThread { chatInFlight = false; addBubble(reply, mine = false) } },
+                onError = { e ->
+                    runOnUiThread {
+                        chatInFlight = false
+                        addBubble("出错了：$e（Key 在设置里填）", mine = false)
+                    }
+                })
+        }
     }
 
     // ---------- 底部：静音 / 麦克风 / 键盘切换 + 折叠输入行 ----------
@@ -408,7 +427,10 @@ class MainActivity : Activity() {
         showingSettings = !showingSettings
         homePanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
         settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
-        if (showingSettings) refresh()
+        if (showingSettings) {
+            refresh()
+            refreshMemoryList()
+        }
     }
 
     private fun buildSettingsPanel(): ScrollView {
@@ -449,6 +471,7 @@ class MainActivity : Activity() {
         buildVoiceSettingsSection(root)
         buildVisionSection(root)
         buildEntrySection(root)
+        buildMemorySection(root)
         buildAuditSection(root)
         return ScrollView(this).apply { addView(root) }
     }
@@ -649,6 +672,80 @@ class MainActivity : Activity() {
         })
     }
 
+    /** 批三新增：「记忆」分区——总开关、列表（分域+时间）、逐条删除、一键清空。数据在 MemoryService（Room）。 */
+    private fun buildMemorySection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "记忆（画像与长期记忆）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        root.addView(CheckBox(this).apply {
+            text = "启用长期记忆（说“记住：……”写入，对话时自动带上）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isMemoryEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                JarvisPrefs.setMemoryEnabled(this@MainActivity, checked)
+                refreshMemoryList()
+            }
+        })
+        memoryListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(memoryListContainer)
+        root.addView(btn("刷新记忆列表") { refreshMemoryList() })
+        root.addView(btn("清空全部记忆") {
+            uiScope.launch {
+                MemoryService.clearAll(this@MainActivity)
+                toast("记忆已清空")
+                refreshMemoryList()
+            }
+        })
+    }
+
+    private fun refreshMemoryList() {
+        if (!::memoryListContainer.isInitialized) return
+        memoryListContainer.removeAllViews()
+        if (!JarvisPrefs.isMemoryEnabled(this)) {
+            memoryListContainer.addView(TextView(this).apply {
+                text = "记忆已关闭，不会写入也不会带上。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
+            })
+            return
+        }
+        memoryListContainer.addView(TextView(this).apply {
+            text = "加载中…"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
+        })
+        uiScope.launch {
+            val list = MemoryService.getAllMemories(this@MainActivity)
+            memoryListContainer.removeAllViews()
+            if (list.isEmpty()) {
+                memoryListContainer.addView(TextView(this@MainActivity).apply {
+                    text = "还没有记忆。对 Jarvis 说“记住：……”就能存一条。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
+                })
+                return@launch
+            }
+            val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+            for (item in list) {
+                val row = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(4))
+                }
+                row.addView(TextView(this@MainActivity).apply {
+                    text = "[${item.domain}] ${item.content} · ${fmt.format(Date(item.timestamp))}"
+                    textSize = 13f
+                    setTextColor(0xFFE8ECF4.toInt())
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                row.addView(Button(this@MainActivity).apply {
+                    text = "删除"
+                    setOnClickListener {
+                        uiScope.launch {
+                            MemoryService.deleteMemory(this@MainActivity, item.id)
+                            refreshMemoryList()
+                        }
+                    }
+                })
+                memoryListContainer.addView(row)
+            }
+        }
+    }
+
     /** 第 2 条「操作审计日志」：默认收起，不占屏幕——点开才看，符合"每屏只做一件事"的精简原则。 */
     private fun buildAuditSection(root: LinearLayout) {
         val section = TextView(this).apply {
@@ -692,6 +789,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         tickRunnable?.let { main.removeCallbacks(it) }
         if (JarvisAgent.onStateChanged != null) JarvisAgent.onStateChanged = null
+        uiScope.cancel()
         super.onDestroy()
     }
 

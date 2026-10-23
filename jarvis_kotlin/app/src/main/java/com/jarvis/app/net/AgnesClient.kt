@@ -120,7 +120,7 @@ object AgnesClient {
     /**
      * 发起一次对话。onResult 在后台线程回调；onError 携带可读错误信息（网络失败 / 未配置 Key / HTTP 错误码）。
      */
-    fun ask(ctx: Context, userText: String, onResult: (String) -> Unit, onError: (String) -> Unit) {
+    fun ask(ctx: Context, userText: String, memoryContext: String = "", onResult: (String) -> Unit, onError: (String) -> Unit) {
         val key = JarvisPrefs.getAgnesKey(ctx)
         if (key.isBlank()) {
             onError("未配置 Agnes API Key，请先去设置里填写")
@@ -132,8 +132,10 @@ object AgnesClient {
             while (history.size > MAX_TURNS * 2) history.removeAt(0)
         }
 
+        // 批三：长期记忆拼在系统提示词后面（memoryContext 为空时与原来完全一致）
+        val fullSystemPrompt = if (memoryContext.isNotBlank()) SYSTEM_PROMPT + memoryContext else SYSTEM_PROMPT
         val messages = JSONArray()
-        messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+        messages.put(JSONObject().put("role", "system").put("content", fullSystemPrompt))
         synchronized(this) {
             for ((role, content) in history) {
                 messages.put(JSONObject().put("role", role).put("content", content))

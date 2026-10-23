@@ -4,9 +4,14 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.tts.EdgeTts
 import com.jarvis.app.vision.ScreenVisionAgent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * 二期新增：对话 + 语音的总调度。接管 OrbController 的 eventSink/dartAlive
@@ -17,6 +22,9 @@ import com.jarvis.app.vision.ScreenVisionAgent
  */
 object JarvisAgent {
     private val main = Handler(Looper.getMainLooper())
+
+    // 批三：记忆读写是挂起调用，统一在这个主线程作用域里跑（单例，不取消）
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     @Volatile
     private var appCtx: Context? = null
@@ -129,6 +137,22 @@ object JarvisAgent {
 
     private fun onUserUtterance(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq) return
+        // 批三：先拦截显式记忆指令；未命中再取长期记忆，随问答一起注入。
+        scope.launch {
+            if (mySeq != genSeq) return@launch
+            val ack = MemoryService.processExplicitMemory(ctx, text)
+            if (mySeq != genSeq) return@launch
+            if (ack != null) {
+                speakReply(ctx, mySeq, ack)
+                return@launch
+            }
+            val mem = MemoryService.getInjectableMemories(ctx)
+            if (mySeq != genSeq) return@launch
+            handleUtterance(ctx, mySeq, text, mem)
+        }
+    }
+
+    private fun handleUtterance(ctx: Context, mySeq: Int, text: String, memoryContext: String) {
         val tapMatch = TAP_INTENT.find(text)
         if (tapMatch != null && tapMatch.groupValues[3].isNotBlank()) {
             val target = tapMatch.groupValues[3].trim()
@@ -149,7 +173,7 @@ object JarvisAgent {
         }
         setState(ctx, "thinking")
         AgnesClient.ask(
-            ctx, text,
+            ctx, text, memoryContext = memoryContext,
             onResult = { reply -> main.post { if (mySeq == genSeq) speakReply(ctx, mySeq, reply) } },
             onError = { msg ->
                 main.post {

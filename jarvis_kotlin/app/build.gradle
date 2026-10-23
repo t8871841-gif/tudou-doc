@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.androidApplication)
-    id 'org.jetbrains.kotlin.android' version '1.9.22'
+    alias(libs.plugins.kotlinAndroid)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -31,15 +32,15 @@ android {
 
 dependencies {
     implementation libs.androidx.core.ktx
-    // 二期新增：Agnes 对话(REST) 用的 HTTP 客户端（Edge TTS 后来改成了手写 TLS socket，不走这个）。
-    // 来源：Maven Central，com.squareup.okhttp3:okhttp，版本 4.12.0（选最后一个仍支持 Java 8/无需 okio3 以上额外配置的稳定版）。
+    // Agnes 对话(REST) 用的 HTTP 客户端。来源：Maven Central，com.squareup.okhttp3:okhttp 4.12.0。
     implementation libs.okhttp
-    // 三期-B：sherpa-onnx 1.12.23（流式 zipformer 离线识别）。官方只发布 GitHub Releases 的
-    // 预编译 aar，不在 Maven Central/阿里云镜像里，需要你们自己下载放到 app/libs/ 下（不进 git）：
-    //   https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar
-    // 本次交付环境没有公网访问权限，这个 aar 没法替你们下载/验证，文件名必须完全一致，否则下面这行会报
-    // "找不到文件"。另外还需要把中英双语流式 zipformer 模型的 4 个文件放进
-    // app/src/main/assets/asr/（文件名见 asr/OfflineAsr.kt 里的 ENCODER/DECODER/JOINER/TOKENS 常量），
-    // 下载地址见 V3_CHANGES.md。这两样东西缺一样，这个模块要么编译不过要么运行时报错，不会假装能用。
+    // 批三：长期记忆的 Room 持久化 + 协程（版本对应见 gradle/libs.versions.toml：
+    // KSP 1.9.22-1.0.17 严格对应 Kotlin 1.9.22；Room 2.6.1；coroutines 1.7.3）。
+    implementation libs.room.runtime
+    implementation libs.room.ktx
+    ksp libs.room.compiler
+    implementation libs.kotlinx.coroutines.android
+    // sherpa-onnx 1.12.23（流式 zipformer 离线识别）预编译 aar，官方只发 GitHub Releases，
+    // 由 CI 构建时下载放到 app/libs/（不进 git），文件名必须完全一致。
     implementation files('libs/sherpa-onnx-1.12.23.aar')
 }

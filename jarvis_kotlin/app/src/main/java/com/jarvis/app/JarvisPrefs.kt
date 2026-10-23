@@ -31,6 +31,15 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_BARGE_IN_ENABLED, on).apply()
     }
 
+    // ---------- 批三：长期记忆总开关（记忆本体存独立 Room 库，与 Key 解耦） ----------
+
+    private const val KEY_MEMORY_ENABLED = "memory_enabled"
+
+    fun isMemoryEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_MEMORY_ENABLED, true)
+    fun setMemoryEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_MEMORY_ENABLED, on).apply()
+    }
+
     private const val KEY_MUTED = "tts_muted"
 
     /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */

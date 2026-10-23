@@ -303,3 +303,12 @@
 ### 未排期 / 本批没碰
 批三到批六（记忆第二代、技能固化、端侧小模型、主动性补完）仍未开始；设置页里语速/音调滑杆、
 来电短信播报、晨报、记忆查看等也还没做，按约定等确认这批没问题再继续。
+
+---
+
+## 对齐轮次 · 批三：记忆二代（第 9 项）——Gemini 首交退回，Muse 以基线补齐
+
+- 首交（Gemini）：记忆四件套（MemoryItem/Dao/Database/Service）结构完整，但缺 Gradle 依赖、JarvisPrefs 接口与基线对不上（把 object 当 class 实例化、文件名写错）、Agent 注入与设置页只有文字无代码、changelog 与实物不符——整批退回。
+- 整改版（Gemini）：依赖三件套（toml/根 gradle/app gradle，KSP 1.9.22-1.0.17 / Room 2.6.1 / coroutines 1.7.3）与 Prefs 风格已改对且经 Muse 逐项核实；但 JarvisAgent 后半、MainActivity 后半、AgnesClient 尾部在粘贴中丢失，未送达部分无法核查。用户拍板：由 Muse 以仓库基线 + 已核实部分补齐，不再等 Gemini。
+- Muse 补齐内容：①Gradle 三件套采用 Gemini 整改版（已核实为基线超集）；②JarvisPrefs 只加记忆总开关（memory_enabled，基线风格）；③memory/ 四件套采用 Gemini 整改版原文（仅加文件头注释）；④AgnesClient.ask 增加 memoryContext 参数（默认空，老调用零影响），记忆拼在 SYSTEM_PROMPT 后；⑤JarvisAgent.onUserUtterance 前置协程：先拦截显式记忆（命中直接确认回复），未命中取记忆注入问答；原视觉/问答逻辑拆到 handleUtterance 原样保留；⑥MainActivity：打字对话（sendChat）与语音同路（拦截+注入），设置页新增「记忆」分区（总开关/列表[分域+时间]/逐条删除/清空，MainScope 加载、onDestroy 取消）；⑦顺手修复存量编译错误：sendChat 的 onError 回调参数是 String 却写了 e.message（批一遗留，此前从未成功构建故未暴露）。
+- 如实标注：**自然语言隐式提取未实现**，仅显式前缀（记住：/记住 /请记住：/请记住 ）写入 + 关键词分域；注入取最近 15 条全量拼接，未做相关性筛选。本批未构建，等用户明确开始再出包验证。
