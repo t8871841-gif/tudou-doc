@@ -201,6 +201,7 @@ object ScreenVisionAgent {
                 TakeoverBorder.hide()
                 if (ok) {
                     resetRepeatGuard()
+                    com.jarvis.app.skill.SkillTrace.recordTap(target)
                     AuditLog.append(ctx, taskLabel, "视觉看屏点击「$target」于坐标附近", "成功")
                     onDone(true, "")
                 } else {

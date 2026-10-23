@@ -32,9 +32,13 @@ import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.hud.HudStageView
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.skill.SkillService
+import com.jarvis.app.skill.SkillTrace
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -72,6 +76,7 @@ class MainActivity : Activity() {
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
     private lateinit var memoryListContainer: LinearLayout
+    private lateinit var skillListContainer: LinearLayout
 
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
@@ -430,6 +435,7 @@ class MainActivity : Activity() {
         if (showingSettings) {
             refresh()
             refreshMemoryList()
+            refreshSkillList()
         }
     }
 
@@ -472,6 +478,7 @@ class MainActivity : Activity() {
         buildVisionSection(root)
         buildEntrySection(root)
         buildMemorySection(root)
+        buildSkillSection(root)
         buildAuditSection(root)
         return ScrollView(this).apply { addView(root) }
     }
@@ -742,6 +749,169 @@ class MainActivity : Activity() {
                     }
                 })
                 memoryListContainer.addView(row)
+            }
+        }
+    }
+
+    /** 批四新增：「技能」分区——总开关、技能列表（启停/计数/删除）、轨迹存技能、手动新建。数据在 SkillService（Room）。 */
+    private fun buildSkillSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "技能（固化任务）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        root.addView(CheckBox(this).apply {
+            text = "启用技能（话里命中触发句就直接重播步骤）"
+            setTextColor(0xB3FFFFFF.toInt())
+            isChecked = JarvisPrefs.isSkillEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                JarvisPrefs.setSkillEnabled(this@MainActivity, checked)
+                refreshSkillList()
+            }
+        })
+        skillListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(skillListContainer)
+
+        // 把最近点按轨迹存为技能
+        val traceName = EditText(this).apply {
+            hint = "给刚才的操作起个名（如：打开微信收款码）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+        }
+        root.addView(traceName)
+        root.addView(btn("把最近操作存为技能") {
+            val name = traceName.text.toString().trim()
+            if (name.isEmpty()) {
+                toast("先给技能起个名")
+                return@btn
+            }
+            val trace = SkillTrace.snapshot()
+            if (trace.isEmpty()) {
+                toast("还没有可存的操作记录（先让 Jarvis 点按几次）")
+                return@btn
+            }
+            uiScope.launch {
+                SkillService.addSkill(this@MainActivity, name, name, SkillService.tapsToStepsJson(trace))
+                SkillTrace.clear()
+                traceName.text.clear()
+                toast("技能「$name」已保存（${trace.size} 步）")
+                refreshSkillList()
+            }
+        })
+
+        // 手动新建技能：一行一步（开：包名 / 点：目标 / 等：毫秒 / 滑：下）
+        val newName = EditText(this).apply {
+            hint = "新技能名"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+        }
+        val newTrigger = EditText(this).apply {
+            hint = "触发句（话里包含它就执行，如：打开收款码）"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+        }
+        val newSteps = EditText(this).apply {
+            hint = "步骤，一行一步：开：包名 / 点：目标 / 等：800 / 滑：下"
+            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
+            minLines = 3
+        }
+        root.addView(newName)
+        root.addView(newTrigger)
+        root.addView(newSteps)
+        root.addView(btn("保存新技能") {
+            val name = newName.text.toString().trim()
+            val trigger = newTrigger.text.toString().trim()
+            if (name.isEmpty() || trigger.isEmpty()) {
+                toast("技能名和触发句都要填")
+                return@btn
+            }
+            val arr = JSONArray()
+            val lines = newSteps.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (lines.isEmpty()) {
+                toast("至少写一步")
+                return@btn
+            }
+            for ((i, line) in lines.withIndex()) {
+                val obj: JSONObject? = when {
+                    line.startsWith("开：") ->
+                        JSONObject().put("t", "open").put("pkg", line.removePrefix("开：").trim())
+                    line.startsWith("点：") ->
+                        JSONObject().put("t", "tap").put("target", line.removePrefix("点：").trim())
+                    line.startsWith("等：") ->
+                        line.removePrefix("等：").trim().toLongOrNull()?.let {
+                            JSONObject().put("t", "wait").put("ms", it)
+                        }
+                    line.startsWith("滑：") -> {
+                        val d = line.removePrefix("滑：").trim()
+                        if (d == "上" || d == "下") JSONObject().put("t", "swipe").put("dir", if (d == "上") "up" else "down") else null
+                    }
+                    else -> null
+                }
+                if (obj == null || obj.length() == 0 || (obj.optString("pkg").isEmpty() && obj.optString("t") == "open") ||
+                    (obj.optString("target").isEmpty() && obj.optString("t") == "tap")
+                ) {
+                    toast("第 ${i + 1} 行看不懂：$line")
+                    return@btn
+                }
+                arr.put(obj)
+            }
+            uiScope.launch {
+                SkillService.addSkill(this@MainActivity, name, trigger, arr.toString())
+                newName.text.clear(); newTrigger.text.clear(); newSteps.text.clear()
+                toast("技能「$name」已保存")
+                refreshSkillList()
+            }
+        })
+        root.addView(btn("刷新技能列表") { refreshSkillList() })
+    }
+
+    private fun refreshSkillList() {
+        if (!::skillListContainer.isInitialized) return
+        skillListContainer.removeAllViews()
+        if (!JarvisPrefs.isSkillEnabled(this)) {
+            skillListContainer.addView(TextView(this).apply {
+                text = "技能已关闭，不会命中也不会重播。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
+            })
+            return
+        }
+        skillListContainer.addView(TextView(this).apply {
+            text = "加载中…"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
+        })
+        uiScope.launch {
+            val list = SkillService.getAllSkills(this@MainActivity)
+            skillListContainer.removeAllViews()
+            if (list.isEmpty()) {
+                skillListContainer.addView(TextView(this@MainActivity).apply {
+                    text = "还没有技能。可以把最近操作存为技能，或在下面手动新建。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
+                })
+                return@launch
+            }
+            for (item in list) {
+                val stepCount = SkillService.parseSteps(item.stepsJson).size
+                val row = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(4))
+                }
+                row.addView(TextView(this@MainActivity).apply {
+                    text = "${item.name}（${stepCount}步 · 触发：${item.triggerText} · 成功${item.successCount}/失败${item.failCount}）"
+                    textSize = 13f
+                    setTextColor(0xFFE8ECF4.toInt())
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                row.addView(CheckBox(this@MainActivity).apply {
+                    isChecked = item.enabled
+                    setOnCheckedChangeListener { _, checked ->
+                        uiScope.launch {
+                            SkillService.setEnabled(this@MainActivity, item, checked)
+                        }
+                    }
+                })
+                row.addView(Button(this@MainActivity).apply {
+                    text = "删除"
+                    setOnClickListener {
+                        uiScope.launch {
+                            SkillService.deleteSkill(this@MainActivity, item.id)
+                            refreshSkillList()
+                        }
+                    }
+                })
+                skillListContainer.addView(row)
             }
         }
     }

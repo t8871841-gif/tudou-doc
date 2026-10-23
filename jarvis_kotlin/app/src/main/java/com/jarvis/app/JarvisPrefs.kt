@@ -40,6 +40,15 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_MEMORY_ENABLED, on).apply()
     }
 
+    // ---------- 批四：技能固化总开关（技能本体存独立 Room 库 jarvis_skills.db） ----------
+
+    private const val KEY_SKILL_ENABLED = "skill_enabled"
+
+    fun isSkillEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_SKILL_ENABLED, true)
+    fun setSkillEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_SKILL_ENABLED, on).apply()
+    }
+
     private const val KEY_MUTED = "tts_muted"
 
     /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */

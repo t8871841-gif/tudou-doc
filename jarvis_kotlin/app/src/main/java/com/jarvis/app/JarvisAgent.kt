@@ -6,6 +6,9 @@ import android.os.Looper
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.skill.SkillItem
+import com.jarvis.app.skill.SkillRunner
+import com.jarvis.app.skill.SkillService
 import com.jarvis.app.tts.EdgeTts
 import com.jarvis.app.vision.ScreenVisionAgent
 import kotlinx.coroutines.CoroutineScope
@@ -148,11 +151,22 @@ object JarvisAgent {
             }
             val mem = MemoryService.getInjectableMemories(ctx)
             if (mySeq != genSeq) return@launch
-            handleUtterance(ctx, mySeq, text, mem)
+            // 批四：技能命中先于视觉意图判定（命中即重播，不再走现场流程）
+            val skill = if (JarvisPrefs.isSkillEnabled(ctx)) SkillService.match(ctx, text) else null
+            if (mySeq != genSeq) return@launch
+            handleUtterance(ctx, mySeq, text, mem, skill)
         }
     }
 
-    private fun handleUtterance(ctx: Context, mySeq: Int, text: String, memoryContext: String) {
+    private fun handleUtterance(ctx: Context, mySeq: Int, text: String, memoryContext: String, skill: SkillItem?) {
+        if (skill != null) {
+            setState(ctx, "thinking")
+            SkillRunner.run(ctx, skill) { ok, detail ->
+                if (mySeq != genSeq) return@run
+                speakReply(ctx, mySeq, if (ok) "技能「${skill.name}」执行完了" else "技能「${skill.name}」$detail，已停下")
+            }
+            return
+        }
         val tapMatch = TAP_INTENT.find(text)
         if (tapMatch != null && tapMatch.groupValues[3].isNotBlank()) {
             val target = tapMatch.groupValues[3].trim()

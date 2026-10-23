@@ -312,3 +312,14 @@
 - 整改版（Gemini）：依赖三件套（toml/根 gradle/app gradle，KSP 1.9.22-1.0.17 / Room 2.6.1 / coroutines 1.7.3）与 Prefs 风格已改对且经 Muse 逐项核实；但 JarvisAgent 后半、MainActivity 后半、AgnesClient 尾部在粘贴中丢失，未送达部分无法核查。用户拍板：由 Muse 以仓库基线 + 已核实部分补齐，不再等 Gemini。
 - Muse 补齐内容：①Gradle 三件套采用 Gemini 整改版（已核实为基线超集）；②JarvisPrefs 只加记忆总开关（memory_enabled，基线风格）；③memory/ 四件套采用 Gemini 整改版原文（仅加文件头注释）；④AgnesClient.ask 增加 memoryContext 参数（默认空，老调用零影响），记忆拼在 SYSTEM_PROMPT 后；⑤JarvisAgent.onUserUtterance 前置协程：先拦截显式记忆（命中直接确认回复），未命中取记忆注入问答；原视觉/问答逻辑拆到 handleUtterance 原样保留；⑥MainActivity：打字对话（sendChat）与语音同路（拦截+注入），设置页新增「记忆」分区（总开关/列表[分域+时间]/逐条删除/清空，MainScope 加载、onDestroy 取消）；⑦顺手修复存量编译错误：sendChat 的 onError 回调参数是 String 却写了 e.message（批一遗留，此前从未成功构建故未暴露）。
 - 如实标注：**自然语言隐式提取未实现**，仅显式前缀（记住：/记住 /请记住：/请记住 ）写入 + 关键词分域；注入取最近 15 条全量拼接，未做相关性筛选。本批未构建，等用户明确开始再出包验证。
+
+---
+
+## 对齐轮次 · 批四：技能固化（第 8 项）——Muse 按自拟规格直接补齐（Gemini 包未及转交，用户改令 Muse 做）
+
+- 新增 skill/ 包（独立 Room 库 jarvis_skills.db，不动批三记忆库）：SkillItem（name/triggerText/stepsJson/enabled/成功失败计数）、SkillDao、SkillDatabase、SkillService（CRUD + 包含式匹配：触发句被包含或含技能名，取最长命中——非语义匹配）、SkillTrace（点按轨迹，仅内存）、SkillRunner（重播引擎）。
+- 步骤只四种：open（系统启动意图）/ tap（走 ScreenVisionAgent 网格看屏原语）/ wait / swipe（无障碍现成方法）。**input 输入步骤未做**——基线无已验证输入原语，不发明。
+- 轨迹采集：ScreenVisionAgent 点按成功的唯一出口加一行 SkillTrace.recordTap（其余逻辑未动）。
+- Agent 集成：handleUtterance 之前（记忆注入同一协程段）先做技能匹配，命中在 TAP_INTENT 之前重播；成功播报"执行完了"，失败播报"第 N 步失败：…，已停下"并计数。**失败不自动回退现场执行**（部分步骤可能已生效，重走会重复动作——评审决定，代码注释已注明）。
+- 设置页新增「技能」分区：总开关（Prefs skill_enabled）、列表（步数/触发句/成功失败计数/启停/删除）、"把最近操作存为技能"（轨迹转 tap 步骤，触发句=技能名）、手动新建（开：/点：/等：/滑： 行格式，解析失败指明行号不存半截）。
+- 本批未构建、未真机验证，等用户明确开始再出包。
