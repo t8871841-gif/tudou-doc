@@ -9,6 +9,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -21,10 +23,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.net.AgnesClient
 
 /**
- * 纯 Kotlin 版主界面：连接状态自检（无障碍/悬浮窗/电池豁免/常驻服务/悬浮球/
- * Agnes Key/系统语音识别），哪一项没通当场跳去开启；二期新增对话与语音设置区。
+ * 纯 Kotlin 版主界面：打开即对话页（打字聊天 + 麦克风走语音流程）；
+ * 自检与设置是二级页（右上角切换）：连接状态（无障碍/电池豁免/常驻服务/悬浮球/
+ * Agnes Key/离线识别）哪一项没通当场跳去开启。悬浮球走无障碍覆盖层，不需要悬浮窗权限。
  */
 class MainActivity : Activity() {
 
@@ -36,25 +40,23 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var detailView: TextView
     private lateinit var orbButton: Button
+    private lateinit var chatPanel: LinearLayout
+    private lateinit var settingsScroll: ScrollView
+    private lateinit var chatList: LinearLayout
+    private lateinit var chatScroll: ScrollView
+    private lateinit var chatInput: EditText
+    private var showingSettings = false
+    private var chatInFlight = false
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 设置内容（自检 + 对话语音设置 + 审计），装进二级页
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(24))
-        }
-        val title = TextView(this).apply {
-            text = "Jarvis"
-            textSize = 28f
-            gravity = Gravity.START
-        }
-        val sub = TextView(this).apply {
-            text = "纯 Kotlin 版 · 二期（对话 + 语音）"
-            textSize = 14f
-            setPadding(0, dp(4), 0, dp(16))
+            setPadding(dp(20), dp(12), dp(20), dp(24))
         }
         statusView = TextView(this).apply { textSize = 15f }
         orbButton = Button(this).apply {
@@ -73,19 +75,9 @@ class MainActivity : Activity() {
             setPadding(0, dp(12), 0, 0)
         }
 
-        root.addView(title)
-        root.addView(sub)
         root.addView(statusView)
-        root.addView(btn("开启无障碍服务") {
+        root.addView(btn("开启无障碍服务（悬浮球靠它承载，无需单独的悬浮窗权限）") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        })
-        root.addView(btn("授予悬浮窗权限") {
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                )
-            )
         })
         root.addView(btn("申请电池优化豁免") {
             startActivity(
@@ -102,11 +94,129 @@ class MainActivity : Activity() {
         root.addView(detailView)
         buildVoiceSettingsSection(root)
         buildAuditSection(root)
+        settingsScroll = ScrollView(this).apply {
+            addView(root)
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        }
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        buildChatPanel()
+        val toggleBtn = Button(this).apply {
+            text = "自检/设置"
+            setOnClickListener {
+                showingSettings = !showingSettings
+                chatPanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
+                settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
+                text = if (showingSettings) "回到对话" else "自检/设置"
+                if (showingSettings) refresh()
+            }
+        }
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(10), dp(8), dp(6))
+            addView(TextView(this@MainActivity).apply {
+                text = "Jarvis"
+                textSize = 22f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            addView(toggleBtn)
+        }
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF0B0E14.toInt())
+            addView(topBar)
+            addView(chatPanel)
+            addView(settingsScroll)
+        }
+        setContentView(outer)
 
         handleAssistIntent(intent)
         startKeepAlive(manual = false)
+    }
+
+    /** 对话主页：消息气泡列表 + 输入行（发送走 Agnes，麦克风走悬浮球同款语音流程）。 */
+    private fun buildChatPanel() {
+        chatList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        chatScroll = ScrollView(this).apply { addView(chatList) }
+        chatInput = EditText(this).apply {
+            hint = "跟 Jarvis 说点什么…"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val inputRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(6), dp(8), dp(10))
+            addView(chatInput)
+            addView(Button(this@MainActivity).apply {
+                text = "🎤"
+                setOnClickListener { JarvisAgent.triggerListenFromAssist(this@MainActivity) }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "发送"
+                setOnClickListener { sendChat() }
+            })
+        }
+        chatPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+            addView(chatScroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            ))
+            addView(inputRow)
+        }
+        addBubble("你好，先生。我是 Jarvis，打字发消息或点 🎤 说话都行。", mine = false)
+    }
+
+    private fun addBubble(text: String, mine: Boolean) {
+        val tv = TextView(this).apply {
+            this.text = text
+            textSize = 15f
+            setTextColor(0xFFE8ECF4.toInt())
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(if (mine) 0xFF1D4ED8.toInt() else 0xFF1E2532.toInt())
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = if (mine) Gravity.END else Gravity.START
+                topMargin = dp(6)
+                marginStart = if (mine) dp(48) else 0
+                marginEnd = if (mine) 0 else dp(48)
+            }
+        }
+        chatList.addView(tv)
+        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun sendChat() {
+        val text = chatInput.text.toString().trim()
+        if (text.isEmpty() || chatInFlight) return
+        chatInFlight = true
+        chatInput.text.clear()
+        addBubble(text, mine = true)
+        AgnesClient.ask(this, text,
+            onResult = { reply ->
+                runOnUiThread {
+                    chatInFlight = false
+                    addBubble(reply, mine = false)
+                }
+            },
+            onError = { e ->
+                runOnUiThread {
+                    chatInFlight = false
+                    addBubble("出错了：${e.message ?: "未知错误"}（Key 在「自检/设置」里填）", mine = false)
+                }
+            })
     }
 
     /** 二期：对话 Key、唤醒词开关与灵敏度、打断说话开关——都在设置里直接能看能改。 */
@@ -266,12 +376,10 @@ class MainActivity : Activity() {
     private fun refresh() {
         if (!::statusView.isInitialized) return
         val a11y = JarvisAccessibilityService.isRunning()
-        val overlay = if (Build.VERSION.SDK_INT >= 23) Settings.canDrawOverlays(this) else true
         val pm = getSystemService(PowerManager::class.java)
         val battery = pm?.isIgnoringBatteryOptimizations(packageName) == true
         statusView.text = buildString {
-            appendLine("无障碍服务：${if (a11y) "已连接" else "未开启"}")
-            appendLine("悬浮窗权限：${if (overlay) "已授予" else "未授予"}")
+            appendLine("无障碍服务：${if (a11y) "已连接" else "未开启"}（悬浮球由它承载，无悬浮窗权限这回事）")
             appendLine("电池优化豁免：${if (battery) "已豁免" else "未豁免"}")
             appendLine("常驻服务：${if (JarvisForegroundService.running) "运行中" else "未运行"}")
             appendLine("悬浮球：${if (OrbController.isEnabled()) "已开启" else "已关闭"}")

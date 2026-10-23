@@ -4,9 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RadialGradient
 import android.graphics.Shader
@@ -457,16 +460,50 @@ object OrbController {
             paint.shader = ringShader
             c.drawCircle(cx, cy, r1 - ringW / 2f, paint)
             c.restore()
-            // 中层：径向渐变圆盘
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.FILL
-            paint.shader = diskShader
-            c.drawCircle(cx, cy, r2, paint)
-            // 核心：光晕 + 高光
-            paint.shader = glowShader
-            c.drawCircle(cx, cy, r3 * 1.9f, paint)
-            paint.shader = coreShader
-            c.drawCircle(cx, cy, r3, paint)
+            // 球面：小熊头像（用户指定，Muse 默认头像）圆形裁切；状态靠外圈渐变环+脉冲表达
+            val bear = bearBitmap()
+            if (bear != null) {
+                paint.reset(); paint.isAntiAlias = true
+                paint.style = Paint.Style.FILL
+                paint.color = Color.WHITE
+                c.drawCircle(cx, cy, r2, paint)
+                c.save()
+                val clip = Path().apply { addCircle(cx, cy, r2, Path.Direction.CW) }
+                c.clipPath(clip)
+                val dst = android.graphics.RectF(cx - r2, cy - r2, cx + r2, cy + r2)
+                c.drawBitmap(bear, null, dst, paint)
+                c.restore()
+                // 盘缘细圈，让球面和外环之间有分界
+                paint.reset(); paint.isAntiAlias = true
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 1f * dp
+                paint.color = 0x33000000
+                c.drawCircle(cx, cy, r2, paint)
+            } else {
+                // 头像资源异常时回退到原渐变盘面
+                paint.reset(); paint.isAntiAlias = true
+                paint.style = Paint.Style.FILL
+                paint.shader = diskShader
+                c.drawCircle(cx, cy, r2, paint)
+                paint.shader = glowShader
+                c.drawCircle(cx, cy, r3 * 1.9f, paint)
+                paint.shader = coreShader
+                c.drawCircle(cx, cy, r3, paint)
+            }
+        }
+
+        private var bearBmp: Bitmap? = null
+        private var bearTried = false
+        private fun bearBitmap(): Bitmap? {
+            if (!bearTried) {
+                bearTried = true
+                bearBmp = try {
+                    BitmapFactory.decodeResource(context.resources, R.drawable.orb_bear)
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            return bearBmp
         }
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
