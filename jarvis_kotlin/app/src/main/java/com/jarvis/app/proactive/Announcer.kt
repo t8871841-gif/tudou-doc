@@ -5,7 +5,7 @@ import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAgent
 import com.jarvis.app.JarvisNotificationListener
 import com.jarvis.app.JarvisPrefs
-import com.jarvis.app.tts.EdgeTts
+import com.jarvis.app.tts.TtsRouter
 
 /**
  * 批六：主动播报。接上 JarvisNotificationListener 早就留好的 announceOn/sink 钩子
@@ -46,7 +46,7 @@ object Announcer {
             }
             if (speakText.isBlank() || speakText.endsWith("：")) return
             AuditLog.append(ctx, "主动播报", speakText.take(60), "已播报")
-            EdgeTts.speak(ctx, speakText, onStart = {}, onDone = {})
+            TtsRouter.speak(ctx, speakText, onStart = {}, onDone = {})
         } catch (_: Exception) {
         }
     }

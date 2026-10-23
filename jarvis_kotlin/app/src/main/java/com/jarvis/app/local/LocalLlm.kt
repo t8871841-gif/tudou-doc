@@ -39,6 +39,44 @@ object LocalLlm {
         return "当前模型：${f.name}（${"%.0f".format(mb)} MB）"
     }
 
+    /** 把用户的话套进 Gemma 指令模型的对话模板（jk-v11 真机教训：直喂原话会胡言乱语、复读数字串）。 */
+    private fun buildPrompt(userText: String): String =
+        "<start_of_turn>user\n你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。\n\n$userText<end_of_turn>\n<start_of_turn>model\n"
+
+    /** 清洗模型输出：砍模板残留、截断复读、数字垃圾直接判失败（返回 null 让上层回退云端）。 */
+    private fun cleanOutput(raw: String): String? {
+        var s = raw
+        for (marker in listOf("<end_of_turn>", "<start_of_turn>", "<eos>")) {
+            val idx = s.indexOf(marker)
+            if (idx >= 0) s = s.substring(0, idx)
+        }
+        s = s.trim()
+        if (s.isBlank()) return null
+        val junkRatio = s.count { it.isDigit() || it == '-' || it == ' ' }.toDouble() / s.length
+        if (junkRatio > 0.6) return null
+        return cutRepetition(s).takeIf { it.isNotBlank() }
+    }
+
+    /** 同一短片段连续重复 6 次以上视为复读机，在重复处截断。 */
+    private fun cutRepetition(s: String): String {
+        if (s.length < 24) return s
+        for (unitLen in 4..12) {
+            var i = 0
+            while (i + unitLen * 6 <= s.length) {
+                val unit = s.substring(i, i + unitLen)
+                var count = 1
+                var j = i + unitLen
+                while (j + unitLen <= s.length && s.substring(j, j + unitLen) == unit) {
+                    count++
+                    j += unitLen
+                }
+                if (count >= 6) return s.substring(0, i + unitLen).trim()
+                i++
+            }
+        }
+        return s
+    }
+
     /** 确保已加载并生成；任何失败返回 null（上层据此回退云端），不在这里抛错或假装答了。 */
     suspend fun generate(ctx: Context, prompt: String): String? = withContext(dispatcher) {
         val path = JarvisPrefs.getLocalLlmPath(ctx)
@@ -56,7 +94,7 @@ object LocalLlm {
                 loadedPath = path
                 loadedMaxTokens = maxTokens
             }
-            llm!!.generateResponse(prompt)?.trim()?.takeIf { it.isNotBlank() }
+            llm!!.generateResponse(buildPrompt(prompt))?.let { cleanOutput(it) }
         } catch (_: Throwable) {
             try { llm?.close() } catch (_: Throwable) {}
             llm = null

@@ -81,6 +81,12 @@ class MainActivity : Activity() {
     private lateinit var skillListContainer: LinearLayout
     private lateinit var localStatusView: TextView
 
+    // 设置二级页面：目录 + 分页宿主（真机反馈：不再十个分区一长条）
+    private lateinit var settingsListPanel: LinearLayout
+    private lateinit var settingsPageHost: LinearLayout
+    private lateinit var settingsPageContent: LinearLayout
+    private val settingsPages = mutableMapOf<String, LinearLayout>()
+
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
     private var showingSettings = false
@@ -142,6 +148,9 @@ class MainActivity : Activity() {
         setContentView(root)
 
         JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s) } }
+        // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
+        JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
+        JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false) } }
         onAgentStateChanged(JarvisAgent.currentState())
 
         handleAssistIntent(intent)
@@ -466,6 +475,7 @@ class MainActivity : Activity() {
         homePanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
         settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
         if (showingSettings) {
+            closeSettingsPage()
             refresh()
             refreshMemoryList()
             refreshSkillList()
@@ -479,6 +489,59 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(12), dp(20), dp(24))
         }
         root.addView(btn("← 回到对话") { toggleSettings() })
+
+        // 真机反馈（jk-v11）：设置改二级页面——先进目录，点一类进一类，不再十个分区一长条。
+        settingsListPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        settingsPageHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        settingsPageContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        settingsPageHost.addView(btn("← 返回设置目录") { closeSettingsPage() })
+        settingsPageHost.addView(settingsPageContent)
+        root.addView(settingsListPanel)
+        root.addView(settingsPageHost)
+
+        val pages = listOf<Pair<String, (LinearLayout) -> Unit>>(
+            "功能自检" to { v -> buildSelfCheckSection(v) },
+            "对话与语音" to { v -> buildVoiceSettingsSection(v) },
+            "视觉看屏" to { v -> buildVisionSection(v) },
+            "常驻与入口" to { v -> buildEntrySection(v) },
+            "记忆" to { v -> buildMemorySection(v) },
+            "技能" to { v -> buildSkillSection(v) },
+            "本地模型" to { v -> buildLocalLlmSection(v) },
+            "主动播报" to { v -> buildAnnounceSection(v) },
+            "晨报与出发提醒" to { v -> buildBriefSection(v) },
+            "操作审计" to { v -> buildAuditSection(v) }
+        )
+        for ((title, builder) in pages) {
+            val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            builder(page)
+            settingsPages[title] = page
+            settingsListPanel.addView(btn(title) { openSettingsPage(title) })
+        }
+        return ScrollView(this).apply { addView(root) }
+    }
+
+    private fun openSettingsPage(title: String) {
+        val page = settingsPages[title] ?: return
+        (page.parent as? android.view.ViewGroup)?.removeView(page)
+        settingsPageContent.removeAllViews()
+        settingsPageContent.addView(page)
+        settingsListPanel.visibility = View.GONE
+        settingsPageHost.visibility = View.VISIBLE
+        settingsScroll.scrollTo(0, 0)
+    }
+
+    private fun closeSettingsPage() {
+        if (!::settingsPageHost.isInitialized) return
+        settingsPageHost.visibility = View.GONE
+        settingsListPanel.visibility = View.VISIBLE
+        settingsScroll.scrollTo(0, 0)
+    }
+
+    /** 功能自检页（原设置页顶部块，拆成二级页）：状态、无障碍/电池/常驻入口、悬浮球开关、节点读取。 */
+    private fun buildSelfCheckSection(root: LinearLayout) {
         statusView = TextView(this).apply { textSize = 15f; setTextColor(Color.WHITE); setPadding(0, dp(12), 0, 0) }
         orbButton = Button(this).apply {
             setOnClickListener {
@@ -508,16 +571,6 @@ class MainActivity : Activity() {
         })
         root.addView(btn("刷新状态") { refresh() })
         root.addView(detail2)
-        buildVoiceSettingsSection(root)
-        buildVisionSection(root)
-        buildEntrySection(root)
-        buildMemorySection(root)
-        buildSkillSection(root)
-        buildLocalLlmSection(root)
-        buildAnnounceSection(root)
-        buildBriefSection(root)
-        buildAuditSection(root)
-        return ScrollView(this).apply { addView(root) }
     }
 
     /** 二期：对话 Key、唤醒词开关与灵敏度、打断说话开关——都在设置里直接能看能改。 */
@@ -573,7 +626,12 @@ class MainActivity : Activity() {
             com.jarvis.app.tts.EdgeTts.speak(
                 this, "您好，我是 Jarvis，这是$label，现在的声音就是这样。",
                 voice = selectedVoice, ratePct = JarvisPrefs.getRatePct(this), pitchHz = JarvisPrefs.getPitchHz(this),
-                onStart = {}, onDone = { main.post { previewBtn.text = "试听" } }
+                onStart = {}, onDone = { ok ->
+                    main.post {
+                        previewBtn.text = "试听"
+                        if (!ok) toast("试听失败：Edge 语音连不上（网络原因居多）")
+                    }
+                }
             )
         }
         root.addView(previewBtn)
@@ -1177,7 +1235,7 @@ class MainActivity : Activity() {
                 toast(text.take(120))
             } else {
                 toast("正在生成晨报语音…")
-                com.jarvis.app.tts.EdgeTts.speak(this@MainActivity, text, onStart = {}, onDone = {})
+                com.jarvis.app.tts.TtsRouter.speak(this@MainActivity, text, onStart = {}, onDone = {})
             }
         })
         root.addView(CheckBox(this).apply {
@@ -1257,6 +1315,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         tickRunnable?.let { main.removeCallbacks(it) }
         if (JarvisAgent.onStateChanged != null) JarvisAgent.onStateChanged = null
+        JarvisAgent.onUserText = null
+        JarvisAgent.onReplyText = null
         uiScope.cancel()
         super.onDestroy()
     }
@@ -1274,7 +1334,7 @@ class MainActivity : Activity() {
             if (body.isNotBlank() && ::chatList.isInitialized) {
                 addBubble(body, mine = false)
                 if (!JarvisPrefs.isMuted(this)) {
-                    com.jarvis.app.tts.EdgeTts.speak(this, body, onStart = {}, onDone = {})
+                    com.jarvis.app.tts.TtsRouter.speak(this, body, onStart = {}, onDone = {})
                 }
             }
         }

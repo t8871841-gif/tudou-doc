@@ -1,8 +1,11 @@
 package com.jarvis.app
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
@@ -10,7 +13,7 @@ import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.skill.SkillItem
 import com.jarvis.app.skill.SkillRunner
 import com.jarvis.app.skill.SkillService
-import com.jarvis.app.tts.EdgeTts
+import com.jarvis.app.tts.TtsRouter
 import com.jarvis.app.vision.ScreenVisionAgent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +42,14 @@ object JarvisAgent {
     /** 批一新增：HUD 主页订阅状态变化（舞台配色、状态文案）。在主线程回调。 */
     @Volatile
     var onStateChanged: ((String) -> Unit)? = null
+
+    // 真机反馈（jk-v11）：语音问答也要在 App 对话里留文字——MainActivity 注册这两个回调把
+    // 用户的话和 Jarvis 的回复同步成气泡（此前只有悬浮球气泡一闪而过，对话里看不到）。
+    @Volatile
+    var onUserText: ((String) -> Unit)? = null
+
+    @Volatile
+    var onReplyText: ((String) -> Unit)? = null
 
     fun currentState(): String = state
 
@@ -99,7 +110,7 @@ object JarvisAgent {
     private fun hardResetToIdle(ctx: Context) {
         genSeq++
         AgnesClient.cancelInFlight()
-        EdgeTts.stop()
+        TtsRouter.stop()
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
         TakeoverBorder.hide()
@@ -118,6 +129,14 @@ object JarvisAgent {
     private fun beginListening(ctx: Context, fromWake: Boolean, prefilledText: String?) {
         wakeLoopRunning = false // 正式进入对话流程，暂停唤醒词轮询
         val mySeq = genSeq
+        // 真机反馈（jk-v11）：没录音权限时别默默失败，给一句看得见的明示（重装后权限会被清掉）。
+        if (prefilledText.isNullOrBlank() &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            OrbController.showBubble("麦克风没授权：打开 App 自检页，或去系统设置给 Jarvis 录音权限")
+            setState(ctx, "idle")
+            return
+        }
         setState(ctx, "listening")
         if (!prefilledText.isNullOrBlank()) {
             onUserUtterance(ctx, mySeq, prefilledText)
@@ -148,6 +167,7 @@ object JarvisAgent {
         // 批三：先拦截显式记忆指令；未命中再取长期记忆，随问答一起注入。
         scope.launch {
             if (mySeq != genSeq) return@launch
+            onUserText?.invoke(text)
             val ack = MemoryService.processExplicitMemory(ctx, text)
             if (mySeq != genSeq) return@launch
             if (ack != null) {
@@ -245,16 +265,17 @@ object JarvisAgent {
     private fun speakReply(ctx: Context, mySeq: Int, reply: String) {
         if (mySeq != genSeq) return
         OrbController.showBubble(reply.take(80))
+        onReplyText?.invoke(reply)
         if (JarvisPrefs.isMuted(ctx)) {
             // 批一新增：HUD 静音按钮开着——只留文字（气泡已经显示了），不过 EdgeTts，直接回 idle。
             setState(ctx, "idle")
             maybeStartWakeLoop()
             return
         }
-        val voice = JarvisPrefs.getVoice(ctx).ifBlank { com.jarvis.app.tts.EdgeVoices.DEFAULT_ID }
-        EdgeTts.speak(
-            ctx, reply, voice = voice,
-            ratePct = JarvisPrefs.getRatePct(ctx), pitchHz = JarvisPrefs.getPitchHz(ctx),
+        // 真机反馈（jk-v11）：改走 TtsRouter——Edge 失败自动落系统 TTS，不再哑火；
+        // 此前这里把 EdgeTts 的 onDone(false) 直接忽略，网络不通时连失败都看不见。
+        TtsRouter.speak(
+            ctx, reply,
             onStart = {
                 main.post {
                     if (mySeq != genSeq) return@post
@@ -293,7 +314,7 @@ object JarvisAgent {
                     if (mySeq == genSeq && state == "speaking" && txt.trim().length >= 2) {
                         main.post {
                             if (mySeq != genSeq || state != "speaking") return@post
-                            EdgeTts.stop()
+                            TtsRouter.stop()
                             OrbController.showBubble("打断了，在听…")
                             beginListening(ctx, fromWake = false, prefilledText = null)
                         }

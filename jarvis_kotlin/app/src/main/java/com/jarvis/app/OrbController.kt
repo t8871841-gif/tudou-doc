@@ -131,7 +131,8 @@ object OrbController {
         val s = svc ?: return
         val w = wm ?: return
         val d = s.resources.displayMetrics
-        val size = (56 * d.density).toInt()
+        // 真机反馈（jk-v11）：用户要求悬浮球放大 3 倍，56dp → 168dp
+        val size = (168 * d.density).toInt()
         val p = s.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val lp = WindowManager.LayoutParams(
             size, size, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
