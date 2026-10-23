@@ -81,7 +81,7 @@ object LocalCommands {
         openDialer(ctx, number)
         AuditLog.append(ctx, "本地指令", "打电话给$display", "已跳拨号盘")
         speak(
-            if (display == name) "给$name打，号码已经填好了，点一下就拨"
+            if (display == name) "给${name}打，号码已经填好了，点一下就拨"
             else "找到$display，号码已经填好了，点一下就拨"
         )
     }
@@ -139,7 +139,7 @@ object LocalCommands {
         }
         val found = best
         if (found == null) {
-            speak("没找到叫$name的应用")
+            speak("没找到叫${name}的应用")
             return
         }
         val intent = pm.getLaunchIntentForPackage(found.second)
