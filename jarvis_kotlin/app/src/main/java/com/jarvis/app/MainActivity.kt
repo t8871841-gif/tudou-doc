@@ -331,6 +331,7 @@ class MainActivity : Activity() {
             if (ack != null) {
                 chatInFlight = false
                 addBubble(ack, mine = false)
+                speakReplyIfEnabled(ack)
                 return@launch
             }
             // 批八：打字路径与语音同路过本地指令层（打电话/打开应用），命中直接办、回执进气泡不朗读。
@@ -341,14 +342,28 @@ class MainActivity : Activity() {
                 chatInFlight = false
                 return@launch
             }
+            // 批十：打字路径同路——天气走真数据工具，不进模型。
+            if (com.jarvis.app.data.WeatherTool.looksLikeWeather(text)) {
+                val city = com.jarvis.app.data.WeatherTool.extractCity(text) ?: JarvisPrefs.getWeatherCity(this@MainActivity)
+                com.jarvis.app.data.WeatherTool.fetch(city, tomorrow = text.contains("明天")) { answer ->
+                    runOnUiThread {
+                        chatInFlight = false
+                        val a = answer ?: "天气没查到，可能是网络不通，你再试一次"
+                        addBubble(a, mine = false)
+                        speakReplyIfEnabled(a)
+                    }
+                }
+                return@launch
+            }
             val mem = MemoryService.getInjectableMemories(this@MainActivity)
-            // 批五：与语音同路的本地模型路由（优先本地先本地答，答不出再云端）
+            // 批十调配：智能调配开时问答类云端优先、闲聊类才本地先答（与语音同路）
             val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
-            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity)) {
+            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity) && !com.jarvis.app.net.ChatRouter.cloudFirst(text)) {
                 val local = LocalLlm.generate(this@MainActivity, text)
                 if (!local.isNullOrBlank()) {
                     chatInFlight = false
                     addBubble(local, mine = false)
+                    speakReplyIfEnabled(local)
                     return@launch
                 }
                 askChatAgnes(text, mem, localTried = true)
@@ -358,9 +373,22 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 批十：界面问答的朗读出口——主界面「朗读」开关开着（未静音）才出声；语音路径由 Agent 自己播，不走这里，防双播。 */
+    private fun speakReplyIfEnabled(text: String) {
+        if (!JarvisPrefs.isMuted(this)) {
+            com.jarvis.app.tts.TtsRouter.speak(this, text, onStart = {}, onDone = {})
+        }
+    }
+
     private fun askChatAgnes(text: String, mem: String, localTried: Boolean) {
         AgnesClient.ask(this, text, memoryContext = mem,
-            onResult = { reply -> runOnUiThread { chatInFlight = false; addBubble(reply, mine = false) } },
+            onResult = { reply ->
+                runOnUiThread {
+                    chatInFlight = false
+                    addBubble(reply, mine = false)
+                    speakReplyIfEnabled(reply)
+                }
+            },
             onError = { e ->
                 val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(this) && LocalLlm.isReady(this)
                 if (!canFallback) {
@@ -376,6 +404,7 @@ class MainActivity : Activity() {
                     chatInFlight = false
                     if (!local.isNullOrBlank()) {
                         addBubble("（云端连不上，本地模型答）$local", mine = false)
+                        speakReplyIfEnabled(local)
                     } else {
                         addBubble("出错了：$e（Key 在设置里填）", mine = false)
                     }
@@ -415,14 +444,27 @@ class MainActivity : Activity() {
         muteButton = ImageButton(this@MainActivity).apply {
             setImageResource(if (JarvisPrefs.isMuted(this@MainActivity)) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
             background = null
+            contentDescription = "回答朗读开关"
             setOnClickListener {
                 val next = !JarvisPrefs.isMuted(this@MainActivity)
                 JarvisPrefs.setMuted(this@MainActivity, next)
                 setImageResource(if (next) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
-                toast(if (next) "已静音，只显示文字" else "已取消静音")
+                toast(if (next) "回答朗读已关，只显示文字" else "回答朗读已开")
             }
         }
-        micRow.addView(muteButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+        // 批十：按钮下加「朗读」标签——用户反馈界面上找不到语音播放的开关（原先只有一个没说明的喇叭图标）
+        val muteCol = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        muteCol.addView(muteButton, LinearLayout.LayoutParams(dp(44), dp(40)))
+        muteCol.addView(TextView(this@MainActivity).apply {
+            text = "朗读"
+            textSize = 9f
+            setTextColor(0x99FFFFFF.toInt())
+            gravity = Gravity.CENTER
+        })
+        micRow.addView(muteCol)
 
         val micButton = View(this@MainActivity).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF00F0FF.toInt(), 0xFF7000FF.toInt())).apply {
@@ -657,6 +699,23 @@ class MainActivity : Activity() {
         }
         refreshEngineBtn()
         root.addView(engineBtn)
+        // 批十：天气默认城市（问天气不带城市名时用这个）
+        root.addView(TextView(this).apply {
+            text = "天气默认城市（问天气不带城市时用）"
+            textSize = 12f
+            setTextColor(0xB3FFFFFF.toInt())
+            setPadding(0, dp(10), 0, 0)
+        })
+        val cityInput = EditText(this).apply {
+            setText(JarvisPrefs.getWeatherCity(this@MainActivity))
+            setTextColor(Color.WHITE)
+            setHintTextColor(0x61FFFFFF.toInt())
+        }
+        root.addView(cityInput)
+        root.addView(btn("保存天气城市") {
+            JarvisPrefs.setWeatherCity(this, cityInput.text.toString().trim())
+            toast("天气默认城市已保存：${JarvisPrefs.getWeatherCity(this)}")
+        })
 
         val wakeBox = CheckBox(this).apply {
             text = "开启唤醒词「贾维斯」（离线识别轮询，非专用低功耗 KWS，见自检详情）"
@@ -1056,7 +1115,7 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, checked -> JarvisPrefs.setLocalLlmEnabled(this@MainActivity, checked) }
         })
         root.addView(CheckBox(this).apply {
-            text = "优先本地回答（关 = 只在云端失败时用本地兜底）"
+            text = "智能调配（开 = 闲聊本地答、问答云端答；关 = 云端优先、本地只在云端失败时兜底）"
             setTextColor(0xB3FFFFFF.toInt())
             isChecked = JarvisPrefs.isLocalLlmPrefer(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> JarvisPrefs.setLocalLlmPrefer(this@MainActivity, checked) }

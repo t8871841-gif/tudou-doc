@@ -8,9 +8,11 @@ import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.command.LocalCommands
+import com.jarvis.app.data.WeatherTool
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.ChatRouter
 import com.jarvis.app.skill.SkillItem
 import com.jarvis.app.skill.SkillRunner
 import com.jarvis.app.skill.SkillService
@@ -236,12 +238,24 @@ object JarvisAgent {
             )
             return
         }
-        // 批五：问答路由——本地模型可用时，"优先本地"先本地答、答不出再云端；
-        // 否则云端优先，云端失败（断网/报错）再用本地兜底。本地只喂原话，不带记忆
-        // 注入（那颗 gemma3 上下文上限 1024，塞不下）。
+        // 批十：天气走真数据工具（Open-Meteo），不进任何模型——防编造的第一道闸。
+        if (WeatherTool.looksLikeWeather(text)) {
+            setState(ctx, "thinking")
+            val city = WeatherTool.extractCity(text) ?: JarvisPrefs.getWeatherCity(ctx)
+            WeatherTool.fetch(city, tomorrow = text.contains("明天")) { answer ->
+                main.post {
+                    if (mySeq != genSeq) return@post
+                    speakReply(ctx, mySeq, answer ?: "天气没查到，可能是网络不通，你再试一次")
+                }
+            }
+            return
+        }
+        // 问答路由（批五原版 + 批十调配）：「智能调配」开时——问答求知类云端优先、
+        // 闲聊类本地优先（net/ChatRouter 判定）；调配关或本地没就绪 → 云端优先、
+        // 云端失败再用本地兜底。本地只喂原话，不带记忆注入（gemma3 上限 1024 塞不下）。
         setState(ctx, "thinking")
         val localReady = JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
-        if (localReady && JarvisPrefs.isLocalLlmPrefer(ctx)) {
+        if (localReady && JarvisPrefs.isLocalLlmPrefer(ctx) && !ChatRouter.cloudFirst(text)) {
             scope.launch {
                 val local = LocalLlm.generate(ctx, text)
                 if (mySeq != genSeq) return@launch

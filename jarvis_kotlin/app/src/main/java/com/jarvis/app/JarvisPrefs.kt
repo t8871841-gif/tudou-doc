@@ -168,6 +168,13 @@ object JarvisPrefs {
         else -> "自动"
     }
 
+    // 批十：天气默认城市（问天气不带城市名时用；用户当前在新乡）
+    private const val KEY_WEATHER_CITY = "weather_city"
+    fun getWeatherCity(ctx: Context): String = p(ctx).getString(KEY_WEATHER_CITY, "新乡") ?: "新乡"
+    fun setWeatherCity(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_WEATHER_CITY, v.ifBlank { "新乡" }).apply()
+    }
+
     /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */
     fun isMuted(ctx: Context): Boolean = p(ctx).getBoolean(KEY_MUTED, false)
     fun setMuted(ctx: Context, on: Boolean) {
