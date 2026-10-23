@@ -24,6 +24,12 @@ object JarvisAgent {
     @Volatile
     private var state = "idle" // idle/listening/thinking/speaking
 
+    /** 批一新增：HUD 主页订阅状态变化（舞台配色、状态文案）。在主线程回调。 */
+    @Volatile
+    var onStateChanged: ((String) -> Unit)? = null
+
+    fun currentState(): String = state
+
     @Volatile
     private var wakeLoopRunning = false
 
@@ -85,6 +91,7 @@ object JarvisAgent {
     private fun setState(ctx: Context, s: String) {
         state = s
         OrbController.setState(s)
+        onStateChanged?.invoke(s)
     }
 
     // ---------- 主流程：听 → 问 → 答 → 播 ----------
@@ -154,6 +161,12 @@ object JarvisAgent {
     private fun speakReply(ctx: Context, mySeq: Int, reply: String) {
         if (mySeq != genSeq) return
         OrbController.showBubble(reply.take(80))
+        if (JarvisPrefs.isMuted(ctx)) {
+            // 批一新增：HUD 静音按钮开着——只留文字（气泡已经显示了），不过 EdgeTts，直接回 idle。
+            setState(ctx, "idle")
+            maybeStartWakeLoop()
+            return
+        }
         EdgeTts.speak(
             ctx, reply,
             onStart = {

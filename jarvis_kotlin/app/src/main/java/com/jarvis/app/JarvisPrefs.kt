@@ -37,4 +37,12 @@ object JarvisPrefs {
     fun setBargeInEnabled(ctx: Context, on: Boolean) {
         p(ctx).edit().putBoolean(KEY_BARGE_IN_ENABLED, on).apply()
     }
+
+    private const val KEY_MUTED = "tts_muted"
+
+    /** 批一新增：HUD 主页的静音按钮——开了就只显示文字回复，不过 EdgeTts。 */
+    fun isMuted(ctx: Context): Boolean = p(ctx).getBoolean(KEY_MUTED, false)
+    fun setMuted(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_MUTED, on).apply()
+    }
 }

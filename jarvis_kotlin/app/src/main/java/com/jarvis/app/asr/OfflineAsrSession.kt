@@ -46,6 +46,12 @@ object OfflineAsrSession {
     @Volatile
     private var currentEngine: OfflineAsr? = null
 
+    /** 批一新增：给 HUD 舞台画声波用的实时电平 0..1，缩放系数是估的，没有真机校过响度。 */
+    @Volatile
+    private var lastLevel01 = 0f
+
+    fun currentLevel(): Float = lastLevel01
+
     fun isAvailable(ctx: Context): Boolean = OfflineAsr.assetsPresent(ctx)
 
     fun listenOnce(
@@ -136,7 +142,9 @@ object OfflineAsrSession {
                     if (n <= 0) break
                     val chunk = if (n == buf.size) buf else buf.copyOf(n)
                     val now = System.currentTimeMillis()
-                    if (rms(chunk) > VOICE_RMS_THRESHOLD) {
+                    val level = rms(chunk)
+                    lastLevel01 = (level / 4000f).coerceIn(0f, 1f)
+                    if (level > VOICE_RMS_THRESHOLD) {
                         spokeAny = true
                         lastVoiceAt = now
                     }
@@ -150,6 +158,7 @@ object OfflineAsrSession {
             } finally {
                 try { recorder.stop() } catch (_: Exception) {}
                 try { recorder.release() } catch (_: Exception) {}
+                lastLevel01 = 0f
                 if (mySeq == seq) currentEngine?.sendAudio(ByteArray(0), true)
             }
         }, "OfflineAsrCapture")
