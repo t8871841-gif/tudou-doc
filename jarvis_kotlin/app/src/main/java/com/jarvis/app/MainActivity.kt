@@ -162,7 +162,7 @@ class MainActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(20), dp(14), dp(20), 0)
-        val gear = ImageButton(this).apply {
+        val gear = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_manage)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
