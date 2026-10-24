@@ -575,3 +575,25 @@ projectionShot 未授权（60 秒限流一条）/grab() 超时/异常分别记�
 onActivityResult 转 start()，MainActivity:913/1287），并非"从来没有授权入口"；
 isAvailable() 为 false 只说明本次进程里还没授权过（MediaProjection 授权不随
 进程重启保留）。其余逻辑原样合入。
+
+## 批十七：主界面极简重构 + 录屏 Android 14 前台服务修复（2026-10-24 用户定，未构建）
+主界面（用户连下三条：舞台全删、顶部只留齿轮、徽章居中放大 10%、SYSTEM ACTIVE
+与状态文字全不要）：
+- 顶栏只剩齿轮设置图标；徽章从顶部移到中央，176dp（160dp 放大 10%），虚线环
+  194dp 慢转（60 秒一圈）不变；徽章上不压任何字，SYSTEM ACTIVE 整行删除。
+- 舞台整块删除：HudStageView.kt 文件已删，主界面不再有光晕、光球、光环、点阵、
+  虚线环、霓虹环、取景框；状态文字（STANDBY/待命）随舞台一起撤，状态只靠
+  徽章/悬浮球颜色与动效表达；onAgentStateChanged 只剩刷新唤醒词胶囊。
+- 保留不动：对话玻璃框、底部麦克风按钮、朗读/编辑图标、提示文字、唤醒词胶囊
+  （徽章下方，仍可点开关）。
+录屏（用户截图 toast“录屏没启动起来，再试一次”的后续）：
+- 新增 CaptureForegroundService（mediaProjection 类型前台服务，通知 ID 7002），
+  清单补 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限与服务声明；Android 14 起
+  getMediaProjection() 前必须先跑该类型服务，否则系统直接拒绝——此前只有
+  microphone 类型服务，是 start() 失败的最可能原因（注：用户机系统版本未核实，
+  若实际是 Android 13 则此规则不适用，见下条）。
+- ScreenCapture 新增 lastError：授权拒绝/拿不到服务/前台服务启动失败/
+  getMediaProjection 被拒（含系统原文）/虚拟屏创建失败各记一句话，回调 toast
+  直接报出来，不再含糊说“再试一次”；投影释放时服务随之停掉（通知消失）。
+  另顺手修正了 ScreenCapture 头注释里“授权尚未接进 MainActivity”的旧话
+  （批十四就已接线）。

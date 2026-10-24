@@ -30,7 +30,6 @@ import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
-import com.jarvis.app.hud.HudStageView
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
@@ -71,10 +70,7 @@ class MainActivity : Activity() {
     private lateinit var chatScroll: ScrollView
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
-    private lateinit var stageView: HudStageView
     private lateinit var bgView: HudBackgroundView
-    private lateinit var statusEnView: TextView
-    private lateinit var statusCnView: TextView
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
@@ -134,7 +130,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        homePanel.addView(buildStage())
+        homePanel.addView(buildEmblem())
         buildChatPanel()
         homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         homePanel.addView(buildBottomPanel())
@@ -160,71 +156,12 @@ class MainActivity : Activity() {
         if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
     }
 
-    // ---------- 顶栏：徽章 + status dot + SYSTEM ACTIVE ----------
+    // ---------- 顶栏：只留齿轮设置图标（2026-10-24 用户定：徽章移居中，SYSTEM ACTIVE 整行删除） ----------
 
     private fun buildTopBar(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        // 顶部徽章（图 2 圆环裁圆形）：居中 160dp，静态图不动，转的是外面那圈虚线环
-        // （环上有一段亮色长标记，转起来才看得出在转；60 秒一圈，极慢）。
-        val badgeRow = FrameLayout(this@MainActivity).apply {
-            val badge = ImageView(this@MainActivity).apply {
-                setImageResource(R.drawable.hud_badge)
-                scaleType = ImageView.ScaleType.CENTER_CROP
-            }
-            val ring = ImageView(this@MainActivity).apply {
-                setImageResource(R.drawable.hud_badge_ring)
-                scaleType = ImageView.ScaleType.CENTER_CROP
-            }
-            addView(badge, FrameLayout.LayoutParams(dp(160), dp(160), Gravity.CENTER))
-            addView(ring, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER))
-            android.animation.ObjectAnimator.ofFloat(ring, "rotation", 0f, 360f).apply {
-                duration = 60000
-                repeatCount = android.animation.ValueAnimator.INFINITE
-                interpolator = android.view.animation.LinearInterpolator()
-                start()
-            }
-        }
-        addView(badgeRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(8); bottomMargin = dp(4)
-        })
-        val statusRow = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), 0, dp(20), 0)
-            val dot = View(this@MainActivity).apply {
-                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF00FF9D.toInt()) }
-            }
-            addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
-            // 状态点轻脉动（透明度 1↔0.55，2 秒一周期），表示后台活着。
-            android.animation.ObjectAnimator.ofFloat(dot, "alpha", 1f, 0.55f, 1f).apply {
-                duration = 2000
-                repeatCount = android.animation.ValueAnimator.INFINITE
-                start()
-            }
-            addView(TextView(this@MainActivity).apply {
-                text = "SYSTEM ACTIVE"
-                setTextColor(0xB3FFFFFF.toInt())
-                textSize = 12f
-                letterSpacing = 0.12f
-            })
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
-            // 批八：顶栏时钟按用户要求删除（连同每秒刷新），顶栏只留状态点 + SYSTEM ACTIVE。
-        }
-        addView(statusRow)
-    }
-
-    // ---------- 舞台：HudStageView + 齿轮(设置) + 状态文字 + 唤醒词胶囊 ----------
-
-    private fun buildStage(): FrameLayout {
-        val stage = FrameLayout(this)
-        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(330))
-
-        stageView = HudStageView(this).apply {
-            mode = { JarvisAgent.currentState() }
-            micLevel = { OfflineAsrSession.currentLevel() }
-        }
-        stage.addView(stageView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(20), dp(14), dp(20), 0)
         val gear = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_manage)
             background = GradientDrawable().apply {
@@ -237,28 +174,31 @@ class MainActivity : Activity() {
             setOnClickListener { toggleSettings() }
             contentDescription = "设置"
         }
-        stage.addView(gear, FrameLayout.LayoutParams(dp(38), dp(38)).apply {
-            gravity = Gravity.TOP or Gravity.START
-            leftMargin = dp(10); topMargin = dp(10)
-        })
+        addView(gear, LinearLayout.LayoutParams(dp(38), dp(38)))
+        addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
+    }
 
-        val statusCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-        statusEnView = TextView(this).apply {
-            textSize = 12f; setTextColor(0x8AFFFFFF.toInt()); letterSpacing = 0.25f; gravity = Gravity.CENTER
-        }
-        statusCnView = TextView(this).apply {
-            textSize = 30f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, 0)
-        }
-        statusCol.addView(statusEnView)
-        statusCol.addView(statusCnView)
-        stage.addView(statusCol, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-            gravity = Gravity.CENTER
-        })
+    // ---------- 中央徽章：图 2 圆环放大 10%（176dp）居中，虚线环 194dp 慢转；上面不压任何字 ----------
 
+    private fun buildEmblem(): FrameLayout {
+        val emblem = FrameLayout(this)
+        emblem.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(280))
+        val badge = ImageView(this).apply {
+            setImageResource(R.drawable.hud_badge)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        emblem.addView(badge, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER))
+        val ring = ImageView(this).apply {
+            setImageResource(R.drawable.hud_badge_ring)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        emblem.addView(ring, FrameLayout.LayoutParams(dp(194), dp(194), Gravity.CENTER))
+        android.animation.ObjectAnimator.ofFloat(ring, "rotation", 0f, 360f).apply {
+            duration = 60000
+            repeatCount = android.animation.ValueAnimator.INFINITE
+            interpolator = android.view.animation.LinearInterpolator()
+            start()
+        }
         wakeChip = TextView(this).apply {
             text = "唤醒词 · 关"
             textSize = 12f
@@ -275,11 +215,11 @@ class MainActivity : Activity() {
                 refreshWakeChip()
             }
         }
-        stage.addView(wakeChip, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+        emblem.addView(wakeChip, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             bottomMargin = dp(4)
         })
-        return stage
+        return emblem
     }
 
     private fun refreshWakeChip() {
@@ -302,13 +242,8 @@ class MainActivity : Activity() {
     }
 
     private fun onAgentStateChanged(state: String) {
-        val color = HudPalette.colorFor(state)
-        val (en, cn) = HudPalette.labelsFor(state, JarvisPrefs.isWakeEnabled(this))
-        if (::statusEnView.isInitialized) {
-            statusEnView.text = en
-            statusCnView.text = cn
-            statusCnView.setTextColor(color)
-        }
+        // 主界面已无状态文字（舞台与 SYSTEM ACTIVE 行均按用户要求删除），
+        // 状态只靠徽章/悬浮球颜色与动效表达；这里只刷新唤醒词胶囊。
         refreshWakeChip()
     }
 
@@ -1287,7 +1222,7 @@ class MainActivity : Activity() {
         if (requestCode == REQ_PROJECTION) {
             if (resultCode == RESULT_OK) {
                 val ok = com.jarvis.app.screen.ScreenCapture.shared(this).start(resultCode, data)
-                toast(if (ok) "录屏授权好了，截图兜底可用" else "录屏没启动起来，再试一次")
+                toast(if (ok) "录屏授权好了，截图兜底可用" else "录屏没启动起来：" + com.jarvis.app.screen.ScreenCapture.shared(this).lastError.ifEmpty { "再试一次" })
             } else {
                 toast("没给录屏授权，截图兜底先不用")
             }

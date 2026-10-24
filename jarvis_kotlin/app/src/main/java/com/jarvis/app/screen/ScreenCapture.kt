@@ -11,10 +11,12 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
+import com.jarvis.app.CaptureForegroundService
 
 /**
  * 批十四移植自 Andee 的 screen/ScreenCapture（实现原样，只改包名、虚拟屏名与
@@ -35,9 +37,14 @@ import android.view.WindowManager
  * 结果再交回 [start]。没有办法从服务里要，也没有办法静默要：Android 14 起授权
  * 按会话计，重启后要重新找用户。这正是它只能当兜底的原因。
  *
- * 接线现状（批十四）：本类以 [shared] 单例持有；TaskLoop 在无障碍截图拿不到图
- * 时用它兜底（隐私黑名单包两条通道都不拍）。授权的发起端（Activity 拉起系统
- * 授权框、把结果喂给 [start]）尚未接进 MainActivity——见 V3_CHANGES 批十四。
+ * 接线现状（批十四起）：本类以 [shared] 单例持有；TaskLoop 在无障碍截图拿不到图
+ * 时用它兜底（隐私黑名单包两条通道都不拍）。授权的发起端已接进 MainActivity
+ * （设置-视觉看屏“录屏授权”按钮 → createScreenCaptureIntent →
+ * onActivityResult → [start]）。
+ *
+ * Android 14 硬性要求（2026-10-24 修复）：调 getMediaProjection() 之前必须先跑
+ * 一个 mediaProjection 类型的前台服务（见 CaptureForegroundService），否则系统
+ * 直接拒绝——此前只有 microphone 类型服务，授权回调回来后 start() 一律失败。
  */
 class ScreenCapture(private val context: Context) {
 
@@ -47,6 +54,14 @@ class ScreenCapture(private val context: Context) {
     private var reader: ImageReader? = null
     private var width = 0
     private var height = 0
+
+    /**
+     * 最近一次 start() 失败的原因（空串 = 最近一次成功或尚未尝试）。
+     * 失败只写日志用户看不见，之前 toast 只能含糊说“再试一次”；现在回调直接
+     * 把这句话报给用户，下次再失败不用猜是哪一步。
+     */
+    var lastError: String = ""
+        private set
 
     /** Whether a capture will work right now. Free to call. */
     fun isAvailable(): Boolean = synchronized(lock) { reader != null && projection != null }
@@ -61,13 +76,26 @@ class ScreenCapture(private val context: Context) {
      */
     fun start(resultCode: Int, data: Intent?): Boolean {
         if (resultCode != Activity.RESULT_OK || data == null) {
+            lastError = "用户未授权"
             Log.i(TAG, "screen capture not granted (resultCode=$resultCode)")
             return false
         }
         val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-            as? MediaProjectionManager ?: return false
+            as? MediaProjectionManager ?: run {
+                lastError = "这台手机拿不到录屏服务"
+                return false
+            }
+        // Android 14：先拉起 mediaProjection 前台服务，否则 getMediaProjection 直接被拒。
+        if (Build.VERSION.SDK_INT >= 34 && !CaptureForegroundService.start(context)) {
+            lastError = "mediaProjection 前台服务启动失败"
+            Log.w(TAG, "capture foreground service refused to start")
+            return false
+        }
         val fresh = runCatching { mgr.getMediaProjection(resultCode, data) }
-            .onFailure { Log.w(TAG, "getMediaProjection refused", it) }
+            .onFailure {
+                lastError = "系统拒绝授权结果：${it.message ?: "未知原因"}"
+                Log.w(TAG, "getMediaProjection refused", it)
+            }
             .getOrNull() ?: return false
         // Registered before anything is created from it. Android 14 requires a
         // callback (an app that stops the projection without one is killed),
@@ -95,10 +123,14 @@ class ScreenCapture(private val context: Context) {
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     r.surface, null, Handler(Looper.getMainLooper()),
                 )
-            }.onFailure { Log.w(TAG, "createVirtualDisplay failed", it) }.getOrNull()
+            }.onFailure {
+                lastError = "虚拟屏创建失败：${it.message ?: "未知原因"}"
+                Log.w(TAG, "createVirtualDisplay failed", it)
+            }.getOrNull()
             if (d == null) {
                 runCatching { r.close() }
                 runCatching { fresh.stop() }
+                CaptureForegroundService.stop(context)
                 return false
             }
             projection = fresh
@@ -106,6 +138,7 @@ class ScreenCapture(private val context: Context) {
             reader = r
             width = w
             height = h
+            lastError = ""
         }
         return true
     }
@@ -181,6 +214,9 @@ class ScreenCapture(private val context: Context) {
 
     fun release() {
         synchronized(lock) { releaseLocked() }
+        // 投影没了，前台服务也不必占着（通知随之消失）；start() 失败路径也会走到
+        // 这里，正好把刚拉起的服务收掉。
+        CaptureForegroundService.stop(context)
     }
 
     private fun releaseLocked() {
