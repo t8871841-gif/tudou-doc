@@ -651,3 +651,32 @@ svc 为空时只记录不画图；TaskLoop 改传 TapMarkerUi(svc)。
 成 continue@stepLoop 直进下一轮；LocalCommands 直查路径的审计与返回值统一
 用 trim 后的名字；TapMarkerUi 的 WindowManager 操作与 hide 调度都在主线程，
 FIFO 顺序无竞态；无参 TapMarkerUi() 调用点已清零。
+
+## 批二十：参数与 Andee 全面对齐（2026-10-25 用户令“直接照搬”，未构建）
+先回答悬浮球问题：Andee 任务期间球不隐藏——只在截图瞬间空白约 200ms，
+点按落点在球下时球让开；球默认 168dp 右下角 16dp 边距（Jarvis 用户此前嫌
+168 太大改定 100dp，尺寸与位置按用户旧决定不动，只对齐任务期行为）。
+超时：Agnes/DeepSeek 连接 10→15 秒、读 90→180 秒（Andee LlmClient 原值，
+注释：思考模型按分钟回答）；循环闩锁 120→200 秒（须大于 180 秒读超时）。
+点击标记按 Andee 重写（批十九全屏窗口废弃——Andee 文档警告全屏覆盖层占满
+0.80 遮挡上限会静默吃触摸）：144dp 小盒定位在落点中心、NO_LIMITS +
+IN_SCREEN + fitInsetsTypes=0，冲击两圈（480ms、间隔 110ms）+ 停留 6000ms +
+淡出 400ms，环 + 圆点 + TAP/HOLD 与 0-1000 坐标标；手势发出前先藏上一圈，
+截图时可重亮（时间线不重启）。
+熔断：无进展熔断 abort 删除（Andee 没有这层，只有重复守卫 + 25 步上限兜底），
+计数保留供连续 2 轮无真交互时强制带图；重复守卫 3 次、步数 25、网格 8x12、
+子格 3x5 与 Andee 原本一致，不动。
+树空等待：nodes_useful==0 时按 Andee SETTLE_BUDGET_MS=1500 轮询等树长出来
+（300ms 一次），而不是立刻按“看不见”处理。
+wait 纪律写进提示词（Andee wait_for_screen 原规则）：每次等待要比上一次久
+（1500→3000→5000→10000），绝不连续发相同等待时长，否则被重复守卫拦停；
+wait 上限 20 秒与 Andee 一致，不动。点按手势超时 2000→3000ms（Andee 手势
+闩锁 3 秒）；截图超时 5 秒、点按行程 150ms 与 Andee 一致，不动。
+悬浮球任务期行为：screenshot() 每次截图前后空白球与气泡（提示词里一直写着
+“每次截图球都会藏起来”，代码此前没做，本次补齐）；tap/longPress/swipe 落点
+在球框内（含 8dp 裕量）时球临时移到对侧边缘、手势完恢复（只改布局不写偏好）。
+树/历史字符预算（5000/6000）与步结果截断（300）在 Andee 无对应值，保留不动。
+自查：6 文件括号平衡全过；MAX_NO_PROGRESS_STEPS 引用清零；dodge 的恢复包
+在 try/finally 里（手势抛异常也不丢原位）；截图空白的恢复放在既有 finally 里，
+截图抛异常也能恢复；setVisibleForCapture/dodge 的主线程闩锁都有 Looper 守卫，
+主线程调用不死锁。

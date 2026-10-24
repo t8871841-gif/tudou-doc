@@ -1195,8 +1195,16 @@ class ScreenController(
         val stroke = GestureDescription.StrokeDescription(path, 0L, 150L)
         val before = screenFingerprint()
         val beforePx = if (before.optBoolean("blind")) snapFrame ?: pixelSignature() else null
-        val result = guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
-            runGesture(GestureDescription.Builder().addStroke(stroke).build(), 2000L)
+        // Andee 对齐：上一圈还亮着时先藏起来——注入落点正好是圈坐着的位置。
+        marker?.hideNow()
+        // Andee 对齐：落点在球下时球先让开，手势完恢复（否则点落在球上，应用收不到）。
+        val dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x, y)
+        val result = try {
+            guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
+                runGesture(GestureDescription.Builder().addStroke(stroke).build(), 3000L)
+            }
+        } finally {
+            if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
         marker?.mark(x, y, TapMarkerUi.Kind.TAP)
         result.put("x", x).put("y", y)
@@ -1629,11 +1637,17 @@ class ScreenController(
         // Chained flings without a look are how a list becomes a maze.
         val before = if (fling) screenFingerprint() else null
         val beforePx = if (fling && before?.optBoolean("blind") == true) pixelSignature() else null
+        // Andee 对齐：上一圈还亮着时先藏起来。
+        marker?.hideNow()
+        // Andee 对齐：滑动起点或终点在球下时球先让开，手势完恢复。
+        var dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x1, y1)
+        if (!dodged) dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x2, y2)
         val target = android.graphics.Rect(
             minOf(x1, x2) - 4, minOf(y1, y2) - 4,
             maxOf(x1, x2) + 4, maxOf(y1, y2) + 4,
         )
-        val result = guardedGesture(target) {
+        val result = try {
+            guardedGesture(target) {
             if (fling) {
                 val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
                 runGesture(GestureDescription.Builder().addStroke(stroke).build(), durationMs + 2000)
@@ -1653,6 +1667,9 @@ class ScreenController(
                 }
                 moved
             }
+            }
+        } finally {
+            if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
         if (fling && before != null) attachFlingSnapshot(result, before, beforePx)
         return result.put("from", "$x1,$y1").put("to", "$x2,$y2").put("duration_ms", durationMs)
@@ -1737,8 +1754,16 @@ class ScreenController(
     fun longPress(x: Int, y: Int, durationMs: Long): JSONObject {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
-        val result = guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
-            runGesture(GestureDescription.Builder().addStroke(stroke).build(), durationMs + 2000)
+        // Andee 对齐：上一圈还亮着时先藏起来。
+        marker?.hideNow()
+        // Andee 对齐：落点在球下时球先让开，手势完恢复。
+        val dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x, y)
+        val result = try {
+            guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
+                runGesture(GestureDescription.Builder().addStroke(stroke).build(), durationMs + 2000)
+            }
+        } finally {
+            if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
         marker?.mark(x, y, TapMarkerUi.Kind.HOLD)
         // A long-press menu appears a beat after the finger lifts.
@@ -2117,6 +2142,8 @@ class ScreenController(
         var h = 0
         val executor = Executors.newSingleThreadExecutor()
         awaitCaptureGap()
+        // Andee 对齐：每次截图球都要藏起来（提示词里一直这么写，代码此前没做）。
+        com.jarvis.app.OrbController.setVisibleForCapture(false)
         try {
             service.takeScreenshot(
                 Display.DEFAULT_DISPLAY,
@@ -2269,6 +2296,7 @@ class ScreenController(
                     }
                 }
         } finally {
+            com.jarvis.app.OrbController.setVisibleForCapture(true)
             lastCaptureAt.set(SystemClock.uptimeMillis())
             executor.shutdown()
         }

@@ -36,11 +36,9 @@ object AgnesClient {
 
     private val client by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            // 2026-10-24 跨应用修复第 2 件：任务循环的提示词带树带历史又长，
-            // 30 秒读超时在移动网络上偏紧（21:56 实测 timeout 判死整轮任务）；
-            // 放到 90 秒，日常聊天只是等得久一点，不会因此失败。
-            .readTimeout(90, TimeUnit.SECONDS)
+            // Andee 对齐：LlmClient 连接 15 秒、读 180 秒（思考模型按分钟回答）。
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
             .build()
     }

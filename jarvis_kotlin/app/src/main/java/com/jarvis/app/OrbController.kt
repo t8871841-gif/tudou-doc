@@ -28,6 +28,8 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -145,6 +147,80 @@ object OrbController {
     }
 
     fun isEnabled(): Boolean = enabled
+
+    /**
+     * Andee 对齐：跨应用任务期间球不隐藏——只在截图瞬间空白、点按落点在球下时让位。
+     * 截图空白：球 View 设 GONE，截图完恢复（提示词里早已写着“每次截图球都会藏起来”，
+     * 代码此前却没做，提示词与实现对不上，本次补齐）。hide 在主线程同步等最多 300ms，
+     * 保证空白已合成再拍；restore 只管 post（下一次截图前一定已恢复）。
+     * 主线程调用时直接改，不 post（否则闩锁死锁）。气泡一并藏。
+     */
+    fun setVisibleForCapture(visible: Boolean) {
+        val v = orb ?: return
+        val b = bubble
+        val apply = {
+            v.visibility = if (visible) View.VISIBLE else View.GONE
+            if (b != null) b.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            apply()
+            return
+        }
+        if (!visible) {
+            val latch = CountDownLatch(1)
+            main.post { try { apply() } finally { latch.countDown() } }
+            try { latch.await(300, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
+        } else {
+            main.post { apply() }
+        }
+    }
+
+    private var dodgeX = 0
+    private var dodgeY = 0
+    private var dodged = false
+
+    /**
+     * 点按让位（Andee：tap 落点在球下时球让开）：落点在球框内（含 8dp 裕量）时
+     * 把球临时移到对侧边缘（只改布局不写偏好，保存的位置不被污染），手势完调
+     * restoreDodge() 恢复。返回是否让位了。
+     */
+    fun dodgeIfNeeded(x: Int, y: Int): Boolean {
+        val o = orb ?: return false
+        val lp = orbLp ?: return false
+        val w = wm ?: return false
+        val s = svc ?: return false
+        val m = (8 * density()).toInt()
+        if (x < lp.x - m || x > lp.x + lp.width + m || y < lp.y - m || y > lp.y + lp.height + m) return false
+        val dm = s.resources.displayMetrics
+        dodgeX = lp.x
+        dodgeY = lp.y
+        dodged = true
+        val move = {
+            lp.x = if (lp.x + lp.width / 2 < dm.widthPixels / 2) (dm.widthPixels - lp.width).coerceAtLeast(0) else 0
+            try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            move()
+        } else {
+            val latch = CountDownLatch(1)
+            main.post { try { move() } finally { latch.countDown() } }
+            try { latch.await(300, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
+        }
+        return true
+    }
+
+    fun restoreDodge() {
+        if (!dodged) return
+        dodged = false
+        val o = orb ?: return
+        val lp = orbLp ?: return
+        val w = wm ?: return
+        main.post {
+            lp.x = dodgeX
+            lp.y = dodgeY
+            try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+        }
+    }
 
     // 急停后的 1.8 秒内球显示“已停止”（红色），不被 Dart 的状态更新盖掉。
     private fun displayState(): String =

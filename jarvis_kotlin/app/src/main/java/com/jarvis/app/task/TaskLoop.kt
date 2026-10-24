@@ -56,21 +56,16 @@ object TaskLoop {
     private const val MAX_REPEATS = 3
 
     /**
-     * 无进展熔断（真机故障追查后新增）：原来的重复守卫只认"连续 N 次一字不差的同一签名"，
-     * 模型只要在 wait/home/back/openApp 这几种"不算交互"的动作里换着来（尤其 wait 还被
-     * 提示词教着要一次比一次久，签名天然每次都不同），就能在实际原地打转的情况下一路
-     * 绕开那层守卫，25 步跑满都不会报警——这正是 2026-10-24 那次微信任务故障的直接原因。
-     * 这里单独数"连续多少步没有出现 tap/longPress/type/zoom 这类真正在跟界面交互的动作"，
-     * 不管中间怎么换着花样 wait/home/back/openApp、动作签名是不是每次都不同，到了这个数
-     * 直接强制 fail，不再指望模型自觉。
-     *
-     * 没有把 swipe 算进"真操作"——滑动本身更像是在找东西，不一定代表任务在往前推进；
-     * 如果真机验收发现"找联系人要滑好几屏"这类场景被误伤，告诉我，加进去就是一行事。
+     * 无进展计数（Andee 对齐后不再熔断 abort）：原来这里有一层“连续 7 步无真交互
+     * 就强制 fail”的熔断，是 2026-10-24 微信任务故障追查后加的；但 Andee 没有这层
+     * （只有重复守卫 + 25 步上限兜底），且熔断会误伤需要多轮等待的慢任务。
+     * 2026-10-25 起按 Andee 照搬：计数保留，只用于“连续 2 轮无真交互时强制带图”
+     * （截图策略），让模型有图可破局；真正的兜底是 MAX_STEPS 与重复守卫。
+     * 没有把 swipe 算进“真操作”——滑动本身更像是在找东西，不一定代表任务在往前推进。
      */
-    private const val MAX_NO_PROGRESS_STEPS = 7
     private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom")
 
-    private const val MODEL_TIMEOUT_SEC = 120L // 须大于客户端 90 秒读超时，否则闩锁先成瓶颈
+    private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
     private const val ELEMENTS_CHARS = 5000
 
     /** 历史段字符预算（单条提示词内，含任务与大纲之外的余量）。 */
@@ -142,8 +137,8 @@ object TaskLoop {
         // 达到 MAX_REPEATS 时在执行前拦下中止。
         var lastSignature = ""
         var repeats = 0
-        // 无进展熔断计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
-        // 见 MAX_NO_PROGRESS_STEPS 处的说明。任何一步出现这几种动作就清零。
+        // 无进展计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
+        // 见上方的说明。任何一步出现这几种动作就清零；计数只用于强制带图。
         var noProgressSteps = 0
         // 2026-10-24 跨应用修复第 2 件：问模型连续失败计数（网络 timeout 之类），
         // 旧代码一次失败就直接 return 判死整轮任务；现在允许连着失败 2 次才判死，
@@ -165,12 +160,24 @@ object TaskLoop {
                 }
                 step++
                 // ---------- 观察 ----------
-                val dump = try {
+                var dump = try {
                     controller.dumpUiTree()
                 } catch (e: Exception) {
                     lastError = "读取界面失败：${e.message}"
                     history += "第 $step 步：$lastError"
                     continue
+                }
+                // Andee 对齐（SETTLE_BUDGET_MS=1500）：树空时先等它长出来再往下走，
+                // 而不是立刻按“看不见”处理；300ms 轮询一次，上限 1500ms。
+                if (dump.optInt("nodes_useful", -1) == 0) {
+                    val settleStart = System.currentTimeMillis()
+                    while (System.currentTimeMillis() - settleStart < 1500) {
+                        try { Thread.sleep(300) } catch (_: InterruptedException) { break }
+                        val again = try { controller.dumpUiTree() } catch (_: Exception) { null }
+                        if (again == null) break
+                        dump = again
+                        if (dump.optInt("nodes_useful", -1) != 0) break
+                    }
                 }
                 val pkg = dump.optString("pkg")
                 val hint = dump.optString("hint")
@@ -258,7 +265,7 @@ object TaskLoop {
                     if (err != null) {
                         // 2026-10-24 跨应用修复第 2 件：问模型失败不再直接判死。
                         // 连着失败 2 次才结束；第 1 次记一步失败、下一轮重新观察再问
-                        // （不计入无进展熔断——这是网络问题，不是模型原地打转）。
+                        // （不计入无进展计数——这是网络问题，不是模型原地打转）。
                         askFails++
                         if (askFails >= 2) {
                             finalReply = "任务没能继续：$err"
@@ -271,7 +278,7 @@ object TaskLoop {
                         prevStepFailed = true
                         prevScreenChanged = null
                         // 直接进下一轮（重新观察、重新问），不能掉进下面“输出无法解析”
-                        // 的分支——那是解析失败的账，网络失败不该计入无进展熔断。
+                        // 的分支——那是解析失败的账，网络失败不该计入无进展计数。
                         continue@stepLoop
                     }
                     askFails = 0
@@ -300,14 +307,9 @@ object TaskLoop {
                         AuditLog.append(ctx, "任务循环", "重复守卫触发", "连续无法解析的输出")
                         return
                     }
-                    // 解析不出动作，自然也谈不上是真交互，一并计入无进展熔断。
+                    // 解析不出动作，自然也谈不上是真交互；Andee 对齐：计数保留
+                    // （供强制带图），熔断 abort 删除，继续下一轮。
                     noProgressSteps++
-                    if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
-                        finalReply = "任务卡在第 $step 步：已经连续 $noProgressSteps 步没有真正点/输入/放大过任何东西" +
-                            "（含输出解析失败），像是在原地打转，已停下。当前停在${pkg.ifEmpty { "未知界面" }}。"
-                        AuditLog.append(ctx, "任务循环", "无进展熔断触发", "解析失败累计 $noProgressSteps 步无交互")
-                        return
-                    }
                     continue
                 }
                 val kind = action.optString("action")
@@ -336,17 +338,9 @@ object TaskLoop {
                     AuditLog.append(ctx, "任务循环", "重复守卫触发", "$kind 连续重复")
                     return
                 }
-                // ---------- 无进展熔断：换着花样 wait/home/back/openApp 也躲不过 ----------
-                // 签名守卫拦的是"一字不差的重复"；这里拦的是"不管签名变不变，反正没有一步
-                // 是真交互"。两层互补，顺序在签名守卫之后——真重复优先报那个更精确的原因。
+                // Andee 对齐：无进展熔断 abort 删除（Andee 只有重复守卫 + 25 步上限兜底）。
+                // 计数保留：连续 2 轮无真交互时强制带图（截图策略），让模型有图可破局。
                 noProgressSteps = if (kind in REAL_ACTION_KINDS) 0 else noProgressSteps + 1
-                if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
-                    finalReply = "任务卡在第 $step 步：已经连续 $noProgressSteps 步没有真正点/输入/放大过任何东西" +
-                        "（期间只有 wait/back/home/openApp 这类动作），像是在原地打转，已停下。" +
-                        "当前停在${pkg.ifEmpty { "未知界面" }}。"
-                    AuditLog.append(ctx, "任务循环", "无进展熔断触发", "连续 $noProgressSteps 步无真交互，最后一步是 $kind")
-                    return
-                }
                 // ---------- 执行 ----------
                 val r = execute(ctx, controller, action)
                 if (r.zoomImage != null) pendingImage = r.zoomImage
@@ -738,7 +732,7 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"swipe\",\"x1\":500,\"y1\":800,\"x2\":500,\"y2\":300} 滑动，坐标都是 0-1000 相对值，手指移动多远列表就走多远；要连滑多屏加 \"screens\":3（系统会回报实际滑了几屏），不要用一串相同的小滑动去凑。" +
 "{\"action\":\"type\",\"text\":\"要输入的文字\"} 往当前已聚焦的输入框输入。" +
 "{\"action\":\"submit\"} 提交当前输入框（如搜索、发送）。" +
-"{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
+"{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待（每次等待要比上一次久，比如 1500→3000→5000→10000，绝不要连续发相同的等待时长，否则会被重复守卫拦停）；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
 "若要按放大图点，动作里加 \"on\":\"zoom\"，坐标和格号都按放大图自身的 0-1000 与小写格号读。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
