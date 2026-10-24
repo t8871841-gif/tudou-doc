@@ -11,7 +11,6 @@ import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
 import com.jarvis.app.TakeoverBorder
 import com.jarvis.app.vision.GridOverlay
-import com.jarvis.app.vision.ScreenVisionAgent
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -119,7 +118,7 @@ object TaskLoop {
                 val elements = dump.optString("elements")
                 var image: String? = pendingImage
                 pendingImage = null
-                if (image == null && pkg.isNotEmpty() && !ScreenVisionAgent.isShotBlocked(pkg)) {
+                if (image == null && pkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(pkg)) {
                     image = try {
                         val shot = controller.screenshot()
                         val b64 = shot.optString("png_base64")
