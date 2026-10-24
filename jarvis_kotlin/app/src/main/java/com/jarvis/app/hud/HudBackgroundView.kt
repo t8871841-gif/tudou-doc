@@ -8,9 +8,9 @@ import android.view.Choreographer
 import android.view.View
 
 /**
- * 背景层：移植自 `hud_painters.dart` 的 AuroraPainter（三团缓慢漂移的大光晕，颜色跟随状态）。
- * 2026-10-24 用户真机看了钢铁侠蜂窝版后明确不要格纹：蜂巢六边形网格已整层撤除，
- * 背景只剩纯净深蓝 + 光晕，无任何网格/点阵（要恢复格纹从 git 历史取本文件旧版）。
+ * 背景层（2026-10-24 清澈化后）：只画一层实色深蓝。沿革：最初是三团漂移光晕；
+ * 钢铁侠蜂窝版撤了格纹剩光晕；本轮用户嫌半透明太多，光晕也撤了——背景不再画任何
+ * 东西，只负责填实色；帧循环保留供以后动效复用。
  */
 class HudBackgroundView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
