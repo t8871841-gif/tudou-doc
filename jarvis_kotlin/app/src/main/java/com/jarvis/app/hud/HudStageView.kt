@@ -137,18 +137,24 @@ class HudStageView @JvmOverloads constructor(
         canvas.drawCircle(cx, cy, haloR, paint)
         paint.shader = null
 
-        // 2. 星云光球：三团柔焦色块
+        // 2. 星云光球：三团色块——改用径向渐变做柔和衰减，不用像素模糊（要求"高清，不要模糊"）。
+        // BlurMaskFilter 在部分设备/分辨率下会让整块画面发虚、边缘发糊；RadialGradient 是矢量
+        // 渐变，任何分辨率下都是锐利的，衰减感来自颜色透明度渐变而不是采样模糊。
         val orbit = r * 0.2f * (1 + lvl * 1.2f)
-        val blobR = r * (0.42f + lvl * 0.12f)
-        paint.maskFilter = android.graphics.BlurMaskFilter(r * 0.24f, android.graphics.BlurMaskFilter.Blur.NORMAL)
+        val blobR = r * (0.52f + lvl * 0.14f)
         for (i in 0 until 3) {
             val a = tt * (0.45f + i * 0.17f) * spin + i * 2.094f
             val px = cx + cos(a.toDouble()).toFloat() * orbit
             val py = cy + sin((a * 1.15f).toDouble()).toFloat() * orbit
-            paint.color = when (i) { 0 -> col(0.9f); 1 -> secCol(0.9f); else -> terCol(0.9f) }
+            val c = when (i) { 0 -> displayedTheme; 1 -> displayedSec; else -> displayedTer }
+            paint.shader = RadialGradient(
+                px, py, blobR,
+                intArrayOf(HudPalette.withAlpha(c, 0.95f), HudPalette.withAlpha(c, 0.55f), HudPalette.withAlpha(c, 0f)),
+                floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP
+            )
             canvas.drawCircle(px, py, blobR, paint)
         }
-        paint.maskFilter = null
+        paint.shader = null
 
         // 3. 柔和高光核心
         val coreR = r * 0.26f * (1 + lvl * 0.8f)
@@ -233,5 +239,56 @@ class HudStageView @JvmOverloads constructor(
             paint.color = col(a.coerceIn(0f, 1f))
             canvas.drawCircle(cx, cy, rr, paint)
         }
+
+        // 6. 雷达扫描扇：钢铁侠 HUD 标志性的那道"转一圈、尾巴渐隐"的扫描光，跟 72 根声波点阵
+        // 叠在一起但半径更大，视觉上是独立的一层。SweepGradient 本身就是矢量扇形渐变，没有
+        // 任何像素模糊成分。
+        val sweepR = r * 1.45f
+        paint.style = Paint.Style.FILL
+        paint.shader = SweepGradient(
+            cx, cy,
+            intArrayOf(col(0f), col(0f), col(0.55f), Color.WHITE),
+            floatArrayOf(0f, 0.82f, 0.97f, 1f)
+        ).also {
+            val m = android.graphics.Matrix()
+            m.postRotate(tt * -0.6f * spin * 57.3f, cx, cy)
+            it.setLocalMatrix(m)
+        }
+        canvas.drawCircle(cx, cy, sweepR, paint)
+        paint.shader = null
+
+        // 7. 四角机甲式取景框——钢铁侠 HUD 的另一个标志性元素，贴着整块舞台 View 的四个角，
+        // 跟中心光球无关，纯粹是"这是一块科技仪表盘"的边框语言。
+        drawCornerBrackets(canvas)
+    }
+
+    /** 四个角各画一个"L + 短斜切角"的取景框记号，颜色跟随当前状态主题色。 */
+    private fun drawCornerBrackets(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val m = min(w, h) * 0.09f // 括号臂长
+        val inset = 6f
+        val chamfer = m * 0.4f // 斜切角长度，避免方方正正显得呆板
+        paint.reset(); paint.isAntiAlias = true
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 2f
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.color = col(0.55f)
+
+        fun bracket(cornerX: Float, cornerY: Float, dx: Int, dy: Int) {
+            val p = Path()
+            val x0 = cornerX + inset * dx
+            val y0 = cornerY + inset * dy
+            p.moveTo(x0 + m * dx, y0)
+            p.lineTo(x0 + chamfer * dx, y0)
+            p.lineTo(x0, y0 + chamfer * dy)
+            p.lineTo(x0, y0 + m * dy)
+            canvas.drawPath(p, paint)
+        }
+        bracket(0f, 0f, 1, 1)
+        bracket(w, 0f, -1, 1)
+        bracket(0f, h, 1, -1)
+        bracket(w, h, -1, -1)
     }
 }

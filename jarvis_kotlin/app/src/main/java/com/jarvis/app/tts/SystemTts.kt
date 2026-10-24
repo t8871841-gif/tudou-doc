@@ -2,6 +2,8 @@ package com.jarvis.app.tts
 
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
@@ -25,7 +27,19 @@ object SystemTts {
     @Volatile
     private var currentDone: ((Boolean) -> Unit)? = null
 
-    fun speak(ctx: Context, text: String, onDone: (Boolean) -> Unit) {
+    @Volatile
+    private var currentStart: (() -> Unit)? = null
+
+    private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * 修复（批八复核发现）：原来没有 onStart 参数，TtsRouter 却按有这个参数调用，
+     * 编译都过不去；这里补上，并且真正接到 TextToSpeech 自己的 onStart 回调上——
+     * 之前即使补了参数，没接线也等于白补，JarvisAgent 的"speaking"状态/打断监听
+     * 在系统 TTS 兜底时永远不会触发。UtteranceProgressListener 的回调不保证在主线程，
+     * 统一 post 到主线程再往外传。
+     */
+    fun speak(ctx: Context, text: String, onStart: () -> Unit = {}, onDone: (Boolean) -> Unit) {
         val clean = text.replace(Regex("[\\r\\n]+"), " ").trim()
         if (clean.isEmpty()) {
             onDone(false)
@@ -39,33 +53,49 @@ object SystemTts {
             }
             val id = "jarvis_sys_" + System.currentTimeMillis()
             currentDone = onDone
+            currentStart = onStart
             try {
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {}
+                    override fun onStart(utteranceId: String?) {
+                        if (utteranceId != id) return
+                        main.post {
+                            val cb = currentStart
+                            currentStart = null
+                            cb?.invoke()
+                        }
+                    }
                     override fun onDone(utteranceId: String?) {
                         if (utteranceId == id) {
-                            val cb = currentDone
-                            currentDone = null
-                            cb?.invoke(true)
+                            main.post {
+                                val cb = currentDone
+                                currentDone = null
+                                currentStart = null
+                                cb?.invoke(true)
+                            }
                         }
                     }
 
                     @Deprecated("旧版回调")
                     override fun onError(utteranceId: String?) {
                         if (utteranceId == id) {
-                            val cb = currentDone
-                            currentDone = null
-                            cb?.invoke(false)
+                            main.post {
+                                val cb = currentDone
+                                currentDone = null
+                                currentStart = null
+                                cb?.invoke(false)
+                            }
                         }
                     }
                 })
                 val params = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1f) }
                 if (engine.speak(clean, TextToSpeech.QUEUE_FLUSH, params, id) != TextToSpeech.SUCCESS) {
                     currentDone = null
+                    currentStart = null
                     onDone(false)
                 }
             } catch (_: Exception) {
                 currentDone = null
+                currentStart = null
                 onDone(false)
             }
         }
@@ -109,5 +139,6 @@ object SystemTts {
         } catch (_: Exception) {
         }
         currentDone = null
+        currentStart = null
     }
 }

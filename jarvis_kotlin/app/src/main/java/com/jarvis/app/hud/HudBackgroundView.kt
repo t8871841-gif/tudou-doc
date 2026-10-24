@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.util.AttributeSet
@@ -13,8 +14,10 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * 移植自 `hud_painters.dart` 的 GridBackgroundPainter（极淡点阵）+ AuroraPainter
- * （三团缓慢漂移的大光晕，颜色跟随状态）。两层合并成一个 View 省一次 overdraw。
+ * 移植自 `hud_painters.dart` 的 AuroraPainter（三团缓慢漂移的大光晕，颜色跟随状态），
+ * 原来的极淡圆点阵换成了六边形网格（Stark Industries/钢铁侠座舱那种蜂窝科技感）。
+ * 网格是开机时按屏幕尺寸预先算好、缓存成一条 Path，每帧只是 `drawPath` 一次，
+ * 不会每帧重新算几百个六边形——矢量描边，天然锐利，不存在"模糊"这回事。
  */
 class HudBackgroundView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -34,8 +37,47 @@ class HudBackgroundView @JvmOverloads constructor(
     private var displayedTer = HudPalette.ROSE
     private var level = 0.08f
 
-    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(13, 255, 255, 255) }
+    private val hexPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 1f; color = Color.argb(20, 255, 255, 255)
+    }
     private val blobPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var hexPath: Path? = null
+    private var hexBuiltForW = -1
+    private var hexBuiltForH = -1
+
+    /** 六边形网格只在尺寸变化时重算一次，缓存成 Path，平时每帧只是 drawPath。 */
+    private fun ensureHexPath(w: Int, h: Int) {
+        if (hexPath != null && hexBuiltForW == w && hexBuiltForH == h) return
+        hexBuiltForW = w; hexBuiltForH = h
+        val path = Path()
+        val r = 30f // 六边形外接圆半径，数值越大网格越稀
+        val colStep = r * 1.5f
+        val rowStep = r * 1.732f // sqrt(3)
+        var col = 0
+        var cx = -r
+        while (cx < w + r * 2) {
+            val yOffset = if (col % 2 == 0) 0f else rowStep / 2f
+            var cy = -r + yOffset
+            while (cy < h + r * 2) {
+                addHex(path, cx, cy, r)
+                cy += rowStep
+            }
+            cx += colStep
+            col++
+        }
+        hexPath = path
+    }
+
+    /** 平顶六边形：以圆心为基准，6 个顶点每隔 60° 取一个。 */
+    private fun addHex(path: Path, cx: Float, cy: Float, r: Float) {
+        for (i in 0..5) {
+            val angle = Math.toRadians((60 * i).toDouble())
+            val x = cx + r * cos(angle).toFloat()
+            val y = cy + r * sin(angle).toFloat()
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        path.close()
+    }
 
     private val choreographer = Choreographer.getInstance()
     private var running = false
@@ -104,14 +146,7 @@ class HudBackgroundView @JvmOverloads constructor(
             w * 1.1f, HudPalette.withAlpha(displayedTheme, 0.22f + level * 0.10f)
         )
 
-        var x = 18f
-        while (x < w) {
-            var y = 18f
-            while (y < h) {
-                canvas.drawCircle(x, y, 0.9f, dotPaint)
-                y += 36f
-            }
-            x += 36f
-        }
+        ensureHexPath(width, height)
+        hexPath?.let { canvas.drawPath(it, hexPaint) }
     }
 }

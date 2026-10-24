@@ -22,18 +22,13 @@ object TtsRouter {
             }
         }
         when (JarvisPrefs.getTtsEngine(ctx)) {
-            // SystemTts 没有 onStart 回调（只有 onDone）：切到它即视为已开始，startOnce 手动补发。
-            "system" -> {
-                startOnce()
-                SystemTts.speak(ctx, text) { ok -> onDone(ok) }
-            }
+            "system" -> SystemTts.speak(ctx, text, onStart = startOnce) { ok -> onDone(ok) }
             "edge" -> speakEdge(ctx, text, attemptsLeft = 2, startOnce) { ok -> onDone(ok) }
             else -> speakEdge(ctx, text, attemptsLeft = 2, startOnce) { ok ->
                 if (ok) {
                     onDone(true)
                 } else {
-                    startOnce()
-                    SystemTts.speak(ctx, text) { sysOk -> onDone(sysOk) }
+                    SystemTts.speak(ctx, text, onStart = startOnce) { sysOk -> onDone(sysOk) }
                 }
             }
         }

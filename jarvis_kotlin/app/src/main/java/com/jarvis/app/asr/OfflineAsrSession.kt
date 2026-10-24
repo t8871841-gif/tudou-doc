@@ -130,19 +130,23 @@ object OfflineAsrSession {
             currentEngine?.sendAudio(ByteArray(0), true)
             return
         }
-        // 批八：给录音会话挂系统音频效果——回声消除（治播报回声误触发打断的关键一环）、
-        // 降噪、自动增益，设备支持才生效，不支持静默跳过。效果对象随 recorder 会话存活，
-        // recorder.release() 后由系统回收，这里不单独持有引用。
+        // 批八修复（复核发现）：之前创建完 AEC/NS/AGC 不持有引用，没人拿着它们，GC 随时可能把
+        // 这几个对象连带其 native 效果一起回收掉（Java 对象没了，底层效果大概率也跟着被拆），
+        // 跟 recorder 的生命周期并没有绑在一起——现在用局部变量接住，録音线程 finally 里跟
+        // recorder 一起显式 release()，保证这个效果真的从头到尾跟着这次录音。
+        var aec: android.media.audiofx.AcousticEchoCanceler? = null
+        var ns: android.media.audiofx.NoiseSuppressor? = null
+        var agc: android.media.audiofx.AutomaticGainControl? = null
         try {
             val sid = recorder.audioSessionId
             if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
-                android.media.audiofx.AcousticEchoCanceler.create(sid)?.enabled = true
+                aec = android.media.audiofx.AcousticEchoCanceler.create(sid)?.apply { enabled = true }
             }
             if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
-                android.media.audiofx.NoiseSuppressor.create(sid)?.enabled = true
+                ns = android.media.audiofx.NoiseSuppressor.create(sid)?.apply { enabled = true }
             }
             if (android.media.audiofx.AutomaticGainControl.isAvailable()) {
-                android.media.audiofx.AutomaticGainControl.create(sid)?.enabled = true
+                agc = android.media.audiofx.AutomaticGainControl.create(sid)?.apply { enabled = true }
             }
         } catch (_: Exception) {
         }
@@ -174,6 +178,9 @@ object OfflineAsrSession {
             } finally {
                 try { recorder.stop() } catch (_: Exception) {}
                 try { recorder.release() } catch (_: Exception) {}
+                try { aec?.release() } catch (_: Exception) {}
+                try { ns?.release() } catch (_: Exception) {}
+                try { agc?.release() } catch (_: Exception) {}
                 lastLevel01 = 0f
                 if (mySeq == seq) currentEngine?.sendAudio(ByteArray(0), true)
             }

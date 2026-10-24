@@ -127,6 +127,7 @@ class MainActivity : Activity() {
 
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(buildTopBar())
+        content.addView(buildStatusChips())
 
         homePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -176,6 +177,72 @@ class MainActivity : Activity() {
         })
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
         // 批八：顶栏时钟按用户要求删除（连同每秒刷新），顶栏只留状态点 + SYSTEM ACTIVE。
+    }
+
+    /**
+     * 钢铁侠 HUD 风格的小仪表条：方括号包起来的几个真实状态，不是随便滚动的假数字。
+     * ASR=离线识别模型是否就位，TTS=当前语音引擎档位，NET=设备有没有可用网络。
+     * 每 3 秒刷新一次（网络状态会变，其余两项基本不变但一起刷不额外费事）。
+     */
+    private lateinit var statusChipsRow: LinearLayout
+    private lateinit var chipAsr: TextView
+    private lateinit var chipTts: TextView
+    private lateinit var chipNet: TextView
+    private var chipsTick: Runnable? = null
+
+    private fun buildStatusChips(): LinearLayout {
+        fun chip() = TextView(this).apply {
+            textSize = 10.5f
+            typeface = android.graphics.Typeface.MONOSPACE
+            letterSpacing = 0.04f
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+        }
+        chipAsr = chip(); chipTts = chip(); chipNet = chip()
+        statusChipsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(20), dp(6), dp(20), 0)
+            addView(chipAsr, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) })
+            addView(chipTts, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) })
+            addView(chipNet, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        refreshStatusChips()
+        return statusChipsRow
+    }
+
+    private fun chipStyle(tv: TextView, ok: Boolean) {
+        val color = HudPalette.colorFor(JarvisAgent.currentState())
+        tv.setTextColor(if (ok) color else 0x80FFFFFF.toInt())
+        tv.background = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            setStroke(dp(1), if (ok) HudPalette.withAlpha(color, 0.6f) else 0x33FFFFFF)
+            cornerRadius = dp(4).toFloat()
+        }
+    }
+
+    private fun isNetworkUp(): Boolean = try {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+        caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    } catch (e: Exception) { false }
+
+    private fun refreshStatusChips() {
+        if (!::chipAsr.isInitialized) return
+        val asrOk = OfflineAsrSession.isAvailable(this)
+        chipAsr.text = "[ASR ${if (asrOk) "OK" else "--"}]"
+        chipStyle(chipAsr, asrOk)
+
+        val engine = JarvisPrefs.getTtsEngine(this)
+        val engineLabel = JarvisPrefs.ttsEngineLabel(engine).take(2)
+        chipTts.text = "[TTS $engineLabel]"
+        chipStyle(chipTts, true)
+
+        val netOk = isNetworkUp()
+        chipNet.text = "[NET ${if (netOk) "OK" else "--"}]"
+        chipStyle(chipNet, netOk)
+
+        chipsTick = chipsTick ?: Runnable { refreshStatusChips() }
+        main.removeCallbacks(chipsTick!!)
+        main.postDelayed(chipsTick!!, 3000)
     }
 
     // ---------- 舞台：HudStageView + 齿轮(设置) + 状态文字 + 唤醒词胶囊 ----------
@@ -275,6 +342,7 @@ class MainActivity : Activity() {
             statusCnView.setTextColor(color)
         }
         refreshWakeChip()
+        if (::chipAsr.isInitialized) { chipStyle(chipAsr, OfflineAsrSession.isAvailable(this)); chipStyle(chipTts, true); chipStyle(chipNet, isNetworkUp()) }
     }
 
     // ---------- 对话气泡流 ----------
@@ -1393,6 +1461,7 @@ class MainActivity : Activity() {
         if (JarvisAgent.onStateChanged != null) JarvisAgent.onStateChanged = null
         JarvisAgent.onUserText = null
         JarvisAgent.onReplyText = null
+        chipsTick?.let { main.removeCallbacks(it) }
         uiScope.cancel()
         super.onDestroy()
     }
