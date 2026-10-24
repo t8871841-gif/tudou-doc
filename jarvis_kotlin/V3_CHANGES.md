@@ -537,3 +537,6 @@
 - 无障碍配置全量对齐 Andee（扩围第 2 项）：eventTypes 补 typeWindowsChanged|typeViewFocused|typeViewScrolled；flags 补 flagDefault|flagRequestTouchExplorationMode；新增 canRequestEnhancedWebAccessibility/canRequestTouchExplorationMode。唯一偏差保留：flagRequestFilterKeyEvents + canRequestFilterKeyEvents——JarvisAccessibilityService.onKeyEvent 用它做音量键双击急停（600ms 内同按音量+/−），是真功能，故不删。
 - 没搬的：BodyCoreService 里非循环的部分（悬浮窗/卡片 UI、ASR/TTS 控制器、会议录音、宠物狗链路、场景系统、WebSocket 大脑通道、笔记/话题折叠等 Andee 自家设施）——不是循环内核，且 Jarvis 有自己的对应层。LocalBrain 的原生 tool-calling 协议没搬：本工程两个 Client 都是单轮文本接口（askOnce），模型协议仍是「一步一个 JSON 动作」，循环机制按等价方式落地。工具执行超时（dispatchWithTimeout）未单独搬：ScreenController 各动作内部已有自己的等待/静稳上限，模型调用侧有 45 秒闩锁超时。
 - 状态：未构建未真机。建议验收：设置任务模型为 DeepSeek 后说「在微信上给桑田发信息：晚上我回家吃饭」，看步数是否够用（25 步）、中途点错时是否会换招而不是原地重复、被守卫拦下时回报是否如实。
+
+## UI 调整：撤蜂巢格纹（2026-10-24 用户真机看后定，未构建）
+用户装 jk-v18 看了钢铁侠蜂窝界面后明确不喜欢背景蜂巢格，要纯净高清。HudBackgroundView 的六边形网格整层撤除（连同预计算 Path 的机器一并删，152→107 行），背景只剩纯净深蓝 + 三团漂移光晕，无任何格纹/点阵；舞台取景框、雷达扫描、顶栏仪表、玻璃框等其余元素按用户选择保留。要恢复格纹从 git 历史取本文件旧版。
