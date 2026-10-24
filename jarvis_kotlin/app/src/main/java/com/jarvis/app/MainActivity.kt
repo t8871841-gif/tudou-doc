@@ -72,7 +72,7 @@ class MainActivity : Activity() {
     private lateinit var inputRow: LinearLayout
     private lateinit var bgView: HudBackgroundView
     private lateinit var wakeChip: TextView
-    private lateinit var muteButton: ImageButton
+    private lateinit var emblemMotionView: com.jarvis.app.hud.EmblemMotionView    private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
     private lateinit var memoryListContainer: LinearLayout
     private lateinit var skillListContainer: LinearLayout
@@ -183,9 +183,16 @@ class MainActivity : Activity() {
     private fun buildEmblem(): FrameLayout {
         val emblem = FrameLayout(this)
         emblem.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(280))
+        // 批十八：徽章反应堆动效层（衬在徽章后面，只画环/粒子/声波，不盖徽章本体）。
+        emblemMotionView = com.jarvis.app.hud.EmblemMotionView(this).apply {
+            mode = { JarvisAgent.currentState() }
+            micLevel = { OfflineAsrSession.currentLevel() }
+        }
+        emblem.addView(emblemMotionView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         val badge = ImageView(this).apply {
             setImageResource(R.drawable.hud_badge)
             scaleType = ImageView.ScaleType.CENTER_CROP
+            setOnClickListener { if (::emblemMotionView.isInitialized) emblemMotionView.pulse() }
         }
         emblem.addView(badge, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER))
         val ring = ImageView(this).apply {
@@ -198,6 +205,19 @@ class MainActivity : Activity() {
             repeatCount = android.animation.ValueAnimator.INFINITE
             interpolator = android.view.animation.LinearInterpolator()
             start()
+        }
+        // 徽章呼吸：±2% 缩放，3 秒一周期（与悬浮球呼吸同款语言）。
+        for (v in listOf(badge, ring)) {
+            android.animation.ObjectAnimator.ofFloat(v, "scaleX", 1f, 1.02f, 1f).apply {
+                duration = 3000
+                repeatCount = android.animation.ValueAnimator.INFINITE
+                start()
+            }
+            android.animation.ObjectAnimator.ofFloat(v, "scaleY", 1f, 1.02f, 1f).apply {
+                duration = 3000
+                repeatCount = android.animation.ValueAnimator.INFINITE
+                start()
+            }
         }
         wakeChip = TextView(this).apply {
             text = "唤醒词 · 关"
@@ -444,7 +464,10 @@ class MainActivity : Activity() {
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF00F0FF.toInt(), 0xFF7000FF.toInt())).apply {
                 shape = GradientDrawable.OVAL
             }
-            setOnClickListener { JarvisAgent.triggerListenFromAssist(this@MainActivity) }
+            setOnClickListener {
+                if (::emblemMotionView.isInitialized) emblemMotionView.pulse()
+                JarvisAgent.triggerListenFromAssist(this@MainActivity)
+            }
         }
         micRow.addView(micButton, LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginStart = dp(20); marginEnd = dp(20) })
 

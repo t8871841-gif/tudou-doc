@@ -2,8 +2,11 @@ package com.jarvis.app
 
 import android.accessibilityservice.AccessibilityService
 import android.animation.ValueAnimator
+import android.app.KeyguardManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -15,6 +18,7 @@ import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.SweepGradient
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -58,18 +62,65 @@ object OrbController {
     @Volatile
     var eventSink: ((String, (Boolean) -> Unit) -> Unit)? = null
 
-    private var tapSeq = 0
     private var stopUntil = 0L
     private var lastTapAt = 0L
+
+    /**
+     * 2026-10-24 用户定：锁屏和息屏都不显示悬浮球，解锁后恢复。
+     * 悬浮球是 TYPE_ACCESSIBILITY_OVERLAY，系统级 overlay 默认会盖在锁屏上，
+     * 靠布局参数藏不住，必须主动藏：灭屏/亮屏仍锁着 → removeAll()；
+     * 解锁（USER_PRESENT）→ refresh()（仍受 enabled 与 appForeground 门控）。
+     * 只藏视觉，不停常驻服务与唤醒词监听。
+     */
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> removeAll()
+                Intent.ACTION_SCREEN_ON -> {
+                    val locked = try {
+                        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                        km.isKeyguardLocked
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (locked) removeAll() else refresh()
+                }
+                Intent.ACTION_USER_PRESENT -> refresh()
+            }
+        }
+    }
+    private var screenReceiverOn = false
 
     fun attach(s: AccessibilityService) {
         svc = s
         wm = s.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         enabled = s.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("on", false)
+        if (!screenReceiverOn) {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    s.registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    @Suppress("DEPRECATION")
+                    s.registerReceiver(screenReceiver, filter)
+                }
+                screenReceiverOn = true
+            } catch (_: Exception) {
+                // 注册失败不影响主流程：最坏是锁屏上仍显示球（旧行为）
+            }
+        }
         refresh()
     }
 
     fun detach() {
+        if (screenReceiverOn) {
+            try { svc?.unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+            screenReceiverOn = false
+        }
         removeAll()
         svc = null
         wm = null
@@ -187,53 +238,24 @@ object OrbController {
     }
 
     /**
-     * 短按：优先通知 Dart 开始聆听（要求 Dart 回执）；投递不可用 / Dart 回 false / 1.5 秒无回执，
-     * 一律兜底 launchApp("assist") 拉起并聆听。点中立即震动；350ms 内再点一次 = 急停。
-     * 任何分支都有反馈：震动 + 状态变色或气泡，不允许静默。
+     * 短按 = 语音对话（2026-10-24 用户定；长按才进主界面）。
+     * 旧逻辑先走 Dart eventSink，桥没起来就兜底 launchApp("assist") 打开主界面——
+     * 纯 Kotlin 版里 agent 没启动时桥永远没起来，于是每次短按都变成“进主界面”，
+     * 正是用户报的“点击就进入”。现在直接走原生入口 triggerListenFromAssist
+     * （内部会先 start() 再 beginListening），全程不打开主界面；
+     * 350ms 内连点两次仍是急停。
      */
     private fun handleTap() {
         val now = System.currentTimeMillis()
         buzz(orb, HapticFeedbackConstants.KEYBOARD_TAP) // 点中立即震动，先给手感反馈
-        // 350ms 内连点两次 = 急停（第一下已按原逻辑开始聆听，第二下把它连同后续一并停掉）
         if (now - lastTapAt < 350) {
             lastTapAt = 0
             emergencyStop()
             return
         }
         lastTapAt = now
-        val sink = eventSink
-        if (!(dartAlive && JarvisForegroundService.running) || sink == null) {
-            doShowBubble("正在唤起 Jarvis…")
-            launchApp("assist")
-            return
-        }
-        val my = ++tapSeq
-        var answered = false
-        main.postDelayed({
-            if (!answered && my == tapSeq) {
-                answered = true
-                doShowBubble("正在唤起 Jarvis…")
-                launchApp("assist")
-            }
-        }, 1500)
-        try {
-            sink("tap") { handled ->
-                main.post {
-                    if (answered) return@post
-                    answered = true
-                    if (!handled) {
-                        doShowBubble("正在唤起 Jarvis…")
-                        launchApp("assist")
-                    }
-                }
-            }
-        } catch (_: Throwable) {
-            if (!answered) {
-                answered = true
-                doShowBubble("正在唤起 Jarvis…")
-                launchApp("assist")
-            }
-        }
+        val s = svc ?: return
+        JarvisAgent.triggerListenFromAssist(s)
     }
 
     /** 触觉反馈：用 View.performHapticFeedback，不需要 VIBRATE 权限；忽略系统“触感反馈”总开关，保证点中有感觉。 */

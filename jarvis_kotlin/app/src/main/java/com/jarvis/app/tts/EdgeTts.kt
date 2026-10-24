@@ -68,7 +68,7 @@ object EdgeTts {
         val seq = ++mySeq
         val clean = text.replace(Regex("[\r\n]+"), " ").trim()
         if (clean.isEmpty()) { onDone(false); return }
-        io.execute { runSynthesis(seq, clean, voice, ratePct, pitchHz, onStart, onDone) }
+        io.execute { runSynthesis(ctx, seq, clean, voice, ratePct, pitchHz, onStart, onDone) }
     }
 
     /** 急停/打断：关掉在飞的 socket（唤醒读写阻塞立即抛异常）和播放轨道，不回调 onDone——调用方自己知道是主动打断。 */
@@ -88,7 +88,7 @@ object EdgeTts {
 
     private fun cancelled(seq: Int) = seq != mySeq
 
-    private fun runSynthesis(seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
+    private fun runSynthesis(ctx: Context, seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
         val sentences = split(text)
         if (sentences.isEmpty()) { main.post { onDone(false) }; return }
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -112,34 +112,69 @@ object EdgeTts {
         track = t
         var started = false
         var sawAny = false
+        // 2026-10-24 语音播不完整修复：AudioTrack.write() 只保证数据进了缓冲区，
+        // 不保证已经播出；旧代码写完最后一句立刻 stop()，会把缓冲区里还没播的
+        // 尾巴（约一个缓冲区，0.3~1.3 秒）直接丢掉——每句回复都被截尾。
+        // 这里累计实际写入的帧数，播完后先等放音头追上再 stop。
+        var totalFrames = 0L
+        var abortedAt: Int? = null
         try {
             t.play()
             for ((i, sentence) in sentences.withIndex()) {
                 if (cancelled(seq)) break
-                val mp3 = fetchMp3(seq, sentence, voice, ratePct, pitchHz)
-                if (cancelled(seq)) break
-                if (mp3.isEmpty()) {
-                    if (i == 0) break // 第一句就没声音，当失败处理
-                    continue
-                }
-                val pcms = decodeMp3(seq, mp3)
-                for (pcm in pcms) {
+                try {
+                    val mp3 = fetchMp3(seq, sentence, voice, ratePct, pitchHz)
                     if (cancelled(seq)) break
-                    if (pcm.isEmpty()) continue
-                    if (!started) { started = true; main.post { if (!cancelled(seq)) onStart() } }
-                    sawAny = true
-                    t.write(pcm, 0, pcm.size)
+                    if (mp3.isEmpty()) {
+                        if (i == 0) break // 第一句就没声音，当失败处理
+                        continue
+                    }
+                    val pcms = decodeMp3(seq, mp3)
+                    for (pcm in pcms) {
+                        if (cancelled(seq)) break
+                        if (pcm.isEmpty()) continue
+                        if (!started) { started = true; main.post { if (!cancelled(seq)) onStart() } }
+                        sawAny = true
+                        t.write(pcm, 0, pcm.size)
+                        totalFrames += pcm.size / 2 // PCM 16bit 单声道：2 字节一帧
+                    }
+                } catch (e: Exception) {
+                    // 旧代码：中间一句取音/解码一抛，整个循环直接进 finally，
+                    // 后面所有句子全丢，表现为“播到一半就断了”。现在只记一次、
+                    // 跳过这一句继续播后面的；第一句就失败才当整体失败。
+                    Log.e(TAG, "edge tts sentence $i failed", e)
+                    if (i == 0) { abortedAt = i; break }
+                    abortedAt = abortedAt ?: i
+                    continue
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "edge tts failed", e)
         } finally {
             if (!cancelled(seq)) {
+                // 等尾巴播完再停：放音头追上总帧数，或超过“音频时长 + 3 秒”就放弃等。
+                if (totalFrames > 0) {
+                    val deadline = System.currentTimeMillis() + totalFrames * 1000 / SAMPLE_RATE + 3000
+                    while (System.currentTimeMillis() < deadline && !cancelled(seq)) {
+                        try {
+                            if (t.playbackHeadPosition.toLong() >= totalFrames) break
+                        } catch (_: Exception) {
+                            break
+                        }
+                        try { Thread.sleep(50) } catch (_: InterruptedException) { break }
+                    }
+                }
                 runCatching { t.stop() }
             }
             runCatching { t.release() }
             if (track === t) track = null
-            if (!cancelled(seq)) main.post { onDone(sawAny) }
+            if (!cancelled(seq)) main.post {
+                // 中间有句子失败被跳过时留一条审计，否则“少播一句”从界面上看不见原因。
+                if (abortedAt != null) {
+                    com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 中间句子失败已跳过", "第 ${abortedAt + 1}/${sentences.size} 句")
+                }
+                onDone(sawAny)
+            }
         }
     }
 

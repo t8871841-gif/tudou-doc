@@ -45,19 +45,37 @@ object SystemTts {
             onDone(false)
             return
         }
+        // 2026-10-24 语音播不完整修复：系统 TTS 一次 speak() 塞长文本时，
+        // 部分 ROM 引擎会在内部截断；改按句切分、首句 QUEUE_FLUSH、其余 QUEUE_ADD
+        // 排队播，全部播完才算完成。回调都 post 到主线程，failed/doneFired 只在
+        // 主线程读写，不用加锁。
+        val chunks = splitSentences(clean)
         ensureInit(ctx) { ok ->
             val engine = tts
             if (!ok || engine == null) {
                 onDone(false)
                 return@ensureInit
             }
-            val id = "jarvis_sys_" + System.currentTimeMillis()
+            val base = "jarvis_sys_" + System.currentTimeMillis()
+            val firstId = base + "_0"
+            val lastId = base + "_" + (chunks.size - 1)
             currentDone = onDone
             currentStart = onStart
+            var failed = false
+            var doneFired = false
+            val fireDone: (Boolean) -> Unit = { ok2 ->
+                if (!doneFired) {
+                    doneFired = true
+                    val cb = currentDone
+                    currentDone = null
+                    currentStart = null
+                    cb?.invoke(ok2)
+                }
+            }
             try {
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
-                        if (utteranceId != id) return
+                        if (utteranceId != firstId) return
                         main.post {
                             val cb = currentStart
                             currentStart = null
@@ -65,41 +83,40 @@ object SystemTts {
                         }
                     }
                     override fun onDone(utteranceId: String?) {
-                        if (utteranceId == id) {
-                            main.post {
-                                val cb = currentDone
-                                currentDone = null
-                                currentStart = null
-                                cb?.invoke(true)
-                            }
-                        }
+                        if (utteranceId == lastId) main.post { fireDone(!failed) }
                     }
 
                     @Deprecated("旧版回调")
                     override fun onError(utteranceId: String?) {
-                        if (utteranceId == id) {
-                            main.post {
-                                val cb = currentDone
-                                currentDone = null
-                                currentStart = null
-                                cb?.invoke(false)
-                            }
+                        main.post {
+                            failed = true
+                            if (utteranceId == lastId) fireDone(false)
                         }
                     }
                 })
                 val params = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1f) }
-                if (engine.speak(clean, TextToSpeech.QUEUE_FLUSH, params, id) != TextToSpeech.SUCCESS) {
-                    currentDone = null
-                    currentStart = null
-                    onDone(false)
+                var queued = true
+                for ((i, chunk) in chunks.withIndex()) {
+                    val mode = if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                    if (engine.speak(chunk, mode, params, base + "_" + i) != TextToSpeech.SUCCESS) {
+                        queued = false
+                        break
+                    }
+                }
+                if (!queued) {
+                    try { engine.stop() } catch (_: Exception) {}
+                    main.post { fireDone(false) }
                 }
             } catch (_: Exception) {
-                currentDone = null
-                currentStart = null
-                onDone(false)
+                main.post { fireDone(false) }
             }
         }
     }
+
+    private fun splitSentences(pending: String): List<String> =
+        pending.split(Regex("(?<=[。！？!?\n])|(?<=\\. )"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
 
     private fun ensureInit(ctx: Context, cb: (Boolean) -> Unit) {
         if (ready && tts != null) {
