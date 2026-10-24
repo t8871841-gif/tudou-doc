@@ -585,7 +585,8 @@ class MainActivity : Activity() {
             "本地模型" to { v -> buildLocalLlmSection(v) },
             "主动播报" to { v -> buildAnnounceSection(v) },
             "晨报与出发提醒" to { v -> buildBriefSection(v) },
-            "操作审计" to { v -> buildAuditSection(v) }
+            "操作审计" to { v -> buildAuditSection(v) },
+            "关于" to { v -> buildAboutSection(v) }
         )
         for ((title, builder) in pages) {
             val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -611,6 +612,30 @@ class MainActivity : Activity() {
         settingsPageHost.visibility = View.GONE
         settingsListPanel.visibility = View.VISIBLE
         settingsScroll.scrollTo(0, 0)
+    }
+
+    /** 关于页（2026-10-24 用户定）：上一张 Jarvis 金属字图标放大展示。 */
+    private fun buildAboutSection(root: LinearLayout) {
+        root.addView(ImageView(this).apply {
+            setImageResource(R.drawable.about_jarvis)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            }
+        })
+        val ver = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        root.addView(TextView(this).apply {
+            text = if (ver.isEmpty()) "Jarvis · 个人智能助手" else "Jarvis · 个人智能助手（$ver）"
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
+        })
     }
 
     /** 功能自检页（原设置页顶部块，拆成二级页）：状态、无障碍/电池/常驻入口、悬浮球开关、节点读取。 */
