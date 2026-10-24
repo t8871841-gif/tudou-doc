@@ -524,3 +524,16 @@
 背景：用户说「打开手机手电筒」打不开，并指出跨应用操作要覆盖全部手机功能、不能是半成品。查实：手电筒是系统功能不是带图标的应用，旧链路把它当应用名翻已装应用列表，找不到就死胡同。
 - 新建 command/DeviceCommands：在 LocalCommands 的「打开应用」之前拦截，整句精确匹配（防吞聊天句），语音/打字双路：手电筒开/关/切换（CameraManager.setTorchMode，不开相机不需相机权限，TorchCallback 同步真实状态，相机被占用时如实回报）、截屏/锁屏/通知栏/快捷设置/回主页/最近任务（无障碍全局动作，服务没开时明示去开）、音量调大/调小（AudioManager 带系统音量条）。
 - 全部动作写审计；办不成说原因，不装成功。
+
+## 批十四：移植 Andee BodyCoreService 循环内核（未构建）
+背景：用户追问「无障碍的代码都复制过了吗」并点名 BodyCoreService——批九只搬了「手」（screen/ 包），驱动它的「脑子循环」（BodyCoreService 本体 + brain/LocalBrain 的循环 + net/ToolSchemas 的屏幕操作纪律）没搬，TaskLoop 是 394 行自写简化版。本批以 Andee 的做法为准把循环内核补齐；同批按用户扩围令把 ScreenCapture 与无障碍配置也全量对齐。
+- 步数上限 12 → 25（Andee VoiceConfig.DEFAULT_MAX_STEPS）。
+- 重复守卫（LocalBrain MAX_REPEATS=3）：按动作签名（种类+eid/cell/坐标/text/ms 等关键参数）数连续重复，第 4 次相同动作执行前拦下中止并如实回报「在打转」；无法解析的模型输出也算一种签名。原先 TaskLoop 完全没有这层（ScreenController 内的同位置连点计数是另一层，不替代它）。
+- 输出不合规的处理改 Andee 式：立即纠偏重试一次（原有）后，再不行不再整场中止——记为一步失败、把错误回喂下一步提示词让模型自纠（Andee 把工具错误当结果回喂）。
+- 历史回喂加密：每步记录「动作简述 → 结果摘要」，摘要透传 ScreenController 的判定（screen_changed/now_pkg/elements_hint/snapped/输入读回）；历史段加 6000 字符预算，超了整步丢最旧的并注明（对应 LocalBrain 的 MAX_HISTORY_CHARS 截断；本工程是单轮提示词，量级按单条提示词定）。另加界面指纹比对：与上一步一字不差时在提示词里点明防原地重复。
+- 系统提示词按 ToolSchemas 的屏幕纪律重写：缩进分组认领控件（列表型界面只用目标行自己组内的按钮）、# 开头是内部 id 不是可见文字、有编号绝不用坐标重算、type 必须紧跟点框（已聚焦的回复框直接 type）、挡路弹窗先清、界面没变化不许原样重发动作、wait 必须逐次加时（相同毫秒数同样判打转）、节点总数为 0（自绘屏，优先 back/home 换路线）与带名为 0（用大纲分组对位点编号）两种空树的区别、树被扣留应用先 zoom 再点的硬规矩。模型可见文案全部 Jarvis 身份、无 Andee 字样。
+- 截图策略改 ToolSchemas 纪律（与批十二的大脑路由不冲突，DeepSeek 仍永不带图）：大纲是默认观察，截图只在树为空、上一步失败或界面没变化要核对、zoom 时才带——批九/十二时 Agnes 每步都带全屏图，现已按需。swipe 动作新增 screens 连滑多屏（swipeNorm 本就支持，回报实际滑了几屏）；wait 上限放宽到 20 秒配合逐次加时纪律。
+- ScreenCapture 移植（扩围第 1 项）：andee/screen/ScreenCapture.kt 原样进 com.jarvis.app.screen（只改包名、虚拟屏名 jarvis-capture、PROJECTION_NOTE 的身份文案；另加 companion 单例 shared() 作为持有点——Andee 由 BodyCoreService 持有，本工程没有那层服务）。取舍按 BodyCoreService 原做法：无障碍 takeScreenshot 为主、MediaProjection 只作兜底（captureFallback 同位），TaskLoop 在无障碍截图拿不到图时才走录屏，图缩到长边 1280、无网格、提示词标明「只能看不能按图瞄准」；隐私黑名单（isShotBlocked：银行/支付/权限/设置类）两条通道都不拍。**未接通的一项（如实记录）**：录屏授权的发起端没有接——createScreenCaptureIntent 必须从 Activity 发起并把结果喂给 ScreenCapture.start()，本工程唯一 Activity 是 MainActivity，不在本批可动文件内；且 Android 14+ 调用 getMediaProjection 前要求 mediaProjection 型前台服务在运行，本工程暂无此服务（目标机 Android 13 不受此限）。因此本批未动 AndroidManifest（没有必需条目：加权限而无前台服务等于没接）。接通只差两步：MainActivity 加一个「录屏授权」入口（拉起授权框、结果转 ScreenCapture.shared().start()），以及（为 Android 14+）加 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限 + 一个 mediaProjection 型前台服务。
+- 无障碍配置全量对齐 Andee（扩围第 2 项）：eventTypes 补 typeWindowsChanged|typeViewFocused|typeViewScrolled；flags 补 flagDefault|flagRequestTouchExplorationMode；新增 canRequestEnhancedWebAccessibility/canRequestTouchExplorationMode。唯一偏差保留：flagRequestFilterKeyEvents + canRequestFilterKeyEvents——JarvisAccessibilityService.onKeyEvent 用它做音量键双击急停（600ms 内同按音量+/−），是真功能，故不删。
+- 没搬的：BodyCoreService 里非循环的部分（悬浮窗/卡片 UI、ASR/TTS 控制器、会议录音、宠物狗链路、场景系统、WebSocket 大脑通道、笔记/话题折叠等 Andee 自家设施）——不是循环内核，且 Jarvis 有自己的对应层。LocalBrain 的原生 tool-calling 协议没搬：本工程两个 Client 都是单轮文本接口（askOnce），模型协议仍是「一步一个 JSON 动作」，循环机制按等价方式落地。工具执行超时（dispatchWithTimeout）未单独搬：ScreenController 各动作内部已有自己的等待/静稳上限，模型调用侧有 45 秒闩锁超时。
+- 状态：未构建未真机。建议验收：设置任务模型为 DeepSeek 后说「在微信上给桑田发信息：晚上我回家吃饭」，看步数是否够用（25 步）、中途点错时是否会换招而不是原地重复、被守卫拦下时回报是否如实。

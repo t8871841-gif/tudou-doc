@@ -58,6 +58,7 @@ class MainActivity : Activity() {
         const val EXTRA_ACTION = "jarvis_action"
         const val EXTRA_TEXT = "jarvis_text"
         const val REQ_PICK_MODEL = 5151
+        const val REQ_PROJECTION = 5152
     }
 
     private lateinit var statusView: TextView
@@ -914,6 +915,16 @@ class MainActivity : Activity() {
             JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(this))
             toast("已保存")
         })
+        // 批十四补线：Andee 的 ScreenCapture（录屏截图兜底）授权入口——授权必须从 Activity 发起。
+        // 无障碍截图拿不到图时任务循环才走这条；不授权不影响主链路（自动退回纯界面树）。
+        root.addView(btn("录屏授权（跨应用截图兜底）") {
+            val mpm = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+            if (mpm == null) {
+                toast("这台手机拿不到录屏服务")
+            } else {
+                startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION)
+            }
+        })
     }
 
     /** 批二新增：常驻与入口——后台常驻待命开关、连续对话开关、几个系统设置快捷入口。 */
@@ -1278,6 +1289,15 @@ class MainActivity : Activity() {
     @Deprecated("文件选择器回调")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PROJECTION) {
+            if (resultCode == RESULT_OK) {
+                val ok = com.jarvis.app.screen.ScreenCapture.shared(this).start(resultCode, data)
+                toast(if (ok) "录屏授权好了，截图兜底可用" else "录屏没启动起来，再试一次")
+            } else {
+                toast("没给录屏授权，截图兜底先不用")
+            }
+            return
+        }
         if (requestCode != REQ_PICK_MODEL) return
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) return
