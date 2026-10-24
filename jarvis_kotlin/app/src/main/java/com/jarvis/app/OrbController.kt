@@ -335,6 +335,7 @@ object OrbController {
         private var phase = 0f
         private var rot = 0f
         private var anim: ValueAnimator? = null
+        private var breathAnim: ValueAnimator? = null
         private var downX = 0f
         private var downY = 0f
         private var moved = false
@@ -407,7 +408,25 @@ object OrbController {
                 anim?.cancel()
                 anim = null
                 phase = 0f
+                // 待机呼吸：整球极轻微缩放（±2%），3 秒一周期；只动缩放，不动透明度。
+                if (breathAnim == null) {
+                    breathAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 3000
+                        repeatCount = ValueAnimator.INFINITE
+                        addUpdateListener {
+                            val v = it.animatedValue as Float
+                            val k = 1f + 0.02f * kotlin.math.sin(v * 2f * Math.PI.toFloat())
+                            scaleX = k
+                            scaleY = k
+                        }
+                        start()
+                    }
+                }
             } else if (anim == null) {
+                breathAnim?.cancel()
+                breathAnim = null
+                scaleX = 1f
+                scaleY = 1f
                 // 沿用原呼吸机制：1.2s 循环的 phase；顺带让外环缓慢旋转（约 36°/秒）
                 anim = ValueAnimator.ofFloat(0f, 1f).apply {
                     duration = 1200
@@ -426,6 +445,8 @@ object OrbController {
         override fun onDetachedFromWindow() {
             anim?.cancel()
             anim = null
+            breathAnim?.cancel()
+            breathAnim = null
             super.onDetachedFromWindow()
         }
 
@@ -461,6 +482,20 @@ object OrbController {
             paint.shader = ringShader
             c.drawCircle(cx, cy, r1 - ringW / 2f, paint)
             c.restore()
+            // 思考态：再加一圈转动的细虚线环——只动线条，不铺半透明；
+            // rot 只在非待机时推进，思考态正好在转。
+            if (st == "thinking") {
+                paint.reset(); paint.isAntiAlias = true
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f * dp
+                paint.color = palette()[1]
+                paint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(14f * dp, 10f * dp), 0f)
+                c.save()
+                c.rotate(rot * 2f, cx, cy)
+                c.drawCircle(cx, cy, r1 + 6f * dp, paint)
+                c.restore()
+                paint.pathEffect = null
+            }
             // 球面：钢铁侠头盔头像（用户 2026-10-24 指定新图，已按头盔位置裁成正方形）圆形裁切；状态靠外圈渐变环+脉冲表达（原小熊 orb_bear 保留在资源里未删）
             val bear = bearBitmap()
             if (bear != null) {

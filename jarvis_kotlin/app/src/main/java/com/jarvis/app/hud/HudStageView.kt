@@ -240,22 +240,8 @@ class HudStageView @JvmOverloads constructor(
             canvas.drawCircle(cx, cy, rr, paint)
         }
 
-        // 6. 雷达扫描扇：钢铁侠 HUD 标志性的那道"转一圈、尾巴渐隐"的扫描光，跟 72 根声波点阵
-        // 叠在一起但半径更大，视觉上是独立的一层。SweepGradient 本身就是矢量扇形渐变，没有
-        // 任何像素模糊成分。
-        val sweepR = r * 1.45f
-        paint.style = Paint.Style.FILL
-        paint.shader = SweepGradient(
-            cx, cy,
-            intArrayOf(col(0f), col(0f), col(0.55f), Color.WHITE),
-            floatArrayOf(0f, 0.82f, 0.97f, 1f)
-        ).also {
-            val m = android.graphics.Matrix()
-            m.postRotate(tt * -0.6f * spin * 57.3f, cx, cy)
-            it.setLocalMatrix(m)
-        }
-        canvas.drawCircle(cx, cy, sweepR, paint)
-        paint.shader = null
+        // 清澈化（2026-10-24 用户定）：雷达扫描扇撤除——转动的半透明扇形是"雾蒙蒙"
+        // 的大头；四角取景框细实线保留，状态切换涟漪（细线圈）保留。
 
         // 7. 四角机甲式取景框——钢铁侠 HUD 的另一个标志性元素，贴着整块舞台 View 的四个角，
         // 跟中心光球无关，纯粹是"这是一块科技仪表盘"的边框语言。

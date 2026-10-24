@@ -18,6 +18,7 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -159,24 +160,57 @@ class MainActivity : Activity() {
         if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
     }
 
-    // ---------- 顶栏：status dot + SYSTEM ACTIVE ... 时钟 ----------
+    // ---------- 顶栏：徽章 + status dot + SYSTEM ACTIVE ----------
 
     private fun buildTopBar(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(20), dp(14), dp(20), 0)
-        val dot = View(this@MainActivity).apply {
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF00FF9D.toInt()) }
+        orientation = LinearLayout.VERTICAL
+        // 顶部徽章（图 2 圆环裁圆形）：居中 160dp，静态图不动，转的是外面那圈虚线环
+        // （环上有一段亮色长标记，转起来才看得出在转；60 秒一圈，极慢）。
+        val badgeRow = FrameLayout(this@MainActivity).apply {
+            val badge = ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.hud_badge)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+            val ring = ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.hud_badge_ring)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+            addView(badge, FrameLayout.LayoutParams(dp(160), dp(160), Gravity.CENTER))
+            addView(ring, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER))
+            android.animation.ObjectAnimator.ofFloat(ring, "rotation", 0f, 360f).apply {
+                duration = 60000
+                repeatCount = android.animation.ValueAnimator.INFINITE
+                interpolator = android.view.animation.LinearInterpolator()
+                start()
+            }
         }
-        addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
-        addView(TextView(this@MainActivity).apply {
-            text = "SYSTEM ACTIVE"
-            setTextColor(0xB3FFFFFF.toInt())
-            textSize = 12f
-            letterSpacing = 0.12f
+        addView(badgeRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8); bottomMargin = dp(4)
         })
-        addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
-        // 批八：顶栏时钟按用户要求删除（连同每秒刷新），顶栏只留状态点 + SYSTEM ACTIVE。
+        val statusRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), 0, dp(20), 0)
+            val dot = View(this@MainActivity).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF00FF9D.toInt()) }
+            }
+            addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+            // 状态点轻脉动（透明度 1↔0.55，2 秒一周期），表示后台活着。
+            android.animation.ObjectAnimator.ofFloat(dot, "alpha", 1f, 0.55f, 1f).apply {
+                duration = 2000
+                repeatCount = android.animation.ValueAnimator.INFINITE
+                start()
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "SYSTEM ACTIVE"
+                setTextColor(0xB3FFFFFF.toInt())
+                textSize = 12f
+                letterSpacing = 0.12f
+            })
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
+            // 批八：顶栏时钟按用户要求删除（连同每秒刷新），顶栏只留状态点 + SYSTEM ACTIVE。
+        }
+        addView(statusRow)
     }
 
     // ---------- 舞台：HudStageView + 齿轮(设置) + 状态文字 + 唤醒词胶囊 ----------
@@ -317,6 +351,10 @@ class MainActivity : Activity() {
             }
         }
         chatList.addView(tv)
+        // 新消息滑入动效（玻璃框本身不动）：从下方 12dp 处 220ms 滑入并淡入。
+        tv.translationY = dp(12).toFloat()
+        tv.alpha = 0f
+        tv.animate().translationY(0f).alpha(1f).setDuration(220).start()
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
