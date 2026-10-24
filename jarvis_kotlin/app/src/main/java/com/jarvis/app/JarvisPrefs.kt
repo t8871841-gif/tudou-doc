@@ -26,7 +26,9 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_WAKE_ENABLED, on).apply()
     }
 
-    fun isBargeInEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_BARGE_IN_ENABLED, true)
+    // 2026-10-24 用户令「麦克风不要一直启动，点击再启用」：打断监听默认关——它会在每次播报时
+    // 开麦，且 jk-v14 真机出现过播报被自己回声误判掐断（只见气泡没声）。要打断功能自己在设置里开。
+    fun isBargeInEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_BARGE_IN_ENABLED, false)
     fun setBargeInEnabled(ctx: Context, on: Boolean) {
         p(ctx).edit().putBoolean(KEY_BARGE_IN_ENABLED, on).apply()
     }

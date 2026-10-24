@@ -830,7 +830,7 @@ class MainActivity : Activity() {
         })
 
         root.addView(CheckBox(this).apply {
-            text = "播报时允许被打断说话（降级版：无回声消除，见自检详情）"
+            text = "播报时允许被打断说话（默认关：麦克风点击才启用；开着时播报期间会开麦听打断）"
             setTextColor(0xB3FFFFFF.toInt())
             isChecked = JarvisPrefs.isBargeInEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, checked -> JarvisPrefs.setBargeInEnabled(this@MainActivity, checked) }

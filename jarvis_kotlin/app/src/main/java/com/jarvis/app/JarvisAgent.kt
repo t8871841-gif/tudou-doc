@@ -323,7 +323,8 @@ object JarvisAgent {
                     if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq)
                 }
             },
-            onDone = { _ ->
+            onDone = { ok ->
+                if (!ok) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", reply.take(40))
                 main.post {
                     if (mySeq != genSeq) return@post
                     // 批二「连续对话」：开着的话说完答案直接继续听，不用再喊一次唤醒词。
