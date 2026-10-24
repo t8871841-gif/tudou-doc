@@ -185,6 +185,34 @@ object LocalCommands {
     /** 批九：任务循环的 openApp 动作复用同一套按名找应用+拉起逻辑，返回结果描述（不播报）。 */
     fun launchApp(ctx: Context, name: String): String = launchAppInternal(ctx, name.trim())
 
+    /**
+     * 常用应用包名直查表（键已小写；查前把名字 trim + lowercase）。
+     * 直查失败（包不存在、无启动界面、拉起抛异常）时一律回落到枚举，
+     * 所以表里即使有个别 ROM 上包名不同的条目也不会开错应用——
+     * 最坏只是直查没命中，走回老路。
+     */
+    private val WELL_KNOWN_APPS = mapOf(
+        "微信" to "com.tencent.mm",
+        "wechat" to "com.tencent.mm",
+        "qq" to "com.tencent.mobileqq",
+        "支付宝" to "com.eg.android.AlipayClient",
+        "alipay" to "com.eg.android.AlipayClient",
+        "淘宝" to "com.taobao.taobao",
+        "京东" to "com.jingdong.app.mall",
+        "抖音" to "com.ss.android.ugc.aweme",
+        "快手" to "com.smile.gifmaker",
+        "哔哩哔哩" to "tv.danmaku.bili",
+        "b站" to "tv.danmaku.bili",
+        "高德地图" to "com.autonavi.minimap",
+        "高德" to "com.autonavi.minimap",
+        "百度地图" to "com.baidu.BaiduMap",
+        "设置" to "com.android.settings",
+        "电话" to "com.android.dialer",
+        "短信" to "com.android.messaging",
+        "相机" to "com.android.camera",
+        "相册" to "com.android.gallery3d"
+    )
+
     // ---------- 打开应用：tryHandle 在 io 线程调进来，枚举/拉起在本线程，回报回主线程 ----------
 
     private fun openAppBg(ctx: Context, name: String, speak: (String) -> Unit) {
@@ -199,7 +227,26 @@ object LocalCommands {
     /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。 */
     private fun launchAppInternal(ctx: Context, name: String): String {
         val pm = ctx.packageManager
+        // 2026-10-24 跨应用修复第 1 件：按名字枚举应用时好时坏（21:56 任务循环里
+        // “微信/WeChat”两次没找到，21:58 同一函数直接说“打开微信”却成功了）——
+        // 常用应用先按包名直查，绕过枚举整条路；直查失败（没装/没启动界面）
+        // 再回落到枚举。包名都是公开的固定值，不是用户隐私。
+        val direct = WELL_KNOWN_APPS[name.trim().lowercase()]
+        if (direct != null) {
+            val intent = pm.getLaunchIntentForPackage(direct)
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                try {
+                    ctx.startActivity(intent)
+                    AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
+                    return "正在打开${name.trim()}"
+                } catch (_: Exception) {
+                    // 拉起失败时不直接判死，继续走枚举（可能装了分身/改名版）
+                }
+            }
+        }
         var best: Pair<String, String>? = null // (label, package)
+        var enumError: String? = null
         try {
             for (app in pm.getInstalledApplications(0)) {
                 val label = pm.getApplicationLabel(app).toString()
@@ -213,11 +260,14 @@ object LocalCommands {
                     best = label to app.packageName
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // 旧代码把枚举异常静默吞成“没找到”，下次取证分不清是真没装还是
+            // 枚举本身炸了；现在把异常原因带进失败文案。
+            enumError = e.message ?: e.javaClass.simpleName
         }
         val found = best
         if (found == null) {
-            return "没找到叫${name}的应用"
+            return if (enumError != null) "找应用时出错：$enumError" else "没找到叫${name}的应用"
         }
         val intent = pm.getLaunchIntentForPackage(found.second)
         if (intent == null) {

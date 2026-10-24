@@ -70,7 +70,7 @@ object TaskLoop {
     private const val MAX_NO_PROGRESS_STEPS = 7
     private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom")
 
-    private const val MODEL_TIMEOUT_SEC = 45L
+    private const val MODEL_TIMEOUT_SEC = 120L // 须大于客户端 90 秒读超时，否则闩锁先成瓶颈
     private const val ELEMENTS_CHARS = 5000
 
     /** 历史段字符预算（单条提示词内，含任务与大纲之外的余量）。 */
@@ -129,7 +129,7 @@ object TaskLoop {
             return
         }
         // 构造签名 (service, marker, ownArea)：ownArea 用默认（不遮罩自家悬浮球区域）。
-        val controller = ScreenController(svc, TapMarkerUi())
+        val controller = ScreenController(svc, TapMarkerUi(svc))
         JarvisAccessibilityService.screenController = controller
         AuditLog.append(ctx, "任务循环", taskText, "开始（上限 $MAX_STEPS 步）")
         TakeoverBorder.show()
@@ -145,6 +145,10 @@ object TaskLoop {
         // 无进展熔断计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
         // 见 MAX_NO_PROGRESS_STEPS 处的说明。任何一步出现这几种动作就清零。
         var noProgressSteps = 0
+        // 2026-10-24 跨应用修复第 2 件：问模型连续失败计数（网络 timeout 之类），
+        // 旧代码一次失败就直接 return 判死整轮任务；现在允许连着失败 2 次才判死，
+        // 中间那次记一步失败继续（下一轮重新观察、重新问）。
+        var askFails = 0
         // 上一步的成败与界面变化：决定下一步要不要带图核对（截图策略）。
         var prevStepFailed = false
         var prevScreenChanged: Boolean? = null
@@ -153,7 +157,7 @@ object TaskLoop {
         var prevScreenSig = ""
         try {
             var step = 0
-            while (step < MAX_STEPS) {
+            stepLoop@ while (step < MAX_STEPS) {
                 if (!alive()) {
                     finalReply = null // 急停：调用方（新指令/停止）会接管播报，这里不抢话
                     AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "已中止")
@@ -181,18 +185,23 @@ object TaskLoop {
                 val screenSameAsPrev = prevScreenSig.isNotEmpty() && screenSig == prevScreenSig
                 prevScreenSig = screenSig
 
-                // ---------- 截图策略（ToolSchemas 纪律 + 批十二路由） ----------
+                // ---------- 截图策略（ToolSchemas 纪律 + 批十二路由 + 批十九放宽） ----------
                 // 默认只看树；带图的情形：树为空（自绘/被扣留）、上一步失败或
                 // 界面没变化需要核对、zoom 留了放大图。录屏通道只作无障碍截图
                 // 拿不到图时的兜底。隐私黑名单包两条通道都不拍。
+                // 2026-10-24 跨应用修复第 3 件：微信这类屏经常是树“有但没用”——
+                // 有节点、但可用节点极少，模型对着没目标的树只能 wait。加两条：
+                // 可用节点 < 3 时强制带图；连续 2 轮无真交互时强制带图，打破 wait 循环。
                 val taskBrain = JarvisPrefs.getTaskBrain(ctx)
                 val brainWantsImage = taskBrain != "deepseek"
                 var image: String? = pendingImage
                 var imageFromProjection = false
                 pendingImage = null
+                val treeTooThin = nodesUseful >= 0 && nodesUseful < 3
                 val needImage = brainWantsImage &&
                     !JarvisAccessibilityService.isShotBlocked(pkg) &&
-                    (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false)
+                    (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false ||
+                        treeTooThin || noProgressSteps >= 2)
                 if (needImage && image == null && pkg.isNotEmpty()) {
                     image = accessibilityShot(controller, ctx)
                     if (image == null) {
@@ -247,10 +256,25 @@ object TaskLoop {
                     val (reply, err) = askModel(ctx, askText, sendImage)
                     if (!alive()) return
                     if (err != null) {
-                        finalReply = "任务没能继续：$err"
-                        AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", err)
-                        return
+                        // 2026-10-24 跨应用修复第 2 件：问模型失败不再直接判死。
+                        // 连着失败 2 次才结束；第 1 次记一步失败、下一轮重新观察再问
+                        // （不计入无进展熔断——这是网络问题，不是模型原地打转）。
+                        askFails++
+                        if (askFails >= 2) {
+                            finalReply = "任务没能继续：$err"
+                            AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", "$err（连着失败 $askFails 次，已停下）")
+                            return
+                        }
+                        AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", "$err（第 $askFails 次，将重试）")
+                        history += "第 $step 步：问模型失败 — $err（已重试）"
+                        lastError = "问模型失败：$err，已重试"
+                        prevStepFailed = true
+                        prevScreenChanged = null
+                        // 直接进下一轮（重新观察、重新问），不能掉进下面“输出无法解析”
+                        // 的分支——那是解析失败的账，网络失败不该计入无进展熔断。
+                        continue@stepLoop
                     }
+                    askFails = 0
                     action = parseAction(reply.orEmpty())
                     if (action == null) {
                         badReply = reply
@@ -425,6 +449,13 @@ object TaskLoop {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 val jpeg = bmp?.let { GridOverlay.toJpegBase64(it) }
                 bmp?.recycle()
+                // 2026-10-24 跨应用修复第 3 件：成功也要留痕。旧逻辑只记失败，
+                // 审计里没记录时分不清“没拍”和“拍了没用”。
+                if (jpeg != null) {
+                    AuditLog.append(ctx, "截图通道", "accessibility", "已拿到图")
+                } else {
+                    AuditLog.append(ctx, "截图通道", "accessibility", "解码失败：b64 非空但解不出位图")
+                }
                 jpeg
             }
         } catch (e: Exception) {
@@ -472,6 +503,8 @@ object TaskLoop {
             val jpeg = GridOverlay.toJpegBase64(scaled)
             if (scaled !== bmp) scaled.recycle()
             bmp.recycle()
+            // 2026-10-24 跨应用修复第 3 件：成功留痕（同 accessibility 通道）。
+            AuditLog.append(ctx, "截图通道", "media_projection", "已拿到图")
             jpeg
         } catch (e: Exception) {
             AuditLog.append(ctx, "截图通道", "media_projection", "失败：${e.message ?: e.javaClass.simpleName}")

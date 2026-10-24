@@ -29,7 +29,9 @@ object DeepSeekClient {
     private val client by lazy {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            // 2026-10-24 跨应用修复第 2 件：与 AgnesClient 同理，任务提示词长，
+            // 30 秒读超时偏紧，放宽到 90 秒。
+            .readTimeout(90, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
             .build()
     }
