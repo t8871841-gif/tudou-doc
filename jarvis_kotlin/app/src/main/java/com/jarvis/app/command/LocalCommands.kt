@@ -65,6 +65,9 @@ object LocalCommands {
         if (QUESTION_HINTS.any { t.contains(it) }) return false
         if (TASK_SHAPED.containsMatchIn(t)) return false
 
+        // 批十三：系统功能（手电筒/截屏/锁屏等）不是应用，先于「打开应用」拦截
+        if (DeviceCommands.tryHandle(ctx, t, speak)) return true
+
         if (CALL_BARE.matches(t)) {
             io.execute {
                 openDialer(ctx, null)
