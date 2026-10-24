@@ -194,7 +194,7 @@ object TaskLoop {
                     !JarvisAccessibilityService.isShotBlocked(pkg) &&
                     (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false)
                 if (needImage && image == null && pkg.isNotEmpty()) {
-                    image = accessibilityShot(controller)
+                    image = accessibilityShot(controller, ctx)
                     if (image == null) {
                         image = projectionShot(ctx)
                         imageFromProjection = image != null
@@ -404,12 +404,21 @@ object TaskLoop {
         return if (detail.isEmpty()) kind else "$kind $detail"
     }
 
-    /** 无障碍截图 → JPEG base64（批九同路径：ScreenController 出带网格的 PNG，GridOverlay 只做编码）。 */
-    private fun accessibilityShot(controller: ScreenController): String? {
+    /**
+     * 无障碍截图 → JPEG base64（批九同路径：ScreenController 出带网格的 PNG，GridOverlay 只做编码）。
+     *
+     * 修复（截图通道追查后新增）：原来不管 `screenshot()` 是返回空 `png_base64` 还是直接抛异常
+     * （超时 / `onFailure(errorCode)`，比如 FLAG_SECURE 窗口），这里一律吞成裸 `null`，连异常
+     * message 里带的具体 errCode 都没留下。现在两种失败都写一条审计日志，把 `screenshot()`
+     * 异常里的原始 message（含 errCode）原样记下来——下次真机再卡在这里，审计日志里就能直接
+     * 看到是哪种失败，不用再靠猜。
+     */
+    private fun accessibilityShot(controller: ScreenController, ctx: Context): String? {
         return try {
             val shot = controller.screenshot()
             val b64 = shot.optString("png_base64")
             if (b64.isEmpty()) {
+                AuditLog.append(ctx, "截图通道", "accessibility", "返回了结果但没有 png_base64 字段（未抛异常）")
                 null
             } else {
                 val bytes = Base64.decode(b64, Base64.DEFAULT)
@@ -418,7 +427,10 @@ object TaskLoop {
                 bmp?.recycle()
                 jpeg
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // screenshot() 的异常 message 本身就带着 errCode（见 ScreenController.screenshot()
+            // 的 "screenshot failed with code $errCode" / "screenshot timeout"），原样记下。
+            AuditLog.append(ctx, "截图通道", "accessibility", "失败：${e.message ?: e.javaClass.simpleName}")
             null
         }
     }
@@ -427,22 +439,50 @@ object TaskLoop {
      * 录屏兜底（批十四，BodyCoreService 的 captureFallback 同位）：无障碍截图
      * 拿不到图时才走。录屏图是原始像素：缩到长边 [ScreenCapture.SHOT_MAX_SIDE]
      * 后直接编码，不画网格——它没有 shot_id 与点击绑定，只能看不能按图瞄准，
-     * 提示词里会标明。录屏通道未授权/不可用时返回 null，静默退回纯树。
+     * 提示词里会标明。
+     *
+     * 修复（截图通道追查后新增）：之前这里连同 grab() 超时、解码异常，全部静默吃成
+     * null，审计日志里一条痕迹都没有，没法区分"没授权"和"这次没抓到帧"。现在三种失败
+     * 分别记一条，"未授权"这条按时间限流（60 秒内最多记一条），不然失败是常态、每一步
+     * 都记会把审计日志刷屏。注：授权入口在 MainActivity（设置-视觉看屏"录屏授权"按钮
+     * + onActivityResult 转 start()）是接好的；isAvailable() 为 false 只说明本次进程里
+     * 还没授权过（MediaProjection 授权不随进程重启保留，进程死后需重新授权）。
      */
     private fun projectionShot(ctx: Context): String? {
+        val cap = ScreenCapture.shared(ctx)
+        if (!cap.isAvailable()) {
+            val now = System.currentTimeMillis()
+            if (now - lastProjectionUnavailableLogAt > PROJECTION_LOG_THROTTLE_MS) {
+                lastProjectionUnavailableLogAt = now
+                AuditLog.append(
+                    ctx, "截图通道", "media_projection",
+                    "不可用：本次进程里尚未获得录屏授权（去设置-视觉看屏点一次录屏授权；" +
+                        "授权不随进程重启保留，进程死后需重新授权）"
+                )
+            }
+            return null
+        }
         return try {
-            val cap = ScreenCapture.shared(ctx)
-            if (!cap.isAvailable()) return null
-            val bmp = cap.grab() ?: return null
+            val bmp = cap.grab()
+            if (bmp == null) {
+                AuditLog.append(ctx, "截图通道", "media_projection", "grab() 超时，没等到帧")
+                return null
+            }
             val scaled = downscale(bmp, ScreenCapture.SHOT_MAX_SIDE)
             val jpeg = GridOverlay.toJpegBase64(scaled)
             if (scaled !== bmp) scaled.recycle()
             bmp.recycle()
             jpeg
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            AuditLog.append(ctx, "截图通道", "media_projection", "失败：${e.message ?: e.javaClass.simpleName}")
             null
         }
     }
+
+    /** media_projection"未授权"这条日志的节流时间戳，避免每一步都重复刷同一条结论。 */
+    @Volatile
+    private var lastProjectionUnavailableLogAt = 0L
+    private const val PROJECTION_LOG_THROTTLE_MS = 60_000L
 
     private fun downscale(bmp: Bitmap, maxSide: Int): Bitmap {
         val longest = maxOf(bmp.width, bmp.height)

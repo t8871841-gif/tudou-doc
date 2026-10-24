@@ -565,3 +565,13 @@ jk-v19 真机实证：模型看不见界面时只回不断加码的 wait + 重�
 另：桌面图标换成用户 2026-10-24 14:46 发来的玻璃 J 字母图标（居中正方形裁切，五档全换）；
 上一张 Jarvis 金属字图标不再做启动图标，改放新加的设置二级页「关于」顶部大图展示
 （drawable-nodpi/about_jarvis.png，配一行名称与版本号）。
+
+## 批十六：截图通道失败留痕（2026-10-24，Claude 按截图通道追查修复，Muse 核查后合入，未构建）
+TaskLoop 两条截图通道不再静默 null：accessibilityShot 空 png_base64 与异常
+（含 ScreenController.screenshot() 的 errCode 原文）各记一条审计「截图通道」；
+projectionShot 未授权（60 秒限流一条）/grab() 超时/异常分别记一条。
+核查时纠正了 Claude 注释里一处事实错误并同步改了审计文案：ScreenCapture.start()
+的调用端批十四就已接进 MainActivity（设置-视觉看屏"录屏授权"按钮 +
+onActivityResult 转 start()，MainActivity:913/1287），并非"从来没有授权入口"；
+isAvailable() 为 false 只说明本次进程里还没授权过（MediaProjection 授权不随
+进程重启保留）。其余逻辑原样合入。
