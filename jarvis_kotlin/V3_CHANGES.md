@@ -680,3 +680,10 @@ wait 上限 20 秒与 Andee 一致，不动。点按手势超时 2000→3000ms�
 在 try/finally 里（手势抛异常也不丢原位）；截图空白的恢复放在既有 finally 里，
 截图抛异常也能恢复；setVisibleForCapture/dodge 的主线程闩锁都有 Looper 守卫，
 主线程调用不死锁。
+
+## 补丁：修复批十八 MainActivity 同行双声明（jk-v23 构建失败原因，2026-10-25）
+jk-v23（8f16713）CI 失败，唯一错误 MainActivity.kt:75:83 "Property getter
+or setter expected"：批十八新增 emblemMotionView 字段时与下一行 muteButton
+写在了同一行，Kotlin 不允许一行两个属性声明（无分号），自批十八起三批
+只入仓未构建，此错一直没被编译器抓到；jk-v22 成功是因为它不含批十八。
+修复：拆成两行。全仓 grep 确认仅此一处同行双声明。

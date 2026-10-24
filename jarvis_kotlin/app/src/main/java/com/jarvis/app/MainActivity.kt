@@ -72,7 +72,8 @@ class MainActivity : Activity() {
     private lateinit var inputRow: LinearLayout
     private lateinit var bgView: HudBackgroundView
     private lateinit var wakeChip: TextView
-    private lateinit var emblemMotionView: com.jarvis.app.hud.EmblemMotionView    private lateinit var muteButton: ImageButton
+    private lateinit var emblemMotionView: com.jarvis.app.hud.EmblemMotionView
+    private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
     private lateinit var memoryListContainer: LinearLayout
     private lateinit var skillListContainer: LinearLayout
