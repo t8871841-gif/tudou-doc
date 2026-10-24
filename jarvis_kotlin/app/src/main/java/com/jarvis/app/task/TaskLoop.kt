@@ -55,6 +55,21 @@ object TaskLoop {
     /** 相同动作签名连续重复的容忍次数（LocalBrain MAX_REPEATS）：达到即判打转中止。 */
     private const val MAX_REPEATS = 3
 
+    /**
+     * 无进展熔断（真机故障追查后新增）：原来的重复守卫只认"连续 N 次一字不差的同一签名"，
+     * 模型只要在 wait/home/back/openApp 这几种"不算交互"的动作里换着来（尤其 wait 还被
+     * 提示词教着要一次比一次久，签名天然每次都不同），就能在实际原地打转的情况下一路
+     * 绕开那层守卫，25 步跑满都不会报警——这正是 2026-10-24 那次微信任务故障的直接原因。
+     * 这里单独数"连续多少步没有出现 tap/longPress/type/zoom 这类真正在跟界面交互的动作"，
+     * 不管中间怎么换着花样 wait/home/back/openApp、动作签名是不是每次都不同，到了这个数
+     * 直接强制 fail，不再指望模型自觉。
+     *
+     * 没有把 swipe 算进"真操作"——滑动本身更像是在找东西，不一定代表任务在往前推进；
+     * 如果真机验收发现"找联系人要滑好几屏"这类场景被误伤，告诉我，加进去就是一行事。
+     */
+    private const val MAX_NO_PROGRESS_STEPS = 7
+    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom")
+
     private const val MODEL_TIMEOUT_SEC = 45L
     private const val ELEMENTS_CHARS = 5000
 
@@ -127,6 +142,9 @@ object TaskLoop {
         // 达到 MAX_REPEATS 时在执行前拦下中止。
         var lastSignature = ""
         var repeats = 0
+        // 无进展熔断计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
+        // 见 MAX_NO_PROGRESS_STEPS 处的说明。任何一步出现这几种动作就清零。
+        var noProgressSteps = 0
         // 上一步的成败与界面变化：决定下一步要不要带图核对（截图策略）。
         var prevStepFailed = false
         var prevScreenChanged: Boolean? = null
@@ -258,6 +276,14 @@ object TaskLoop {
                         AuditLog.append(ctx, "任务循环", "重复守卫触发", "连续无法解析的输出")
                         return
                     }
+                    // 解析不出动作，自然也谈不上是真交互，一并计入无进展熔断。
+                    noProgressSteps++
+                    if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
+                        finalReply = "任务卡在第 $step 步：已经连续 $noProgressSteps 步没有真正点/输入/放大过任何东西" +
+                            "（含输出解析失败），像是在原地打转，已停下。当前停在${pkg.ifEmpty { "未知界面" }}。"
+                        AuditLog.append(ctx, "任务循环", "无进展熔断触发", "解析失败累计 $noProgressSteps 步无交互")
+                        return
+                    }
                     continue
                 }
                 val kind = action.optString("action")
@@ -284,6 +310,17 @@ object TaskLoop {
                     finalReply = "任务卡在第 $step 步：同一个动作（$kind）连着重复多次、界面没有进展，已停下。" +
                         "当前停在${pkg.ifEmpty { "未知界面" }}。"
                     AuditLog.append(ctx, "任务循环", "重复守卫触发", "$kind 连续重复")
+                    return
+                }
+                // ---------- 无进展熔断：换着花样 wait/home/back/openApp 也躲不过 ----------
+                // 签名守卫拦的是"一字不差的重复"；这里拦的是"不管签名变不变，反正没有一步
+                // 是真交互"。两层互补，顺序在签名守卫之后——真重复优先报那个更精确的原因。
+                noProgressSteps = if (kind in REAL_ACTION_KINDS) 0 else noProgressSteps + 1
+                if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
+                    finalReply = "任务卡在第 $step 步：已经连续 $noProgressSteps 步没有真正点/输入/放大过任何东西" +
+                        "（期间只有 wait/back/home/openApp 这类动作），像是在原地打转，已停下。" +
+                        "当前停在${pkg.ifEmpty { "未知界面" }}。"
+                    AuditLog.append(ctx, "任务循环", "无进展熔断触发", "连续 $noProgressSteps 步无真交互，最后一步是 $kind")
                     return
                 }
                 // ---------- 执行 ----------
