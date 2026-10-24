@@ -699,6 +699,43 @@ class MainActivity : Activity() {
             toast("已保存")
         })
 
+        // ---- 批十二：跨应用任务模型切换 + DeepSeek Key ----
+        // 任务循环（task/TaskLoop）的大脑二选一：Agnes 带图问；DeepSeek 纯文本，
+        // 靠无障碍界面树文字推进（Andee 同款路线，识图不是命脉）。
+        val taskBrainBtn = Button(this)
+        fun refreshTaskBrainBtn() {
+            taskBrainBtn.text = if (JarvisPrefs.getTaskBrain(this) == "deepseek") {
+                "跨应用任务模型：DeepSeek"
+            } else {
+                "跨应用任务模型：Agnes"
+            }
+        }
+        taskBrainBtn.setOnClickListener {
+            val next = if (JarvisPrefs.getTaskBrain(this) == "deepseek") "agnes" else "deepseek"
+            JarvisPrefs.setTaskBrain(this, next)
+            refreshTaskBrainBtn()
+            toast(
+                if (next == "deepseek") "跨应用任务改用 DeepSeek（纯文本，看界面树操作）"
+                else "跨应用任务改用 Agnes（带截图问）"
+            )
+        }
+        refreshTaskBrainBtn()
+        root.addView(taskBrainBtn)
+
+        val dsKeyLabel = TextView(this).apply {
+            text = "DeepSeek API Key（跨应用任务选 DeepSeek 时用）"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt())
+        }
+        val dsKeyInput = EditText(this).apply {
+            hint = "DeepSeek Key（用 DeepSeek 跑跨应用任务时填）"; setTextColor(Color.WHITE)
+            setText(JarvisPrefs.getDeepSeekKey(this@MainActivity))
+        }
+        root.addView(dsKeyLabel)
+        root.addView(dsKeyInput)
+        root.addView(btn("保存 DeepSeek Key") {
+            JarvisPrefs.setDeepSeekKey(this, dsKeyInput.text.toString())
+            toast("已保存")
+        })
+
         // ---- 播报声音：下拉选择 + 试听（批二新增） ----
         root.addView(TextView(this).apply { text = "播报声音"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()) })
         val savedVoice = JarvisPrefs.getVoice(this).ifBlank { com.jarvis.app.tts.EdgeVoices.DEFAULT_ID }

@@ -10,6 +10,8 @@ import android.content.SharedPreferences
 object JarvisPrefs {
     private const val FILE = "jarvis_settings"
     private const val KEY_AGNES_KEY = "agnes_api_key"
+    private const val KEY_DEEPSEEK_KEY = "deepseek_api_key"
+    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：agnes（默认）/ deepseek
     private const val KEY_WAKE_ENABLED = "wake_enabled"
     private const val KEY_BARGE_IN_ENABLED = "barge_in_enabled"
 
@@ -19,6 +21,18 @@ object JarvisPrefs {
     fun getAgnesKey(ctx: Context): String = p(ctx).getString(KEY_AGNES_KEY, "") ?: ""
     fun setAgnesKey(ctx: Context, key: String) {
         p(ctx).edit().putString(KEY_AGNES_KEY, key.trim()).apply()
+    }
+
+    // ---------- 批十二：DeepSeek Key + 跨应用任务模型选择 ----------
+
+    fun getDeepSeekKey(ctx: Context): String = p(ctx).getString(KEY_DEEPSEEK_KEY, "") ?: ""
+    fun setDeepSeekKey(ctx: Context, key: String) {
+        p(ctx).edit().putString(KEY_DEEPSEEK_KEY, key.trim()).apply()
+    }
+
+    fun getTaskBrain(ctx: Context): String = p(ctx).getString(KEY_TASK_BRAIN, "agnes") ?: "agnes"
+    fun setTaskBrain(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_TASK_BRAIN, v.trim()).apply()
     }
 
     fun isWakeEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_WAKE_ENABLED, false)

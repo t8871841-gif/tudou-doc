@@ -5,8 +5,10 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
+import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.DeepSeekClient
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
 import com.jarvis.app.TakeoverBorder
@@ -20,7 +22,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * 批九：多步跨应用任务循环。借鉴 Andee 的 BodyCoreService 循环结构（看屏 →
  * 模型出一步 → 执行 → 再看），但不搬它的服务/人格/配置体系：模型走本工程的
- * [AgnesClient]（用户自填的 Agnes Key），动作走批九移植的 [ScreenController]，
+ * [AgnesClient]（用户自填的 Agnes Key；批十二起设置里可改选 [DeepSeekClient]
+ * 纯文本跑循环），动作走批九移植的 [ScreenController]，
  * 急停复用 JarvisAgent 的代次序号（genSeq 变化即中止），记录走 [AuditLog]。
  *
  * 一次 run 的生命周期：构造一个专属 ScreenController 注册到无障碍服务（事件
@@ -148,13 +151,23 @@ object TaskLoop {
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
+                // 批十二：任务大脑按设置选——DeepSeek 是纯文本模型，不带图（循环靠
+                // 界面树文字推进，Andee 同款路线）；界面树空白且最终不带图时，明确
+                // 告知模型它看不到元素，别让它对着截图说明文案空转。
+                val taskBrain = JarvisPrefs.getTaskBrain(ctx)
+                val sendImage = if (taskBrain == "deepseek") null else image
+                val askBase = if (elements.isBlank() && sendImage == null) {
+                    userText + "\n（注意：本屏界面树不可见，你看不到界面元素，只能根据历史步骤判断；若无法推进请输出 done 并说明卡点）"
+                } else {
+                    userText
+                }
                 // ---------- 问模型（解析失败带原因重试一次） ----------
                 var action: JSONObject? = null
                 var attempt = 0
-                var askText = userText
+                var askText = askBase
                 while (action == null && attempt < 2) {
                     attempt++
-                    val (reply, err) = askModel(ctx, askText, image)
+                    val (reply, err) = askModel(ctx, askText, sendImage)
                     if (!alive()) return
                     if (err != null) {
                         finalReply = "任务没能继续：$err"
@@ -164,7 +177,7 @@ object TaskLoop {
                     action = parseAction(reply.orEmpty())
                     if (action == null) {
                         lastError = "模型输出不是合法的 JSON 动作"
-                        askText = userText + "\n你上一次的输出无法解析：${reply?.take(200)}。请严格只输出一个 JSON 对象，不要任何其他文字。"
+                        askText = askBase + "\n你上一次的输出无法解析：${reply?.take(200)}。请严格只输出一个 JSON 对象，不要任何其他文字。"
                     }
                 }
                 if (action == null) {
@@ -224,11 +237,21 @@ object TaskLoop {
         val latch = CountDownLatch(1)
         var reply: String? = null
         var error: String? = null
-        AgnesClient.askOnce(
-            ctx, SYSTEM_PROMPT, userText, image,
-            onResult = { reply = it; latch.countDown() },
-            onError = { error = it; latch.countDown() }
-        )
+        // 批十二：按设置路由任务大脑。DeepSeek 走纯文本（image 强制传 null，
+        // 调用方也已把 sendImage 置空，这里双保险）；Agnes 维持现状带图。
+        if (JarvisPrefs.getTaskBrain(ctx) == "deepseek") {
+            DeepSeekClient.askOnce(
+                ctx, SYSTEM_PROMPT, userText, null,
+                onResult = { reply = it; latch.countDown() },
+                onError = { error = it; latch.countDown() }
+            )
+        } else {
+            AgnesClient.askOnce(
+                ctx, SYSTEM_PROMPT, userText, image,
+                onResult = { reply = it; latch.countDown() },
+                onError = { error = it; latch.countDown() }
+            )
+        }
         val finished = try {
             latch.await(MODEL_TIMEOUT_SEC, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {

@@ -503,3 +503,19 @@
 ## 批十一：麦克风点击启用 + 悬浮球没声加固（2026-10-24 用户两条反馈，未构建，随 jk-v15 出）
 1. **麦克风改点击启用**：打断监听默认开→关（JarvisPrefs.isBargeInEnabled 默认值 true→false）；唤醒词常开、连续对话本来就默认关，三个会自动开麦的开关至此默认全关——点悬浮球/点麦克风才开始聆听，要哪个功能自己在设置里开。设置页打断开关文案同步改准（旧文案"无回声消除"已过时）。
 2. **悬浮球回答没声**：定位为打断监听在播报期间开麦、jk-v14 的 AEC 对象被回收后回声消除失效，播报被自己的回声误判成插话掐断（只剩气泡）。AEC 持有引用修复已在整合批入仓；本批再关掉打断默认（断了误判路径），并给 speakReply 的 TTS 结果加审计——全部通道失败时写审计日志，下次真机出问题可直接查账，不再靠猜。
+
+---
+
+## 批十二：任务循环树文字优先 + DeepSeek 任务模型选项（未构建）
+
+背景：jk-v17 交付后用户指正——「我用 Andee 时就填写 DeepSeek 的 Key 就可以」。查实 Andee 的跨应用循环主要吃无障碍界面树文字（元素大纲+步骤历史），纯文本模型就能跑；批九的 TaskLoop 虽然也把元素大纲发给模型，却把每步截图一并押在 Agnes 未验证的识图上。本批把循环改回树文字优先，并给任务大脑加一个可选的 DeepSeek。
+
+改动：
+1. **新增 `net/DeepSeekClient.kt`**：签名与 `AgnesClient.askOnce` 完全一致（调用方切换不用改形状）；POST `https://api.deepseek.com/v1/chat/completions`，模型 `deepseek-chat`，temperature 0.2，messages 只发 system+user 纯文本，`jpegBase64` 参数忽略（文本模型）；Key 走 `JarvisPrefs.getDeepSeekKey`，为空时报错「未配置 DeepSeek API Key，请先去设置里填写」；错误文案风格与 AgnesClient 一致（中文、带 HTTP 状态码）。
+2. **JarvisPrefs 加两个设置项**：`deepseek_api_key`（get/setDeepSeekKey）与 `task_brain`（getTaskBrain 默认 `"agnes"` / setTaskBrain），放在 Agnes Key 附近。
+3. **TaskLoop 路由**：`askModel` 按 `getTaskBrain` 分流——`"deepseek"` 调 DeepSeekClient 且图强制传 null；`"agnes"` 维持现状带图。另外当本步 elements 大纲为空白且最终不带图时，在发给模型的 userText 末尾追加一行提示（本屏界面树不可见、只能根据历史判断、无法推进就输出 done 说明卡点），避免模型对着截图说明文案空转。循环步数、急停、审计、动作执行一律未动。
+4. **设置页（对话与语音段，Agnes Key 之后）**：加「跨应用任务模型：Agnes / DeepSeek」切换按钮（点击互换并刷新文案），以及 DeepSeek Key 输入框（hint 注明用途、预填已存值）+ 保存按钮，写法镜像同段 Agnes Key。
+
+**MiniCPM-V 本地视觉模型降为后续可选**：本批不再把它当跨应用的前置条件。它的位置是专治两类场景——微信等应用界面树被系统扣住（withheld）看不到元素、且用户要全离线运行；需要时再单独立项（GGUF + llama.cpp 引擎 + 设置里第二个模型槽位）。
+
+**状态：未构建、未真机。** 下一版构建后建议验收：设置里切到 DeepSeek、填 Key，说「在微信上给桑田发信息：晚上我回家吃饭」，看任务循环能否靠界面树一步步走完；界面树不可见的界面看提示与卡点回报是否如实。
