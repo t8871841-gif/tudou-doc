@@ -327,12 +327,14 @@ class JarvisAccessibilityService : AccessibilityService() {
                     AccessibilityEvent.TYPE_VIEW_SCROLLED
                 cur.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
                 cur.notificationTimeout = 100L
-                cur.flags = cur.flags or
+                // Andee 同款做法：主动清掉触摸探索——开着它时单击只会浏览、
+                // 双击才生效，屏幕看着像失灵；Andee 清掉它后微信定位照常工作。
+                cur.flags = (cur.flags or
                     AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                    AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE or
-                    AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+                    AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) and
+                    AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
                 // 注意：capabilities 在 SDK 里是只读属性（无 setter），应用侧
                 // 改不了——只能重设上面这些可写字段，让系统侧重新算能力位；
                 // FLAG_DEFAULT 亦不存在（不是合法常量），故不列入。
