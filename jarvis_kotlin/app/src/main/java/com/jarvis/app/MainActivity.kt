@@ -179,28 +179,36 @@ class MainActivity : Activity() {
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
     }
 
-    // ---------- 中央徽章：图 2 圆环放大 10%（176dp）居中，虚线环 194dp 慢转；上面不压任何字 ----------
+    // ---------- 中央徽章：批二十二反应堆放大——容器 420dp（点阵外沿 380dp + 唤醒词胶囊区 40dp），
+    // 徽章本体 176dp 不动，虚线环 drawable 放大到 330dp 慢转；上面不压任何字 ----------
 
     private fun buildEmblem(): FrameLayout {
         val emblem = FrameLayout(this)
-        emblem.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(280))
+        emblem.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(420))
         // 批十八：徽章反应堆动效层（衬在徽章后面，只画环/粒子/声波，不盖徽章本体）。
+        // 批二十二：动效层与徽章/虚线环共用 bottomMargin 40dp，使三者圆心对齐在容器 190dp 处。
         emblemMotionView = com.jarvis.app.hud.EmblemMotionView(this).apply {
             mode = { JarvisAgent.currentState() }
             micLevel = { OfflineAsrSession.currentLevel() }
         }
-        emblem.addView(emblemMotionView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        emblem.addView(emblemMotionView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT).apply {
+            bottomMargin = dp(40)
+        })
         val badge = ImageView(this).apply {
             setImageResource(R.drawable.hud_badge)
             scaleType = ImageView.ScaleType.CENTER_CROP
             setOnClickListener { if (::emblemMotionView.isInitialized) emblemMotionView.pulse() }
         }
-        emblem.addView(badge, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER))
+        emblem.addView(badge, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER).apply {
+            bottomMargin = dp(40)
+        })
         val ring = ImageView(this).apply {
             setImageResource(R.drawable.hud_badge_ring)
             scaleType = ImageView.ScaleType.CENTER_CROP
         }
-        emblem.addView(ring, FrameLayout.LayoutParams(dp(194), dp(194), Gravity.CENTER))
+        emblem.addView(ring, FrameLayout.LayoutParams(dp(330), dp(330), Gravity.CENTER).apply {
+            bottomMargin = dp(40)
+        })
         android.animation.ObjectAnimator.ofFloat(ring, "rotation", 0f, 360f).apply {
             duration = 60000
             repeatCount = android.animation.ValueAnimator.INFINITE

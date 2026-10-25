@@ -20,6 +20,12 @@ import kotlin.math.sin
  * 取代已删舞台的视觉生命力，但载体只剩中央徽章：全部用细线、圆点、亮段弧光
  * 实现，不恢复大面积雾状光晕、蜂巢、扫描扇；对话玻璃框仍是界面唯一半透明元素。
  *
+ * 批二十二（2026-10-25 用户定方案 A 修订版）：反应堆放大到 300dp 级。
+ * 新增霓虹渐变环（电光青→霓虹紫→翡翠绿三段固定色）与 72 根声波点阵（长度随
+ * 能量、颜色主/辅/第三色循环），刻度环与轨道粒子外移到 118dp；仍不恢复三团
+ * 漂移光晕、格纹、大面积雾；徽章本体保持 176dp 不动，虚线环 drawable 放大到
+ * 330dp（MainActivity 侧）；对话玻璃框仍是唯一半透明元素。
+ *
  * 三层（方案原文）：
  * - 常驻：中环刻度环反向转 + 轨道粒子 + 徽章呼吸（呼吸在 MainActivity 里用
  *   ObjectAnimator 做在徽章/虚线环上，本 View 只画环与粒子）；
@@ -44,6 +50,7 @@ class EmblemMotionView @JvmOverloads constructor(
 
     private var displayedTheme = HudPalette.BLUE2
     private var displayedSec = HudPalette.PURPLE
+    private var displayedTer = HudPalette.ROSE
 
     private var lastMode = "idle"
     private var burstStart = -10f
@@ -89,12 +96,16 @@ class EmblemMotionView @JvmOverloads constructor(
         }
         val target = HudPalette.colorFor(m)
         displayedTheme = HudPalette.lerp(displayedTheme, target, 0.08f)
-        displayedSec = HudPalette.lerp(displayedSec, HudPalette.secondaryTertiary(target).first, 0.08f)
+        val (sec, ter) = HudPalette.secondaryTertiary(target)
+        displayedSec = HudPalette.lerp(displayedSec, sec, 0.08f)
+        displayedTer = HudPalette.lerp(displayedTer, ter, 0.08f)
 
         val cx = width / 2f
         val cy = height / 2f
         val badgeR = dp(88f) // 徽章 176dp 的半径
-        val tickR = dp(108f) // 刻度环与轨道粒子半径（虚线环 194dp 之外）
+        val tickR = dp(118f) // 刻度环与轨道粒子半径（批二十二从 108dp 外移）
+        val neonR = dp(150f) // 霓虹渐变环半径（300dp 直径）
+        val dotR0 = dp(170f) // 声波点阵起点半径（虚线环 330dp 之外）
         if (cx <= 0f || cy <= 0f) return
         val maxR = min(width, height) / 2f - dp(4f)
         if (tickR > maxR) return
@@ -129,7 +140,47 @@ class EmblemMotionView @JvmOverloads constructor(
             canvas.drawCircle(px, py, dp(2.5f), paint)
         }
 
-        // 3. 思考态扫描弧：亮段弧光绕徽章快扫。
+        // 3. 霓虹渐变环（批二十二）：电光青→霓虹紫→翡翠绿三段固定色，从顶部起顺时针。
+        if (neonR < maxR) {
+            val oval = RectF(cx - neonR, cy - neonR, cx + neonR, cy + neonR)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(2.5f)
+            paint.strokeCap = Paint.Cap.BUTT
+            val neon = arrayOf(
+                Triple(-90f, 120f, HudPalette.AQUA),
+                Triple(30f, 120f, HudPalette.PURPLE),
+                Triple(150f, 120f, HudPalette.EMERALD)
+            )
+            for ((start, sweep, col) in neon) {
+                paint.color = col
+                canvas.drawArc(oval, start, sweep, false, paint)
+            }
+        }
+
+        // 4. 声波点阵（批二十二）：72 根，长度随能量变化、每根长短有起伏，
+        // 颜色主/辅/第三色循环；外端不超出本 View 半径（窄屏自动截短）。
+        if (dotR0 < maxR) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(2f)
+            paint.strokeCap = Paint.Cap.ROUND
+            val dotCols = arrayOf(displayedTheme, displayedSec, displayedTer)
+            for (i in 0 until 72) {
+                val a = (i * 5f * Math.PI / 180).toFloat()
+                val wobble = 0.7f + 0.6f * abs(sin(i * 1.7f))
+                val len = dp(6f + level * 14f) * wobble
+                val r1 = min(dotR0 + len, maxR)
+                paint.color = HudPalette.withAlpha(dotCols[i % 3], 0.85f)
+                canvas.drawLine(
+                    cx + cos(a.toDouble()).toFloat() * dotR0,
+                    cy + sin(a.toDouble()).toFloat() * dotR0,
+                    cx + cos(a.toDouble()).toFloat() * r1,
+                    cy + sin(a.toDouble()).toFloat() * r1,
+                    paint
+                )
+            }
+        }
+
+        // 5. 思考态扫描弧：亮段弧光绕徽章快扫。
         if (m == "thinking") {
             val sweep = 70f
             val start = (tt * 180f) % 360f
@@ -141,7 +192,7 @@ class EmblemMotionView @JvmOverloads constructor(
             canvas.drawArc(oval, start, sweep, false, paint)
         }
 
-        // 4. 声波环：聆听/说话时持续扩散，幅度跟能量走；交互 pulse() 也复用此通道。
+        // 6. 声波环：聆听/说话时持续扩散，幅度跟能量走；交互 pulse() 也复用此通道。
         if (m == "listening" || m == "speaking") {
             val interval = if (m == "speaking") 0.7f else 0.9f
             if (tt - lastSonicSpawn > interval) {
@@ -159,7 +210,7 @@ class EmblemMotionView @JvmOverloads constructor(
             canvas.drawCircle(cx, cy, r, paint)
         }
 
-        // 5. 状态切换粒子爆发：12 个光点 0.6 秒内从徽章边缘炸开收回。
+        // 7. 状态切换粒子爆发：12 个光点 0.6 秒内从徽章边缘炸开收回。
         val bp = ((tt - burstStart) / 0.6f)
         if (bp in 0f..1f) {
             paint.style = Paint.Style.FILL

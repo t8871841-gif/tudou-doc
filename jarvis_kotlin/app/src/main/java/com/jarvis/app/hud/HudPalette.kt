@@ -11,6 +11,7 @@ object HudPalette {
     const val ROSE = 0xFFE8788A.toInt()    // 聆听：玫瑰
     const val PURPLE = 0xFFA98BE0.toInt()  // 思考：薰衣草紫
     const val AQUA = 0xFF7FD6E6.toInt()    // 回答：浅青
+    const val EMERALD = 0xFF00E676.toInt() // 批二十二霓虹环：翡翠绿
     const val ICE = 0xFFF1F4FF.toInt()     // 近白文字
 
     const val BOOT_BG = 0xFF050811.toInt()
