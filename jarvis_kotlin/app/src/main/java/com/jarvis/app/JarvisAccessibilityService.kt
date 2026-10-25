@@ -313,6 +313,42 @@ class JarvisAccessibilityService : AccessibilityService() {
         OrbController.attach(this) // 悬浮球：开关记在 SharedPreferences，服务起来就自动恢复
         TakeoverBorder.attach(this) // 三期：看屏代理接管时的彩光边框
         com.jarvis.app.screen.GroundingLog.init(this) // 批九：移植的落点记录（默认关，开后才真正初始化）
+        logCapabilitiesOnce() // 真机故障追查：截图能力位到底有没有真的生效，别再靠猜
+    }
+
+    /**
+     * 真机追查「Services don't have the capability of taking the screenshot.」用：
+     * 系统给这个已连接服务的 [AccessibilityServiceInfo.capabilities] 位图里，
+     * `CAPABILITY_CAN_TAKE_SCREENSHOT` 到底有没有被置位，连接一次记一次。
+     *
+     * 这不是"修复"——能力位是系统侧根据当前已连接服务的元数据算出来的，应用自己
+     * 没法在代码里伪造或强行刷新它（见下方 V3_CHANGES 的说明）。这里只是把"有没有
+     * 生效"这件事从「要不要重新开关一次无障碍服务才能看出来」变成「打开自检页/审计
+     * 日志立刻能看到」，免得下次又要翻真机日志才能确认是不是这个老问题。
+     */
+    private fun logCapabilitiesOnce() {
+        try {
+            val info = serviceInfo
+            val caps = info?.capabilities ?: -1
+            val canShot = (caps and android.accessibilityservice.AccessibilityServiceInfo
+                .CAPABILITY_CAN_TAKE_SCREENSHOT) != 0
+            val msg = if (caps < 0) {
+                "serviceInfo 读不到（罕见，服务可能还没完全连接好）"
+            } else {
+                "capabilities=0b${Integer.toBinaryString(caps)}，CAN_TAKE_SCREENSHOT=${if (canShot) "已置位" else "未置位"}"
+            }
+            Log.i(TAG, "onServiceConnected capability check: $msg")
+            AuditLog.append(this, "无障碍服务", "连接时能力位自检", msg)
+            if (caps >= 0 && !canShot) {
+                AuditLog.append(
+                    this, "无障碍服务", "截图能力缺失提示",
+                    "多半是改过无障碍服务的 XML 元数据后，系统还在用旧的能力缓存——" +
+                        "去系统设置里把本服务关掉再开一次（不是重启 App），通常就能刷新"
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "capability check failed", e)
+        }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {

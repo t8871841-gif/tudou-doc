@@ -155,6 +155,17 @@ object OrbController {
      * 保证空白已合成再拍；restore 只管 post（下一次截图前一定已恢复）。
      * 主线程调用时直接改，不 post（否则闩锁死锁）。气泡一并藏。
      */
+    /**
+     * 修复（真机追查 Q3）：原来 hide 分支的闩锁，只等到"赋值语句在主线程跑完"就放行——
+     * `v.visibility = View.GONE` 这行执行完，不代表 SurfaceFlinger 已经把下一帧（球消失的
+     * 那帧）真正合成上屏；球是 `TYPE_ACCESSIBILITY_OVERLAY` 独立窗口，这行代码跟"屏幕上
+     * 真的看不见球了"之间天然隔着至少一帧的合成延迟，设备负载高时可能更久。这段时间差
+     * 很短，平时很难复现，但截图这种"此刻立即拍一张"的操作恰好最容易撞上这个窗口——
+     * 球刚被下令隐藏、画面还没来得及更新，screenshot() 已经拍下去了。
+     * 现在改成：赋值之后再等一帧真正回调（`View.postOnAnimation`，挂在下一次 vsync 之后），
+     * 确认合成器至少处理过一轮之后才放行；为防止机型/负载异常导致这帧回调迟迟不来，
+     * 闩锁整体超时从 300ms 放宽到 400ms（多出来的 100ms 专门留给这一帧的余量）。
+     */
     fun setVisibleForCapture(visible: Boolean) {
         val v = orb ?: return
         val b = bubble
@@ -162,17 +173,28 @@ object OrbController {
             v.visibility = if (visible) View.VISIBLE else View.GONE
             if (b != null) b.visibility = if (visible) View.VISIBLE else View.GONE
         }
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            apply()
+        if (!visible) {
+            // Muse 核查修正（Claude 原版此处主线程也会闩锁等 400ms，但主线程被堵住，
+            // vsync 回调反而跑不出来，等于白等还卡主线程 400ms）：主线程调用时只隐藏
+            // 不等帧；后台线程才走闩锁等帧。当前 screenshot() 调用方都在后台线程，
+            // 这条分支只是防以后有主线程调用方。
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                apply()
+                return
+            }
+            val latch = CountDownLatch(1)
+            val doHide = {
+                apply()
+                // 等真正跑过一次 vsync 回调，而不是等赋值语句本身跑完——这才是"球已经
+                // 从这一帧的合成结果里消失了"的更可靠信号。回调本身挂在 orb 这个 View 上，
+                // GONE 之后它还在窗口树里（只是不绘制），postOnAnimation 仍然有效。
+                v.postOnAnimation { latch.countDown() }
+            }
+            main.post(doHide)
+            try { latch.await(400, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
             return
         }
-        if (!visible) {
-            val latch = CountDownLatch(1)
-            main.post { try { apply() } finally { latch.countDown() } }
-            try { latch.await(300, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
-        } else {
-            main.post { apply() }
-        }
+        if (Looper.myLooper() == Looper.getMainLooper()) apply() else main.post { apply() }
     }
 
     private var dodgeX = 0

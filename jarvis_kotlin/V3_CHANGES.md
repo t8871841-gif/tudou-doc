@@ -687,3 +687,22 @@ or setter expected"：批十八新增 emblemMotionView 字段时与下一行 mut
 写在了同一行，Kotlin 不允许一行两个属性声明（无分号），自批十八起三批
 只入仓未构建，此错一直没被编译器抓到；jk-v22 成功是因为它不含批十八。
 修复：拆成两行。全仓 grep 确认仅此一处同行双声明。
+
+## 批二十一：Claude 查问题两件修复（2026-10-25 用户转发 Claude 输出，Muse 核查后入仓，未构建）
+1）服务连接时能力位自检（JarvisAccessibilityService）：onServiceConnected()
+里新增 logCapabilitiesOnce()，读 serviceInfo.capabilities，看
+CAPABILITY_CAN_TAKE_SCREENSHOT 到底有没有置位，记 Log 与审计日志；未置位时
+审计里给提示：多半是改过无障碍服务 XML 元数据后系统还在用旧的能力缓存，
+去系统设置里把本服务关掉再开一次（不是重启 App）通常能刷新。注意这只是
+诊断、不是修复本身：能力位是系统侧算的，代码伪造不了。
+2）截图空白等一帧（OrbController.setVisibleForCapture）：原来 hide 分支的闩锁
+只等到赋值语句在主线程跑完就放行，但 GONE 赋值不等于 SurfaceFlinger 已把
+球消失那帧合成上屏，截图恰好最容易撞上这个窗口；现改成赋值后等一次真正的
+vsync 回调（View.postOnAnimation）再放行，闩锁超时 300→400ms（多 100ms
+留给这一帧）。GONE 的 View 仍在窗口树里，postOnAnimation 有效；回调迟迟
+不来时 400ms 超时兜底。
+Muse 核查：两文件 diff 均干净——服务文件仅 1 处纯新增（零删行），Orb 文件
+仅 2 处（注释 + 该函数重构），无其他改动；另修正 Claude 原版一处：hide 分支
+主线程也会闩锁等 400ms，但主线程被堵住时 vsync 回调跑不出来，等于白等还卡
+主线程，现主线程只隐藏不等帧（当前截图调用方都在后台线程，此条只防以后）。
+自查：两文件括号平衡全过。
