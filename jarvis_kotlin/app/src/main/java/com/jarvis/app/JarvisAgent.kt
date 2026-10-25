@@ -168,6 +168,16 @@ object JarvisAgent {
 
     private fun onUserUtterance(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq) return
+        // 批二十四：空/近空识别结果直接丢弃，不发模型、不回复。
+        // 唤醒词被环境噪声误触发时，空识别结果发给模型会换来一句"你说什么，
+        // 我没听清楚"。只认纯空白/纯标点，以及单个语气词——这些都不构成指令；
+        // 丢弃后直接回 idle 并恢复唤醒轮询，别卡在 listening 状态。
+        val norm = text.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
+        if (norm.isEmpty() || norm in setOf("啊", "嗯", "呃", "哦", "额")) {
+            setState(ctx, "idle")
+            maybeStartWakeLoop()
+            return
+        }
         // 批三：先拦截显式记忆指令；未命中再取长期记忆，随问答一起注入。
         scope.launch {
             if (mySeq != genSeq) return@launch

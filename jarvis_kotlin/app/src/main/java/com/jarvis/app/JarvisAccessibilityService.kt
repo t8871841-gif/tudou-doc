@@ -495,6 +495,51 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (!ok) done(false, "dispatch_failed")
     }
 
+    /**
+     * 批二十四：划掉最近任务里的一张卡片（只给用户亲口说的「关闭 X」用）。
+     * 通用 tapXY/swipeScreen 只在白名单 App 内放行，而最近任务界面属于 SystemUI，
+     * 不在白名单里；但划卡片是系统界面操作、不是在某个 App 内容里点按，且调用方
+     * 只能是本地指令层的用户原话，不经过模型任务循环。只划与 label 文本相符的卡片，
+     * 一次一划；找不到卡片、发不出手势都如实回报，不装成功。
+     */
+    fun dismissRecentCard(label: String, done: (Boolean, String) -> Unit) {
+        val root = rootInActiveWindow ?: run { done(false, "no_window"); return }
+        val rect = findTextNodeRect(root, label)
+        if (rect == null) { done(false, "not_found"); return }
+        val cx = rect.centerX().toFloat()
+        val cy = rect.centerY().toFloat()
+        val y2 = (cy - rect.height()).coerceAtLeast(0f)
+        val path = Path().apply { moveTo(cx, cy); lineTo(cx, y2) }
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 300)).build()
+        val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) { done(true, "") }
+            override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
+        }, null)
+        if (!ok) done(false, "dispatch_failed")
+    }
+
+    /** 最近任务界面里是否还有带这段文本的节点（关后复查用）。 */
+    fun hasTextNode(label: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        return findTextNodeRect(root, label) != null
+    }
+
+    /** 深度优先找文本或无障碍描述等于 label 的节点，返回其屏幕坐标框；找不到返回 null。 */
+    private fun findTextNodeRect(node: AccessibilityNodeInfo, label: String): Rect? {
+        if (node.text?.toString() == label || node.contentDescription?.toString() == label) {
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            if (!r.isEmpty) return r
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findTextNodeRect(child, label)
+            child.recycle()
+            if (found != null) return found
+        }
+        return null
+    }
+
     // ---------- v3：音量键组合急停 ----------
     private var volUpAt = 0L
     private var volDownAt = 0L

@@ -49,6 +49,8 @@ object LocalCommands {
     private val CALL_GIVE = Regex("^给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
     private val CALL_BARE = Regex("^(?:打电话|拨电话|拨号)$")
     private val OPEN_APP = Regex("^(?:打开|开启|启动|进入)\\s*(.+)$")
+    private val CLOSE_APP = Regex("^(?:关闭|关掉|退出)\\s*(.+)$")
+    private val CLOSE_APP_BA = Regex("^把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
 
     // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
     // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
@@ -67,6 +69,17 @@ object LocalCommands {
 
         // 批十三：系统功能（手电筒/截屏/锁屏等）不是应用，先于「打开应用」拦截
         if (DeviceCommands.tryHandle(ctx, t, speak)) return true
+
+        // 批二十四：关闭应用（与「打开应用」对称）。DeviceCommands 已先行，
+        // 所以「关手电筒/关闭手电筒」这类系统功能不会落到这里。
+        val closeName = CLOSE_APP.matchEntire(t)?.groupValues?.get(1)
+            ?: CLOSE_APP_BA.matchEntire(t)?.groupValues?.get(1)
+        if (closeName != null) {
+            val name = cleanName(closeName).removeSuffix("应用").removeSuffix("软件").trim()
+            if (!looksLikeLiteralName(name)) return false // 不像应用名，交还给聊天流程
+            io.execute { closeAppBg(ctx, name, speak) }
+            return true
+        }
 
         if (CALL_BARE.matches(t)) {
             io.execute {
@@ -282,6 +295,97 @@ object LocalCommands {
         AuditLog.append(ctx, "本地指令", "打开${found.first}", "已启动")
         return "正在打开${found.first}"
 
+    }
+
+    // ---------- 关闭应用：批二十四新增——去最近任务划掉目标卡片 ----------
+
+    private fun closeAppBg(ctx: Context, name: String, speak: (String) -> Unit) {
+        if (name.isBlank()) {
+            main.post { speak("关闭什么？说个应用名") }
+            return
+        }
+        val svc = com.jarvis.app.JarvisAccessibilityService.instance
+        if (svc == null) {
+            main.post { speak("关闭应用要用无障碍服务：去设置里把 Jarvis 的无障碍打开") }
+            AuditLog.append(ctx, "本地指令", "关闭$name", "无障碍服务未连接")
+            return
+        }
+        // 找目标：常用应用先包名直查（与打开同一张表），否则按标签精确匹配；
+        // 关闭错应用比关不成严重，所以这里不用打开那边的模糊匹配。
+        val pm = ctx.packageManager
+        var label: String? = null
+        var pkg: String? = null
+        val direct = WELL_KNOWN_APPS[name.trim().lowercase()]
+        if (direct != null && pm.getLaunchIntentForPackage(direct) != null) {
+            label = name.trim(); pkg = direct
+        } else {
+            try {
+                for (app in pm.getInstalledApplications(0)) {
+                    val l = pm.getApplicationLabel(app).toString()
+                    if (l == name) { label = l; pkg = app.packageName; break }
+                }
+            } catch (e: Exception) {
+                main.post { speak("找应用时出错：${e.message ?: e.javaClass.simpleName}") }
+                return
+            }
+        }
+        if (label == null || pkg == null) {
+            main.post { speak("没找到叫${name}的应用") }
+            return
+        }
+        // 自己不能这样关：划掉自己的卡片会把前台界面杀掉。
+        if (pkg == ctx.packageName) {
+            main.post { speak("Jarvis 自己不能这样关") }
+            return
+        }
+        val targetLabel = label
+        try {
+            svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
+        } catch (_: Exception) {
+            main.post { speak("最近任务没打开，系统拒绝了这个动作") }
+            return
+        }
+        // 等最近任务界面真正成为前台（SystemUI 或桌面启动器），最多等 2 秒；
+        // 没等到就不乱划——在原应用里上滑会变成翻页，不是关应用。
+        var inRecents = false
+        for (i in 0 until 10) {
+            Thread.sleep(200)
+            val fg = svc.foregroundPackage()
+            if (fg.contains("systemui") || fg.endsWith(".launcher")) { inRecents = true; break }
+        }
+        if (!inRecents) {
+            main.post { speak("最近任务界面没等到，再试一次") }
+            AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "最近任务界面未出现")
+            return
+        }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var dispatched = false
+        var dispatchReason = ""
+        svc.dismissRecentCard(targetLabel) { ok, reason ->
+            dispatched = ok; dispatchReason = reason; latch.countDown()
+        }
+        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+        if (!dispatched) {
+            val why = when (dispatchReason) {
+                "not_found" -> "最近任务里没找到${targetLabel}，可能它没在后台运行"
+                "no_window" -> "最近任务界面没拿到，系统正忙"
+                "cancelled" -> "手势被系统取消了，没关成"
+                else -> "手势没发出去，系统正忙，没关成"
+            }
+            AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "失败：$dispatchReason")
+            main.post { speak(why) }
+            return
+        }
+        // 划后复查：卡片还在就是没划掉，如实说，不装成功。
+        Thread.sleep(600)
+        val gone = !svc.hasTextNode(targetLabel)
+        AuditLog.append(ctx, "本地指令", "关闭$targetLabel", if (gone) "卡片已划掉" else "划后卡片仍在")
+        main.post {
+            speak(
+                if (gone) "${targetLabel}关了"
+                else "划了一下但${targetLabel}的卡片还在，系统可能没放行，可以手动划掉"
+            )
+        }
     }
 
     private fun openDialer(ctx: Context, number: String?) {
