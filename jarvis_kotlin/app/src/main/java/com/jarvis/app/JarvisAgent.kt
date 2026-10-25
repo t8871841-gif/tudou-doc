@@ -320,7 +320,7 @@ object JarvisAgent {
                 main.post {
                     if (mySeq != genSeq) return@post
                     setState(ctx, "speaking")
-                    if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq)
+                    if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq, reply)
                 }
             },
             onDone = { ok ->
@@ -344,11 +344,17 @@ object JarvisAgent {
      * 一旦收到非空的中途识别文字就认为"用户在开口"，立即停播并转入听。
      * 已知局限：没有 AEC，扬声器播报的声音本身可能被麦克风拾取触发误判，
      * 真机联调如果经常被自己的播报打断自己，先把"打断说话"开关关掉，或改用听筒/耳机测试。
+     *
+     * 批二十三回声过滤（2026-10-25 用户确认切断时气泡正是"打断了，在听…"）：
+     * 批八收紧的阈值（1200ms 缓冲、连续两次 ≥4 字）拦不住长回复——扬声器自己的
+     * 声音会源源不断地产生 ≥4 字的中间结果，等于必误判。现把正在播的回复文本
+     * 交给监听做回声比对：识别结果去标点去空白后，只要是回复文本的子串、或以
+     * 回复文本开头（回声后拖了尾巴），都当回声直接忽略，既不计数也不清零；
+     * 只有回复里没有的话才计入打断。真插话仍能打断，只是要连续两次非回声结果。
      */
-    private fun startBargeInWatch(ctx: Context, mySeq: Int) {
-        // 批八收紧（jk-v12 真机反馈：自己播报的回声被麦克风拾到、2 个字就误判打断，
-        // 回复没播完就跳去聆听）：起播缓冲 500ms → 1200ms；判定改成「连续两次中间结果
-        // 都 ≥4 个字」才算真有人插话；录音端另有 AEC 回声消除配合（OfflineAsrSession）。
+    private fun startBargeInWatch(ctx: Context, mySeq: Int, reply: String) {
+        // 回声比对只看字本身：回复里的标点、空白都去掉，识别结果同样处理。
+        val replyNorm = reply.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
         main.postDelayed({
             if (mySeq != genSeq || state != "speaking") return@postDelayed
             var strongHits = 0
@@ -356,6 +362,10 @@ object JarvisAgent {
                 ctx,
                 onPartial = { txt ->
                     if (mySeq != genSeq || state != "speaking") return@listenOnce
+                    val norm = txt.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
+                    // 回声：识别结果是正在播的回复里的一段，或以回复开头——忽略。
+                    // replyNorm 为空（回复全是标点，不可能出现在正常回复里）时不过滤。
+                    if (replyNorm.isNotEmpty() && norm.isNotEmpty() && (replyNorm.contains(norm) || norm.startsWith(replyNorm))) return@listenOnce
                     if (txt.trim().length >= 4) strongHits++ else strongHits = 0
                     if (strongHits >= 2) {
                         main.post {
