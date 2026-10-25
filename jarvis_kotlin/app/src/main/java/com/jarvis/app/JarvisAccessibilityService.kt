@@ -1,6 +1,7 @@
 package com.jarvis.app
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
 import android.graphics.Path
@@ -309,6 +310,42 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        // Flyme 真机追查：系统按 XML 算出的 capabilities 在本机为 0（全新安装＋
+        // 重新启用仍是 0），树拿不到、截图报没能力。Andee 同机正常，且它在连接时
+        // 会把 serviceInfo 改写回系统；本工程此前从不碰 serviceInfo，全靠 XML。
+        // 现改与 XML 完全一致地显式重设一次（只取 XML 已声明的位，不越权：OR
+        // 运算只加位不减位），让系统按这份信息重新算能力位；随后 capcheck 立
+        // 刻验证是否生效——若仍为 0，说明系统侧不接受能力协商，诊断也到此为止。
+        try {
+            val cur = serviceInfo
+            if (cur != null) {
+                cur.eventTypes = cur.eventTypes or
+                    AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOWS_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED or
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED
+                cur.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+                cur.notificationTimeout = 100L
+                cur.flags = cur.flags or
+                    AccessibilityServiceInfo.FLAG_DEFAULT or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE or
+                    AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+                cur.capabilities = cur.capabilities or
+                    AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT or
+                    AccessibilityServiceInfo.CAPABILITY_CAN_REQUEST_TOUCH_EXPLORATION_MODE or
+                    AccessibilityServiceInfo.CAPABILITY_CAN_REQUEST_ENHANCED_WEB_ACCESSIBILITY or
+                    AccessibilityServiceInfo.CAPABILITY_CAN_REQUEST_FILTER_KEY_EVENTS or
+                    AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT or
+                    AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES
+                serviceInfo = cur
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "re-assert serviceInfo failed", e)
+        }
         instance = this
         OrbController.attach(this) // 悬浮球：开关记在 SharedPreferences，服务起来就自动恢复
         TakeoverBorder.attach(this) // 三期：看屏代理接管时的彩光边框
@@ -342,8 +379,8 @@ class JarvisAccessibilityService : AccessibilityService() {
             if (caps >= 0 && !canShot) {
                 AuditLog.append(
                     this, "无障碍服务", "截图能力缺失提示",
-                    "多半是改过无障碍服务的 XML 元数据后，系统还在用旧的能力缓存——" +
-                        "去系统设置里把本服务关掉再开一次（不是重启 App），通常就能刷新"
+                    "连接时已按 XML 显式重设过能力位仍为 0：不是缓存问题（关开重装均已排除），" +
+                        "系统侧没有接受能力协商，需查 ROM/系统侧限制"
                 )
             }
         } catch (e: Exception) {
@@ -411,55 +448,67 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (isShotBlocked(pkg)) {
             done(mapOf("error" to if (pkg.isEmpty()) "unknown_app" else "blocked_app", "pkg" to pkg)); return
         }
-        try {
-            takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
-                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
-                    shotExecutor.execute {
-                        try {
-                            val hw = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
-                            val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
-                            result.hardwareBuffer.close()
-                            if (bmp == null) {
-                                lastCaptureError = "capture_failed"
-                                done(mapOf("error" to "capture_failed")); return@execute
-                            }
-                            val sw = bmp.width
-                            val sh = bmp.height
-                            val scale = minOf(1f, 1280f / maxOf(sw, sh))
-                            val out = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (sw * scale).toInt(), (sh * scale).toInt(), true) else bmp
-                            val bos = ByteArrayOutputStream()
-                            out.compress(Bitmap.CompressFormat.JPEG, 70, bos)
-                            val tiny = Bitmap.createScaledBitmap(bmp, 16, 16, true)
-                            val sig = StringBuilder()
-                            for (y in 0 until 16) for (x in 0 until 16) {
-                                val px = tiny.getPixel(x, y)
-                                val g = (((px shr 16) and 0xFF) + ((px shr 8) and 0xFF) + (px and 0xFF)) / 3 / 16
-                                sig.append(Integer.toHexString(g))
-                            }
-                            lastCaptureError = ""
-                            done(
-                                mapOf(
-                                    "b64" to Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP),
-                                    "w" to out.width, "h" to out.height, "sw" to sw, "sh" to sh,
-                                    "pkg" to pkg, "sig" to sig.toString()
+        // 视觉看屏的截图此前不空白悬浮球：模型看到带球的图，定位会被球吸走
+        // （与录屏兜底同款问题）。takeScreenshot 改到 shotExecutor（单线程）
+        // 上调：先隐藏球（工作线程等一帧 vsync，与无障碍/录屏通道同款保证），
+        // 回调各终点恢复。守卫分支（SDK/自身/黑名单）在隐藏之前就已返回，
+        // 不动球的状态。
+        shotExecutor.execute {
+            com.jarvis.app.OrbController.setVisibleForCapture(false)
+            try {
+                takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                        shotExecutor.execute {
+                            try {
+                                val hw = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                                val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                result.hardwareBuffer.close()
+                                if (bmp == null) {
+                                    lastCaptureError = "capture_failed"
+                                    done(mapOf("error" to "capture_failed")); return@execute
+                                }
+                                val sw = bmp.width
+                                val sh = bmp.height
+                                val scale = minOf(1f, 1280f / maxOf(sw, sh))
+                                val out = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (sw * scale).toInt(), (sh * scale).toInt(), true) else bmp
+                                val bos = ByteArrayOutputStream()
+                                out.compress(Bitmap.CompressFormat.JPEG, 70, bos)
+                                val tiny = Bitmap.createScaledBitmap(bmp, 16, 16, true)
+                                val sig = StringBuilder()
+                                for (y in 0 until 16) for (x in 0 until 16) {
+                                    val px = tiny.getPixel(x, y)
+                                    val g = (((px shr 16) and 0xFF) + ((px shr 8) and 0xFF) + (px and 0xFF)) / 3 / 16
+                                    sig.append(Integer.toHexString(g))
+                                }
+                                lastCaptureError = ""
+                                done(
+                                    mapOf(
+                                        "b64" to Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP),
+                                        "w" to out.width, "h" to out.height, "sw" to sw, "sh" to sh,
+                                        "pkg" to pkg, "sig" to sig.toString()
+                                    )
                                 )
-                            )
-                        } catch (t: Throwable) {
-                            lastCaptureError = "capture_failed"
-                            done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
+                            } catch (t: Throwable) {
+                                lastCaptureError = "capture_failed"
+                                done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
+                            } finally {
+                                com.jarvis.app.OrbController.setVisibleForCapture(true)
+                            }
                         }
                     }
-                }
 
-                override fun onFailure(errorCode: Int) {
-                    val e = if (errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW) "secure_window" else "capture_failed"
-                    lastCaptureError = e
-                    done(mapOf("error" to e, "code" to errorCode))
-                }
-            })
-        } catch (t: Throwable) {
-            lastCaptureError = "capture_failed"
-            done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
+                    override fun onFailure(errorCode: Int) {
+                        val e = if (errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW) "secure_window" else "capture_failed"
+                        lastCaptureError = e
+                        com.jarvis.app.OrbController.setVisibleForCapture(true)
+                        done(mapOf("error" to e, "code" to errorCode))
+                    }
+                })
+            } catch (t: Throwable) {
+                lastCaptureError = "capture_failed"
+                com.jarvis.app.OrbController.setVisibleForCapture(true)
+                done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
+            }
         }
     }
 

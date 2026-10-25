@@ -128,6 +128,9 @@ object TaskLoop {
         JarvisAccessibilityService.screenController = controller
         AuditLog.append(ctx, "任务循环", taskText, "开始（上限 $MAX_STEPS 步）")
         TakeoverBorder.show()
+        // 用户定：跨应用任务期球彻底隐藏，减少屏幕干扰、有利于定位；任务结束
+        // 在 finally 里恢复。截图空白是另一层标志，互不顶掉（见 OrbController）。
+        com.jarvis.app.OrbController.setTaskHidden(true)
         val history = mutableListOf<String>()
         var lastError = ""
         var pendingImage: String? = null // zoom 放大图：作为下一轮的观察图喂回模型
@@ -362,6 +365,7 @@ object TaskLoop {
             AuditLog.append(ctx, "任务循环", "异常", e.message ?: e.javaClass.simpleName)
         } finally {
             TakeoverBorder.hide()
+            com.jarvis.app.OrbController.setTaskHidden(false)
             if (JarvisAccessibilityService.screenController === controller) {
                 JarvisAccessibilityService.screenController = null
             }

@@ -166,25 +166,39 @@ object OrbController {
      * 确认合成器至少处理过一轮之后才放行；为防止机型/负载异常导致这帧回调迟迟不来，
      * 闩锁整体超时从 300ms 放宽到 400ms（多出来的 100ms 专门留给这一帧的余量）。
      */
+    // 两层隐藏，任一层为真球和气泡都不显示：
+    // captureHidden = 截图瞬间空白（screenshot/grab/captureScreen）；
+    // taskHidden = 跨应用任务期隐藏（用户定：减少屏幕干扰、有利于定位）。
+    // 分层是为了截图完恢复不会把任务期的隐藏顶掉——恢复只清自己那层。
+    // 标志位无条件写（即使 orb 为空也写，保证成对调用下不残留）；真正改
+    // View 只在 orb 存在时，且一律走主线程。
+    private var captureHidden = false
+    private var taskHidden = false
+
+    /** 仅主线程调：按两层标志位统一落一次可见性。 */
+    private fun applyVisibility() {
+        val vis = if (captureHidden || taskHidden) View.GONE else View.VISIBLE
+        orb?.visibility = vis
+        bubble?.visibility = vis
+    }
+
     fun setVisibleForCapture(visible: Boolean) {
-        val v = orb ?: return
-        val b = bubble
-        val apply = {
-            v.visibility = if (visible) View.VISIBLE else View.GONE
-            if (b != null) b.visibility = if (visible) View.VISIBLE else View.GONE
-        }
+        val v = orb
         if (!visible) {
-            // Muse 核查修正（Claude 原版此处主线程也会闩锁等 400ms，但主线程被堵住，
-            // vsync 回调反而跑不出来，等于白等还卡主线程 400ms）：主线程调用时只隐藏
-            // 不等帧；后台线程才走闩锁等帧。当前 screenshot() 调用方都在后台线程，
-            // 这条分支只是防以后有主线程调用方。
+            // 主线程调用时只隐藏不等帧；后台线程才走闩锁等帧（见上方注释）。
             if (Looper.myLooper() == Looper.getMainLooper()) {
-                apply()
+                captureHidden = true
+                applyVisibility()
+                return
+            }
+            if (v == null) {
+                captureHidden = true
                 return
             }
             val latch = CountDownLatch(1)
             val doHide = {
-                apply()
+                captureHidden = true
+                applyVisibility()
                 // 等真正跑过一次 vsync 回调，而不是等赋值语句本身跑完——这才是"球已经
                 // 从这一帧的合成结果里消失了"的更可靠信号。回调本身挂在 orb 这个 View 上，
                 // GONE 之后它还在窗口树里（只是不绘制），postOnAnimation 仍然有效。
@@ -194,7 +208,19 @@ object OrbController {
             try { latch.await(400, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
             return
         }
-        if (Looper.myLooper() == Looper.getMainLooper()) apply() else main.post { apply() }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            captureHidden = false
+            applyVisibility()
+        } else {
+            main.post { captureHidden = false; applyVisibility() }
+        }
+    }
+
+    /** 跨应用任务期隐藏球（任务结束恢复；急停仍可用音量键双击）。 */
+    fun setTaskHidden(hidden: Boolean) {
+        taskHidden = hidden
+        if (Looper.myLooper() == Looper.getMainLooper()) applyVisibility()
+        else main.post { applyVisibility() }
     }
 
     private var dodgeX = 0
@@ -330,6 +356,7 @@ object OrbController {
             w.addView(v, lp)
             orb = v
             orbLp = lp
+            if (captureHidden || taskHidden) v.visibility = View.GONE
         } catch (_: Exception) {
             // 系统拒绝（极少见）：不显示，不影响其他功能
         }
@@ -414,6 +441,7 @@ object OrbController {
         try {
             w.addView(tv, lp)
             bubble = tv
+            if (captureHidden || taskHidden) tv.visibility = View.GONE
             main.postDelayed(hideBubbleRunnable, (3500L + text.length * 60L).coerceAtMost(12000L))
         } catch (_: Exception) {}
     }
