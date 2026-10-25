@@ -160,15 +160,27 @@ class ScreenCapture(private val context: Context) {
             w = width
             h = height
         }
-        val image = awaitImage(r, timeoutMs) ?: run {
-            Log.w(TAG, "no frame within ${timeoutMs}ms")
-            return null
-        }
-        return try {
-            image.use { toBitmap(it, w, h) }
-        } catch (t: Throwable) {
-            Log.w(TAG, "frame could not be read", t)
-            null
+        // 与无障碍截图通道对齐：模型看到的图里不能有悬浮球——球压住的内容
+        // 模型根本看不见，定位就会落到球上（真机反馈；Andee 的球也没隐藏但
+        // 定位正常，正因为它截图里没有球）。无障碍 screenshot() 早已这么做，
+        // 录屏兜底这条路此前没做，模型拿到的是带球的原始屏。
+        // grab() 只在工作线程调（见函数注释），后台线程的隐藏会等一帧 vsync
+        // 回调再放行，与 screenshot() 同款保证；finally 里恢复，失败路径也
+        // 不会把球一直藏着。
+        com.jarvis.app.OrbController.setVisibleForCapture(false)
+        try {
+            val image = awaitImage(r, timeoutMs) ?: run {
+                Log.w(TAG, "no frame within ${timeoutMs}ms")
+                return null
+            }
+            return try {
+                image.use { toBitmap(it, w, h) }
+            } catch (t: Throwable) {
+                Log.w(TAG, "frame could not be read", t)
+                null
+            }
+        } finally {
+            com.jarvis.app.OrbController.setVisibleForCapture(true)
         }
     }
 

@@ -165,6 +165,13 @@ object JarvisAgent {
     // 三期新增：两类问法在进 Agnes 聊天之前先分流到视觉看屏通道。
     private val TAP_INTENT = Regex("^(帮我)?点(一下|击)?\\s*(.+)$")
     private val SCREEN_QUESTION = Regex("(屏幕上|这上面|这是什么|这是啥|这个(按钮|图标|东西)|这上边)")
+    // 发信息缺收件人：以“发信息/发消息/发微信/发短信”开头、却没写给谁的句式。
+    // 三个任务句式（IN_APP_SEND/SEND_TO/OPEN_THEN）都要求收件人或动作词，
+    // 这种裸发句式命中不了，掉进闲聊会被模型鹦鹉学舌（真机：“发信息我晚上
+    // 回家吃饭”→“你晚上回家吃饭吧”）。问句不算（带吗/？/怎么/为什么等），
+    // 避免“发信息要钱吗”这类求知句被误拦。
+    private val BARE_SEND = Regex("^(帮我)?发(个|条)?(信息|消息|微信|短信)")
+    private val BARE_SEND_QUESTION = Regex("(吗|？|\\?|怎么|为什么|为何|多少|是不是|能不能|会不会)")
 
     private fun onUserUtterance(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq) return
@@ -220,6 +227,16 @@ object JarvisAgent {
             com.jarvis.app.task.TaskLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
                 speakReply(ctx, mySeq, reply)
             }
+            return
+        }
+        // 发信息缺收件人：先反问，不当闲聊回掉（见 BARE_SEND 注释）。
+        // 带给/向/跟的不拦：收件人可能写在动词后面（如“发信息给老婆”），
+        // 那是任务句式词序没覆盖的另一缺口，不在这里错问。
+        if (BARE_SEND.containsMatchIn(text) && !BARE_SEND_QUESTION.containsMatchIn(text) &&
+            !text.contains("给") && !text.contains("向") && !text.contains("跟")
+        ) {
+            AuditLog.append(ctx, "任务路由", text, "发信息缺收件人，反问")
+            speakReply(ctx, mySeq, "发给谁？你说个名字，我就帮你发。")
             return
         }
         if (skill != null) {
