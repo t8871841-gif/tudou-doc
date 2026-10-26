@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -644,8 +643,8 @@ object OrbController {
                 c.restore()
                 paint.pathEffect = null
             }
-            // 球面：钢铁侠头盔头像（用户 2026-10-24 指定新图，已按头盔位置裁成正方形）圆形裁切；状态靠外圈渐变环+脉冲表达（原小熊 orb_bear 保留在资源里未删）
-            val bear = bearBitmap()
+            // 球面：头像资源已删（2026-10-26 用户令删小熊与钢铁侠两图），恒走渐变盘面回退；状态靠外圈渐变环+脉冲表达
+            val bear = avatarBitmap()
             if (bear != null) {
                 paint.reset(); paint.isAntiAlias = true
                 paint.style = Paint.Style.FILL
@@ -676,19 +675,8 @@ object OrbController {
             }
         }
 
-        private var bearBmp: Bitmap? = null
-        private var bearTried = false
-        private fun bearBitmap(): Bitmap? {
-            if (!bearTried) {
-                bearTried = true
-                bearBmp = try {
-                    BitmapFactory.decodeResource(context.resources, R.drawable.orb_ironman)
-                } catch (_: Throwable) {
-                    null
-                }
-            }
-            return bearBmp
-        }
+        // 头像位：2026-10-26 用户令删 orb_bear 与 orb_ironman 两图，恒返回 null，走渐变盘面回退。
+        private fun avatarBitmap(): Bitmap? = null
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
             when (e.actionMasked) {
