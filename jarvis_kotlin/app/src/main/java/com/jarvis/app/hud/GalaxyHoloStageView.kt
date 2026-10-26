@@ -76,9 +76,11 @@ class GalaxyHoloStageView @JvmOverloads constructor(
 
     private fun generateGalaxy(): List<Particle> {
         val rnd = Random(7)
-        val list = ArrayList<Particle>(190)
+        val list = ArrayList<Particle>(230)
         fun lerpF(a: Float, b: Float, t: Float) = a + (b - a) * t
-        fun arm(offset: Float, n: Int, a: Float = 3.2f, b: Float = 0.26f, maxTheta: Float = 4.3f, jitter: Float = 0.22f) {
+        // 批三十：螺旋臂从贴近核心一直绕到盘缘（约 2 圈），亮盘铺满舞台，不再是小橙团。
+        // a=4（起于核心边）、maxTheta=12.75（约 2 圈）→ 半径 4→110 逻辑单位。
+        fun arm(offset: Float, n: Int, a: Float = 4.0f, b: Float = 0.26f, maxTheta: Float = 12.75f, jitter: Float = 0.22f) {
             for (i in 0 until n) {
                 val tt = i / (n - 1f)
                 val theta = tt * maxTheta
@@ -97,7 +99,7 @@ class GalaxyHoloStageView @JvmOverloads constructor(
                 list.add(Particle(x, y, size, alpha, color))
             }
         }
-        arm(0f, 46); arm(2.05f, 46); arm(4.1f, 40)
+        arm(0f, 60); arm(2.05f, 60); arm(4.1f, 54)
         repeat(50) {
             val ang = rnd.nextFloat() * 2 * PI.toFloat()
             val r = 70 + rnd.nextFloat() * 58
@@ -200,6 +202,8 @@ class GalaxyHoloStageView @JvmOverloads constructor(
     }
 
     // ---------- 星系 ----------
+    // 批三十：星系盘竖向压扁成椭圆（银河系侧视角）。注意变换顺序：先旋转（盘内自转）、
+    // 再压扁（倾斜投影），这样椭圆轮廓固定、螺旋臂在盘内扫动；反过来会变成椭圆本身打转。
 
     private fun drawGalaxy(canvas: Canvas, cx: Float, cy: Float, r: Float, tt: Float, alphaMul: Float) {
         val scaleBase = r / 130f // 逻辑 260 空间 -> 实际半径
@@ -209,6 +213,7 @@ class GalaxyHoloStageView @JvmOverloads constructor(
 
         canvas.save()
         canvas.translate(cx, cy)
+        canvas.scale(1f, 0.62f)
         canvas.rotate(rotationDeg)
         canvas.scale(scale, scale)
         for (p in particles) {
@@ -218,12 +223,15 @@ class GalaxyHoloStageView @JvmOverloads constructor(
         }
         canvas.restore()
 
-        // 核心脉动光
+        // 核心脉动光（同样压扁成椭圆，与星系盘一致）
         val pulse = 0.75f + 0.25f * abs(sin(tt * (2 * PI.toFloat() / 3.6f)))
         val coreR = 13f * scaleBase * collapseScale * pulse
+        canvas.save()
+        canvas.translate(cx, cy)
+        canvas.scale(1f, 0.62f)
         paint.reset(); paint.isAntiAlias = true
         paint.shader = RadialGradient(
-            cx, cy, max(1f, coreR * 2.2f),
+            0f, 0f, max(1f, coreR * 2.2f),
             intArrayOf(
                 HudPalette.withAlpha(Color.parseColor("#fff6e0"), alphaMul),
                 HudPalette.withAlpha(HudPalette.GALAXY_CORE, 0.8f * alphaMul),
@@ -232,8 +240,9 @@ class GalaxyHoloStageView @JvmOverloads constructor(
             ),
             floatArrayOf(0f, 0.35f, 0.65f, 1f), Shader.TileMode.CLAMP
         )
-        canvas.drawCircle(cx, cy, max(1f, coreR * 2.2f), paint)
+        canvas.drawCircle(0f, 0f, max(1f, coreR * 2.2f), paint)
         paint.shader = null
+        canvas.restore()
     }
 
     // ---------- 冲击波 ----------
@@ -349,19 +358,24 @@ class GalaxyHoloStageView @JvmOverloads constructor(
                 }
                 paint.pathEffect = null
             }
-            "listening" -> { // 聆听：声波条（跟随麦克风能量）
+            "listening" -> { // 聆听：真实声纹（批三十：不再是 13 根整齐正弦条）
                 val micL = micLevel()
-                val n = 13
+                val n = 44
                 paint.reset(); paint.isAntiAlias = true
                 paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 4f
+                paint.strokeWidth = 3f
                 paint.strokeCap = Paint.Cap.ROUND
                 for (i in 0 until n) {
                     val lx = -hw * 0.75f + (hw * 1.5f) * (i / (n - 1f))
-                    val base = 0.25f + 0.5f * abs(sin(tt * (3f + i % 4) + i * 0.6f))
-                    val energy = (base * 0.5f + micL * 0.6f).coerceIn(0.08f, 1f)
-                    val barH = hh * 0.65f * energy
-                    paint.color = HudPalette.withAlpha(accent, (0.55f + 0.35f * energy) * reveal)
+                    // 每根频段权重不同（有的频段天然高、有的低），随位置起伏；
+                    // 再叠一层每根速度不同的抖动，条与条之间不对称、不同步，像真人声纹。
+                    val band = 0.35f + 0.65f * (0.5f + 0.5f * sin(i * 1.7f))
+                    val wobble = 0.5f + 0.5f * sin(tt * (7f + (i % 5)) + i * 1.3f)
+                    // micL 是实测麦克风能量：有声时整体包络跟人声走，没声时只剩低幅呼吸微动。
+                    val energy = ((0.12f + micL * 0.9f) * (0.35f + 0.65f * band * (0.4f + 0.6f * wobble)))
+                        .coerceIn(0.06f, 1f)
+                    val barH = hh * 0.7f * energy
+                    paint.color = HudPalette.withAlpha(accent, (0.45f + 0.5f * energy) * reveal)
                     canvas.drawLine(lx, -barH, lx, barH, paint)
                 }
             }
