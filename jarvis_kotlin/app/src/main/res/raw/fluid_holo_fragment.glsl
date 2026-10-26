@@ -48,23 +48,47 @@ vec2 map(vec3 p) {
     vec3 p1 = p;
     p1.xz = rot(0.8) * p1.xz;
     p1 = twist(p1, 2.0 + 0.3 * sin(u_time * 0.8));
-    float d1 = sdFlatTorus(p1, vec2(0.55 + 0.05 * sin(u_time), 0.035), 2.5);
+    float d1 = sdFlatTorus(p1, vec2(0.55 + 0.05 * sin(u_time), 0.06), 2.5);
     if (d1 < d) { d = d1; id = 1.0; }
 
-    // --- 丝带 2：暖橙 ---
+    // --- 丝带 2：蜜桃 ---
     vec3 p2 = p;
     p2.xy = rot(1.57) * p2.xy;
     p2.xz = rot(-0.5) * p2.xz;
     p2 = twist(p2, 2.5 + 0.4 * cos(u_time * 0.6));
-    float d2 = sdFlatTorus(p2, vec2(0.65 + 0.05 * cos(u_time * 1.2), 0.04), 2.2);
+    float d2 = sdFlatTorus(p2, vec2(0.65 + 0.05 * cos(u_time * 1.2), 0.065), 2.2);
     if (d2 < d) { d = d2; id = 2.0; }
 
     // --- 丝带 3：浅蓝 ---
     vec3 p3 = p;
     p3.yz = rot(0.6) * p3.yz;
     p3 = twist(p3, 3.0 - 0.3 * sin(u_time * 0.9));
-    float d3 = sdFlatTorus(p3, vec2(0.45, 0.03), 2.8);
+    float d3 = sdFlatTorus(p3, vec2(0.45, 0.055), 2.8);
     if (d3 < d) { d = d3; id = 3.0; }
+
+    // --- 丝带 4：青蓝（新增，补密度） ---
+    vec3 p4 = p;
+    p4.xz = rot(2.1) * p4.xz;
+    p4.xy = rot(0.9) * p4.xy;
+    p4 = twist(p4, 2.2 + 0.3 * cos(u_time * 0.7));
+    float d4 = sdFlatTorus(p4, vec2(0.60 + 0.04 * sin(u_time * 1.1), 0.06), 2.4);
+    if (d4 < d) { d = d4; id = 4.0; }
+
+    // --- 丝带 5：蜜桃（新增，补密度） ---
+    vec3 p5 = p;
+    p5.yz = rot(1.9) * p5.yz;
+    p5.xz = rot(1.2) * p5.xz;
+    p5 = twist(p5, 2.8 + 0.3 * sin(u_time * 0.5));
+    float d5 = sdFlatTorus(p5, vec2(0.50 + 0.04 * cos(u_time * 0.9), 0.06), 2.3);
+    if (d5 < d) { d = d5; id = 5.0; }
+
+    // --- 丝带 6：浅蓝（新增，补密度） ---
+    vec3 p6 = p;
+    p6.xy = rot(2.6) * p6.xy;
+    p6.yz = rot(-0.8) * p6.yz;
+    p6 = twist(p6, 2.4 + 0.4 * sin(u_time * 1.0));
+    float d6 = sdFlatTorus(p6, vec2(0.70, 0.055), 2.6);
+    if (d6 < d) { d = d6; id = 6.0; }
 
     return vec2(d, id);
 }
@@ -117,39 +141,32 @@ void main() {
             float d  = res.x;
             float id = res.y;
 
-            // --- 核心：将距离场转为密度 ---
-            float density = smoothstep(0.04, 0.0, abs(d));
+            // --- 核心：将距离场转为密度（辉光范围 0.04→0.06，带子更宽更软） ---
+            float density = smoothstep(0.06, 0.0, abs(d));
 
-            // 1. 数据流纹理 (Data Stream)
-            // 利用空间位置和时间生成沿丝带流动的高频条纹
-            float dataFlow = sin(p.y * 50.0 - u_time * 10.0) * 0.5 + 0.5;
-            dataFlow = smoothstep(0.3, 1.0, dataFlow);
+            // 数据流改柔和亮度波（原高频条纹 + 全息网格都去掉，参考图里丝带是干净的）：
+            // 低频正弦沿带缓慢起伏，只做亮度明暗，不出条纹
+            float dataFlow = sin(p.y * 8.0 - u_time * 1.5) * 0.5 + 0.5;
 
-            // 2. 全息网格 (Hologram Grid) - 叠加在丝带表面
-            float grid = max(
-                smoothstep(0.9, 1.0, sin(p.x * 40.0)),
-                smoothstep(0.9, 1.0, sin(p.y * 40.0))
-            );
-
-            // 3. 扫描光幕增强
+            // 扫描光幕增强
             float scanEffect = smoothstep(0.05, 0.0, abs(p.y - scanPos)) * 2.0;
 
             // 修复原稿作用域问题：两色提到 if 外，丝带段与粒子段共用
             // （原稿在 if 内定义，粒子段引用会编译失败）
             vec3 cCyan   = vec3(0.0, 0.8, 1.0);
-            vec3 cOrange = vec3(1.0, 0.6, 0.2);
+            vec3 cPeach  = vec3(1.0, 0.72, 0.5);
 
             if (density > 0.001) {
                 // 经典贾维斯配色
                 vec3 baseCol = cCyan;
-                if (id == 2.0) baseCol = cOrange;
-                if (id == 3.0) baseCol = vec3(0.4, 0.9, 1.0);
+                if (id == 2.0 || id == 5.0) baseCol = cPeach;
+                if (id == 3.0 || id == 6.0) baseCol = vec3(0.4, 0.9, 1.0);
 
                 // 边缘高光 (类似菲涅尔)
                 float edgeGlow = smoothstep(0.01, 0.04, abs(d)) * (1.0 - smoothstep(0.04, 0.08, abs(d)));
 
                 // 组合最终颜色
-                vec3 ribbonColor = baseCol * (1.0 + dataFlow * 1.5 + grid * 2.0);
+                vec3 ribbonColor = baseCol * (1.0 + dataFlow * 0.4);
                 ribbonColor += cCyan * scanEffect; // 扫描时泛蓝光
                 ribbonColor += baseCol * edgeGlow * 3.0; // 边缘高光
 
@@ -169,7 +186,7 @@ void main() {
                 float pDensity = smoothstep(0.02, 0.0, pDist);
                 // 粒子闪烁
                 float flicker = sin(u_time * 10.0 + pNoise * 100.0) * 0.5 + 0.5;
-                vec3 pCol = mix(cCyan, cOrange, pNoise);
+                vec3 pCol = mix(cCyan, cPeach, pNoise);
                 accumColor += pCol * pDensity * flicker * 0.5 * (1.0 - accumAlpha);
                 accumAlpha += pDensity * 0.2 * (1.0 - accumAlpha);
             }
