@@ -390,11 +390,20 @@ object JarvisAgent {
                 onPartial = { txt ->
                     if (mySeq != genSeq || state != "speaking") return@listenOnce
                     val norm = txt.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
-                    // 回声：识别结果是正在播的回复里的一段，或以回复开头——忽略。
+                    // 回声：识别结果是正在播的回复里的一段，或以回复开头——忽略，
+                    // 并且清零打断计数（刚听到的是扬声器自己，不是用户插话）。
                     // replyNorm 为空（回复全是标点，不可能出现在正常回复里）时不过滤。
-                    if (replyNorm.isNotEmpty() && norm.isNotEmpty() && (replyNorm.contains(norm) || norm.startsWith(replyNorm))) return@listenOnce
-                    if (txt.trim().length >= 4) strongHits++ else strongHits = 0
-                    if (strongHits >= 2) {
+                    if (replyNorm.isNotEmpty() && norm.isNotEmpty() && (replyNorm.contains(norm) || norm.startsWith(replyNorm))) {
+                        strongHits = 0
+                        return@listenOnce
+                    }
+                    // 批三十调参（2026-10-26 用户真机确认：没点球、有打断气泡、开关开着——
+                    // 即扬声器自声被误判为插话）：回声过滤只认原样子串，识别错一两个字
+                    // 就过不了滤；旧阈值（连续 2 次 ≥4 字）太灵敏，单句误识别的累计
+                    // partial 就能凑够 2 次。改成连续 3 次 ≥5 字：真插话是持续成句的
+                    // 话，轻松达标；零星误识别很难连凑 3 次长片段。功能本身不动。
+                    if (txt.trim().length >= 5) strongHits++ else strongHits = 0
+                    if (strongHits >= 3) {
                         main.post {
                             if (mySeq != genSeq || state != "speaking") return@post
                             TtsRouter.stop()
