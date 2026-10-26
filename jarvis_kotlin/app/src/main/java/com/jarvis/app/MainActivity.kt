@@ -285,6 +285,13 @@ class MainActivity : Activity() {
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
+    /** 设置里「清空对话」：只清对话框气泡，回到刚打开时的问候语；长期记忆库不受影响。 */
+    private fun clearChat() {
+        if (!::chatList.isInitialized) return
+        chatList.removeAllViews()
+        addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
+    }
+
     private fun sendChat() {
         val text = chatInput.text.toString().trim()
         if (text.isEmpty() || chatInFlight) return
@@ -913,6 +920,10 @@ class MainActivity : Activity() {
                 toast("记忆已清空")
                 refreshMemoryList()
             }
+        })
+        root.addView(btn("清空对话") {
+            clearChat()
+            toast("对话已清空")
         })
     }
 
