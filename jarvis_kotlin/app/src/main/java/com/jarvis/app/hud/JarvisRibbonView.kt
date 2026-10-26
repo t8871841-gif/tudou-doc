@@ -337,7 +337,7 @@ void main() {
     // 网格常量（类里只能有一个 companion，写成普通成员字段）
     private val SEGMENTS = 360
     private val KNOT_SCALE = 0.5f // 背景位：结约占屏高一半，不再满屏（原 0.72）
-    private val HALF_W = 0.05f // 单条带半宽：细丝（原 0.16）
+    private val HALF_W = 0.3f // 单条带半宽：用户定 0.3（带内 9 根微线才够宽、看得清）
     // 9 条带：4 个倾角（3/2/2/2 分布），倾角以 (rx, rz) 给出， baked 进顶点
     private val BAND_TILTS = arrayOf(
         doubleArrayOf(0.45, 0.0),
