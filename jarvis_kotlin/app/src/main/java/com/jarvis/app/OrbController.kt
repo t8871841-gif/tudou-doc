@@ -670,7 +670,7 @@ object OrbController {
             // 层 4：脉冲波纹（每 2.5 秒一圈，播报/聆听时更明显）
             val rippleT = (elapsed % 2.5f) / 2.5f
             val rippleR = coreR + (r1 * 1.05f - coreR) * rippleT
-            val rippleA = ((1f - rippleT) * (if (st == "speaking" || st == "listening") 130 + 110 * amp else 70)).toInt().coerceIn(0, 255)
+            val rippleA = ((1f - rippleT) * (if (st == "speaking" || st == "listening") 130f + 110f * amp else 70f)).toInt().coerceIn(0, 255)
             paint.reset(); paint.isAntiAlias = true
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 1.5f * dp
