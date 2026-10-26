@@ -7,11 +7,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RadialGradient
 import android.graphics.Shader
@@ -20,6 +18,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -27,6 +26,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
+import com.jarvis.app.asr.OfflineAsrSession
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -350,6 +350,7 @@ object OrbController {
                 launchApp(null)
             }
         })
+        v.amplitude = { OfflineAsrSession.currentLevel() }
         v.setState(displayState())
         try {
             w.addView(v, lp)
@@ -479,7 +480,6 @@ object OrbController {
         private val dp = ctx.resources.displayMetrics.density
         private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2.5f
         private var st = "idle"
-        private var phase = 0f
         private var rot = 0f
         private var anim: ValueAnimator? = null
         private var breathAnim: ValueAnimator? = null
@@ -487,11 +487,14 @@ object OrbController {
         private var downY = 0f
         private var moved = false
         private var longFired = false
+        private var pressed = false
+        private var lastTickMs = 0L
+        private var animStartMs = SystemClock.uptimeMillis()
+        /** 音量 0..1：OrbController 接 OfflineAsrSession.currentLevel（聆听时有效） */
+        var amplitude: () -> Float = { 0f }
         private var ringShader: Shader? = null
-        private var diskShader: Shader? = null
         private var glowShader: Shader? = null
         private var coreShader: Shader? = null
-        private var pulseShader: Shader? = null
         private val longRunnable = Runnable {
             longFired = true
             performHapticFeedback(
@@ -501,14 +504,12 @@ object OrbController {
             host.longPress()
         }
 
-        // (高光, 主色, 暗部)
-        private fun palette(): IntArray = when (st) {
-            "listening" -> intArrayOf(0xFFB2F5FF.toInt(), 0xFF26C6DA.toInt(), 0xFF006978.toInt())
-            "stopped" -> intArrayOf(0xFFFFCDD2.toInt(), 0xFFEF5350.toInt(), 0xFF8E0000.toInt())
-            "thinking" -> intArrayOf(0xFFFFE0B2.toInt(), 0xFFFFA726.toInt(), 0xFFB45F06.toInt())
-            "speaking" -> intArrayOf(0xFFC8F7CC.toInt(), 0xFF43C463.toInt(), 0xFF1B5E20.toInt())
-            else -> intArrayOf(0xFFB3D4FF.toInt(), 0xFF4F8DF7.toInt(), 0xFF1F3C88.toInt())
-        }
+        // 颜色：设计语言蓝 #2A8CFF / 橙 #FF7A2E；停止态沿用原红色（安全态，不在设计里）。
+        private val BLUE = 0xFF2A8CFF.toInt()
+        private val ORANGE = 0xFFFF7A2E.toInt()
+        private val RED_L = 0xFFFFCDD2.toInt()
+        private val RED_B = 0xFFEF5350.toInt()
+        private val RED_D = 0xFF8E0000.toInt()
 
         private fun alpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
 
@@ -517,27 +518,28 @@ object OrbController {
             val cy = height / 2f
             if (cx <= 0f) return
             val half = min(cx, cy)
-            val (light, base, dark) = palette().let { Triple(it[0], it[1], it[2]) }
-            val r1 = half * 0.80f // 外环外半径
-            val ringW = 3.5f * dp
-            val r2 = r1 - ringW - 1.5f * dp // 中层半径
-            val r3 = r2 * 0.52f // 核心半径
-            ringShader = SweepGradient(cx, cy, intArrayOf(light, base, dark, base, light), null)
-            diskShader = RadialGradient(
-                cx, cy, r2, intArrayOf(alpha(light, 235), alpha(base, 235), alpha(dark, 245)),
-                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
+            val r1 = half * 0.80f
+            val stopped = st == "stopped"
+            // 外环 sweep：正常蓝→橙→蓝；停止态红系
+            ringShader = SweepGradient(
+                cx, cy,
+                if (stopped) intArrayOf(RED_L, RED_B, RED_D, RED_B, RED_L)
+                else intArrayOf(BLUE, ORANGE, BLUE, ORANGE, BLUE),
+                null
             )
+            // 光晕：中心亮、边缘透明
+            val glowC = if (stopped) RED_B else BLUE
             glowShader = RadialGradient(
-                cx, cy, r3 * 1.9f, intArrayOf(alpha(light, 170), alpha(base, 70), alpha(base, 0)),
+                cx, cy, r1 * 1.15f,
+                intArrayOf(alpha(glowC, 150), alpha(glowC, 50), alpha(glowC, 0)),
                 floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
             )
+            // 核心：白→琥珀→橙；停止态红系
             coreShader = RadialGradient(
-                cx - r3 * 0.28f, cy - r3 * 0.30f, r3 * 1.25f,
-                intArrayOf(0xFFFFFFFF.toInt(), light, base), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP
-            )
-            pulseShader = RadialGradient(
-                cx, cy, r1, intArrayOf(alpha(base, 0), alpha(light, 150), alpha(base, 0)),
-                floatArrayOf(0.62f, 0.86f, 1f), Shader.TileMode.CLAMP
+                cx - r1 * 0.10f, cy - r1 * 0.11f, r1 * 0.55f,
+                if (stopped) intArrayOf(0xFFFFFFFF.toInt(), RED_L, RED_B)
+                else intArrayOf(0xFFFFFFFF.toInt(), 0xFFFFC08A.toInt(), 0xFFFF7A2E.toInt()),
+                floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP
             )
         }
 
@@ -546,16 +548,37 @@ object OrbController {
             buildShaders()
         }
 
+        /** 状态定转速：待机 30°/秒、思考 90°/秒、说话/聆听 55°/秒、停止 0 */
+        private fun speedFor(s: String) = when (s) {
+            "thinking" -> 90f
+            "speaking", "listening" -> 55f
+            "stopped" -> 0f
+            else -> 30f
+        }
+
         fun setState(s: String) {
             if (s != st) {
                 st = s
                 buildShaders()
             }
+            // 旋转动画常驻（待机也要 30°/秒慢转）；只按状态换速度，不跳变。
+            if (anim == null) {
+                lastTickMs = SystemClock.uptimeMillis()
+                anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 1000
+                    repeatCount = ValueAnimator.INFINITE
+                    addUpdateListener {
+                        val now = SystemClock.uptimeMillis()
+                        val dt = ((now - lastTickMs).coerceAtLeast(0L)) / 1000f
+                        lastTickMs = now
+                        rot = (rot + speedFor(st) * dt) % 360f
+                        invalidate()
+                    }
+                    start()
+                }
+            }
             if (s == "idle") {
-                anim?.cancel()
-                anim = null
-                phase = 0f
-                // 待机呼吸：整球极轻微缩放（±2%），3 秒一周期；只动缩放，不动透明度。
+                // 待机呼吸：整球极轻微缩放（±2%），3 秒一周期；只动缩放，不动透明度（沿用原机制）。
                 if (breathAnim == null) {
                     breathAnim = ValueAnimator.ofFloat(0f, 1f).apply {
                         duration = 3000
@@ -569,22 +592,11 @@ object OrbController {
                         start()
                     }
                 }
-            } else if (anim == null) {
+            } else {
                 breathAnim?.cancel()
                 breathAnim = null
                 scaleX = 1f
                 scaleY = 1f
-                // 沿用原呼吸机制：1.2s 循环的 phase；顺带让外环缓慢旋转（约 36°/秒）
-                anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 1200
-                    repeatCount = ValueAnimator.INFINITE
-                    addUpdateListener {
-                        phase = it.animatedValue as Float
-                        rot = (rot + 0.6f) % 360f
-                        invalidate()
-                    }
-                    start()
-                }
             }
             invalidate()
         }
@@ -604,79 +616,96 @@ object OrbController {
             val half = min(cx, cy)
             val r1 = half * 0.80f
             val ringW = 3.5f * dp
-            val r2 = r1 - ringW - 1.5f * dp
-            val r3 = r2 * 0.52f
+            val rr = r1 - ringW / 2f
+            val coreR = r1 * 0.42f
+            val elapsed = (SystemClock.uptimeMillis() - animStartMs) / 1000f
+            val stopped = st == "stopped"
+            // 有效音量：聆听取麦克风；播报无 TTS 电平，用 2 秒呼吸合成；其余取麦克风（常为 0）。
+            val mic = amplitude().coerceIn(0f, 1f)
+            val amp = if (st == "speaking") 0.45f + 0.25f * kotlin.math.sin(elapsed * Math.PI.toFloat()) else mic
+            val accent = if (stopped) RED_B else BLUE
+
             paint.reset()
             paint.isAntiAlias = true
-            // 呼吸脉冲（非待命）：渐变环向外扩散并淡出
-            if (st != "idle") {
-                val s = 1f + (half / r1 - 1f) * phase
+            if (pressed) {
                 c.save()
-                c.scale(s, s, cx, cy)
-                paint.style = Paint.Style.FILL
-                paint.shader = pulseShader
-                paint.alpha = ((1f - phase) * 255).toInt()
-                c.drawCircle(cx, cy, r1, paint)
-                c.restore()
-                paint.reset()
-                paint.isAntiAlias = true
+                c.scale(0.92f, 0.92f, cx, cy)
             }
-            // 外层：环绕渐变环
-            c.save()
-            c.rotate(rot, cx, cy)
+            // 层 1：径向光晕（随音量变亮）
+            paint.style = Paint.Style.FILL
+            paint.shader = glowShader
+            paint.alpha = (90 + amp * 130).toInt().coerceIn(0, 255)
+            c.drawCircle(cx, cy, r1 * 1.15f, paint)
+            paint.shader = null
+            // 层 2：外环带缺口（sweep 渐变，270° 弧 + 尾部光点），思考态快闪
+            paint.reset(); paint.isAntiAlias = true
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = ringW
+            paint.strokeCap = Paint.Cap.ROUND
             paint.shader = ringShader
-            c.drawCircle(cx, cy, r1 - ringW / 2f, paint)
+            paint.alpha = if (st == "thinking") (205 + 50 * kotlin.math.sin(elapsed * 12f)).toInt().coerceIn(0, 255) else 255
+            val arcRect = android.graphics.RectF(cx - rr, cy - rr, cx + rr, cy + rr)
+            c.save()
+            c.rotate(rot, cx, cy)
+            c.drawArc(arcRect, 0f, 270f, false, paint)
+            // 尾部光点：弧终点（旋转系里的正上方）
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.FILL
+            paint.color = if (stopped) RED_L else 0xFFFFFFFF.toInt()
+            c.drawCircle(cx, cy - rr, 2.6f * dp, paint)
             c.restore()
-            // 思考态：再加一圈转动的细虚线环——只动线条，不铺半透明；
-            // rot 只在非待机时推进，思考态正好在转。
-            if (st == "thinking") {
-                paint.reset(); paint.isAntiAlias = true
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2f * dp
-                paint.color = palette()[1]
-                paint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(14f * dp, 10f * dp), 0f)
-                c.save()
-                c.rotate(rot * 2f, cx, cy)
-                c.drawCircle(cx, cy, r1 + 6f * dp, paint)
-                c.restore()
-                paint.pathEffect = null
-            }
-            // 球面：头像资源已删（2026-10-26 用户令删小熊与钢铁侠两图），恒走渐变盘面回退；状态靠外圈渐变环+脉冲表达
-            val bear = avatarBitmap()
-            if (bear != null) {
-                paint.reset(); paint.isAntiAlias = true
-                paint.style = Paint.Style.FILL
-                paint.color = Color.WHITE
-                c.drawCircle(cx, cy, r2, paint)
-                c.save()
-                val clip = Path().apply { addCircle(cx, cy, r2, Path.Direction.CW) }
-                c.clipPath(clip)
-                val dst = android.graphics.RectF(cx - r2, cy - r2, cx + r2, cy + r2)
-                c.drawBitmap(bear, null, dst, paint)
-                c.restore()
-                // 盘缘细圈，让球面和外环之间有分界
-                paint.reset(); paint.isAntiAlias = true
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1f * dp
-                paint.color = 0x33000000
-                c.drawCircle(cx, cy, r2, paint)
-            } else {
-                // 头像资源异常时回退到原渐变盘面
-                paint.reset(); paint.isAntiAlias = true
-                paint.style = Paint.Style.FILL
-                paint.shader = diskShader
-                c.drawCircle(cx, cy, r2, paint)
-                paint.shader = glowShader
-                c.drawCircle(cx, cy, r3 * 1.9f, paint)
-                paint.shader = coreShader
-                c.drawCircle(cx, cy, r3, paint)
-            }
+            paint.shader = null
+            // 层 3：反向旋转中环（细虚线）
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.5f * dp
+            paint.color = accent
+            paint.alpha = 160
+            paint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f * dp, 8f * dp), 0f)
+            c.save()
+            c.rotate(-rot * 1.5f, cx, cy)
+            c.drawCircle(cx, cy, r1 * 0.62f, paint)
+            c.restore()
+            paint.pathEffect = null
+            // 层 4：脉冲波纹（每 2.5 秒一圈，播报/聆听时更明显）
+            val rippleT = (elapsed % 2.5f) / 2.5f
+            val rippleR = coreR + (r1 * 1.05f - coreR) * rippleT
+            val rippleA = ((1f - rippleT) * (if (st == "speaking" || st == "listening") 130 + 110 * amp else 70)).toInt().coerceIn(0, 255)
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.5f * dp
+            paint.color = accent
+            paint.alpha = rippleA
+            c.drawCircle(cx, cy, rippleR, paint)
+            // 层 5：核心光球（2 秒呼吸 + 音量缩放）
+            val breath = 1f + 0.06f * kotlin.math.sin(elapsed * Math.PI.toFloat())
+            val coreScale = breath * (1f + 0.18f * amp)
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.FILL
+            paint.shader = coreShader
+            c.drawCircle(cx, cy, coreR * coreScale, paint)
+            paint.shader = null
+            // 层 6：环绕小卫星 + 高光点
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.FILL
+            paint.color = 0xFFFFFFFF.toInt()
+            val sat1 = Math.toRadians((elapsed * 40.0) % 360.0)
+            c.drawCircle(
+                (cx + r1 * 0.95f * kotlin.math.cos(sat1)).toFloat(),
+                (cy + r1 * 0.95f * kotlin.math.sin(sat1)).toFloat(),
+                2f * dp, paint
+            )
+            paint.alpha = 200
+            val sat2 = Math.toRadians((-elapsed * 28.0 + 180.0) % 360.0)
+            c.drawCircle(
+                (cx + r1 * 1.02f * kotlin.math.cos(sat2)).toFloat(),
+                (cy + r1 * 1.02f * kotlin.math.sin(sat2)).toFloat(),
+                1.5f * dp, paint
+            )
+            paint.alpha = 230
+            c.drawCircle(cx - coreR * 0.35f, cy - coreR * 0.38f, coreR * 0.18f, paint)
+            if (pressed) c.restore()
         }
-
-        // 头像位：2026-10-26 用户令删 orb_bear 与 orb_ironman 两图，恒返回 null，走渐变盘面回退。
-        private fun avatarBitmap(): Bitmap? = null
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
             when (e.actionMasked) {
@@ -685,6 +714,8 @@ object OrbController {
                     downY = e.rawY
                     moved = false
                     longFired = false
+                    pressed = true
+                    invalidate()
                     host.dragStart()
                     postDelayed(longRunnable, 600)
                     return true
@@ -701,11 +732,15 @@ object OrbController {
                 }
                 MotionEvent.ACTION_UP -> {
                     removeCallbacks(longRunnable)
+                    pressed = false
+                    invalidate()
                     if (moved) host.dragEnd() else if (!longFired) host.tap()
                     return true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     removeCallbacks(longRunnable)
+                    pressed = false
+                    invalidate()
                     if (moved) host.dragEnd()
                     return true
                 }
