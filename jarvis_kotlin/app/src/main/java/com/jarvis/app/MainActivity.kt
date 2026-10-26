@@ -583,7 +583,7 @@ class MainActivity : Activity() {
     /** 功能自检页（原设置页顶部块，拆成二级页）：状态、无障碍/电池/常驻入口、悬浮球开关、节点读取。 */
     private fun buildSelfCheckSection(root: LinearLayout) {
         statusView = TextView(this).apply { textSize = 15f; setTextColor(Color.WHITE); setPadding(0, dp(12), 0, 0) }
-        val orbRow = switchRow("悬浮球", "由无障碍服务承载，关闭后悬浮球消失", OrbController.isEnabled(), { checked ->
+        val orbRow = switchRow("悬浮球", "由无障碍服务承载，关闭后悬浮球消失", OrbController.isEnabled(), onChecked = { checked ->
             if (orbSwitchUpdating) return@switchRow
             if (!JarvisAccessibilityService.isRunning()) {
                 toast("先开启无障碍服务，悬浮球由它承载")
@@ -594,7 +594,7 @@ class MainActivity : Activity() {
             }
             OrbController.setEnabled(checked)
             refresh()
-        }, { orbSwitch = it })
+        }, onCreated = { orbSwitch = it })
         val detail2 = TextView(this).apply { textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(12), 0, 0) }
 
         root.addView(statusView)
@@ -987,12 +987,12 @@ class MainActivity : Activity() {
             val name = traceName.text.toString().trim()
             if (name.isEmpty()) {
                 toast("先给技能起个名")
-                return@btn
+                return@primaryBtn
             }
             val trace = SkillTrace.snapshot()
             if (trace.isEmpty()) {
                 toast("还没有可存的操作记录（先让 Jarvis 点按几次）")
-                return@btn
+                return@primaryBtn
             }
             uiScope.launch {
                 SkillService.addSkill(this@MainActivity, name, name, SkillService.tapsToStepsJson(trace))
@@ -1025,13 +1025,13 @@ class MainActivity : Activity() {
             val trigger = newTrigger.text.toString().trim()
             if (name.isEmpty() || trigger.isEmpty()) {
                 toast("技能名和触发句都要填")
-                return@btn
+                return@primaryBtn
             }
             val arr = JSONArray()
             val lines = newSteps.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }
             if (lines.isEmpty()) {
                 toast("至少写一步")
-                return@btn
+                return@primaryBtn
             }
             for ((i, line) in lines.withIndex()) {
                 val obj: JSONObject? = when {
@@ -1053,7 +1053,7 @@ class MainActivity : Activity() {
                     (obj.optString("target").isEmpty() && obj.optString("t") == "tap")
                 ) {
                     toast("第 ${i + 1} 行看不懂：$line")
-                    return@btn
+                    return@primaryBtn
                 }
                 arr.put(obj)
             }
@@ -1567,9 +1567,11 @@ class MainActivity : Activity() {
 
     /** 开关行：标题 + 说明 + Switch（选中态紫色）。初始值先设好再挂 listener，避免误触发；
      * onCreated 供悬浮球那处拿 Switch 引用（refresh 时同步状态用）。 */
+    // 注意：onChecked 必须放最后一位（onCreated 之后），这样各处 switchRow(...) { checked -> ... }
+    // 的尾随 lambda 才能绑定到 onChecked；若 onChecked 在前，尾随 lambda 会误绑到 onCreated 而编译失败。
     private fun switchRow(
         title: String, desc: String, initial: Boolean,
-        onChecked: (Boolean) -> Unit, onCreated: ((android.widget.Switch) -> Unit)? = null
+        onCreated: ((android.widget.Switch) -> Unit)? = null, onChecked: (Boolean) -> Unit
     ): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
