@@ -14,7 +14,6 @@ import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -28,10 +27,11 @@ import kotlin.math.min
 /**
  * 微软 Edge 神经网络语音（云扬）——移植自参考实现（Flutter 版 Jarvis 真机验证过的协议）。
  *
- * 和二期交付的第一版相比，关键差异（按 `for_claude_reference/README.md` 的提示修正）：
- *  - 端点不是 speech.platform.bing.com，微软已经把 Read Aloud 迁到 api.msedgeservices.com；
- *  - 认证除了公开令牌（走 Ocp-Apim-Subscription-Key，不是查询参数 TrustedClientToken），
- *    还要带 Sec-MS-GEC（Windows ticks 向下取整 5 分钟 + 令牌 的 SHA-256 大写 hex）；
+ * v2 协议（2026-10-26 更新，旧 v1 写法握手已返回 200 不升级、彻底没声）：
+ *  - 端点迁回 speech.platform.bing.com，路径为 /consumer/speech/synthesize/readaloud/edge/v1，
+ *    参数改 TrustedClientToken（不再是 Ocp-Apim-Subscription-Key）；
+ *  - Sec-MS-GEC-Version 前缀由 1- 改为 2-，GEC 值由纯 SHA-256 改为 CS64-SHA256 两段式
+ *    （算法见 EdgeGec，移植自 edge-tts 7.3.1 的 drm.py；新写法已实测握手返回 101）；
  *  - 握手成功(101)后服务端会带 `Connection: close`，OkHttp 等标准 WebSocket 客户端可能直接
  *    判定握手失败，所以这里跟参考实现一样手写 TLS socket + 手搓 WebSocket 帧，不用 OkHttp；
  *  - 拿到的是 MP3，用 MediaCodec 解成 PCM 后用 AudioTrack 流式播放（而不是先落盘成 mp3
@@ -41,7 +41,7 @@ import kotlin.math.min
  */
 object EdgeTts {
     private const val TAG = "EdgeTts"
-    private const val HOST = "api.msedgeservices.com"
+    private const val HOST = "speech.platform.bing.com"
 
     /** 开源 edge-tts 项目公开的客户端令牌，不是任何人的私密凭据。 */
     private const val TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
@@ -191,15 +191,17 @@ object EdgeTts {
             val out = ssl.outputStream
 
             val key = android.util.Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, android.util.Base64.NO_WRAP)
-            val path = "/tts/cognitiveservices/websocket/v1" +
-                "?Ocp-Apim-Subscription-Key=$TOKEN" +
+            val path = "/consumer/speech/synthesize/readaloud/edge/v1" +
+                "?TrustedClientToken=$TOKEN" +
                 "&ConnectionId=${hexId()}" +
                 "&Sec-MS-GEC=${secMsGec()}" +
-                "&Sec-MS-GEC-Version=1-$CHROMIUM_MAJOR.0.3650.75"
+                "&Sec-MS-GEC-Version=2-$CHROMIUM_MAJOR.0.3650.75"
             val request = "GET $path HTTP/1.1\r\n" +
                 "Host: $HOST\r\n" +
                 "Upgrade: websocket\r\n" +
                 "Connection: Upgrade\r\n" +
+                "Pragma: no-cache\r\n" +
+                "Cache-Control: no-cache\r\n" +
                 "Sec-WebSocket-Key: $key\r\n" +
                 "Sec-WebSocket-Version: 13\r\n" +
                 "Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold\r\n" +
@@ -284,14 +286,8 @@ object EdgeTts {
             "<voice name='$voice'><prosody rate='$rateStr' pitch='$pitchStr'>$esc</prosody></voice></speak>"
     }
 
-    /** Sec-MS-GEC：Windows ticks（向下取整到 5 分钟）+ 令牌 的 SHA-256 大写 hex。 */
-    private fun secMsGec(): String {
-        var ticks = System.currentTimeMillis() / 1000 + 11644473600L
-        ticks -= ticks % 300
-        val winTicks = ticks * 10_000_000L
-        val digest = MessageDigest.getInstance("SHA-256").digest("$winTicks$TOKEN".toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02X".format(it) }
-    }
+    /** Sec-MS-GEC v2：格式为“CS64-SHA256”，算法见 EdgeGec（移植自 edge-tts 7.3.1 的 drm.py）。 */
+    private fun secMsGec(): String = EdgeGec.generate(TOKEN)
 
     private fun hexId(): String {
         val r = SecureRandom()
