@@ -27,10 +27,9 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
-import com.jarvis.app.hud.GalaxyHoloStageView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
-import com.jarvis.app.hud.JarvisRibbonView
+import com.jarvis.app.hud.JarvisHoloView
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
@@ -73,9 +72,8 @@ class MainActivity : Activity() {
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
     private var bgView: HudBackgroundView? = null
-    private var ribbonView: JarvisRibbonView? = null
+    private var holoView: JarvisHoloView? = null
     private lateinit var wakeChip: TextView
-    private lateinit var stageView: GalaxyHoloStageView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
     private lateinit var memoryListContainer: LinearLayout
@@ -111,15 +109,15 @@ class MainActivity : Activity() {
         )
 
         val root = FrameLayout(this)
-        if (JarvisRibbonView.isSupported(this)) {
-            // 交织光带 GL 背景：Surface 在窗口底层，全部 UI 盖在它上面；
-            // GL 自己画深蓝黑底 + 星点，渐变层与旧光晕点阵不再需要。
-            val rv = JarvisRibbonView(this).apply {
+        if (JarvisHoloView.isSupported(this)) {
+            // 全息光带 GL 背景（raymarching 三带）：Surface 在窗口底层，全部 UI 盖在它上面；
+            // 旧三叶结光带与银河舞台已删，主界面中央 420dp 区域空出来透出全息背景。
+            val hv = JarvisHoloView(this).apply {
                 amplitudeFn = { OfflineAsrSession.currentLevel() }
                 thinkingFn = { JarvisAgent.currentState() == "thinking" }
             }
-            ribbonView = rv
-            root.addView(rv, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            holoView = hv
+            root.addView(hv, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         } else {
             root.addView(
                 GradientLayerView(
@@ -164,7 +162,7 @@ class MainActivity : Activity() {
         JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s) } }
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
         JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
-        JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false); if (::stageView.isInitialized) stageView.setReplyText(t) } }
+        JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false) } }
         onAgentStateChanged(JarvisAgent.currentState())
 
         handleAssistIntent(intent)
@@ -194,17 +192,12 @@ class MainActivity : Activity() {
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
     }
 
-    // ---------- 中央舞台：批二十八星系全息版——替换批二十二反应堆（动效层/徽章/虚线环全部退役），
-    // 容器仍是 420dp（下方对话玻璃框与底部面板位置不动）；唤醒词胶囊保留在容器底部中央 ----------
+    // ---------- 中央区域：银河舞台已删（2026-10-27），只剩唤醒词胶囊；
+    // 容器仍是 420dp（下方对话玻璃框与底部面板位置不动），空出来的地方透出全息背景 ----------
 
     private fun buildStage(): FrameLayout {
         val stage = FrameLayout(this)
         stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(420))
-        stageView = GalaxyHoloStageView(this).apply {
-            mode = { JarvisAgent.currentState() }
-            micLevel = { OfflineAsrSession.currentLevel() }
-        }
-        stage.addView(stageView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         wakeChip = TextView(this).apply {
             text = "唤醒词 · 关"
             textSize = 12f
@@ -497,8 +490,8 @@ class MainActivity : Activity() {
         showingSettings = !showingSettings
         homePanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
         settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
-        // 光带只在主界面：进设置（含子页）藏起来，回对话再显示
-        ribbonView?.visibility = if (showingSettings) View.GONE else View.VISIBLE
+        // 全息背景只在主界面：进设置（含子页）藏起来，回对话再显示
+        holoView?.visibility = if (showingSettings) View.GONE else View.VISIBLE
         if (showingSettings) {
             closeSettingsPage()
             refresh()
@@ -1437,14 +1430,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        ribbonView?.onResume()
+        holoView?.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
     }
 
     override fun onPause() {
         OrbController.setAppForeground(false)
-        ribbonView?.onPause()
+        holoView?.onPause()
         super.onPause()
     }
 
