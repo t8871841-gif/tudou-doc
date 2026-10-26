@@ -30,6 +30,7 @@ import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.GalaxyHoloStageView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
+import com.jarvis.app.hud.JarvisRibbonView
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
@@ -71,7 +72,8 @@ class MainActivity : Activity() {
     private lateinit var chatScroll: ScrollView
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
-    private lateinit var bgView: HudBackgroundView
+    private var bgView: HudBackgroundView? = null
+    private var ribbonView: JarvisRibbonView? = null
     private lateinit var wakeChip: TextView
     private lateinit var stageView: GalaxyHoloStageView
     private lateinit var muteButton: ImageButton
@@ -109,19 +111,31 @@ class MainActivity : Activity() {
         )
 
         val root = FrameLayout(this)
-        root.addView(
-            GradientLayerView(
-                this,
-                intArrayOf(HudPalette.BG_TOP, HudPalette.BG_MID, HudPalette.BG_BOTTOM),
-                floatArrayOf(0f, 0.5f, 1f), diagonal = true
-            ),
-            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-        )
-        bgView = HudBackgroundView(this).apply {
-            mode = { JarvisAgent.currentState() }
-            micLevel = { OfflineAsrSession.currentLevel() }
+        if (JarvisRibbonView.isSupported(this)) {
+            // 交织光带 GL 背景：Surface 在窗口底层，全部 UI 盖在它上面；
+            // GL 自己画深蓝黑底 + 星点，渐变层与旧光晕点阵不再需要。
+            val rv = JarvisRibbonView(this).apply {
+                amplitudeFn = { OfflineAsrSession.currentLevel() }
+                thinkingFn = { JarvisAgent.currentState() == "thinking" }
+            }
+            ribbonView = rv
+            root.addView(rv, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        } else {
+            root.addView(
+                GradientLayerView(
+                    this,
+                    intArrayOf(HudPalette.BG_TOP, HudPalette.BG_MID, HudPalette.BG_BOTTOM),
+                    floatArrayOf(0f, 0.5f, 1f), diagonal = true
+                ),
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            )
+            val bg = HudBackgroundView(this).apply {
+                mode = { JarvisAgent.currentState() }
+                micLevel = { OfflineAsrSession.currentLevel() }
+            }
+            bgView = bg
+            root.addView(bg, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
-        root.addView(bgView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         // 批八：原先这里还盖着一层全屏黑色半透明渐变膜（上 65% 黑→中透明→下 80% 黑），
         // 整个界面发朦就是它——按用户要求撤掉；背景的光晕+点阵（上一层）与底部玻璃框保留不动。
 
@@ -1421,12 +1435,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        ribbonView?.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
     }
 
     override fun onPause() {
         OrbController.setAppForeground(false)
+        ribbonView?.onPause()
         super.onPause()
     }
 
