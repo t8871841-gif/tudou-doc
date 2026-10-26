@@ -358,13 +358,20 @@ object LocalCommands {
             AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "最近任务界面未出现")
             return
         }
-        val latch = java.util.concurrent.CountDownLatch(1)
+        // 最近任务刚出现时卡片可能还没铺好（入场动画），先等一拍再找卡片；
+        // 一次没找到不立刻认输，晚 800ms 再找一次。两次都用精确匹配，关错风险不变。
+        Thread.sleep(600)
         var dispatched = false
         var dispatchReason = ""
-        svc.dismissRecentCard(targetLabel) { ok, reason ->
-            dispatched = ok; dispatchReason = reason; latch.countDown()
+        for (attempt in 0 until 2) {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            svc.dismissRecentCard(targetLabel) { ok, reason ->
+                dispatched = ok; dispatchReason = reason; latch.countDown()
+            }
+            latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            if (dispatched || dispatchReason != "not_found") break
+            if (attempt == 0) Thread.sleep(800)
         }
-        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
         if (!dispatched) {
             val why = when (dispatchReason) {
                 "not_found" -> "最近任务里没找到${targetLabel}，可能它没在后台运行"
@@ -373,6 +380,10 @@ object LocalCommands {
                 else -> "手势没发出去，系统正忙，没关成"
             }
             AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "失败：$dispatchReason")
+            if (dispatchReason == "not_found") {
+                val seen = svc.recentCardLabels()
+                AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "最近任务卡片标题：${seen.joinToString("、").ifEmpty { "(一个都没读到)" }}")
+            }
             main.post { speak(why) }
             return
         }

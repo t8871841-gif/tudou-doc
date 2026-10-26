@@ -570,6 +570,26 @@ class JarvisAccessibilityService : AccessibilityService() {
         return findTextNodeRect(root, label) != null
     }
 
+    /** 最近任务界面里所有带文本的节点去重后的标题（关卡片失败时记审计日志用，帮定位该 ROM 的卡片标题格式）。 */
+    fun recentCardLabels(limit: Int = 20): List<String> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val out = LinkedHashSet<String>()
+        fun walk(node: AccessibilityNodeInfo) {
+            if (out.size >= limit) return
+            val t = node.text?.toString()?.trim().orEmpty()
+            if (t.isNotEmpty()) out.add(t.take(20))
+            val d = node.contentDescription?.toString()?.trim().orEmpty()
+            if (d.isNotEmpty()) out.add(d.take(20))
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                walk(child)
+                child.recycle()
+            }
+        }
+        walk(root)
+        return out.toList()
+    }
+
     /** 深度优先找文本或无障碍描述等于 label 的节点，返回其屏幕坐标框；找不到返回 null。 */
     private fun findTextNodeRect(node: AccessibilityNodeInfo, label: String): Rect? {
         if (node.text?.toString() == label || node.contentDescription?.toString() == label) {
