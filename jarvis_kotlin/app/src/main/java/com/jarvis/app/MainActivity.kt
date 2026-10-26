@@ -497,6 +497,8 @@ class MainActivity : Activity() {
         showingSettings = !showingSettings
         homePanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
         settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
+        // 光带只在主界面：进设置（含子页）藏起来，回对话再显示
+        ribbonView?.visibility = if (showingSettings) View.GONE else View.VISIBLE
         if (showingSettings) {
             closeSettingsPage()
             refresh()

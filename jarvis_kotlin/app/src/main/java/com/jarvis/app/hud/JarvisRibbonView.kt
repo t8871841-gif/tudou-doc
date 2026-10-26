@@ -19,8 +19,10 @@ import kotlin.math.tan
  * 主界面静止效果：交织光带 GL 背景（OpenGL ES 3.0）。
  *
  * 做法（对照用户给的参考图：立体交织的蓝橙光带 + 星空）：
- * - 两条三叶结（2,3）环带：一条冷蓝、一条暖橙，第二条沿法线推出 0.38，
- *   与第一条真实打结缠绕，交叉处靠深度测试形成压上/穿下的遮挡；
+ * - 9 条细光丝：4 个倾角的三叶结（2,3）带交织穿插，蓝橙浅蓝交替，
+ *   交叉处靠深度测试形成压上/穿下的遮挡；
+ * - 每条带本身不是实心的：片元着色器把带宽 9 等分，每格中心一条亮线、
+ *   格边为空隙，透出星空和别的丝；
  * - 全屏背景三角画深蓝黑底 + 哈希星点 + 暗角；
  * - 慢速自转（待机 30 秒/圈，thinking 时 ×3）、2 秒呼吸缩放；
  * - amplitude（聆听音量 0..1）推高辉光与整体缩放。
@@ -180,7 +182,7 @@ private class RibbonRenderer(private val view: JarvisRibbonView) : GLSurfaceView
             val spin = t * (2f * PI.toFloat() / 30f) * spinSpeed // 待机 30 秒/圈
             val breath = 1f + 0.02f * sin(PI.toFloat() * t) // 2 秒呼吸 0.98~1.02
             val scale = breath * (1f + 0.04f * amp)
-            val glow = 0.85f + 0.75f * amp
+            val glow = 0.55f + 0.60f * amp // 退居背景：底辉光调暗（原 0.85 + 0.75*amp）
 
             val mvp = buildMvp(spin, scale)
             GLES30.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
@@ -271,10 +273,12 @@ in float vAcross;
 out vec4 fragColor;
 void main() {
     float a = abs(vAcross);
-    // 带边柔和衰减 + 中心更亮，加色混合后自然成辉光
-    float edge = 1.0 - smoothstep(0.55, 1.0, a);
-    float core = 1.0 - smoothstep(0.0, 0.4, a);
-    vec3 col = vColor * (edge * 0.85 + core * 0.7) * uGlow;
+    // 带内 9 根微线：带宽 9 等分，每格中心一条亮线、格边为空隙，透出星空和别的丝
+    float cell = fract((vAcross * 0.5 + 0.5) * 9.0);
+    float line = 1.0 - smoothstep(0.10, 0.38, abs(cell - 0.5));
+    // 带缘只在最外侧柔和收边，不切断微线
+    float edge = 1.0 - smoothstep(0.85, 1.0, a);
+    vec3 col = vColor * line * edge * uGlow * 1.3;
     fragColor = vec4(col, 1.0);
 }
 """
@@ -332,11 +336,22 @@ void main() {
 
     // 网格常量（类里只能有一个 companion，写成普通成员字段）
     private val SEGMENTS = 360
-    private val KNOT_SCALE = 0.72f // 结半径 3 -> 2.16，相机 z=7、fov45 时竖向刚好，横向裁边（与参考图一致）
-    private val HALF_W = 0.16f // 单条带半宽
-    private val PUSH = 0.38f // 第二条带沿法线推出距离（0.38 - 0.16 - 0.16 = 0.06 缝隙，缠绕感）
+    private val KNOT_SCALE = 0.5f // 背景位：结约占屏高一半，不再满屏（原 0.72）
+    private val HALF_W = 0.05f // 单条带半宽：细丝（原 0.16）
+    // 9 条带：4 个倾角（3/2/2/2 分布），倾角以 (rx, rz) 给出， baked 进顶点
+    private val BAND_TILTS = arrayOf(
+        doubleArrayOf(0.45, 0.0),
+        doubleArrayOf(-0.85, 0.7),
+        doubleArrayOf(0.9, -0.6),
+        doubleArrayOf(-0.3, 1.2)
+    )
+    private val BAND_TILT_OF = intArrayOf(0, 0, 0, 1, 1, 2, 2, 3, 3)
+    // 同倾角内各带沿法线错开，免得重合 z-fighting
+    private val BAND_OFFSET = doubleArrayOf(-0.34, 0.0, 0.34, -0.17, 0.17, -0.17, 0.17, -0.17, 0.17)
     private val BLUE = floatArrayOf(0.30f, 0.62f, 1.0f)
     private val ORANGE = floatArrayOf(1.0f, 0.50f, 0.16f)
+    private val PALE = floatArrayOf(0.65f, 0.85f, 1.0f)
+    private val BAND_COLORS = arrayOf(BLUE, ORANGE, PALE, BLUE, ORANGE, PALE, BLUE, ORANGE, PALE)
 
     /** 三叶结 (2,3)：P(t) = ((2+cos3t)cos2t, (2+cos3t)sin2t, sin3t)，t in [0, 2π) */
     private fun knotPoint(t: Double): DoubleArray {
@@ -377,8 +392,8 @@ void main() {
             }
         }
 
-        // 顶点：两条带，每段 2 点（across -1/+1），每点 7 float：pos(3) + color(3) + across(1)
-        val verts = FloatArray(2 * n * 2 * 7)
+        // 顶点：9 条带，每段 2 点（across -1/+1），每点 7 float：pos(3) + color(3) + across(1)
+        val verts = FloatArray(9 * n * 2 * 7)
         fun putVert(base: Int, idx: Int, cx: Double, cy: Double, cz: Double, across: Float, color: FloatArray) {
             var o = base + idx * 7
             verts[o++] = (cx * KNOT_SCALE).toFloat()
@@ -389,26 +404,28 @@ void main() {
             verts[o++] = color[2]
             verts[o] = across
         }
-        for (i in 0 until n) {
-            val p = points[i]
-            val nn = normals[i]
-            // 带 A：冷蓝，本体
-            putVert(0, 2 * i, p[0] - nn[0] * HALF_W, p[1] - nn[1] * HALF_W, p[2] - nn[2] * HALF_W, -1f, BLUE)
-            putVert(0, 2 * i + 1, p[0] + nn[0] * HALF_W, p[1] + nn[1] * HALF_W, p[2] + nn[2] * HALF_W, 1f, BLUE)
-            // 带 B：暖橙，沿法线推出 PUSH，与 A 打结缠绕
-            val qx = p[0] + nn[0] * PUSH
-            val qy = p[1] + nn[1] * PUSH
-            val qz = p[2] + nn[2] * PUSH
-            val baseB = 2 * n * 7
-            putVert(baseB, 2 * i, qx - nn[0] * HALF_W, qy - nn[1] * HALF_W, qz - nn[2] * HALF_W, -1f, ORANGE)
-            putVert(baseB, 2 * i + 1, qx + nn[0] * HALF_W, qy + nn[1] * HALF_W, qz + nn[2] * HALF_W, 1f, ORANGE)
+        for (band in 0 until 9) {
+            val tilt = BAND_TILTS[BAND_TILT_OF[band]]
+            val off = BAND_OFFSET[band]
+            val color = BAND_COLORS[band]
+            val baseB = band * n * 2 * 7
+            for (i in 0 until n) {
+                // 倾角 baked 进顶点：点和法线同转，9 条带在模型空间已是 4 个角度
+                val p = rotXZ(points[i], tilt[0], tilt[1])
+                val nn = rotXZ(normals[i], tilt[0], tilt[1])
+                val cx = p[0] + nn[0] * off
+                val cy = p[1] + nn[1] * off
+                val cz = p[2] + nn[2] * off
+                putVert(baseB, 2 * i, cx - nn[0] * HALF_W, cy - nn[1] * HALF_W, cz - nn[2] * HALF_W, -1f, color)
+                putVert(baseB, 2 * i + 1, cx + nn[0] * HALF_W, cy + nn[1] * HALF_W, cz + nn[2] * HALF_W, 1f, color)
+            }
         }
 
         // 索引：每条带每段 2 三角，闭环 wraparound
-        val idx = ShortArray(2 * n * 6)
+        val idx = ShortArray(9 * n * 6)
         var o = 0
-        for (ribbon in 0 until 2) {
-            val base = ribbon * 2 * n
+        for (band in 0 until 9) {
+            val base = band * 2 * n
             for (i in 0 until n) {
                 val j = (i + 1) % n
                 val a = base + 2 * i
@@ -424,6 +441,17 @@ void main() {
             }
         }
         return MeshData(verts, idx)
+    }
+
+    /** 先绕 X 转 rx、再绕 Z 转 rz（刚性旋转，点和法线同转） */
+    private fun rotXZ(p: DoubleArray, rx: Double, rz: Double): DoubleArray {
+        val cx = cos(rx); val sx = sin(rx)
+        val y1 = p[1] * cx - p[2] * sx
+        val z1 = p[1] * sx + p[2] * cx
+        val cz = cos(rz); val sz = sin(rz)
+        val x2 = p[0] * cz - y1 * sz
+        val y2 = p[0] * sz + y1 * cz
+        return doubleArrayOf(x2, y2, z1)
     }
 
     private fun dot(a: DoubleArray, b: DoubleArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -452,11 +480,10 @@ void main() {
     // ---------- 矩阵（列主序 FloatArray(16)，与 glUniformMatrix4fv transpose=false 对应） ----------
 
     private fun buildMvp(spinY: Float, scale: Float): FloatArray {
-        // M = Ry(spinY) * Rx(0.45) * S(scale)，V = 平移 z=-7，P = 透视 45°
-        val rx = rotX(0.45f)
+        // M = Ry(spinY) * S(scale)；倾角已 baked 进各带顶点，不再另加全局 tilt
         val ry = rotY(spinY)
         val s = scaleMat(scale)
-        val m = multiply(ry, multiply(rx, s))
+        val m = multiply(ry, s)
         val v = FloatArray(16)
         v[0] = 1f; v[5] = 1f; v[10] = 1f; v[15] = 1f
         v[14] = -7f // 相机在 z=7 看向原点
@@ -473,14 +500,6 @@ void main() {
         m[10] = (far + near) / (near - far)
         m[11] = -1f
         m[14] = 2f * far * near / (near - far)
-        return m
-    }
-
-    private fun rotX(a: Float): FloatArray {
-        val c = cos(a)
-        val s = sin(a)
-        val m = FloatArray(16)
-        m[0] = 1f; m[5] = c; m[6] = s; m[9] = -s; m[10] = c; m[15] = 1f
         return m
     }
 
