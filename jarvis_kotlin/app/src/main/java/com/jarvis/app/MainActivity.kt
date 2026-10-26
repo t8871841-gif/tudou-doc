@@ -15,7 +15,6 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -64,7 +63,8 @@ class MainActivity : Activity() {
 
     private lateinit var statusView: TextView
     private lateinit var detailView: TextView
-    private lateinit var orbButton: Button
+    private var orbSwitch: android.widget.Switch? = null
+    private var orbSwitchUpdating = false
     private lateinit var homePanel: LinearLayout
     private lateinit var settingsScroll: ScrollView
     private lateinit var chatList: LinearLayout
@@ -490,7 +490,15 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(24))
         }
-        root.addView(btn("← 回到对话") { toggleSettings() })
+        root.addView(TextView(this).apply {
+            text = "设置"; textSize = 22f; setTextColor(Color.WHITE)
+            setPadding(0, dp(4), 0, dp(12))
+        })
+        root.addView(TextView(this).apply {
+            text = "‹ 回到对话"; textSize = 15f; setTextColor(HudPalette.GALAXY_MID)
+            setPadding(0, dp(4), 0, dp(12))
+            setOnClickListener { toggleSettings() }
+        })
 
         // 真机反馈（jk-v11）：设置改二级页面——先进目录，点一类进一类，不再十个分区一长条。
         settingsListPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -499,29 +507,34 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
         settingsPageContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        settingsPageHost.addView(btn("← 返回设置目录") { closeSettingsPage() })
+        settingsPageHost.addView(TextView(this).apply {
+            text = "‹ 返回设置目录"; textSize = 15f; setTextColor(HudPalette.GALAXY_MID)
+            setPadding(0, dp(4), 0, dp(12))
+            setOnClickListener { closeSettingsPage() }
+        })
         settingsPageHost.addView(settingsPageContent)
         root.addView(settingsListPanel)
         root.addView(settingsPageHost)
 
-        val pages = listOf<Pair<String, (LinearLayout) -> Unit>>(
-            "功能自检" to { v -> buildSelfCheckSection(v) },
-            "对话与语音" to { v -> buildVoiceSettingsSection(v) },
-            "视觉看屏" to { v -> buildVisionSection(v) },
-            "常驻与入口" to { v -> buildEntrySection(v) },
-            "记忆" to { v -> buildMemorySection(v) },
-            "技能" to { v -> buildSkillSection(v) },
-            "本地模型" to { v -> buildLocalLlmSection(v) },
-            "主动播报" to { v -> buildAnnounceSection(v) },
-            "晨报与出发提醒" to { v -> buildBriefSection(v) },
-            "操作审计" to { v -> buildAuditSection(v) },
-            "关于" to { v -> buildAboutSection(v) }
+        val pages = listOf<Triple<String, String, (LinearLayout) -> Unit>>(
+            Triple("✅", "功能自检", { v -> buildSelfCheckSection(v) }),
+            Triple("💬", "对话与语音", { v -> buildVoiceSettingsSection(v) }),
+            Triple("👁️", "视觉看屏", { v -> buildVisionSection(v) }),
+            Triple("🚀", "常驻与入口", { v -> buildEntrySection(v) }),
+            Triple("🧠", "记忆", { v -> buildMemorySection(v) }),
+            Triple("🧩", "技能", { v -> buildSkillSection(v) }),
+            Triple("🤖", "本地模型", { v -> buildLocalLlmSection(v) }),
+            Triple("📢", "主动播报", { v -> buildAnnounceSection(v) }),
+            Triple("⏰", "晨报与出发提醒", { v -> buildBriefSection(v) }),
+            Triple("📋", "操作审计", { v -> buildAuditSection(v) }),
+            Triple("ℹ️", "关于", { v -> buildAboutSection(v) })
         )
-        for ((title, builder) in pages) {
+        for ((icon, title, builder) in pages) {
             val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             builder(page)
+            styleSettingsInputs(page)
             settingsPages[title] = page
-            settingsListPanel.addView(btn(title) { openSettingsPage(title) })
+            settingsListPanel.addView(settingRow(icon, title) { openSettingsPage(title) })
         }
         return ScrollView(this).apply { addView(root) }
     }
@@ -570,17 +583,18 @@ class MainActivity : Activity() {
     /** 功能自检页（原设置页顶部块，拆成二级页）：状态、无障碍/电池/常驻入口、悬浮球开关、节点读取。 */
     private fun buildSelfCheckSection(root: LinearLayout) {
         statusView = TextView(this).apply { textSize = 15f; setTextColor(Color.WHITE); setPadding(0, dp(12), 0, 0) }
-        orbButton = Button(this).apply {
-            setOnClickListener {
-                if (!JarvisAccessibilityService.isRunning()) {
-                    toast("先开启无障碍服务，悬浮球由它承载")
-                    return@setOnClickListener
-                }
-                val on = !OrbController.isEnabled()
-                OrbController.setEnabled(on)
-                refresh()
+        val orbRow = switchRow("悬浮球", "由无障碍服务承载，关闭后悬浮球消失", OrbController.isEnabled(), { checked ->
+            if (orbSwitchUpdating) return@switchRow
+            if (!JarvisAccessibilityService.isRunning()) {
+                toast("先开启无障碍服务，悬浮球由它承载")
+                orbSwitchUpdating = true
+                orbSwitch?.isChecked = false
+                orbSwitchUpdating = false
+                return@switchRow
             }
-        }
+            OrbController.setEnabled(checked)
+            refresh()
+        }, { orbSwitch = it })
         val detail2 = TextView(this).apply { textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(12), 0, 0) }
 
         root.addView(statusView)
@@ -594,7 +608,7 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(android.Manifest.permission.READ_CONTACTS), 6201)
         })
         root.addView(btn("启动常驻服务") { startKeepAlive(manual = true) })
-        root.addView(orbButton)
+        root.addView(orbRow)
         root.addView(btn("测试：读取当前界面") {
             if (!JarvisAccessibilityService.isRunning()) { toast("无障碍未开启，读不到界面"); return@btn }
             detail2.text = "界面节点树（前 600 字）：\n" + JarvisAccessibilityService.perceiveScreenTree().take(600)
@@ -610,6 +624,7 @@ class MainActivity : Activity() {
         }
         root.addView(section)
 
+        root.addView(sectionTitle("对话 Key"))
         val keyLabel = TextView(this).apply {
             text = "Agnes API Key（对话用，不会写死在代码里）"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt())
         }
@@ -619,7 +634,7 @@ class MainActivity : Activity() {
         }
         root.addView(keyLabel)
         root.addView(keyInput)
-        root.addView(btn("保存 Key") {
+        root.addView(primaryBtn("保存 Key") {
             JarvisPrefs.setAgnesKey(this, keyInput.text.toString())
             toast("已保存")
         })
@@ -627,25 +642,15 @@ class MainActivity : Activity() {
         // ---- 批十二：跨应用任务模型切换 + DeepSeek Key ----
         // 任务循环（task/TaskLoop）的大脑二选一：Agnes 带图问；DeepSeek 纯文本，
         // 靠无障碍界面树文字推进（Andee 同款路线，识图不是命脉）。
-        val taskBrainBtn = Button(this)
-        fun refreshTaskBrainBtn() {
-            taskBrainBtn.text = if (JarvisPrefs.getTaskBrain(this) == "deepseek") {
-                "跨应用任务模型：DeepSeek"
-            } else {
-                "跨应用任务模型：Agnes"
-            }
-        }
-        taskBrainBtn.setOnClickListener {
-            val next = if (JarvisPrefs.getTaskBrain(this) == "deepseek") "agnes" else "deepseek"
+        root.addView(segmentedRow("跨应用任务模型", listOf("Agnes", "DeepSeek"),
+            if (JarvisPrefs.getTaskBrain(this) == "deepseek") 1 else 0) { i ->
+            val next = if (i == 1) "deepseek" else "agnes"
             JarvisPrefs.setTaskBrain(this, next)
-            refreshTaskBrainBtn()
             toast(
                 if (next == "deepseek") "跨应用任务改用 DeepSeek（纯文本，看界面树操作）"
                 else "跨应用任务改用 Agnes（带截图问）"
             )
-        }
-        refreshTaskBrainBtn()
-        root.addView(taskBrainBtn)
+        })
 
         val dsKeyLabel = TextView(this).apply {
             text = "DeepSeek API Key（跨应用任务选 DeepSeek 时用）"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt())
@@ -656,20 +661,32 @@ class MainActivity : Activity() {
         }
         root.addView(dsKeyLabel)
         root.addView(dsKeyInput)
-        root.addView(btn("保存 DeepSeek Key") {
+        root.addView(primaryBtn("保存 DeepSeek Key") {
             JarvisPrefs.setDeepSeekKey(this, dsKeyInput.text.toString())
             toast("已保存")
         })
 
         // ---- 播报声音：下拉选择 + 试听（批二新增） ----
-        root.addView(TextView(this).apply { text = "播报声音"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()) })
+        root.addView(sectionTitle("播报声音"))
         val savedVoice = JarvisPrefs.getVoice(this).ifBlank { com.jarvis.app.tts.EdgeVoices.DEFAULT_ID }
         var selectedVoice = savedVoice
         val voiceSpinner = android.widget.Spinner(this).apply {
-            adapter = android.widget.ArrayAdapter(
+            // 浅色主题下原 adapter 的选中行是深字、落在深底上看不清；选中行改白字、下拉行改深字。
+            adapter = object : android.widget.ArrayAdapter<String>(
                 this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
                 com.jarvis.app.tts.EdgeVoices.LIST.map { it.label }
-            )
+            ) {
+                override fun getView(pos: Int, v: View?, parent: android.view.ViewGroup): View {
+                    val tv = super.getView(pos, v, parent) as TextView
+                    tv.setTextColor(HudPalette.ICE)
+                    return tv
+                }
+                override fun getDropDownView(pos: Int, v: View?, parent: android.view.ViewGroup): View {
+                    val tv = super.getDropDownView(pos, v, parent) as TextView
+                    tv.setTextColor(0xFF111111.toInt())
+                    return tv
+                }
+            }
             val idx = com.jarvis.app.tts.EdgeVoices.LIST.indexOfFirst { it.id == savedVoice }.coerceAtLeast(0)
             setSelection(idx)
             onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
@@ -680,7 +697,9 @@ class MainActivity : Activity() {
             }
         }
         root.addView(voiceSpinner)
-        val previewBtn = Button(this)
+        val previewBtn = styleBtn(Button(this), false).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) }
+        }
         previewBtn.text = "试听"
         previewBtn.setOnClickListener {
             if (com.jarvis.app.tts.EdgeTts.isSpeaking()) {
@@ -702,23 +721,23 @@ class MainActivity : Activity() {
             )
         }
         root.addView(previewBtn)
-        root.addView(btn("保存声音选择") {
+        root.addView(primaryBtn("保存声音选择") {
             JarvisPrefs.setVoice(this, selectedVoice)
             toast("已保存，先点“试听”确认效果")
         })
-        // 批八：语音引擎三档（治两个声来回跳）——自动/只用云扬/只用系统，点按循环切换。
-        val engineBtn = Button(this)
-        fun refreshEngineBtn() {
-            engineBtn.text = "语音引擎：${JarvisPrefs.ttsEngineLabel(JarvisPrefs.getTtsEngine(this))}（点按切换）"
-        }
-        engineBtn.setOnClickListener {
-            val next = when (JarvisPrefs.getTtsEngine(this)) {
-                "auto" -> "edge"
-                "edge" -> "system"
+        // 批八：语音引擎三档（治两个声来回跳）——自动/只用云扬/只用系统。
+        root.addView(segmentedRow("语音引擎", listOf("自动", "只用云扬", "只用系统"),
+            when (JarvisPrefs.getTtsEngine(this)) {
+                "edge" -> 1
+                "system" -> 2
+                else -> 0
+            }) { i ->
+            val next = when (i) {
+                1 -> "edge"
+                2 -> "system"
                 else -> "auto"
             }
             JarvisPrefs.setTtsEngine(this, next)
-            refreshEngineBtn()
             toast(
                 when (next) {
                     "edge" -> "只用云扬：断网时只出文字，不换系统声"
@@ -726,9 +745,7 @@ class MainActivity : Activity() {
                     else -> "自动：云扬失败重试一次，再落系统语音"
                 }
             )
-        }
-        refreshEngineBtn()
-        root.addView(engineBtn)
+        })
         // 批十：天气默认城市（问天气不带城市名时用这个）
         root.addView(TextView(this).apply {
             text = "天气默认城市（问天气不带城市时用）"
@@ -742,22 +759,18 @@ class MainActivity : Activity() {
             setHintTextColor(0x61FFFFFF.toInt())
         }
         root.addView(cityInput)
-        root.addView(btn("保存天气城市") {
+        root.addView(primaryBtn("保存天气城市") {
             JarvisPrefs.setWeatherCity(this, cityInput.text.toString().trim())
             toast("天气默认城市已保存：${JarvisPrefs.getWeatherCity(this)}")
         })
 
-        val wakeBox = CheckBox(this).apply {
-            text = "开启唤醒词「贾维斯」（离线识别轮询，非专用低功耗 KWS，见自检详情）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isWakeEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked ->
-                JarvisPrefs.setWakeEnabled(this@MainActivity, checked)
-                if (checked) JarvisAgent.maybeStartWakeLoop() else JarvisAgent.stopWakeLoop()
-                refreshWakeChip()
-            }
-        }
-        root.addView(wakeBox)
+        root.addView(sectionTitle("唤醒词"))
+        root.addView(switchRow("开启唤醒词「贾维斯」", "离线识别轮询，非专用低功耗 KWS，见自检详情",
+            JarvisPrefs.isWakeEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setWakeEnabled(this@MainActivity, checked)
+            if (checked) JarvisAgent.maybeStartWakeLoop() else JarvisAgent.stopWakeLoop()
+            refreshWakeChip()
+        })
 
         // ---- 唤醒严格度：严格/标准/宽松三档（批二替换掉原来的 0..100 滑杆） ----
         root.addView(TextView(this).apply {
@@ -772,14 +785,14 @@ class MainActivity : Activity() {
             }
         }
         strictLabels.forEachIndexed { i, label ->
-            val b = Button(this).apply {
+            val b = styleBtn(Button(this).apply {
                 text = label
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 setOnClickListener {
                     JarvisPrefs.setWakeStrictness(this@MainActivity, i)
                     paintStrict(i)
                 }
-            }
+            }, false)
             strictButtons.add(b)
             strictRow.addView(b)
         }
@@ -791,11 +804,9 @@ class MainActivity : Activity() {
             textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, dp(8))
         })
 
-        root.addView(CheckBox(this).apply {
-            text = "播报时允许被打断说话（默认关：麦克风点击才启用；开着时播报期间会开麦听打断）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isBargeInEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setBargeInEnabled(this@MainActivity, checked) }
+        root.addView(switchRow("播报时允许被打断说话", "默认关：麦克风点击才启用；开着时播报期间会开麦听打断",
+            JarvisPrefs.isBargeInEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setBargeInEnabled(this@MainActivity, checked)
         })
     }
 
@@ -804,11 +815,9 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "视觉看屏（截图 + 多模态模型）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        root.addView(CheckBox(this).apply {
-            text = "启用视觉看屏"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isVisionEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setVisionEnabled(this@MainActivity, checked) }
+        root.addView(switchRow("启用视觉看屏", "",
+            JarvisPrefs.isVisionEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setVisionEnabled(this@MainActivity, checked)
         })
         root.addView(TextView(this).apply {
             text = "界面读不到文字、或点不到目标时，截图发给下面配置的模型兜底；银行/支付/钱包/系统设置类界面永不截图。"
@@ -831,7 +840,7 @@ class MainActivity : Activity() {
             text = "坐标点击只在“不在黑名单 且 在看屏白名单内”的 App 里允许；含 bank/pay/wallet/settings 的包名会被原生层拒绝。"
             textSize = 11f; setTextColor(0x8AFFFFFF.toInt())
         })
-        root.addView(btn("保存视觉看屏设置") {
+        root.addView(primaryBtn("保存视觉看屏设置") {
             JarvisPrefs.setVisionModel(this, vModel.text.toString())
             JarvisPrefs.setVisionBaseUrl(this, vBase.text.toString())
             JarvisPrefs.setVisionApiKey(this, vKey.text.toString())
@@ -856,21 +865,15 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "常驻与入口"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        root.addView(CheckBox(this).apply {
-            text = "后台常驻待命（前台服务 + 常驻通知，熄屏也能听“贾维斯”，耗电会增加）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isKeepAliveEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked ->
-                JarvisPrefs.setKeepAliveEnabled(this@MainActivity, checked)
-                if (checked) startKeepAlive(manual = true)
-                // 关闭时不主动杀掉已经在跑的前台服务——只是不再"记住要常驻"，下次打开 App 不会自动再启动。
-            }
+        root.addView(switchRow("后台常驻待命", "前台服务 + 常驻通知，熄屏也能听“贾维斯”，耗电会增加",
+            JarvisPrefs.isKeepAliveEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setKeepAliveEnabled(this@MainActivity, checked)
+            if (checked) startKeepAlive(manual = true)
+            // 关闭时不主动杀掉已经在跑的前台服务——只是不再"记住要常驻"，下次打开 App 不会自动再启动。
         })
-        root.addView(CheckBox(this).apply {
-            text = "连续对话（语音回答说完自动继续听，不用再喊一次唤醒词）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isContinuousChat(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setContinuousChat(this@MainActivity, checked) }
+        root.addView(switchRow("连续对话", "语音回答说完自动继续听，不用再喊一次唤醒词",
+            JarvisPrefs.isContinuousChat(this@MainActivity)) { checked ->
+            JarvisPrefs.setContinuousChat(this@MainActivity, checked)
         })
         val linkRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0) }
         linkRow.addView(btn("设为默认助手") {
@@ -896,14 +899,10 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "记忆（画像与长期记忆）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        root.addView(CheckBox(this).apply {
-            text = "启用长期记忆（说“记住：……”写入，对话时自动带上）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isMemoryEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked ->
-                JarvisPrefs.setMemoryEnabled(this@MainActivity, checked)
-                refreshMemoryList()
-            }
+        root.addView(switchRow("启用长期记忆", "说“记住：……”写入，对话时自动带上",
+            JarvisPrefs.isMemoryEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setMemoryEnabled(this@MainActivity, checked)
+            refreshMemoryList()
         })
         memoryListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(memoryListContainer)
@@ -951,7 +950,7 @@ class MainActivity : Activity() {
                     setTextColor(0xFFE8ECF4.toInt())
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
-                row.addView(Button(this@MainActivity).apply {
+                row.addView(styleBtn(Button(this@MainActivity).apply {
                     text = "删除"
                     setOnClickListener {
                         uiScope.launch {
@@ -959,7 +958,7 @@ class MainActivity : Activity() {
                             refreshMemoryList()
                         }
                     }
-                })
+                }, false))
                 memoryListContainer.addView(row)
             }
         }
@@ -970,14 +969,10 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "技能（固化任务）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        root.addView(CheckBox(this).apply {
-            text = "启用技能（话里命中触发句就直接重播步骤）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isSkillEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked ->
-                JarvisPrefs.setSkillEnabled(this@MainActivity, checked)
-                refreshSkillList()
-            }
+        root.addView(switchRow("启用技能", "话里命中触发句就直接重播步骤",
+            JarvisPrefs.isSkillEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setSkillEnabled(this@MainActivity, checked)
+            refreshSkillList()
         })
         skillListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(skillListContainer)
@@ -988,7 +983,7 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
         }
         root.addView(traceName)
-        root.addView(btn("把最近操作存为技能") {
+        root.addView(primaryBtn("把最近操作存为技能") {
             val name = traceName.text.toString().trim()
             if (name.isEmpty()) {
                 toast("先给技能起个名")
@@ -1025,7 +1020,7 @@ class MainActivity : Activity() {
         root.addView(newName)
         root.addView(newTrigger)
         root.addView(newSteps)
-        root.addView(btn("保存新技能") {
+        root.addView(primaryBtn("保存新技能") {
             val name = newName.text.toString().trim()
             val trigger = newTrigger.text.toString().trim()
             if (name.isEmpty() || trigger.isEmpty()) {
@@ -1106,7 +1101,7 @@ class MainActivity : Activity() {
                     setTextColor(0xFFE8ECF4.toInt())
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
-                row.addView(CheckBox(this@MainActivity).apply {
+                row.addView(android.widget.Switch(this@MainActivity).apply {
                     isChecked = item.enabled
                     setOnCheckedChangeListener { _, checked ->
                         uiScope.launch {
@@ -1114,7 +1109,7 @@ class MainActivity : Activity() {
                         }
                     }
                 })
-                row.addView(Button(this@MainActivity).apply {
+                row.addView(styleBtn(Button(this@MainActivity).apply {
                     text = "删除"
                     setOnClickListener {
                         uiScope.launch {
@@ -1122,7 +1117,7 @@ class MainActivity : Activity() {
                             refreshSkillList()
                         }
                     }
-                })
+                }, false))
                 skillListContainer.addView(row)
             }
         }
@@ -1148,17 +1143,13 @@ class MainActivity : Activity() {
                 toast("打不开文件选择器：${e.message}")
             }
         })
-        root.addView(CheckBox(this).apply {
-            text = "启用本地模型"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isLocalLlmEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setLocalLlmEnabled(this@MainActivity, checked) }
+        root.addView(switchRow("启用本地模型", "",
+            JarvisPrefs.isLocalLlmEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setLocalLlmEnabled(this@MainActivity, checked)
         })
-        root.addView(CheckBox(this).apply {
-            text = "智能调配（开 = 闲聊本地答、问答云端答；关 = 云端优先、本地只在云端失败时兜底）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isLocalLlmPrefer(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setLocalLlmPrefer(this@MainActivity, checked) }
+        root.addView(switchRow("智能调配", "开 = 闲聊本地答、问答云端答；关 = 云端优先、本地只在云端失败时兜底",
+            JarvisPrefs.isLocalLlmPrefer(this@MainActivity)) { checked ->
+            JarvisPrefs.setLocalLlmPrefer(this@MainActivity, checked)
         })
         val tokensInput = EditText(this).apply {
             hint = "maxTokens（256–1024，你的 gemma3 上限就是 1024）"
@@ -1167,7 +1158,7 @@ class MainActivity : Activity() {
             setText(JarvisPrefs.getLocalMaxTokens(this@MainActivity).toString())
         }
         root.addView(tokensInput)
-        root.addView(btn("保存 maxTokens") {
+        root.addView(primaryBtn("保存 maxTokens") {
             val v = tokensInput.text.toString().trim().toIntOrNull()
             if (v == null) {
                 toast("填个数字")
@@ -1254,23 +1245,17 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "主动播报"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        root.addView(CheckBox(this).apply {
-            text = "启用主动播报（来电/短信/指定应用通知读出来）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isAnnounceEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setAnnounceEnabled(this@MainActivity, checked) }
+        root.addView(switchRow("启用主动播报", "来电/短信/指定应用通知读出来",
+            JarvisPrefs.isAnnounceEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setAnnounceEnabled(this@MainActivity, checked)
         })
-        root.addView(CheckBox(this).apply {
-            text = "播报来电"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isAnnounceCalls(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setAnnounceCalls(this@MainActivity, checked) }
+        root.addView(switchRow("播报来电", "",
+            JarvisPrefs.isAnnounceCalls(this@MainActivity)) { checked ->
+            JarvisPrefs.setAnnounceCalls(this@MainActivity, checked)
         })
-        root.addView(CheckBox(this).apply {
-            text = "播报短信"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isAnnounceSms(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setAnnounceSms(this@MainActivity, checked) }
+        root.addView(switchRow("播报短信", "",
+            JarvisPrefs.isAnnounceSms(this@MainActivity)) { checked ->
+            JarvisPrefs.setAnnounceSms(this@MainActivity, checked)
         })
         root.addView(TextView(this).apply {
             text = "其他应用通知只播下面名单里的（一行一个包名，如 com.tencent.mm）；验证码类永远不读。"
@@ -1283,15 +1268,13 @@ class MainActivity : Activity() {
             setText(JarvisPrefs.getAnnounceAppsRaw(this@MainActivity))
         }
         root.addView(appsInput)
-        root.addView(btn("保存播报应用名单") {
+        root.addView(primaryBtn("保存播报应用名单") {
             JarvisPrefs.setAnnounceAppsRaw(this@MainActivity, appsInput.text.toString())
             toast("已保存")
         })
-        root.addView(CheckBox(this).apply {
-            text = "勿扰时段不播"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isDndEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setDndEnabled(this@MainActivity, checked) }
+        root.addView(switchRow("勿扰时段不播", "",
+            JarvisPrefs.isDndEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setDndEnabled(this@MainActivity, checked)
         })
         val dndStart = EditText(this).apply {
             hint = "勿扰开始（如 22:00）"
@@ -1305,7 +1288,7 @@ class MainActivity : Activity() {
         }
         root.addView(dndStart)
         root.addView(dndEnd)
-        root.addView(btn("保存勿扰时段") {
+        root.addView(primaryBtn("保存勿扰时段") {
             val s = parseHhMm(dndStart.text.toString())
             val e = parseHhMm(dndEnd.text.toString())
             if (s == null || e == null) {
@@ -1339,7 +1322,7 @@ class MainActivity : Activity() {
             setText("%02d:%02d".format(ReminderScheduler.briefHour(this@MainActivity), ReminderScheduler.briefMinute(this@MainActivity)))
         }
         root.addView(briefTime)
-        root.addView(btn("开启/更新晨报") {
+        root.addView(primaryBtn("开启/更新晨报") {
             val t = parseHhMm(briefTime.text.toString())
             if (t == null) {
                 toast("时间格式不对，写成 07:30 这样")
@@ -1364,11 +1347,9 @@ class MainActivity : Activity() {
                 com.jarvis.app.tts.TtsRouter.speak(this@MainActivity, text, onStart = {}, onDone = {})
             }
         })
-        root.addView(CheckBox(this).apply {
-            text = "出发提醒（带地点的日程，按固定提前量提醒；没有路程估算）"
-            setTextColor(0xB3FFFFFF.toInt())
-            isChecked = JarvisPrefs.isDepartureEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> JarvisPrefs.setDepartureEnabled(this@MainActivity, checked) }
+        root.addView(switchRow("出发提醒", "带地点的日程，按固定提前量提醒；没有路程估算",
+            JarvisPrefs.isDepartureEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setDepartureEnabled(this@MainActivity, checked)
         })
         val leadInput = EditText(this).apply {
             hint = "提前分钟数（如 30）"
@@ -1377,7 +1358,7 @@ class MainActivity : Activity() {
             setText(JarvisPrefs.getDepartureLeadMin(this@MainActivity).toString())
         }
         root.addView(leadInput)
-        root.addView(btn("保存提前量") {
+        root.addView(primaryBtn("保存提前量") {
             val v = leadInput.text.toString().trim().toIntOrNull()
             if (v == null) {
                 toast("填个数字")
@@ -1514,15 +1495,159 @@ class MainActivity : Activity() {
             appendLine("语音合成：Edge TTS（云扬），需联网，无需 Key")
             if (a11y) append("无障碍详情：${JarvisAccessibilityService.status()}")
         }
-        orbButton.text = if (OrbController.isEnabled()) "关闭悬浮球" else "开启悬浮球"
+        orbSwitch?.let {
+            orbSwitchUpdating = true
+            it.isChecked = OrbController.isEnabled()
+            orbSwitchUpdating = false
+        }
     }
 
     private fun btn(label: String, onClick: (View) -> Unit): Button =
-        Button(this).apply {
+        styleBtn(Button(this).apply {
             text = label
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) }
             setOnClickListener(onClick)
+        }, false)
+
+    // ---------- 批二十九：设置页样式 helper（只改外观，不动任何 prefs 键与回调） ----------
+
+    private val SETTING_INPUT_BG = 0xFF1E1533.toInt()
+    private val SETTING_STROKE = 0x2EFFFFFF
+    private val SETTING_DIVIDER = 0x1EFFFFFF
+
+    /** 目录行：图标 + 标题 + 右箭头，下附细线（参考图样式）。 */
+    private fun settingRow(icon: String, title: String, onClick: (View) -> Unit): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(14), dp(4), dp(14))
+            setOnClickListener(onClick)
         }
+        row.addView(TextView(this).apply { text = icon; textSize = 24f })
+        row.addView(TextView(this).apply {
+            text = title; textSize = 16f; setTextColor(HudPalette.ICE)
+            setPadding(dp(16), 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(TextView(this).apply { text = "›"; textSize = 20f; setTextColor(0x8AFFFFFF.toInt()) })
+        col.addView(row)
+        col.addView(View(this).apply {
+            setBackgroundColor(SETTING_DIVIDER)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+        })
+        return col
+    }
+
+    /** 分组小标题：13sp 旋臂紫。 */
+    private fun sectionTitle(text: String): TextView = TextView(this).apply {
+        this.text = text; textSize = 13f; setTextColor(HudPalette.GALAXY_MID)
+        setPadding(0, dp(20), 0, dp(6))
+    }
+
+    /** 按钮统一样式：primary = 旋臂紫实色，secondary = 深底描边。 */
+    private fun styleBtn(b: Button, primary: Boolean): Button = b.apply {
+        background = GradientDrawable().apply {
+            cornerRadius = dp(12).toFloat()
+            if (primary) setColor(HudPalette.GALAXY_MID) else {
+                setColor(SETTING_INPUT_BG)
+                setStroke(dp(1), SETTING_STROKE)
+            }
+        }
+        setTextColor(Color.WHITE)
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+    }
+
+    private fun primaryBtn(label: String, onClick: (View) -> Unit): Button =
+        styleBtn(Button(this).apply {
+            text = label
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) }
+            setOnClickListener(onClick)
+        }, true)
+
+    /** 开关行：标题 + 说明 + Switch（选中态紫色）。初始值先设好再挂 listener，避免误触发；
+     * onCreated 供悬浮球那处拿 Switch 引用（refresh 时同步状态用）。 */
+    private fun switchRow(
+        title: String, desc: String, initial: Boolean,
+        onChecked: (Boolean) -> Unit, onCreated: ((android.widget.Switch) -> Unit)? = null
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(10))
+        }
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        texts.addView(TextView(this).apply { text = title; textSize = 15f; setTextColor(HudPalette.ICE) })
+        if (desc.isNotEmpty()) texts.addView(TextView(this).apply {
+            text = desc; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(2), 0, 0)
+        })
+        row.addView(texts)
+        val sw = android.widget.Switch(this).apply {
+            isChecked = initial
+            thumbTintList = android.content.res.ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(HudPalette.GALAXY_MID, 0xFF9E9E9E.toInt())
+            )
+            trackTintList = android.content.res.ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(HudPalette.withAlpha(HudPalette.GALAXY_MID, 0.5f), 0xFF616161.toInt())
+            )
+        }
+        onCreated?.invoke(sw)
+        sw.setOnCheckedChangeListener { _, checked -> onChecked(checked) }
+        row.addView(sw)
+        return row
+    }
+
+    /** 分段选择行：标题 + 一排等宽按钮，选中不透明、未选中半透明（沿用唤醒严格度那排的做法）。 */
+    private fun segmentedRow(title: String, options: List<String>, selected: Int, onSelect: (Int) -> Unit): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = title; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, dp(4))
+        })
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val buttons = ArrayList<Button>()
+        options.forEachIndexed { i, label ->
+            val b = styleBtn(Button(this).apply {
+                text = label
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (i > 0) marginStart = dp(8)
+                }
+                setOnClickListener {
+                    onSelect(i)
+                    buttons.forEachIndexed { j, bb -> bb.alpha = if (j == i) 1f else 0.5f }
+                }
+            }, false)
+            b.alpha = if (i == selected) 1f else 0.5f
+            buttons.add(b)
+            row.addView(b)
+        }
+        col.addView(row)
+        return col
+    }
+
+    /** 设置页内所有输入框统一样式：实色圆角深底。页面构建完统一扫一遍，
+     * 免得十几个 EditText 创建处逐个改；只扫设置页子树，不动主界面输入框。 */
+    private fun styleSettingsInputs(root: android.view.ViewGroup) {
+        for (i in 0 until root.childCount) {
+            val c = root.getChildAt(i)
+            if (c is EditText) {
+                c.background = GradientDrawable().apply {
+                    cornerRadius = dp(12).toFloat()
+                    setColor(SETTING_INPUT_BG)
+                    setStroke(dp(1), SETTING_STROKE)
+                }
+                c.setPadding(dp(16), dp(12), dp(16), dp(12))
+                c.setTextColor(HudPalette.ICE)
+                c.setHintTextColor(0x66FFFFFF)
+            } else if (c is android.view.ViewGroup) {
+                styleSettingsInputs(c)
+            }
+        }
+    }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 }
