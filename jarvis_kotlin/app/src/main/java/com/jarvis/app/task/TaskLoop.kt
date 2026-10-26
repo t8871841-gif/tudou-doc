@@ -597,7 +597,8 @@ val cell = action.optString("cell").ifEmpty { null}
 val part = action.optString("part").ifEmpty { null}
 val on = action.optString("on").ifEmpty { "screen"}
 val ms = action.optLong("ms", 700)
-val result = when {
+val result = try {
+when {
 eid.isNotEmpty() ->
 if (kind == "tap") controller.tapByEid(eid)
 else controller.longPressByEid(eid, ms)
@@ -611,6 +612,33 @@ if (kind == "tap") controller.tapAim(on, x, y, null, part)
 else controller.longPressAim(on, x, y, null, null, ms)
 }
 else -> return StepResult("$kind 缺少 eid、cell 或坐标", false, null, null)
+}
+} catch (e: IllegalStateException) {
+// 批三十：树盲应用上 tap 因 zoom 过期被拒时，自动对同一目标重拍一张 zoom 图
+// 随拒绝一并返回，模型直接从这张图上用 on=zoom 再点，不用另花一步 zoom，
+// 也不会在 zoom 和 tap 之间插导航把 zoom 作废。只认守卫的 refused 文案、
+// 只认全屏坐标（on=screen）；参数错误（坏 cell、未知 eid/part）和 zoom 图内
+// 坐标（on=zoom）不走这里，模型须先修正参数或手动重拍。
+if (kind != "tap" || on != "screen" || e.message?.startsWith("refused:") != true) throw e
+val zoomCell = cell ?: if (action.has("x") && action.has("y")) cellFromNorm(action.optInt("x", 500), action.optInt("y", 500)) else null
+if (zoomCell == null || zoomCell.any { it.isLowerCase() }) throw e
+val zoomed = runCatching { controller.zoomAim(zoomCell, part) }.getOrNull() ?: throw e
+val png = zoomed.optString("png_base64")
+val jpeg = if (png.isNotEmpty()) {
+try {
+val bytes = Base64.decode(png, Base64.DEFAULT)
+val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+val j = bmp?.let { GridOverlay.toJpegBase64(it) }
+bmp?.recycle()
+j
+} catch (_: Exception) {
+null
+}
+} else {
+null
+}
+if (jpeg == null) throw e
+return StepResult("点按被拒：${e.message}。已自动对同一目标重拍 zoom 图（见附图），请直接从这张图上用 on=\"zoom\" 点目标，不要再做 zoom、导航等中间动作。", false, null, jpeg)
 }
 summarize(result)
 }
