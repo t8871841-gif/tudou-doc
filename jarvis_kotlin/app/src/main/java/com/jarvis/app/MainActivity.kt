@@ -29,7 +29,6 @@ import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
-import com.jarvis.app.hud.JarvisHoloView
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
@@ -72,7 +71,6 @@ class MainActivity : Activity() {
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
     private var bgView: HudBackgroundView? = null
-    private var holoView: JarvisHoloView? = null
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
@@ -109,31 +107,21 @@ class MainActivity : Activity() {
         )
 
         val root = FrameLayout(this)
-        if (JarvisHoloView.isSupported(this)) {
-            // 全息光带 GL 背景（raymarching 三带）：Surface 在窗口底层，全部 UI 盖在它上面；
-            // 旧三叶结光带与银河舞台已删，主界面中央 420dp 区域空出来透出全息背景。
-            val hv = JarvisHoloView(this).apply {
-                amplitudeFn = { OfflineAsrSession.currentLevel() }
-                thinkingFn = { JarvisAgent.currentState() == "thinking" }
-            }
-            holoView = hv
-            root.addView(hv, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        } else {
-            root.addView(
-                GradientLayerView(
-                    this,
-                    intArrayOf(HudPalette.BG_TOP, HudPalette.BG_MID, HudPalette.BG_BOTTOM),
-                    floatArrayOf(0f, 0.5f, 1f), diagonal = true
-                ),
-                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-            )
-            val bg = HudBackgroundView(this).apply {
-                mode = { JarvisAgent.currentState() }
-                micLevel = { OfflineAsrSession.currentLevel() }
-            }
-            bgView = bg
-            root.addView(bg, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        // 全息效果已删（2026-10-27）：背景回到渐变层 + 光晕点阵（原 fallback）。
+        root.addView(
+            GradientLayerView(
+                this,
+                intArrayOf(HudPalette.BG_TOP, HudPalette.BG_MID, HudPalette.BG_BOTTOM),
+                floatArrayOf(0f, 0.5f, 1f), diagonal = true
+            ),
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        )
+        val bg = HudBackgroundView(this).apply {
+            mode = { JarvisAgent.currentState() }
+            micLevel = { OfflineAsrSession.currentLevel() }
         }
+        bgView = bg
+        root.addView(bg, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         // 批八：原先这里还盖着一层全屏黑色半透明渐变膜（上 65% 黑→中透明→下 80% 黑），
         // 整个界面发朦就是它——按用户要求撤掉；背景的光晕+点阵（上一层）与底部玻璃框保留不动。
 
@@ -490,8 +478,6 @@ class MainActivity : Activity() {
         showingSettings = !showingSettings
         homePanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
         settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
-        // 全息背景只在主界面：进设置（含子页）藏起来，回对话再显示
-        holoView?.visibility = if (showingSettings) View.GONE else View.VISIBLE
         if (showingSettings) {
             closeSettingsPage()
             refresh()
@@ -1430,14 +1416,12 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        holoView?.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
     }
 
     override fun onPause() {
         OrbController.setAppForeground(false)
-        holoView?.onPause()
         super.onPause()
     }
 
