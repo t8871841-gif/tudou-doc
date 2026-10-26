@@ -28,6 +28,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
+import com.jarvis.app.hud.GalaxyHoloStageView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
@@ -72,7 +73,7 @@ class MainActivity : Activity() {
     private lateinit var inputRow: LinearLayout
     private lateinit var bgView: HudBackgroundView
     private lateinit var wakeChip: TextView
-    private lateinit var emblemMotionView: com.jarvis.app.hud.EmblemMotionView
+    private lateinit var stageView: GalaxyHoloStageView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
     private lateinit var memoryListContainer: LinearLayout
@@ -131,7 +132,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        homePanel.addView(buildEmblem())
+        homePanel.addView(buildStage())
         buildChatPanel()
         homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         homePanel.addView(buildBottomPanel())
@@ -149,7 +150,7 @@ class MainActivity : Activity() {
         JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s) } }
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
         JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
-        JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false) } }
+        JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false); if (::stageView.isInitialized) stageView.setReplyText(t) } }
         onAgentStateChanged(JarvisAgent.currentState())
 
         handleAssistIntent(intent)
@@ -179,55 +180,17 @@ class MainActivity : Activity() {
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
     }
 
-    // ---------- 中央徽章：批二十二反应堆放大——容器 420dp（点阵外沿 380dp + 唤醒词胶囊区 40dp），
-    // 徽章本体 176dp 不动，虚线环 drawable 放大到 330dp 慢转；上面不压任何字 ----------
+    // ---------- 中央舞台：批二十八星系全息版——替换批二十二反应堆（动效层/徽章/虚线环全部退役），
+    // 容器仍是 420dp（下方对话玻璃框与底部面板位置不动）；唤醒词胶囊保留在容器底部中央 ----------
 
-    private fun buildEmblem(): FrameLayout {
-        val emblem = FrameLayout(this)
-        emblem.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(420))
-        // 批十八：徽章反应堆动效层（衬在徽章后面，只画环/粒子/声波，不盖徽章本体）。
-        // 批二十二：动效层与徽章/虚线环共用 bottomMargin 40dp，使三者圆心对齐在容器 190dp 处。
-        emblemMotionView = com.jarvis.app.hud.EmblemMotionView(this).apply {
+    private fun buildStage(): FrameLayout {
+        val stage = FrameLayout(this)
+        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(420))
+        stageView = GalaxyHoloStageView(this).apply {
             mode = { JarvisAgent.currentState() }
             micLevel = { OfflineAsrSession.currentLevel() }
         }
-        emblem.addView(emblemMotionView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT).apply {
-            bottomMargin = dp(40)
-        })
-        val badge = ImageView(this).apply {
-            setImageResource(R.drawable.hud_badge)
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            setOnClickListener { if (::emblemMotionView.isInitialized) emblemMotionView.pulse() }
-        }
-        emblem.addView(badge, FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER).apply {
-            bottomMargin = dp(40)
-        })
-        val ring = ImageView(this).apply {
-            setImageResource(R.drawable.hud_badge_ring)
-            scaleType = ImageView.ScaleType.CENTER_CROP
-        }
-        emblem.addView(ring, FrameLayout.LayoutParams(dp(330), dp(330), Gravity.CENTER).apply {
-            bottomMargin = dp(40)
-        })
-        android.animation.ObjectAnimator.ofFloat(ring, "rotation", 0f, 360f).apply {
-            duration = 60000
-            repeatCount = android.animation.ValueAnimator.INFINITE
-            interpolator = android.view.animation.LinearInterpolator()
-            start()
-        }
-        // 徽章呼吸：±2% 缩放，3 秒一周期（与悬浮球呼吸同款语言）。
-        for (v in listOf(badge, ring)) {
-            android.animation.ObjectAnimator.ofFloat(v, "scaleX", 1f, 1.02f, 1f).apply {
-                duration = 3000
-                repeatCount = android.animation.ValueAnimator.INFINITE
-                start()
-            }
-            android.animation.ObjectAnimator.ofFloat(v, "scaleY", 1f, 1.02f, 1f).apply {
-                duration = 3000
-                repeatCount = android.animation.ValueAnimator.INFINITE
-                start()
-            }
-        }
+        stage.addView(stageView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         wakeChip = TextView(this).apply {
             text = "唤醒词 · 关"
             textSize = 12f
@@ -244,11 +207,11 @@ class MainActivity : Activity() {
                 refreshWakeChip()
             }
         }
-        emblem.addView(wakeChip, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+        stage.addView(wakeChip, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             bottomMargin = dp(4)
         })
-        return emblem
+        return stage
     }
 
     private fun refreshWakeChip() {
@@ -474,7 +437,6 @@ class MainActivity : Activity() {
                 shape = GradientDrawable.OVAL
             }
             setOnClickListener {
-                if (::emblemMotionView.isInitialized) emblemMotionView.pulse()
                 JarvisAgent.triggerListenFromAssist(this@MainActivity)
             }
         }
