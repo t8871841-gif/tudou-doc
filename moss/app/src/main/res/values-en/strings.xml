@@ -122,6 +122,7 @@
     <string name="settings_voice_tts_sample_rate">TTS sample rate</string>
     <string name="settings_voice_provider">Voice provider</string>
     <string name="settings_voice_provider_huoshan">Volcengine</string>
+    <string name="settings_voice_provider_edge">Edge</string>
     <string name="settings_voice_provider_google">Google</string>
     <string name="settings_google_api_key">Google API key</string>
     <string name="settings_google_api_key_hint">Vertex Express key — hearing and speaking both use it</string>
@@ -135,6 +136,7 @@
     <string name="settings_google_language">Language</string>
     <string name="settings_google_language_hint">blank = detect automatically</string>
     <string name="settings_voice_google_note">Recognition runs on Gemini Live (so it needs the project number and location); synthesis is plain HTTP. The key stays on this device.</string>
+    <string name="settings_voice_edge_note">Speech uses Edge neural voices and recognition uses the system speech recognizer; neither needs a key. Recognition quality depends on this device’s speech service.</string>
     <string name="settings_section_diagnostics">Diagnostics</string>
     <string name="settings_section_advanced">Advanced</string>
     <string name="settings_max_steps">Max steps per task</string>

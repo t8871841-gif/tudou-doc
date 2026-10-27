@@ -99,6 +99,7 @@
     <string name="settings_voice_tts_sample_rate">合成采样率</string>
     <string name="settings_voice_provider">语音服务商</string>
     <string name="settings_voice_provider_huoshan">火山</string>
+    <string name="settings_voice_provider_edge">Edge</string>
     <string name="settings_voice_provider_google">谷歌</string>
     <string name="settings_google_api_key">Google API Key</string>
     <string name="settings_google_api_key_hint">Vertex Express Key,听和说都用它</string>
@@ -112,6 +113,7 @@
     <string name="settings_google_language">语言</string>
     <string name="settings_google_language_hint">留空 = 自动判断</string>
     <string name="settings_voice_google_note">识别走 Gemini Live(需要项目号和区域),合成走 HTTP。密钥只存在这台设备上。</string>
+    <string name="settings_voice_edge_note">播报走 Edge 神经网络语音，识别走系统语音识别，两者都不需要 Key。系统识别的效果取决于这台设备的识别服务。</string>
     <string name="settings_section_diagnostics">诊断</string>
     <string name="settings_section_advanced">高级</string>
     <string name="settings_max_steps">单次任务最多步数</string>

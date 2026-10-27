@@ -15,7 +15,7 @@ data class VoiceConfig(
     val ttsSpeaker: String,
     val ttsSampleRate: Int,
     /**
-     * [VOICE_HUOSHAN] or [VOICE_GOOGLE] — which service hears and speaks.
+     * [VOICE_HUOSHAN], [VOICE_GOOGLE] or [VOICE_EDGE] — which service hears and speaks.
      *
      * Read here rather than at the call site so that the two engines, the
      * meeting recorder and the start-up log cannot disagree about it, the same
@@ -108,6 +108,7 @@ data class VoiceConfig(
          */
         const val VOICE_HUOSHAN = "huoshan"
         const val VOICE_GOOGLE = "google"
+        const val VOICE_EDGE = "edge"
 
         /**
          * The Vertex endpoint, its Express-keyed surface.
@@ -573,7 +574,9 @@ data class VoiceConfig(
         }
 
         /**
-         * Which service hears and speaks: [VOICE_HUOSHAN] or [VOICE_GOOGLE].
+         * Which service hears and speaks: [VOICE_HUOSHAN], [VOICE_GOOGLE] or
+         * [VOICE_EDGE] (Edge neural voices for speaking, the system recogniser
+         * for hearing — neither half takes a key).
          *
          * **Anything that is not exactly `google` reads as 火山**, which is the
          * same fail-closed direction [groundingEnabled] and [notifyScope] take,
@@ -602,6 +605,7 @@ data class VoiceConfig(
                 .getString("voice_provider", "").orEmpty().trim().lowercase()
             return when (saved) {
                 VOICE_GOOGLE -> VOICE_GOOGLE
+                VOICE_EDGE -> VOICE_EDGE
                 VOICE_HUOSHAN -> VOICE_HUOSHAN
                 // Never chosen. A build packaged with a Google key is a build
                 // packaged *for* Google, so that is what it reads as; a build

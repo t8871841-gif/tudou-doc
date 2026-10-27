@@ -217,6 +217,15 @@ class AsrController(
         // can only ever mean "keep doing what this device already did".
         val client: AsrEngine = when (cfg.voiceProvider) {
             VoiceConfig.VOICE_GOOGLE -> GoogleAsr(cfg, listener)
+            VoiceConfig.VOICE_EDGE -> if (SystemAsrEngine.isAvailable(context)) {
+                SystemAsrEngine(context, listener)
+            } else {
+                // No recognition service on this device: hearing falls back
+                // to 火山 rather than failing every turn. Speaking stays
+                // Edge — the two controllers pick independently.
+                Log.w(TAG, "system ASR unavailable, falling back to huoshan")
+                HuoshanAsr(cfg, listener)
+            }
             else -> HuoshanAsr(cfg, listener)
         }
         turnSilenceMs = client.silenceMs

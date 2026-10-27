@@ -686,6 +686,7 @@ class SettingsUi(
                 // [VoiceConfig.voiceProvider].
                 VoiceConfig.VOICE_HUOSHAN to lctx.getString(R.string.settings_voice_provider_huoshan),
                 VoiceConfig.VOICE_GOOGLE to lctx.getString(R.string.settings_voice_provider_google),
+                VoiceConfig.VOICE_EDGE to lctx.getString(R.string.settings_voice_provider_edge),
             ),
         ) { applyProvider?.invoke(it, true) }
 
@@ -778,9 +779,18 @@ class SettingsUi(
         )
         note(googleBlock, lctx.getString(R.string.settings_voice_google_note))
 
+        // ---- Edge: no keys on either half ----
+        //
+        // Speaking is Edge neural voices, hearing is the system recogniser.
+        // Neither takes a credential, so there are no rows here — only the
+        // note saying so, or a user reads the empty space as "not set up".
+        val edgeBlock = block(voiceBlock)
+        note(edgeBlock, lctx.getString(R.string.settings_voice_edge_note))
+
         applyProvider = { p, animate ->
             Glass.setVisible(huoshanBlock, p == VoiceConfig.VOICE_HUOSHAN, animate)
             Glass.setVisible(googleBlock, p == VoiceConfig.VOICE_GOOGLE, animate)
+            Glass.setVisible(edgeBlock, p == VoiceConfig.VOICE_EDGE, animate)
         }
         applyProvider(provider, false)
 
