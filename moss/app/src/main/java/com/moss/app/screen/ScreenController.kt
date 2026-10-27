@@ -3166,7 +3166,7 @@ class ScreenController(
             total == 0 && com.moss.app.ui.OwnCard.showing ->
                 out.put(
                     "hint",
-                    "The user has one of Andee's own cards open (settings or the vault), so " +
+                    "The user has one of Moss's own cards open (settings or the vault), so " +
                         "there is no app tree to read — the card is deliberately invisible to " +
                         "accessibility, including to us. Nothing is broken. Wait for them to " +
                         "close it, or say in plain words that you need the settings card closed " +
@@ -3182,7 +3182,7 @@ class ScreenController(
             total == 0 && com.moss.app.ui.FullscreenCard.covering ->
                 out.put(
                     "hint",
-                    "Andee's own card is unfolded over the whole screen, so the app behind it " +
+                    "Moss's own card is unfolded over the whole screen, so the app behind it " +
                         "is covered and reports every node as not visible — that is why this is " +
                         "empty, and nothing is broken. Folding the card is automatic before any " +
                         "screen tool, so retry this call once and it should read normally. Do " +
@@ -3195,12 +3195,12 @@ class ScreenController(
             useful == 0 && out.optBoolean("withheld") -> {
                 val app = out.optString("pkg").ifEmpty { "This app" }
                 val helper = if (out.optBoolean("tree_helper_enabled")) {
-                    "Andee has just switched that helper on itself and the app has not picked " +
+                    "Moss has just switched that helper on itself and the app has not picked " +
                         "it up yet — the next dump may read normally, so retry once before " +
                         "giving up on the list; if it is still blank, the user may need to " +
                         "reopen the app. "
                 } else {
-                    "Andee could not switch it on here, and the user cannot either: it is a " +
+                    "Moss could not switch it on here, and the user cannot either: it is a " +
                         "hidden companion MIUI only runs alongside TalkBack, and TalkBack " +
                         "would read the whole screen aloud and change how every tap works. So " +
                         "do not send the user to look for any setting — if it matters, say " +
@@ -3211,7 +3211,7 @@ class ScreenController(
                     "`$app` is withholding its UI from accessibility: its window hands every " +
                         "accessibility client — the system's own uiautomator included — a blank " +
                         "placeholder with no size and no children. That is the app's choice, not a " +
-                        "fault on this device; switching Andee off and on does not change it, so " +
+                        "fault on this device; switching Moss off and on does not change it, so " +
                         "do not ask the user to. What it does depend on is which *other* " +
                         "accessibility services are on: WeChat was measured exposing its full " +
                         "tree only while MIUI's TalkBack helper (MiuiEnhanceTalkback) was also " +
@@ -3336,7 +3336,7 @@ class ScreenController(
             "containers. Zero nodes from an app that was readable is the signature of " +
             "our accessibility connection having gone stale, and no tool call can " +
             "repair it: only the person holding the tablet can, by opening 设置 → " +
-            "无障碍 (Settings → Accessibility), switching Andee off and back on. That " +
+            "无障碍 (Settings → Accessibility), switching Moss off and back on. That " +
             "takes about three seconds. Retry this tool once first in case the screen " +
             "was merely mid-transition; if it is still empty, say so to the user in " +
             "plain words and wait for them. Taps and swipes still work and you still " +

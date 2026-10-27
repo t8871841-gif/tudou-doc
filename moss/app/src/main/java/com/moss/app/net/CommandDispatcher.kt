@@ -1994,8 +1994,8 @@ class CommandDispatcher(
          * this — it has a fallback; see the `screen.screenshot` branch.
          */
         const val SCREEN_UNAVAILABLE =
-            "accessibility is off — Andee can't touch or read the screen without " +
-                "it. It has to be switched on in Settings → Accessibility → Andee."
+            "accessibility is off — Moss can't touch or read the screen without " +
+                "it. It has to be switched on in Settings → Accessibility → Moss."
 
         /**
          * Ceiling for `screen.wait`. The hub drops a request at 30s, and the

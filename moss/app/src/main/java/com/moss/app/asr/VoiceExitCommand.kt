@@ -12,13 +12,13 @@ internal object VoiceExitCommand {
         text.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
 
     private val commands = setOf(
-        "exit Andee", "close Andee", "quit Andee",
-        "Andee exit", "Andee close", "Andee quit",
-        "take a break", "Andee take a break", "Hey Andee take a break",
-        "退出 Andee", "关闭 Andee", "Andee 退出", "Andee 关闭",
-        "退出安迪", "关闭安迪", "安迪退出", "安迪关闭",
+        "exit Moss", "close Moss", "quit Moss",
+        "Moss exit", "Moss close", "Moss quit",
+        "take a break", "Moss take a break", "Hey Moss take a break",
+        "退出 Moss", "关闭 Moss", "Moss 退出", "Moss 关闭",
+        "退出Moss", "关闭Moss", "Moss退出", "Moss关闭",
         "休息一下", "先休息一下", "你先休息一下",
-        "Andee 休息一下", "安迪休息一下", "安迪你先休息一下",
+        "Moss 休息一下", "Moss休息一下", "Moss你先休息一下",
     ).map(::normalize).toSet()
 
     fun matches(text: String, userInitiated: Boolean = true): Boolean =

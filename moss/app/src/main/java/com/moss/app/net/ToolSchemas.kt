@@ -150,7 +150,7 @@ object ToolSchemas {
           pane — a self-drawn pane still reports its containers. It means our
           accessibility connection went stale, which happens to WeChat in
           particular. You cannot fix it with a tool call. Ask the user, in
-          plain words, to open 设置 → 无障碍 and switch Andee (this device's
+          plain words, to open 设置 → 无障碍 and switch Moss (this device's
           assistant, the floating ball) off and back on; it takes seconds and
           the element list comes back. Judge whether it is worth interrupting
           them — you can still tap by coordinate meanwhile — but do not silently

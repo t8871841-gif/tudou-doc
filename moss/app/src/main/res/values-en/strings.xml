@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Moss</string>
-    <string name="notification_relay_label">Andee notification access</string>
-    <string name="accessibility_service_description">Andee needs this to see what is on screen and to tap, swipe and type for you. A floating ball appears on the home screen: tap it to talk, long-press to open the conversation.</string>
+    <string name="notification_relay_label">Moss notification access</string>
+    <string name="accessibility_service_description">Moss needs this to see what is on screen and to tap, swipe and type for you. A floating ball appears on the home screen: tap it to talk, long-press to open the conversation.</string>
 
     <!--
         English mirror of values/strings.xml. Same keys, same order, one entry
@@ -96,15 +96,15 @@
     <string name="settings_brain_local_note">The device runs the agent loop itself, with no hub. Without a key it will not take over.</string>
     <string name="settings_section_wake">Wake word</string>
     <string name="settings_wake_enrolled">Enrolled — say your wake word and it wakes up</string>
-    <string name="settings_wake_not_enrolled">Not enrolled — pick a phrase and say it 3 times to wake me by voice, e.g. “Hey Andee”</string>
+    <string name="settings_wake_not_enrolled">Not enrolled — pick a phrase and say it 3 times to wake me by voice, e.g. “Hey Moss”</string>
     <string name="settings_wake_record">Record</string>
     <string name="settings_wake_locked_on">Listen while locked: on</string>
     <string name="settings_wake_locked_off">Listen while locked: off</string>
-    <string name="settings_wake_locked_note">Andee keeps listening with the screen off. That costs battery: the microphone stays open, and so does the system recording indicator.</string>
+    <string name="settings_wake_locked_note">Moss keeps listening with the screen off. That costs battery: the microphone stays open, and so does the system recording indicator.</string>
     <string name="common_clear">Clear</string>
     <string name="common_delete">Delete</string>
     <string name="settings_section_vault">Vault</string>
-    <string name="settings_vault_empty_note">No accounts yet — once saved, Andee can log in as you when a task needs it</string>
+    <string name="settings_vault_empty_note">No accounts yet — once saved, Moss can log in as you when a task needs it</string>
     <string name="settings_vault_count_note">%1$d saved — the brain may read the phone and email, but only this device types the password</string>
     <string name="settings_vault_manage">Manage</string>
     <string name="settings_section_voice">Volcengine endpoints</string>
@@ -216,7 +216,7 @@
     <string name="factory_reset_target_grounding">the grounding screenshots and logs</string>
     <string name="vault_title">Vault</string>
     <string name="vault_edit_title">Edit account</string>
-    <string name="vault_intro">Accounts saved here let Andee log in for you when a task needs it.\nIt types the password into the field itself and never hands it to the remote brain.</string>
+    <string name="vault_intro">Accounts saved here let Moss log in for you when a task needs it.\nIt types the password into the field itself and never hands it to the remote brain.</string>
     <string name="vault_empty">No accounts saved yet.</string>
     <string name="vault_add_account">+ New account</string>
     <string name="vault_password_saved">Password saved</string>
@@ -242,10 +242,10 @@
     <string name="vault_label_card_last4">Card ending</string>
     <string name="vault_error_name_required">Name cannot be empty</string>
     <string name="wake_title">Teach me your wake word</string>
-    <string name="wake_instructions">Pick any word or phrase you like to call me by, for example “Hey Andee”. Aim for something that takes at least half a second to say — very short words are easy to confuse and may not record at all. Tap Start, then say it the way you normally would — it stops on its own. You\'ll say the same thing %1$d times — don\'t say it more carefully than usual, or I won\'t recognise it when you call me normally.</string>
+    <string name="wake_instructions">Pick any word or phrase you like to call me by, for example “Hey Moss”. Aim for something that takes at least half a second to say — very short words are easy to confuse and may not record at all. Tap Start, then say it the way you normally would — it stops on its own. You\'ll say the same thing %1$d times — don\'t say it more carefully than usual, or I won\'t recognise it when you call me normally.</string>
     <string name="wake_progress">%1$d / %2$d</string>
     <string name="wake_status_enrolled">Already recorded — recording again will overwrite it.</string>
-    <string name="wake_status_not_enrolled">Not recorded yet. Think of a phrase (e.g. “Hey Andee”), then tap Start.</string>
+    <string name="wake_status_not_enrolled">Not recorded yet. Think of a phrase (e.g. “Hey Moss”), then tap Start.</string>
     <string name="wake_close">Close</string>
     <string name="wake_start">Start</string>
     <string name="wake_listening">Listening…</string>
@@ -294,7 +294,7 @@
     <string name="history_suggest_hint">Tell me, or pick one</string>
     <string name="suggestion_turn">Enter the \"%1$s\" scene. %2$s</string>
     <string name="history_role_you">You · %1$s</string>
-    <string name="history_role_assistant">Andee · %1$s</string>
+    <string name="history_role_assistant">Moss · %1$s</string>
     <string name="history_role_error">Error · %1$s</string>
     <string name="history_role_page_open">Page · %1$s · Tap to reopen</string>
     <string name="history_topic_label">Topic</string>
@@ -311,7 +311,7 @@
     <string name="history_role_page_cleared">Page · %1$s · Cleared</string>
     <string name="html_default_title">AI page</string>
     <string name="textpage_role_you">You</string>
-    <string name="textpage_role_assistant">Andee</string>
+    <string name="textpage_role_assistant">Moss</string>
     <string name="textpage_role_error">Error</string>
     <string name="textpage_role_page">Page</string>
     <!-- What called this turn into being. The old wording was just "Started",
@@ -353,7 +353,7 @@
     <string name="svc_btn_type_instead">Type it instead</string>
     <string name="svc_btn_open_settings">Open settings</string>
     <string name="svc_stopped">Stopped</string>
-    <string name="svc_exit_meeting_active">A meeting is recording. End it and save the minutes before exiting Andee.</string>
+    <string name="svc_exit_meeting_active">A meeting is recording. End it and save the minutes before exiting Moss.</string>
     <string name="svc_meeting_ended_line">(Meeting recording ended — %1$d characters, drafting the minutes…)</string>
     <string name="svc_call_ended_line">(Call ended — %1$d characters, summarising…)</string>
     <string name="svc_notification_look_line">(%1$s has a message — I tapped "Take a look"…)</string>
@@ -524,7 +524,7 @@
     <string name="check_detail_voice_host_ok">%1$s is reachable.</string>
     <string name="check_detail_voice_host_bad">Could not reach %1$s: %2$s. Both recognition and synthesis will time out.</string>
     <string name="check_detail_wake_on">Taught, and it wakes when you say it.</string>
-    <string name="check_detail_wake_off">Not taught yet. Pick a phrase (e.g. “Hey Andee”) and say it 3 times to wake me by voice. Everything still works without it, you just tap the ball to talk.</string>
+    <string name="check_detail_wake_off">Not taught yet. Pick a phrase (e.g. “Hey Moss”) and say it 3 times to wake me by voice. Everything still works without it, you just tap the ball to talk.</string>
     <string name="check_detail_battery_on">Exempt, so pending reminders are not delayed.</string>
     <string name="check_detail_battery_off">Not exempt from battery optimisation. Tap “Open settings” — the system asks “Ignore battery optimisations?”; take the button that ignores them.\nThe vendor’s own “App launch / background running” controls are a separate system; changing them leaves this row red. With the screen off a pending reminder may arrive late, and the wake phrase stops listening.</string>
     <string name="check_detail_auto_start_on">Allowed. The process can bring itself back after the system kills it.</string>
@@ -562,7 +562,7 @@
          change them, and the new one announces itself in the subtitle band —
          that name is read by a person, hence a resource rather than
          BallLook.name, which is for logs and diffs. -->
-    <string name="ball_look_andee">Andee</string>
+    <string name="ball_look_andee">Moss</string>
     <string name="ball_look_cream">Cream</string>
     <string name="ball_look_bajie">Pigsy</string>
     <string name="ball_look_rabbit">Rascal</string>

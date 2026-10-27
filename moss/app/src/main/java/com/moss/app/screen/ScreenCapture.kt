@@ -240,7 +240,7 @@ class ScreenCapture(private val context: Context) {
         /** What the brain is told when a projection shot is all it gets. */
         const val PROJECTION_NOTE =
             "Captured with MediaProjection: this is the raw screen, with no aim " +
-                "grid and no element list — both of those need Andee's accessibility " +
+                "grid and no element list — both of those need Moss's accessibility " +
                 "service, and so does tapping. You can describe what you see; you " +
                 "cannot act on it until accessibility is back on."
     }
