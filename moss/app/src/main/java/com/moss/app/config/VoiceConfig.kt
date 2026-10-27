@@ -213,35 +213,53 @@ data class VoiceConfig(
         const val BRAIN_LOCAL = "local"
         const val BRAIN_CODEFLYING = "codeflying"
 
-        const val DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
-        const val DEFAULT_LLM_MODEL = "deepseek-flash"
+        /**
+         * The out-of-box default for a blank 本机 tab: Jarvis's setup — the
+         * Agnes endpoint and `agnes-3.0-flash`, the same key and model
+         * Jarvis itself uses. The rows stay freely editable: typing any
+         * base URL / model / key (DeepSeek, OpenRouter, OpenAI, …)
+         * overrides this, and a saved value is never rewritten by a
+         * default change.
+         */
+        const val DEFAULT_LLM_BASE_URL = "https://apihub.agnes-ai.com/v1"
+        const val DEFAULT_LLM_MODEL = "agnes-3.0-flash"
         const val DEFAULT_REASONING_EFFORT = "high"
 
         /**
-         * The same two defaults for an **English** card, pointing at OpenAI.
+         * The same two defaults for an **English** card. They match the
+         * Chinese card: both default to Jarvis's setup (Agnes), so there is
+         * one default, not one per language — the split used to point the
+         * English card at OpenAI and the Chinese card at DeepSeek.
          *
          * The 本机 tab's hint *is* the value a blank row resolves to, so the two
-         * cannot be allowed to disagree: a card that advertises an OpenAI `Model`
-         * / `Base URL` and then, when the user leaves the boxes empty, quietly
-         * calls DeepSeek would be lying in the one place a user reads to decide
-         * what to type. [llmBaseUrlDefault] / [llmModelDefault] pick by
-         * [uiLanguage], and both the hint and the resolved config go through
-         * them — that is the whole point of tying these to the language rather
-         * than to the build.
+         * cannot be allowed to disagree: a card that advertises one `Model` /
+         * `Base URL` and then, when the user leaves the boxes empty, quietly
+         * calls another would be lying in the one place a user reads to decide
+         * what to type. [llmBaseUrlDefault] / [llmModelDefault] return the
+         * Agnes defaults, and both the hint and the resolved config go
+         * through them.
          *
-         * **CodeFlying is deliberately not switched by language.** Its model is
-         * whatever the hosted backend serves; an English build inventing
-         * `gpt-4o-mini` at that endpoint would name a model CodeFlying does not
-         * have. See [brainConfig].
+         * **CodeFlying is deliberately not switched by the defaults above.**
+         * Its model is whatever the hosted backend serves; pointing it at
+         * `agnes-3.0-flash` would name a model CodeFlying does not have, so
+         * its fallback stays [DEFAULT_CODEFLYING_MODEL]. See [brainConfig].
          */
-        const val DEFAULT_LLM_BASE_URL_EN = "https://api.openai.com/v1"
-        const val DEFAULT_LLM_MODEL_EN = "gpt-4o-mini"
+        const val DEFAULT_LLM_BASE_URL_EN = "https://apihub.agnes-ai.com/v1"
+        const val DEFAULT_LLM_MODEL_EN = "agnes-3.0-flash"
 
-        /** [DEFAULT_LLM_BASE_URL] for a Chinese card, [DEFAULT_LLM_BASE_URL_EN] for an English one. */
+        /**
+         * The model the hosted CodeFlying backend serves, used only as the
+         * fallback when no model was ever saved. Kept separate from
+         * [DEFAULT_LLM_MODEL] so changing the out-of-box default cannot
+         * misname the model at CodeFlying's endpoint.
+         */
+        const val DEFAULT_CODEFLYING_MODEL = "deepseek-flash"
+
+        /** The Jarvis/Agnes default base URL, for either card. */
         fun llmBaseUrlDefault(context: Context): String =
             if (uiLanguage(context) == LANG_EN) DEFAULT_LLM_BASE_URL_EN else DEFAULT_LLM_BASE_URL
 
-        /** [DEFAULT_LLM_MODEL] for a Chinese card, [DEFAULT_LLM_MODEL_EN] for an English one. */
+        /** The Jarvis/Agnes default model, for either card. */
         fun llmModelDefault(context: Context): String =
             if (uiLanguage(context) == LANG_EN) DEFAULT_LLM_MODEL_EN else DEFAULT_LLM_MODEL
 
@@ -469,8 +487,8 @@ data class VoiceConfig(
                     mode = BRAIN_CODEFLYING,
                     apiKey = codeFlyingKey(context),
                     baseUrl = codeFlyingLlmBaseUrl(),
-                    model = p.getString("llm_model", DEFAULT_LLM_MODEL)
-                        .orEmpty().trim().ifEmpty { DEFAULT_LLM_MODEL },
+                    model = p.getString("llm_model", DEFAULT_CODEFLYING_MODEL)
+                        .orEmpty().trim().ifEmpty { DEFAULT_CODEFLYING_MODEL },
                     thinking = p.getString("llm_thinking", defaultThinking())
                         ?.trim()?.lowercase() != "disabled",
                     reasoningEffort = p.getString("llm_reasoning_effort", DEFAULT_REASONING_EFFORT)
@@ -762,8 +780,7 @@ data class VoiceConfig(
                 // is the only state in which the hint is visible at all —
                 // printing the resolved default into the box would be text, not
                 // a placeholder, and the row's language-aware hint
-                // ([llmModelDefault]: DeepSeek for a Chinese card, OpenAI for an
-                // English one) could never be seen.
+                // ([llmModelDefault]: Agnes, Jarvis's setup, for either card) could never be seen.
                 "llm_api_key" to p.getString("llm_api_key", "").orEmpty(),
                 "llm_base_url" to p.getString("llm_base_url", "").orEmpty(),
                 "llm_model" to p.getString("llm_model", "").orEmpty(),

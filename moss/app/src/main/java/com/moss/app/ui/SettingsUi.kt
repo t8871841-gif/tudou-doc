@@ -616,9 +616,9 @@ class SettingsUi(
         val localBlock = block(panel)
         // The hint *is* the value a blank row resolves to, so the hint and the
         // resolved config come from the same language-aware pair — see
-        // [VoiceConfig.llmModelDefault]. An English card advertises an OpenAI
-        // model / base URL and, if the user never saves one, actually calls it;
-        // a Chinese card stays on DeepSeek.
+        // [VoiceConfig.llmModelDefault]. Either card advertises the Agnes
+        // default (Jarvis's setup) and, if the user never saves one, actually
+        // calls it; the rows stay freely editable.
         field(
             localBlock,
             "llm_api_key",
