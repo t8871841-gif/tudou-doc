@@ -1,14 +1,19 @@
 package com.jarvis.app.local
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
 import com.jarvis.app.JarvisPrefs
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.coroutines.resume
 
 /**
  * 批五：端侧小模型（MediaPipe LLM Inference）。逻辑移植自旧 Flutter 版已验证的
@@ -78,23 +83,33 @@ object LocalLlm {
         return s
     }
 
+    /** 确保模型已加载（路径或 maxTokens 变了就重载）；返回 false 表示加载失败。调用方须已在 dispatcher 上。 */
+    private fun ensureLoaded(ctx: Context, path: String, maxTokens: Int): Boolean {
+        if (llm != null && loadedPath == path && loadedMaxTokens == maxTokens) return true
+        try { llm?.close() } catch (_: Throwable) {}
+        llm = null
+        return try {
+            val opts = LlmInference.LlmInferenceOptions.builder()
+                .setModelPath(path)
+                .setMaxTokens(maxTokens)
+                .build()
+            llm = LlmInference.createFromOptions(ctx.applicationContext, opts)
+            loadedPath = path
+            loadedMaxTokens = maxTokens
+            true
+        } catch (_: Throwable) {
+            loadedPath = null
+            false
+        }
+    }
+
     /** 确保已加载并生成；任何失败返回 null（上层据此回退云端），不在这里抛错或假装答了。 */
     suspend fun generate(ctx: Context, prompt: String): String? = withContext(dispatcher) {
         val path = JarvisPrefs.getLocalLlmPath(ctx)
         if (path.isBlank() || !File(path).exists()) return@withContext null
         val maxTokens = JarvisPrefs.getLocalMaxTokens(ctx)
         try {
-            if (llm == null || loadedPath != path || loadedMaxTokens != maxTokens) {
-                try { llm?.close() } catch (_: Throwable) {}
-                llm = null
-                val opts = LlmInference.LlmInferenceOptions.builder()
-                    .setModelPath(path)
-                    .setMaxTokens(maxTokens)
-                    .build()
-                llm = LlmInference.createFromOptions(ctx.applicationContext, opts)
-                loadedPath = path
-                loadedMaxTokens = maxTokens
-            }
+            if (!ensureLoaded(ctx, path, maxTokens)) return@withContext null
             llm!!.generateResponse(buildPrompt(prompt))?.let { cleanOutput(it) }
         } catch (_: Throwable) {
             try { llm?.close() } catch (_: Throwable) {}
@@ -103,6 +118,50 @@ object LocalLlm {
             null
         }
     }
+
+    /**
+     * 视觉问答（Gemma 3n 多模态）：会话开视觉模态，先喂图再喂文字，done=true 那次回调带的是完整回答。任何失败返回 null（上层回退云端）；会话失败不卸载模型，文字路还能用。
+     * 超时 90 秒没答完也判失败，不让看屏流程无限等。
+     */
+    suspend fun generateWithImage(ctx: Context, prompt: String, bitmap: Bitmap): String? = withContext(dispatcher) {
+        val path = JarvisPrefs.getLocalLlmPath(ctx)
+        if (path.isBlank() || !File(path).exists()) return@withContext null
+        val maxTokens = JarvisPrefs.getLocalMaxTokens(ctx)
+        try {
+            if (!ensureLoaded(ctx, path, maxTokens)) return@withContext null
+            val llmNow = llm ?: return@withContext null
+            val safeBmp = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap
+                else bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: return@withContext null
+            val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
+                .setTemperature(0.7f)
+                .setTopK(40)
+                .setTopP(0.95f)
+                .setEnableVisionModality(true)
+                .setMaxNumImages(1)
+                .build()
+            val session = llmNow.createSession(sessionOptions)
+            try {
+                session.addImage(safeBmp)
+                session.addQueryChunk(buildVisionPrompt(prompt))
+                val raw = withTimeoutOrNull(90_000) {
+                    suspendCancellableCoroutine<String?> { cont ->
+                        session.generateResponseAsync { partial, done ->
+                            if (done && cont.isActive) cont.resume(partial)
+                        }
+                    }
+                } ?: return@withContext null
+                cleanOutput(raw)
+            } finally {
+                try { session.close() } catch (_: Throwable) {}
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** 视觉问答的模板：只套 Gemma 对话壳，不加文字路那段 Jarvis 人设（看屏提示词自带完整指令，勿冲突）。 */
+    private fun buildVisionPrompt(prompt: String): String =
+        "<start_of_turn>user\n$prompt<end_of_turn>\n<start_of_turn>model\n"
 
     fun unload() {
         try { llm?.close() } catch (_: Throwable) {}

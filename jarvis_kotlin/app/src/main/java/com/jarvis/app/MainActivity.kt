@@ -1166,7 +1166,7 @@ class MainActivity : Activity() {
             JarvisPrefs.setLocalLlmPrefer(this@MainActivity, checked)
         })
         val tokensInput = EditText(this).apply {
-            hint = "maxTokens（256–1024，你的 gemma3 上限就是 1024）"
+            hint = "maxTokens（256–4096；gemma3n 上限 4096，旧 gemma3 上限 1024）"
             setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(JarvisPrefs.getLocalMaxTokens(this@MainActivity).toString())

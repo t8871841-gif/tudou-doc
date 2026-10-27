@@ -8,8 +8,14 @@ import android.os.Looper
 import android.util.Base64
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
+import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.TakeoverBorder
+import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.net.AgnesClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import kotlin.math.abs
 
@@ -21,6 +27,9 @@ import kotlin.math.abs
  */
 object ScreenVisionAgent {
     private val main = Handler(Looper.getMainLooper())
+
+    /** 本地视觉问答走挂起函数，用独立作用域桥回回调式调用方；取消靠 genSeq 序号丢弃结果。 */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     @Volatile
     private var genSeq = 0
@@ -43,6 +52,42 @@ object ScreenVisionAgent {
     }
 
     /**
+     * 视觉问答统一入口：本地/云端调配规则与文字路一致——智能调配开 = 本地先答、答不出再云端；
+     * 关 = 云端先答、失败再本地兜底。本地只在"启用本地模型且已导入模型"时参与；两路都失败才报失败。
+     * onResult/onError 原样透传调用方的回调（含序号守卫），本函数不替调用方 post。
+     */
+    private fun askVisionSmart(
+        ctx: Context, mySeq: Int, prompt: String, bmp: Bitmap, b64: String,
+        onResult: (String) -> Unit, onError: (String) -> Unit
+    ) {
+        val localReady = JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
+        val preferLocal = localReady && JarvisPrefs.isLocalLlmPrefer(ctx)
+        if (preferLocal) {
+            scope.launch {
+                val local = LocalLlm.generateWithImage(ctx, prompt, bmp)
+                if (mySeq != genSeq) return@launch
+                if (local != null) {
+                    onResult(local)
+                } else {
+                    AgnesClient.askVision(ctx, prompt, b64, onResult, onError)
+                }
+            }
+            return
+        }
+        AgnesClient.askVision(ctx, prompt, b64, onResult, { msg ->
+            if (mySeq != genSeq || !localReady) {
+                onError(msg)
+                return@askVision
+            }
+            scope.launch {
+                val local = LocalLlm.generateWithImage(ctx, prompt, bmp)
+                if (mySeq != genSeq) return@launch
+                if (local != null) onResult(local) else onError(msg)
+            }
+        })
+    }
+
+    /**
      * 看一眼屏幕回答问题：截图(受黑名单限制) → 问视觉模型 → 用自然语言回答，适合直接拿去 TTS 朗读。
      */
     fun describeScreen(ctx: Context, question: String, onResult: (String) -> Unit, onError: (String) -> Unit) {
@@ -52,7 +97,7 @@ object ScreenVisionAgent {
             val b64 = GridOverlay.toJpegBase64(bmp, quality = 70)
             val prompt = "这是用户当前手机屏幕的截图。用户的问题是：「$question」。" +
                 "请直接、简短地用自然语言回答，这段话会被原样朗读给用户听，不要用markdown、不要分点、不要读坐标数字。"
-            AgnesClient.askVision(ctx, prompt, b64,
+            askVisionSmart(ctx, mySeq, prompt, bmp, b64,
                 onResult = { reply -> if (mySeq == genSeq) main.post { onResult(reply) } },
                 onError = { msg -> if (mySeq == genSeq) main.post { onError(msg) } }
             )
@@ -90,10 +135,9 @@ object ScreenVisionAgent {
             "cell 是目标所在的格子号；sub 是目标在格子内偏左/居中/偏右；" +
             "如果目标很小、不确定具体位置，把 zoom 设为 true，我会再给你一张放大图确认；" +
             "如果这张截图里根本找不到这个目标，把 not_found 设为 true。不许直接给出像素坐标。"
-        AgnesClient.askVision(ctx, prompt, b64,
+        askVisionSmart(ctx, mySeq, prompt, bmp, b64,
             onResult = { raw ->
-                if (mySeq != genSeq) return@askVision
-                main.post {
+                if (mySeq == genSeq) main.post {
                     val json = parseJsonLoose(raw)
                     if (json == null) {
                         finishFail(ctx, taskLabel, target, "视觉模型没有按约定格式回答")
@@ -122,8 +166,7 @@ object ScreenVisionAgent {
                 }
             },
             onError = { msg ->
-                if (mySeq != genSeq) return@askVision
-                main.post {
+                if (mySeq == genSeq) main.post {
                     finishFail(ctx, taskLabel, target, "视觉模型请求失败：$msg")
                     onDone(false, "视觉模型请求失败：$msg")
                 }
@@ -140,10 +183,9 @@ object ScreenVisionAgent {
         val prompt = "这是刚才那个格子区域的放大图，图中的红色十字是当前的粗略猜测位置。" +
             "目标是：「$target」。请只回复 JSON：{\"x_frac\":0.5,\"y_frac\":0.5,\"not_found\":false}，" +
             "x_frac/y_frac 是目标中心点在这张放大图里的相对比例坐标（左上角是 0,0，右下角是 1,1）。"
-        AgnesClient.askVision(ctx, prompt, b64,
+        askVisionSmart(ctx, mySeq, prompt, bmp, b64,
             onResult = { raw ->
-                if (mySeq != genSeq) return@askVision
-                main.post {
+                if (mySeq == genSeq) main.post {
                     val json = parseJsonLoose(raw)
                     if (json == null || json.optBoolean("not_found", false)) {
                         finishFail(ctx, taskLabel, target, "放大确认后仍未找到「$target」")
@@ -158,8 +200,7 @@ object ScreenVisionAgent {
                 }
             },
             onError = { msg ->
-                if (mySeq != genSeq) return@askVision
-                main.post {
+                if (mySeq == genSeq) main.post {
                     finishFail(ctx, taskLabel, target, "放大确认请求失败：$msg")
                     onDone(false, "放大确认请求失败：$msg")
                 }

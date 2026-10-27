@@ -88,10 +88,10 @@ object JarvisPrefs {
         p(ctx).edit().putString(KEY_LOCAL_PATH, v.trim()).apply()
     }
 
-    /** 上限 1024：用户那颗 gemma3-tudou.task 的上下文上限就是 1024，超了模型加载失败（旧桥踩过）。 */
+    /** 上限 4096：Gemma 3n 的 .task 上下文是 4096；旧 gemma3-tudou.task 上限 1024，超了加载失败（旧桥踩过），默认仍 1024。 */
     fun getLocalMaxTokens(ctx: Context): Int = p(ctx).getInt(KEY_LOCAL_MAX_TOKENS, 1024)
     fun setLocalMaxTokens(ctx: Context, v: Int) {
-        p(ctx).edit().putInt(KEY_LOCAL_MAX_TOKENS, v.coerceIn(256, 1024)).apply()
+        p(ctx).edit().putInt(KEY_LOCAL_MAX_TOKENS, v.coerceIn(256, 4096)).apply()
     }
 
     fun isLocalLlmPrefer(ctx: Context): Boolean = p(ctx).getBoolean(KEY_LOCAL_PREFER, false)
