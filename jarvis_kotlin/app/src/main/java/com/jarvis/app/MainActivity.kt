@@ -26,7 +26,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
-import com.jarvis.app.hud.GalaxyPhotoStageView
+import com.jarvis.app.hud.GalaxyHoloStageView
 import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
@@ -72,7 +72,7 @@ class MainActivity : Activity() {
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
     private var bgView: HudBackgroundView? = null
-    private var galaxyStageView: GalaxyPhotoStageView? = null
+    private var stageView: GalaxyHoloStageView? = null
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
@@ -182,13 +182,16 @@ class MainActivity : Activity() {
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
     }
 
-    // ---------- 中央区域：星系照片横版舞台（2026-10-27，用户定：横版、比例匹配照片 16:9、完整星系带）；
-    // 舞台高由 GalaxyPhotoStageView 自量（宽 × 9/16），对话与底部面板位置不动 ----------
+    // ---------- 中央区域：银河舞台动画（2026-10-27，用户令复活全套动态效果；照片舞台已删）；
+    // 舞台占上部区域 2/3（权重 2:1），对话与底部面板位置不动 ----------
 
     private fun buildStage(): FrameLayout {
         val stage = FrameLayout(this)
-        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        galaxyStageView = GalaxyPhotoStageView(this).also {
+        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f)
+        stageView = GalaxyHoloStageView(this).apply {
+            mode = { JarvisAgent.currentState() }
+            micLevel = { OfflineAsrSession.currentLevel() }
+        }.also {
             stage.addView(it, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
         wakeChip = TextView(this).apply {
@@ -1422,13 +1425,11 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         OrbController.setAppForeground(true)
-        galaxyStageView?.startBreathing()
         if (showingSettings) refresh()
     }
 
     override fun onPause() {
         OrbController.setAppForeground(false)
-        galaxyStageView?.stopBreathing()
         super.onPause()
     }
 
