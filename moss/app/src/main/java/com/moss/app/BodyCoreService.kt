@@ -859,6 +859,15 @@ class BodyCoreService : Service() {
         acceptBrainOutput = true
         // A deliberate press that fails is owed its explanation again.
         voiceFailureReported = false
+        // The tap's acknowledgement is drawn here, on the UI thread, before
+        // the turn's work is handed to the ASR executor — a stalled executor
+        // must not leave the tap with no visible answer at all. `stopImpl`
+        // clears both, so the toggle's "off" half self-corrects.
+        window.setState(FloatingWindowUi.State.RECORDING)
+        window.setSubtitle(
+            AppLocale.str(this, R.string.asr_listening),
+            FloatingWindowUi.SubtitleKind.PARTIAL,
+        )
         asr.toggle()
     }
 

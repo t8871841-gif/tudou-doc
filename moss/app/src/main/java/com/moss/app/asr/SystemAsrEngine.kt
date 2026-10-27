@@ -18,7 +18,10 @@ package com.moss.app.asr
 // turn never hangs on a recogniser that went quiet. A recogniser error that
 // only means "nothing was said" (no match, speech timeout) settles quietly
 // as an empty final, exactly like an empty turn on the other backends;
-// anything else is a real error.
+// anything else is a real error. A service that takes the request and never
+// answers at all — no callback of any kind within [NO_CALLBACK_MS] — is a
+// real error too: without the deadline the turn would end silently on the
+// caller's silence watchdog and the tap would look dead.
 //
 // No key, no download, no account. Quality depends on this device's speech
 // service, which is why the caller falls back to 火山 when
@@ -47,6 +50,15 @@ class SystemAsrEngine(
 
         /** Ready fallback: some services never fire onReadyForSpeech. */
         private const val READY_FALLBACK_MS = 2000L
+
+        /**
+         * No-callback deadline: a service that has not produced a single
+         * callback this long after the request is not listening. Long
+         * enough that a slow first bind never trips it — onReadyForSpeech
+         * normally arrives within a second — short enough that the user
+         * is told promptly instead of watching a dead turn.
+         */
+        private const val NO_CALLBACK_MS = 8000L
 
         fun isAvailable(context: Context): Boolean =
             SpeechRecognizer.isRecognitionAvailable(context)
@@ -87,6 +99,15 @@ class SystemAsrEngine(
     @Volatile
     private var readyFired = false
 
+    /**
+     * True once the service has spoken back in any form this session:
+     * ready, speech, partial, results, or error. Only the service's own
+     * callbacks count — the [READY_FALLBACK_MS] timer is this class's,
+     * not the service's, so it must not set this.
+     */
+    @Volatile
+    private var heardFromService = false
+
     @Volatile
     private var recognizer: SpeechRecognizer? = null
 
@@ -95,6 +116,7 @@ class SystemAsrEngine(
         started = true
         lastPartial = ""
         readyFired = false
+        heardFromService = false
         delivered.set(false)
         doneLatch = CountDownLatch(1)
         if (!isAvailable(context)) {
@@ -112,16 +134,29 @@ class SystemAsrEngine(
             recognizer = r
             r.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
+                    heardFromService = true
                     fireReady()
                 }
 
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
+                override fun onBeginningOfSpeech() {
+                    heardFromService = true
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {
+                    heardFromService = true
+                }
+
+                override fun onBufferReceived(buffer: ByteArray?) {
+                    heardFromService = true
+                }
+
+                override fun onEndOfSpeech() {
+                    heardFromService = true
+                }
 
                 override fun onPartialResults(partialResults: Bundle?) {
                     if (gen != generation) return
+                    heardFromService = true
                     val txt = partialResults
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull().orEmpty()
@@ -133,6 +168,7 @@ class SystemAsrEngine(
 
                 override fun onResults(results: Bundle?) {
                     if (gen != generation) return
+                    heardFromService = true
                     val txt = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull().orEmpty()
@@ -142,6 +178,7 @@ class SystemAsrEngine(
 
                 override fun onError(error: Int) {
                     if (gen != generation) return
+                    heardFromService = true
                     destroyRecognizer(r)
                     when (error) {
                         // Nothing said, or nothing intelligible: an empty
@@ -152,7 +189,9 @@ class SystemAsrEngine(
                     }
                 }
 
-                override fun onEvent(eventType: Int, params: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {
+                    heardFromService = true
+                }
             })
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(
@@ -171,6 +210,17 @@ class SystemAsrEngine(
                 return@post
             }
             main.postDelayed({ if (gen == generation) fireReady() }, READY_FALLBACK_MS)
+            // No-callback deadline: a service that takes the request and
+            // never answers must fail loudly, or the tap looks dead. The
+            // generation check is the cancellation — [endOfTurn]/[close]
+            // bump it — and the flag is only ever set by the service's
+            // own callbacks, never by the ready fallback above.
+            main.postDelayed({
+                if (gen == generation && !heardFromService) {
+                    destroyRecognizer(r)
+                    terminalError("系统识别没有反应")
+                }
+            }, NO_CALLBACK_MS)
         }
     }
 
