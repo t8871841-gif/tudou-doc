@@ -589,6 +589,7 @@ class BodyCoreService : Service() {
             // purpose-built call. It goes through the same submit path anyway,
             // so a meeting ends identically in both modes and the text above
             // stays the one thing that explains the transcript.
+            val brain = localBrain
             if (brain != null) {
                 ui.post {
                     acceptBrainOutput = true

@@ -1,4 +1,4 @@
-// Moss: derived from Andee (KUAFUAI, Apache-2.0 + conditions). hub (Java-WebSocket) and dog (usb-serial) dependencies removed.
+// Moss: derived from Andee (KUAFUAI, Apache-2.0 + conditions). Hub server/client and dog (usb-serial) removed; Java-WebSocket kept: Huoshan voice uses it directly.
 plugins {
     alias(libs.plugins.androidApplication)
     id 'org.jetbrains.kotlin.android' version '1.9.22'
@@ -136,10 +136,11 @@ dependencies {
     implementation libs.material
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
-    // The robot dog's dongle is a plain USB-serial device (Arduino Nano:
-    // CH340/CH9102/FTDI depending on the clone). 3.8.1 deliberately, not the
-    // latest: 3.11.0 pulls kotlin-stdlib 2.2.x, whose metadata this project's
-    // Kotlin 1.9.22 compiler cannot read. 3.8.1 is pure Java.
+    // Huoshan ASR/TTS speak WebSocket directly (HuoshanAsr/HuoshanTts). The
+    // library is transport only: the hub server/client that also used it
+    // are deleted, and this does not bring any of it back.
+    implementation 'org.java-websocket:Java-WebSocket:1.5.7'
+
 
     // Camera eye: CameraX preview/analysis + ML Kit barcode.
     def camerax_version = "1.3.4"
