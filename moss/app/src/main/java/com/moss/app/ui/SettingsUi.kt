@@ -5,6 +5,7 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -17,6 +18,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.annotation.StringRes
 import com.moss.app.R
 import com.moss.app.config.FactoryReset
@@ -1253,7 +1255,8 @@ class SettingsUi(
     /**
      * One text row.
      *
-     * @param secret renders masked with a 显示 / Show toggle. The key is the
+     * @param secret renders masked with a 显示 / Show toggle and a 粘贴 /
+     *   Paste button. The key is the
      *   user's own and this card is an overlay on top of whatever they are
      *   doing, so it has no business printing it at full size by default.
      */
@@ -1299,6 +1302,37 @@ class SettingsUi(
             gravity = Gravity.CENTER_VERTICAL
         }
         row.addView(et, LinearLayout.LayoutParams(0, WRAP, 1f))
+        // Paste, as a button of its own: long-press paste does not work in
+        // this overlay window on some ROMs, and the key field is the one
+        // place where a paste is the whole job — a key is copied, not
+        // typed. Reading the clipboard here answers the user's tap
+        // directly, and an empty or unreadable clipboard says so instead
+        // of doing nothing. Trimmed: a copied key often carries a trailing
+        // newline, which would otherwise fail closed as a wrong key.
+        row.addView(TextView(context).apply {
+            text = lctx.getString(R.string.settings_paste)
+            textSize = Glass.Type.CAPTION
+            setTextColor(Color.parseColor(Glass.ACCENT))
+            setPadding(dp(14), dp(8), dp(2), dp(8))
+            isClickable = true
+            setOnClickListener {
+                val pasted = runCatching {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                        as ClipboardManager
+                    cm.primaryClip?.getItemAt(0)?.coerceToText(context)
+                }.getOrNull()?.toString()?.trim().orEmpty()
+                if (pasted.isEmpty()) {
+                    Toast.makeText(
+                        context,
+                        lctx.getString(R.string.settings_paste_empty),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                } else {
+                    et.setText(pasted)
+                    et.setSelection(et.text?.length ?: 0)
+                }
+            }
+        })
         var shown = false
         row.addView(TextView(context).apply {
             text = lctx.getString(R.string.common_show)
