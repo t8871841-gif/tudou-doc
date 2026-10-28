@@ -12,8 +12,8 @@ import android.graphics.Shader
 import android.os.Looper
 import android.util.AttributeSet
 import android.view.View
-import android.view.animation.FastOutSlowInInterpolator
 import android.view.animation.LinearInterpolator
+import android.view.animation.PathInterpolator
 import kotlin.math.roundToInt
 
 /**
@@ -61,7 +61,10 @@ class MossOrbView @JvmOverloads constructor(
 
     private val breathAnim = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 1600L
-        interpolator = FastOutSlowInInterpolator()
+        // Cubic-bezier(0.4, 0, 0.2, 1): the Compose FastOutSlowInEasing
+        // curve, as a framework interpolator (there is no framework
+        // FastOutSlowInInterpolator to import).
+        interpolator = PathInterpolator(0.4f, 0f, 0.2f, 1f)
         repeatCount = ValueAnimator.INFINITE
         repeatMode = ValueAnimator.REVERSE
         addUpdateListener { breath = it.animatedValue as Float; invalidate() }

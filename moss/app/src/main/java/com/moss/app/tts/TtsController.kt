@@ -186,7 +186,6 @@ class TtsController(
         // while an utterance is very much on its way.
         cancelled = true
         disarmStallWatchdog()
-        stopCueTicker()
         val c = client
         client = null
         runCatching { c?.cancel() }
@@ -197,7 +196,6 @@ class TtsController(
     fun cancel() {
         executor.execute {
             disarmStallWatchdog()
-            stopCueTicker()
             runCatching { client?.cancel() }
             runCatching { audio.stopStreamPlayback() }
             focus.release()
@@ -208,7 +206,6 @@ class TtsController(
 
     fun shutdown() {
         disarmStallWatchdog()
-        stopCueTicker()
         runCatching { client?.cancel() }
         runCatching { audio.stopStreamPlayback() }
         focus.release()

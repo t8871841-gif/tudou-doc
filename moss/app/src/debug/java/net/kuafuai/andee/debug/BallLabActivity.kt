@@ -9,21 +9,17 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
-import com.moss.app.ui.ball.Action
-import com.moss.app.ui.ball.BallLooks
-import com.moss.app.ui.ball.EmotionBallTextureView
-import com.moss.app.ui.ball.Mood
+import com.moss.app.ui.ball.MossOrbView
+import com.moss.app.ui.ball.OrbState
 
 /**
- * One ball on a plain background, driven by intent extras, for `screencap`.
+ * One orb on a plain background, driven by intent extras, for `screencap`.
  *
  *   adb shell am start -n com.moss.app/.debug.BallLabActivity \
- *       --es mood WINK --es look andee --es bg light --ei dp 360
+ *       --es state LISTENING --es bg light --ei dp 360
  *
- * Extras (all optional): `mood` (a [Mood] name), `emotion` (a [Mood] name worn
- * while `mood` is SPEAKING), `look` (a BallLook name), `action` (an [Action]
- * name, fired once), `bg` (`dark` | `light` | `mid`), `dp` (the ball's side; 168
- * is the real folded size), `working`, `holding`, `ledge`.
+ * Extras (all optional): `state` (an [OrbState] name), `bg` (`dark` | `light`
+ * | `mid`), `dp` (the orb's side; 168 is the real folded size).
  *
  * Debug builds only — it lives in `src/debug`, so release never carries it.
  */
@@ -31,12 +27,12 @@ class BallLabActivity : Activity() {
 
     private lateinit var root: FrameLayout
     private lateinit var label: TextView
-    private var ball: EmotionBallTextureView? = null
+    private var ball: MossOrbView? = null
     private var builtDp = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Long captures (the idle life takes minutes) must not end on a dark screen.
+        // Long captures must not end on a dark screen.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         root = FrameLayout(this)
         label = TextView(this).apply {
@@ -62,13 +58,11 @@ class BallLabActivity : Activity() {
         root.setBackgroundColor(bg)
         label.setTextColor(if (bg == 0xFFF4F6FB.toInt()) Color.DKGRAY else Color.LTGRAY)
 
-        i.getStringExtra("look")?.let { BallLooks.requestByName(it) }
-
         val dp = i.getIntExtra("dp", 360)
         if (ball == null || dp != builtDp) {
             ball?.let { root.removeView(it) }
             val px = (dp * resources.displayMetrics.density).toInt()
-            ball = EmotionBallTextureView(this).also {
+            ball = MossOrbView(this).also {
                 root.addView(it, FrameLayout.LayoutParams(px, px, Gravity.CENTER))
             }
             builtDp = dp
@@ -77,20 +71,9 @@ class BallLabActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP,
             ))
         }
-        val b = ball!!
-
-        val mood = runCatching { Mood.valueOf(i.getStringExtra("mood")?.uppercase() ?: "CALM") }
-            .getOrDefault(Mood.CALM)
-        b.setMood(mood)
-        b.setListening(mood == Mood.LISTENING)
-        b.setEmotion(i.getStringExtra("emotion")?.let { runCatching { Mood.valueOf(it.uppercase()) }.getOrNull() })
-        b.setWorking(i.getBooleanExtra("working", false))
-        b.setAtLedge(i.getBooleanExtra("ledge", false))
-        b.setHolding(i.getBooleanExtra("holding", false))
-        i.getStringExtra("action")?.let { name ->
-            runCatching { Action.valueOf(name.uppercase()) }.getOrNull()?.let { b.trigger(it) }
-        }
-        label.text = "${BallLooks.requestedLook.name} · $mood" +
-            (i.getStringExtra("emotion")?.let { " · $it" } ?: "")
+        val state = runCatching { OrbState.valueOf(i.getStringExtra("state")?.uppercase() ?: "IDLE") }
+            .getOrDefault(OrbState.IDLE)
+        ball?.setOrbState(state)
+        label.text = state.name
     }
 }

@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.moss.app.R
 import com.moss.app.asr.AsrEngine
+import com.moss.app.asr.OfflineAsrEngine
 import com.moss.app.asr.SystemAsrEngine
 import com.moss.app.audio.AudioFocusGate
 import com.moss.app.audio.AudioIO
