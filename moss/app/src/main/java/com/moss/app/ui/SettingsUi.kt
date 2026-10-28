@@ -6,7 +6,9 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.text.InputType
@@ -52,7 +54,7 @@ import com.moss.app.wake.WakeWord
  *    other one's fields away instead of leaving the user to guess which four
  *    rows matter. It *folds* rather than flicking to `GONE`: rows that vanish
  *    instantly read as rows that were deleted.
- *  * **The voice section is a note, not rows.** Hearing is the system
+ *  * **The voice section is a note and one picker.** Hearing is the system
  *    recogniser and speaking is Edge neural voices; neither takes a
  *    credential, so there is nothing to fill in. The note exists so the
  *    empty space does not read as "not set up".
@@ -658,16 +660,25 @@ class SettingsUi(
         )
         note(localBlock, lctx.getString(R.string.settings_brain_local_note))
 
-        // ---- Voice: Edge only, nothing to configure ----
+        // ---- Voice: Edge only, nothing credentialled to configure ----
         //
         // Speaking is Edge neural voices, hearing is the system recogniser.
-        // Neither takes a credential, so there are no rows here — only the
-        // note saying so, or a user reads the empty space as "not set up".
+        // Neither takes a credential, so there are no credential rows here —
+        // only the note saying so, the service picker, or a user reads the
+        // empty space as "not set up".
         // The block is shown in every brain mode: voice is Edge in all of
         // them, so unlike the brain blocks below there is nothing to flip.
         val voiceBlock = block(panel)
         rowLabel(voiceBlock, lctx.getString(R.string.settings_section_voice_key))
         note(voiceBlock, lctx.getString(R.string.settings_voice_edge_note))
+        // Which recognition service a session is handed to. A radio list,
+        // not the segmented track: five long service names do not fit one
+        // row of cells, and the values are case-sensitive component names
+        // that [segmented]'s lowercasing would corrupt — so the rows keep
+        // their exact values and register in [picks] directly.
+        rowLabel(voiceBlock, lctx.getString(R.string.settings_asr_service))
+        asrServiceRows(voiceBlock)
+        note(voiceBlock, lctx.getString(R.string.settings_asr_service_note))
 
         // **These flips belong to the mode picker, not to this build pass.**
         // They used to be lone `setVisible` calls evaluated once here, against
@@ -1348,6 +1359,66 @@ class SettingsUi(
             }
         })
         parent.addView(row, rowParams(dp(5)))
+    }
+
+    /**
+     * One selectable row per installed recognition service, plus the
+     * system default. The values are flattened component names and must
+     * stay exact: [segmented] lowercases its keys, which would corrupt
+     * them, so these rows keep their own selection state and register in
+     * [picks] directly. The current choice comes from [saved], which
+     * [VoiceConfig.current] fills from prefs; a saved service that is no
+     * longer installed falls back to the default row.
+     */
+    private fun asrServiceRows(parent: LinearLayout) {
+        val options = mutableListOf(
+            "" to lctx.getString(R.string.settings_asr_service_default),
+        )
+        for ((flat, short) in recognitionOptions()) {
+            if (options.none { it.first == flat }) options += flat to short
+        }
+        var picked = saved["asr_service"].orEmpty()
+        if (options.none { it.first == picked }) picked = ""
+        picks["asr_service"] = { picked }
+        val rows = mutableListOf<TextView>()
+        fun paint() {
+            for ((i, tv) in rows.withIndex()) {
+                val on = options[i].first == picked
+                tv.text = (if (on) "● " else "○ ") + options[i].second
+                tv.setTextColor(Color.parseColor(if (on) Glass.TITLE else Glass.SECONDARY))
+            }
+        }
+        for ((value, _) in options) {
+            val tv = TextView(context).apply {
+                textSize = Glass.Type.BODY
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                isClickable = true
+                setOnClickListener { picked = value; paint() }
+            }
+            rows += tv
+            parent.addView(tv, rowParams(dp(5)))
+        }
+        paint()
+    }
+
+    /** Installed recognition services as (flattened component, short name). */
+    private fun recognitionOptions(): List<Pair<String, String>> {
+        val infos = runCatching {
+            context.packageManager.queryIntentServices(
+                Intent("android.speech.RecognitionService"),
+                0,
+            )
+        }.getOrDefault(emptyList())
+        return infos.map {
+            val cn = ComponentName(it.serviceInfo.packageName, it.serviceInfo.name)
+            cn.flattenToString() to shortServiceName(cn)
+        }.distinctBy { it.first }
+    }
+
+    private fun shortServiceName(cn: ComponentName): String {
+        val pkg = cn.packageName.substringAfterLast('.')
+        val cls = cn.className.substringAfterLast('.')
+        return "$pkg/$cls"
     }
 
     /**

@@ -1,6 +1,8 @@
 package com.moss.app.config
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import com.moss.app.BuildConfig
 import java.util.UUID
 
@@ -458,7 +460,33 @@ class VoiceConfig {
                     "sweep_daily_cap", DEFAULT_SWEEP_DAILY_CAP.toString(),
                 )!!,
                 "max_steps" to maxSteps(context).toString(),
+                "asr_service" to p.getString("asr_service", "").orEmpty(),
             )
+        }
+
+        /**
+         * Which recognition service a session is handed to, or null for the
+         * system default. The stored value is the flattened component name;
+         * a value naming a service that is no longer installed falls back
+         * to the default rather than failing the turn, so an uninstalled
+         * app cannot strand hearing.
+         */
+        fun asrService(context: Context): ComponentName? {
+            val flat = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString("asr_service", "").orEmpty().trim()
+            if (flat.isEmpty()) return null
+            val component = ComponentName.unflattenFromString(flat) ?: return null
+            val installed = runCatching {
+                context.packageManager.queryIntentServices(
+                    Intent("android.speech.RecognitionService"),
+                    0,
+                )
+            }.getOrDefault(emptyList())
+            val present = installed.any {
+                it.serviceInfo.packageName == component.packageName &&
+                    it.serviceInfo.name == component.className
+            }
+            return if (present) component else null
         }
 
         /**
@@ -633,6 +661,7 @@ class VoiceConfig {
             "notify",
             "lang",
             "ball",
+            "asr_service",
             "sweep", "sweep_quiet_minutes", "sweep_daily_cap",
             "max_steps",
         )

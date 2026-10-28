@@ -257,7 +257,11 @@ class AsrController(
         }
 
         // Which service hears: the system recogniser. There is no other.
-        val client: AsrEngine = SystemAsrEngine(context, listener)
+        val client: AsrEngine = SystemAsrEngine(
+            context,
+            listener,
+            com.moss.app.config.VoiceConfig.asrService(context),
+        )
         turnSilenceMs = client.silenceMs
         Log.i(
             TAG,

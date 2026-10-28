@@ -111,6 +111,9 @@
     <string name="settings_vault_manage">Manage</string>
     <string name="settings_section_voice_key">Speech</string>
     <string name="settings_voice_edge_note">Speech uses Edge neural voices and recognition uses the system speech recognizer; neither needs a key. Recognition quality depends on this device’s speech service.</string>
+    <string name="settings_asr_service">Recognition service</string>
+    <string name="settings_asr_service_default">System default</string>
+    <string name="settings_asr_service_note">System default unless pinned here. If taps hear nothing, try another; it applies from the next turn after saving.</string>
     <string name="settings_section_diagnostics">Diagnostics</string>
     <string name="settings_section_advanced">Advanced</string>
     <string name="settings_max_steps">Max steps per task</string>

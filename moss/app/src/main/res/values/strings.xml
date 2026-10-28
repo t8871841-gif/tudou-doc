@@ -88,6 +88,9 @@
     <string name="settings_vault_manage">管理</string>
     <string name="settings_section_voice_key">语音</string>
     <string name="settings_voice_edge_note">播报走 Edge 神经网络语音，识别走系统语音识别，两者都不需要 Key。系统识别的效果取决于这台设备的识别服务。</string>
+    <string name="settings_asr_service">识别服务</string>
+    <string name="settings_asr_service_default">系统默认</string>
+    <string name="settings_asr_service_note">默认走系统默认的那个；点球听不见时换一个试试，保存后下一轮生效。</string>
     <string name="settings_section_diagnostics">诊断</string>
     <string name="settings_section_advanced">高级</string>
     <string name="settings_max_steps">单次任务最多步数</string>

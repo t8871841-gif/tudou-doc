@@ -29,6 +29,7 @@ package com.moss.app.asr
 // service, which is why the caller checks [isAvailable] before starting a
 // turn — and why this still needs a real-device test.
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -45,6 +46,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SystemAsrEngine(
     private val context: Context,
     private val listener: AsrEngine.Listener,
+    /**
+     * The recognition service to bind, or null for the system default. A
+     * device can carry several services and the default can be a stub
+     * that takes the session and never answers; pinning one is how the
+     * user picks a service that actually hears.
+     */
+    private val service: ComponentName? = null,
 ) : AsrEngine {
 
     companion object {
@@ -131,7 +139,8 @@ class SystemAsrEngine(
         main.post {
             if (gen != generation) return@post
             val r = try {
-                SpeechRecognizer.createSpeechRecognizer(context)
+                if (service != null) SpeechRecognizer.createSpeechRecognizer(context, service)
+                else SpeechRecognizer.createSpeechRecognizer(context)
             } catch (e: Exception) {
                 terminalError("启动识别失败：${e.message}")
                 return@post
