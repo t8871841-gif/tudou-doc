@@ -19,3 +19,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Offline recognition (sherpa-onnx, prebuilt AAR): the JNI bridge classes
+# must survive minification, or a release build loses the recogniser at
+# runtime. Debug builds do not minify, so this only matters for release.
+-keep class com.k2fsa.sherpa.onnx.** { *; }

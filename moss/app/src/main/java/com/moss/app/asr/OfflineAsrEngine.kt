@@ -69,8 +69,17 @@ class OfflineAsrEngine(
     private var committed = ""
     private var lastPartial = ""
 
+    /**
+     * How the current turn is ending, from [endOfTurn]. Only a silence-ended
+     * blank turn reports a cause: a turn the user ended by hand settles
+     * silently through [onFinal], the way the system engine does it.
+     */
+    @Volatile
+    private var endedBySilence = false
+
     override fun start(sampleRate: Int, channels: Int) {
         io.execute {
+            endedBySilence = false
             try {
                 val rec = sharedRecognizer(context)
                 recognizer = rec
@@ -104,7 +113,9 @@ class OfflineAsrEngine(
         }
     }
 
-    override fun endOfTurn(bySilence: Boolean) = Unit
+    override fun endOfTurn(bySilence: Boolean) {
+        endedBySilence = bySilence
+    }
 
     override fun waitFinished(timeoutMs: Long): Boolean =
         finishedLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
@@ -147,7 +158,14 @@ class OfflineAsrEngine(
             s.inputFinished()
             while (rec.isReady(s)) rec.decode(s)
             val full = committed + rec.getResult(s).text
-            listener.onFinal(full)
+            // A silence-ended turn that heard nothing must say why instead
+            // of clearing silently: a silent empty end reads exactly like
+            // a dead tap. A hand-ended turn keeps today's silent settle.
+            if (full.isBlank() && endedBySilence) {
+                listener.onEmptyEnd("没听见：静默结束，没有内容")
+            } else {
+                listener.onFinal(full)
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "final decode failed", t)
             listener.onError("离线识别出错：${t.message ?: "解码失败"}")
