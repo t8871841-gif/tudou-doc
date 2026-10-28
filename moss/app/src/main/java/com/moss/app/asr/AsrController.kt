@@ -256,12 +256,22 @@ class AsrController(
             override fun onClosed() {}
         }
 
-        // Which service hears: the system recogniser. There is no other.
-        val client: AsrEngine = SystemAsrEngine(
-            context,
-            listener,
-            com.moss.app.config.VoiceConfig.asrService(context),
-        )
+        // Which engine hears: the on-device model by default — the system
+        // services on this device take the session and never answer. The
+        // system recogniser stays one tap away in settings, for the day a
+        // service on some other device does hear.
+        val client: AsrEngine = if (
+            com.moss.app.config.VoiceConfig.asrEngine(context) ==
+            com.moss.app.config.VoiceConfig.ASR_SYSTEM
+        ) {
+            SystemAsrEngine(
+                context,
+                listener,
+                com.moss.app.config.VoiceConfig.asrService(context),
+            )
+        } else {
+            OfflineAsrEngine(context, listener)
+        }
         turnSilenceMs = client.silenceMs
         Log.i(
             TAG,

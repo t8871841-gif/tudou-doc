@@ -486,11 +486,20 @@ class MeetingRecorder(
         // text comes from its own capture; if the device has no recognition
         // service, [SystemAsrEngine.start] reports it and the segment
         // settles empty rather than hanging the meeting.
-        val asr: AsrEngine = SystemAsrEngine(
-            context,
-            this,
-            com.moss.app.config.VoiceConfig.asrService(context),
-        )
+        // Same engine the conversation uses: the on-device model by
+        // default, the system recogniser only when settings say so.
+        val asr: AsrEngine = if (
+            com.moss.app.config.VoiceConfig.asrEngine(context) ==
+            com.moss.app.config.VoiceConfig.ASR_SYSTEM
+        ) {
+            SystemAsrEngine(
+                context,
+                this,
+                com.moss.app.config.VoiceConfig.asrService(context),
+            )
+        } else {
+            OfflineAsrEngine(context, this)
+        }
 
         /** Reset by [rotate] when a replacement could not be opened. */
         @Volatile

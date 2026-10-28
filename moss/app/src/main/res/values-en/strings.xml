@@ -114,6 +114,9 @@
     <string name="settings_asr_service">Recognition service</string>
     <string name="settings_asr_service_default">System default</string>
     <string name="settings_asr_service_note">System default unless pinned here. If taps hear nothing, try another; it applies from the next turn after saving.</string>
+    <string name="settings_asr_engine">Recognition engine</string>
+    <string name="settings_asr_engine_offline">On-device model</string>
+    <string name="settings_asr_engine_system">System service</string>
     <string name="settings_section_diagnostics">Diagnostics</string>
     <string name="settings_section_advanced">Advanced</string>
     <string name="settings_max_steps">Max steps per task</string>
@@ -446,6 +449,9 @@
     <string name="check_title_adb_keyboard">ADB keyboard</string>
     <string name="check_title_secure_settings">Typing without root</string>
     <string name="check_title_voice_key">System speech recognition</string>
+    <string name="check_title_offline_model">Offline model</string>
+    <string name="check_detail_offline_model_ok">Model files are present; offline recognition can run.</string>
+    <string name="check_detail_offline_model_missing">Model files are missing; offline recognition cannot run.</string>
     <string name="check_title_voice_host">Voice service</string>
     <string name="check_title_wake">Wake phrase</string>
     <string name="check_title_battery">Background running</string>

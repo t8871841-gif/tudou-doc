@@ -29,3 +29,10 @@ __pycache__/
 # 而它和源页面几乎一样、很容易被误提交。两种后缀都要挡：
 andee-website/*.probe.html
 andee-website/*.degraded.html
+
+# sherpa-onnx offline recognition: binaries, downloaded by CI, never committed.
+app/libs/sherpa-onnx-*.aar
+app/src/main/assets/asr/encoder-epoch-99-avg-1.int8.onnx
+app/src/main/assets/asr/decoder-epoch-99-avg-1.onnx
+app/src/main/assets/asr/joiner-epoch-99-avg-1.int8.onnx
+app/src/main/assets/asr/tokens.txt

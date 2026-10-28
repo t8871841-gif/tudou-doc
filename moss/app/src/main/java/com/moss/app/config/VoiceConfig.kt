@@ -36,6 +36,10 @@ class VoiceConfig {
         const val BRAIN_LOCAL = "local"
         const val BRAIN_CODEFLYING = "codeflying"
 
+        /** Which engine hears: the on-device sherpa model, or the system recognition service. */
+        const val ASR_OFFLINE = "offline"
+        const val ASR_SYSTEM = "system"
+
         /**
          * The out-of-box default for a blank 本机 tab: Jarvis's setup — the
          * Agnes endpoint and `agnes-3.0-flash`, the same key and model
@@ -250,6 +254,21 @@ class VoiceConfig {
         }
 
         /**
+         * Which recognition engine a turn uses. Offline is the default: the
+         * system services on this device take the session and never answer,
+         * so the default must be the engine that cannot be refused one.
+         * Unknown saved values fail closed to offline, same rule as
+         * [brainMode].
+         */
+        fun asrEngine(context: Context): String {
+            val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            return when (p.getString("asr_engine", "").orEmpty().trim().lowercase()) {
+                ASR_SYSTEM -> ASR_SYSTEM
+                else -> ASR_OFFLINE
+            }
+        }
+
+        /**
          * The brain mode in effect, with CodeFlying availability already
          * reconciled. Reads the saved `brain` pref; falls back to CodeFlying
          * if the build enables it and otherwise to local. Unknown saved values
@@ -461,6 +480,7 @@ class VoiceConfig {
                 )!!,
                 "max_steps" to maxSteps(context).toString(),
                 "asr_service" to p.getString("asr_service", "").orEmpty(),
+                "asr_engine" to asrEngine(context),
             )
         }
 
@@ -662,6 +682,7 @@ class VoiceConfig {
             "lang",
             "ball",
             "asr_service",
+            "asr_engine",
             "sweep", "sweep_quiet_minutes", "sweep_daily_cap",
             "max_steps",
         )

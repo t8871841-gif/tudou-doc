@@ -28,6 +28,40 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Offline recognition binaries: the sherpa-onnx aar and the zipformer
+      # model files are binaries and never enter git. They are fetched here
+      # from the upstream GitHub releases, and the build fails loudly if any
+      # of them is missing — shipping a build without the model would mean
+      # turns that fail with "offline recognition unavailable" and no
+      # explanation. Retried downloads: the release host cuts long transfers,
+      # so curl resumes until the file is whole.
+      - name: Fetch sherpa-onnx AAR and offline model
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p moss/app/libs moss/app/src/main/assets/asr
+          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar"
+          for i in 1 2 3 4 5 6; do
+            curl -sL -C - --max-time 600 -o moss/app/libs/sherpa-onnx-1.12.23.aar "$AAR_URL" && break
+            sleep 5
+          done
+          test -s moss/app/libs/sherpa-onnx-1.12.23.aar
+          MODEL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2"
+          for i in 1 2 3 4 5 6; do
+            curl -sL -C - --max-time 600 -o /tmp/sherpa-model.tar.bz2 "$MODEL_URL" && break
+            sleep 5
+          done
+          mkdir -p /tmp/sherpa-model
+          tar -xjf /tmp/sherpa-model.tar.bz2 --wildcards -C /tmp/sherpa-model \
+            '*/encoder-epoch-99-avg-1.int8.onnx' \
+            '*/decoder-epoch-99-avg-1.onnx' \
+            '*/joiner-epoch-99-avg-1.int8.onnx' \
+            '*/tokens.txt'
+          for f in encoder-epoch-99-avg-1.int8.onnx decoder-epoch-99-avg-1.onnx joiner-epoch-99-avg-1.int8.onnx tokens.txt; do
+            src=$(find /tmp/sherpa-model -name "$f" | head -1)
+            test -n "$src" && test -s "$src" && cp "$src" moss/app/src/main/assets/asr/
+          done
+          ls -la moss/app/libs moss/app/src/main/assets/asr
+
       - name: Install Android SDK platform 34
         working-directory: ${{ github.workspace }}
         run: |

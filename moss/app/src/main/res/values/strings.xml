@@ -91,6 +91,9 @@
     <string name="settings_asr_service">识别服务</string>
     <string name="settings_asr_service_default">系统默认</string>
     <string name="settings_asr_service_note">默认走系统默认的那个；点球听不见时换一个试试，保存后下一轮生效。</string>
+    <string name="settings_asr_engine">识别方式</string>
+    <string name="settings_asr_engine_offline">离线模型</string>
+    <string name="settings_asr_engine_system">系统服务</string>
     <string name="settings_section_diagnostics">诊断</string>
     <string name="settings_section_advanced">高级</string>
     <string name="settings_max_steps">单次任务最多步数</string>
@@ -531,6 +534,9 @@
     <string name="check_title_adb_keyboard">ADB 键盘</string>
     <string name="check_title_secure_settings">免 root 输入</string>
     <string name="check_title_voice_key">系统语音识别</string>
+    <string name="check_title_offline_model">离线模型</string>
+    <string name="check_detail_offline_model_ok">模型文件齐了，离线识别能用。</string>
+    <string name="check_detail_offline_model_missing">缺模型文件，离线识别用不了。</string>
     <string name="check_title_voice_host">语音服务可达</string>
     <string name="check_title_wake">唤醒词</string>
     <string name="check_title_battery">后台运行</string>

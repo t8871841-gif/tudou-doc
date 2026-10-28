@@ -255,6 +255,7 @@ object SelfCheck {
             adbKeyboard(context, a11yIme),
             secureSettings(context, a11yIme),
             voiceKey(context),
+            offlineModel(context),
             voiceReach(context, probe, online),
             wakePhrase(context),
             background(context),
@@ -787,6 +788,27 @@ object SelfCheck {
             else R.string.check_detail_voice_key_missing,
             detailArgs = if (has) listOf(recognitionServiceLabel(context)) else emptyList(),
             fix = if (has) Fix.Nothing else Fix.OurSettings,
+        )
+    }
+
+    /**
+     * The on-device recognition model.
+     *
+     * Graded on the model files' presence in assets, not on a live load:
+     * loading the recogniser on every check would pay the copy-and-load
+     * cost for a row the user glances at. A build that forgot the CI
+     * download step shows here as missing instead of failing turns with
+     * "offline recognition unavailable" and no explanation.
+     */
+    private fun offlineModel(context: Context): Finding {
+        val has = com.moss.app.asr.OfflineAsrEngine.assetsPresent(context)
+        return Finding(
+            id = "offline_model",
+            title = R.string.check_title_offline_model,
+            level = if (has) Level.OK else Level.WARN,
+            detail = if (has) R.string.check_detail_offline_model_ok
+            else R.string.check_detail_offline_model_missing,
+            fix = Fix.Nothing,
         )
     }
 

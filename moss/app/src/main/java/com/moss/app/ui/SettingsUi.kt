@@ -54,7 +54,7 @@ import com.moss.app.wake.WakeWord
  *    other one's fields away instead of leaving the user to guess which four
  *    rows matter. It *folds* rather than flicking to `GONE`: rows that vanish
  *    instantly read as rows that were deleted.
- *  * **The voice section is a note and one picker.** Hearing is the system
+ *  * **The voice section is a note and two pickers.** Hearing is the system
  *    recogniser and speaking is Edge neural voices; neither takes a
  *    credential, so there is nothing to fill in. The note exists so the
  *    empty space does not read as "not set up".
@@ -671,14 +671,35 @@ class SettingsUi(
         val voiceBlock = block(panel)
         rowLabel(voiceBlock, lctx.getString(R.string.settings_section_voice_key))
         note(voiceBlock, lctx.getString(R.string.settings_voice_edge_note))
+        // Which engine hears. The on-device model is the default: the system
+        // services on this device take the session and never answer. The
+        // service rows below only matter for the system engine, so they fold
+        // away under the on-device choice — same flip pattern as the brain
+        // blocks below.
+        rowLabel(voiceBlock, lctx.getString(R.string.settings_asr_engine))
+        var applyAsrEngine: ((String, Boolean) -> Unit)? = null
+        val asrEngine = segmented(
+            voiceBlock,
+            "asr_engine",
+            listOf(
+                VoiceConfig.ASR_OFFLINE to lctx.getString(R.string.settings_asr_engine_offline),
+                VoiceConfig.ASR_SYSTEM to lctx.getString(R.string.settings_asr_engine_system),
+            ),
+        ) { applyAsrEngine?.invoke(it, true) }
+        val serviceBlock = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        voiceBlock.addView(serviceBlock, rowParams(dp(7)))
         // Which recognition service a session is handed to. A radio list,
         // not the segmented track: five long service names do not fit one
         // row of cells, and the values are case-sensitive component names
         // that [segmented]'s lowercasing would corrupt — so the rows keep
         // their exact values and register in [picks] directly.
-        rowLabel(voiceBlock, lctx.getString(R.string.settings_asr_service))
-        asrServiceRows(voiceBlock)
-        note(voiceBlock, lctx.getString(R.string.settings_asr_service_note))
+        rowLabel(serviceBlock, lctx.getString(R.string.settings_asr_service))
+        asrServiceRows(serviceBlock)
+        note(serviceBlock, lctx.getString(R.string.settings_asr_service_note))
+        applyAsrEngine = { e, animate ->
+            Glass.setVisible(serviceBlock, e == VoiceConfig.ASR_SYSTEM, animate)
+        }
+        applyAsrEngine(asrEngine, false)
 
         // **These flips belong to the mode picker, not to this build pass.**
         // They used to be lone `setVisible` calls evaluated once here, against
