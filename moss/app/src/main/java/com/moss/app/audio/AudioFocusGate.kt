@@ -42,7 +42,7 @@ class AudioFocusGate(
 
     /** Set by [acquire], cleared by whichever of loss/[release] happens first. */
     @Volatile
-    private var onLost: (() -> Unit)? = null
+    private var onLost: ((Int) -> Unit)? = null
 
     @Volatile
     private var held = false
@@ -62,7 +62,7 @@ class AudioFocusGate(
                 onLost = null
                 held = false
                 Log.i(TAG, "focus lost ($change)")
-                runCatching { cb?.invoke() }
+                runCatching { cb?.invoke(change) }
             }
         }
     }
@@ -85,9 +85,14 @@ class AudioFocusGate(
      * talking over whatever it was.
      *
      * @param onLost invoked, on a binder thread, when the floor is taken back
-     *   mid-turn. Fires at most once per [acquire].
+     *   mid-turn, with the [AudioManager] change code (`AUDIOFOCUS_LOSS`,
+     *   `AUDIOFOCUS_LOSS_TRANSIENT`, `AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK`).
+     *   Fires at most once per [acquire]. The code matters: ducking is a
+     *   request to turn down, not to stop, and a listener that is not
+     *   playing anything has nothing to duck — collapsing all three into
+     *   one "stop" ended listening turns on notifications.
      */
-    fun acquire(onLost: () -> Unit): Boolean {
+    fun acquire(onLost: (Int) -> Unit): Boolean {
         this.onLost = onLost
         val ok = am.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         held = ok

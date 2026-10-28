@@ -173,7 +173,7 @@ class MeetingRecorder(
         // Reported as its own reason, not as "user": the brain reads
         // `stopped_by` out loud, and a meeting killed by a focus loss used to
         // have it tell the user they had touched the ball.
-        focus.acquire { endAndNotify(BY_FOCUS) }
+        focus.acquire { _ -> endAndNotify(BY_FOCUS) }
 
         val first = try {
             openSegment()

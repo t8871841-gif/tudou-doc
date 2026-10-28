@@ -16,12 +16,14 @@ package com.moss.app.asr
 // Turn end: the recogniser usually ends the turn itself ([onResults]), and
 // [endOfTurn]/[close] cover the rest by settling the last partial heard, so a
 // turn never hangs on a recogniser that went quiet. A recogniser error that
-// only means "nothing was said" (no match, speech timeout) settles quietly
-// as an empty final, exactly like an empty turn on the other backends;
-// anything else is a real error. A service that takes the request and never
-// answers at all — no callback of any kind within [NO_CALLBACK_MS] — is a
-// real error too: without the deadline the turn would end silently on the
-// caller's silence watchdog and the tap would look dead.
+// only means "nothing was said" (no match, speech timeout) settles as an
+// empty end that carries its cause ([AsrEngine.Listener.onEmptyEnd]),
+// so the caller can report it instead of clearing the turn silently —
+// a silent empty end reads exactly like a dead tap. Anything else is a
+// real error. A service that takes the request and never answers at all —
+// no callback of any kind within [NO_CALLBACK_MS] — is a real error too:
+// without the deadline the turn would end silently on the caller's
+// silence watchdog and the tap would look dead.
 //
 // No key, no download, no account. Quality depends on this device's speech
 // service, which is why the caller checks [isAvailable] before starting a
@@ -176,7 +178,7 @@ class SystemAsrEngine(
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull().orEmpty()
                     destroyRecognizer(r)
-                    deliverFinal(txt)
+                    deliverFinal(txt, "识别没有返回文字")
                 }
 
                 override fun onError(error: Int) {
@@ -185,9 +187,13 @@ class SystemAsrEngine(
                     destroyRecognizer(r)
                     when (error) {
                         // Nothing said, or nothing intelligible: an empty
-                        // turn, not a failure. The caller ends it quietly.
+                        // end with its cause, not a failure. The caller
+                        // reports the cause instead of ending quietly.
                         SpeechRecognizer.ERROR_NO_MATCH,
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> deliverFinal(lastPartial)
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> deliverFinal(
+                            lastPartial,
+                            "没听见：识别没有返回内容",
+                        )
                         else -> terminalError("识别出错(code=$error)")
                     }
                 }
@@ -204,6 +210,10 @@ class SystemAsrEngine(
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                // Which app is asking. Optional by the docs, but some
+                // services misbehave without it — a session that ends
+                // with no callback at all is one of the ways that shows.
+                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
             }
             try {
                 r.startListening(intent)
@@ -229,8 +239,8 @@ class SystemAsrEngine(
 
     /**
      * Discarded on purpose: the system recogniser captures for itself. The
-     * caller keeps its capture thread running regardless — see the class
-     * KDoc — so this must stay cheap and non-blocking.
+     * caller opens no capture of its own for this engine, so this must stay
+     * cheap and non-blocking.
      */
     override fun sendAudio(pcm: ByteArray, isLast: Boolean) = Unit
 
@@ -238,8 +248,14 @@ class SystemAsrEngine(
         generation++
         cancelRecognizer()
         // The recogniser's own callbacks are now suppressed, so settle here:
-        // by construction the last results are already in hand.
-        deliverFinal(lastPartial)
+        // by construction the last results are already in hand. A turn the
+        // user ended by hand settles silently, as before; a turn the silence
+        // rule ended carries its cause, so an empty end is reported instead
+        // of looking like a dead tap.
+        val cause = if (!bySilence) null
+            else if (!heardFromService) "没听见：识别服务没有回调"
+            else "没听见：静默结束，没有内容"
+        deliverFinal(lastPartial, cause)
     }
 
     override fun waitFinished(timeoutMs: Long): Boolean {
@@ -256,7 +272,11 @@ class SystemAsrEngine(
         cancelRecognizer()
         // Covers the path where the wait timed out with no delivery: settle
         // rather than hang the turn. No-op when a final already went out.
-        deliverFinal(lastPartial)
+        // The cause only matters on the standalone path — inside a stop the
+        // delivery above has already won — but it costs nothing to carry it.
+        val cause = if (!heardFromService) "没听见：识别服务没有回调"
+            else "没听见：没有听到内容"
+        deliverFinal(lastPartial, cause)
     }
 
     private fun fireReady() {
@@ -266,11 +286,19 @@ class SystemAsrEngine(
         }
     }
 
-    /** First delivery wins; every later one (including stale callbacks) is dropped. */
-    private fun deliverFinal(text: String) {
+    /**
+     * First delivery wins; every later one (including stale callbacks) is
+     * dropped. A blank line carries its cause to
+     * [AsrEngine.Listener.onEmptyEnd] instead of [onFinal], so the caller
+     * can say why nothing was heard rather than clearing the turn silently.
+     * A blank line with no cause — a turn the user ended by hand — keeps
+     * today's silent [onFinal] path.
+     */
+    private fun deliverFinal(text: String, cause: String? = null) {
         if (delivered.compareAndSet(false, true)) {
             doneLatch.countDown()
-            listener.onFinal(text)
+            if (text.isBlank() && cause != null) listener.onEmptyEnd(cause)
+            else listener.onFinal(text)
         }
     }
 

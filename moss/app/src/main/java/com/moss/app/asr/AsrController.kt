@@ -178,7 +178,15 @@ class AsrController(
         // stop in — asking and then opening the mic in the same breath would
         // still catch the tail of whatever was playing. A phone call takes the
         // floor back: end the turn rather than transcribe one side of a call.
-        focus.acquire { stop() }
+        // Ducking does not: nothing is playing to duck while listening, and
+        // treating it as a loss ended turns on notifications.
+        focus.acquire { change ->
+            if (change == android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+                Log.i(TAG, "focus duck ignored mid-turn")
+            } else {
+                stop()
+            }
+        }
 
         val listener = object : AsrEngine.Listener {
             override fun onReady() {
@@ -211,6 +219,23 @@ class AsrController(
                     // Capture the origin per session; a later tap must not
                     // turn an earlier follow-up result into an exit command.
                     if (text.isNotBlank()) onTranscript(text, userInitiated)
+                }
+            }
+
+            override fun onEmptyEnd(cause: String) {
+                // The turn ended with nothing heard, and the engine knows
+                // why. Say the cause as the turn's settled line instead of
+                // clearing silently: a silent empty end reads exactly like
+                // a dead tap, which is the failure that started this. The
+                // stop runs first so the teardown that follows it does not
+                // clear the cause, and the next turn overwrites it when it
+                // starts. A turn the user ended by hand never reaches
+                // here — it settles through onFinal with no cause.
+                window.clearSubtitle()
+                executor.execute {
+                    runCatching { stopImpl() }
+                    window.setSubtitle(cause, FloatingWindowUi.SubtitleKind.FINAL)
+                    window.setState(FloatingWindowUi.State.ERROR)
                 }
             }
 

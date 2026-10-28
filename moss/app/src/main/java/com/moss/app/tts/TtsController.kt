@@ -313,7 +313,7 @@ class TtsController(
         // for its caller to take over (startTurn → RECORDING), but a focus
         // loss has no caller and no next state. Without this line the ball
         // would keep mouthing words in silence until the next turn.
-        focus.acquire {
+        focus.acquire { _ ->
             stopSpeaking()
             window.setState(FloatingWindowUi.State.IDLE)
         }

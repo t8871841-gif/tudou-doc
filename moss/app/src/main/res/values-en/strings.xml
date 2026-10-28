@@ -491,7 +491,7 @@
     <string name="check_detail_secure_spare">Not granted, and typing works anyway — it goes through the accessibility input method. This is only needed by the spare channel above.</string>
     <string name="check_detail_mic_on">Allowed.</string>
     <string name="check_detail_mic_off">Not allowed. Tapping the ball does nothing at all — the failure that least resembles a permission problem.</string>
-    <string name="check_detail_voice_key_ok">This device has a speech recognition service; it can hear.</string>
+    <string name="check_detail_voice_key_ok">This device has a speech recognition service (%1$s); it can hear.</string>
     <string name="check_detail_voice_key_missing">This device has no speech recognition service, so it cannot hear. Speaking is unaffected, and everything else works.</string>
     <string name="check_detail_voice_host_ok">%1$s is reachable.</string>
     <string name="check_detail_voice_host_bad">Could not reach %1$s: %2$s. Both recognition and synthesis will time out.</string>

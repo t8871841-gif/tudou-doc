@@ -785,8 +785,39 @@ object SelfCheck {
             level = if (has) Level.OK else Level.WARN,
             detail = if (has) R.string.check_detail_voice_key_ok
             else R.string.check_detail_voice_key_missing,
+            detailArgs = if (has) listOf(recognitionServiceLabel(context)) else emptyList(),
             fix = if (has) Fix.Nothing else Fix.OurSettings,
         )
+    }
+
+    /**
+     * Which recognition service the framework would hand a session to, in a
+     * form short enough for a check row: the default component from the
+     * system setting, shortened to its last package segment and class name,
+     * with a count when more than one service answers the recognition
+     * intent. Both halves matter when hearing is dead but present: a
+     * default pointing at a stub, or several services installed, reads
+     * here instead of needing a logcat.
+     */
+    private fun recognitionServiceLabel(context: Context): String {
+        val flat = runCatching {
+            android.provider.Settings.Secure.getString(
+                context.contentResolver,
+                android.provider.Settings.Secure.VOICE_RECOGNITION_SERVICE,
+            )
+        }.getOrNull().orEmpty()
+        val count = runCatching {
+            context.packageManager.queryIntentServices(
+                android.content.Intent("android.speech.RecognitionService"),
+                0,
+            ).size
+        }.getOrDefault(0)
+        val name = flat.takeIf { it.isNotBlank() }?.let {
+            val pkg = it.substringBefore('/').substringAfterLast('.')
+            val cls = it.substringAfter('/', "").trimStart('.').substringAfterLast('.')
+            if (cls.isNotBlank()) "$pkg/$cls" else pkg
+        } ?: "?"
+        return if (count > 1) "$name ×$count" else name
     }
 
     /**

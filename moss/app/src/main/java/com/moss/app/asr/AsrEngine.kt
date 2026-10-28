@@ -88,6 +88,20 @@ interface AsrEngine {
         /** The finished transcript. Empty means "there was nothing to hear". */
         fun onFinal(text: String)
 
+        /**
+         * The turn ended with no transcript, and the engine knows why.
+         *
+         * Default is [onFinal] with an empty line, so a listener that only
+         * settles on finals (a meeting segment) keeps today's behaviour
+         * without noticing. A listener that talks to the user overrides
+         * this to say the cause out loud: an empty end that stays silent
+         * reads exactly like a dead tap, and the cause is the only thing
+         * that tells the two apart.
+         */
+        fun onEmptyEnd(cause: String) {
+            onFinal("")
+        }
+
         fun onError(msg: String)
 
         /** The upstream connection ended. */

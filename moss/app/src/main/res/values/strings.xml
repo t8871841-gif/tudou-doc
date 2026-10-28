@@ -575,7 +575,7 @@
     <string name="check_detail_secure_spare">没授权，不过不影响打字 —— 现在走的是无障碍输入法。它只给上面那条备用通道用，没有也行。</string>
     <string name="check_detail_mic_on">已允许。</string>
     <string name="check_detail_mic_off">没允许。点球不会有任何反应 —— 这是最不像权限问题的一条。</string>
-    <string name="check_detail_voice_key_ok">这台设备有语音识别服务，听得见。</string>
+    <string name="check_detail_voice_key_ok">这台设备有语音识别服务（%1$s），听得见。</string>
     <string name="check_detail_voice_key_missing">这台设备没有语音识别服务，听不见。播报不受影响，其余功能照常。</string>
     <string name="check_detail_voice_host_ok">%1$s 可达。</string>
     <string name="check_detail_voice_host_bad">连不上 %1$s：%2$s。识别和合成都会超时。</string>
