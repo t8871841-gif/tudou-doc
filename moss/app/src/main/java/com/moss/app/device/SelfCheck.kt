@@ -791,13 +791,15 @@ object SelfCheck {
     }
 
     /**
-     * Which recognition service the framework would hand a session to, in a
-     * form short enough for a check row: the default component from the
-     * system setting, shortened to its last package segment and class name,
-     * with a count when more than one service answers the recognition
-     * intent. Both halves matter when hearing is dead but present: a
-     * default pointing at a stub, or several services installed, reads
-     * here instead of needing a logcat.
+     * Which recognition services are installed, in a form short enough for
+     * a check row: every service answering the recognition intent, one per
+     * line, with the system default marked. The default is the one a
+     * session is handed to, so it is named first in the story even when it
+     * is not first in the list — and when hearing is dead but present, the
+     * list is what says whether the default is a stub while a working
+     * service sits next to it. Names are shortened to the last package
+     * segment and the class name; a lone service keeps the old one-name
+     * form.
      */
     private fun recognitionServiceLabel(context: Context): String {
         val flat = runCatching {
@@ -808,18 +810,28 @@ object SelfCheck {
                 "voice_recognition_service",
             )
         }.getOrNull().orEmpty()
-        val count = runCatching {
+        val services = runCatching {
             context.packageManager.queryIntentServices(
                 android.content.Intent("android.speech.RecognitionService"),
                 0,
-            ).size
-        }.getOrDefault(0)
-        val name = flat.takeIf { it.isNotBlank() }?.let {
-            val pkg = it.substringBefore('/').substringAfterLast('.')
-            val cls = it.substringAfter('/', "").trimStart('.').substringAfterLast('.')
-            if (cls.isNotBlank()) "$pkg/$cls" else pkg
-        } ?: "?"
-        return if (count > 1) "$name ×$count" else name
+            )
+        }.getOrDefault(emptyList())
+        fun shortOf(pkg: String, cls: String): String {
+            val p = pkg.substringAfterLast('.')
+            val c = cls.trimStart('.').substringAfterLast('.')
+            return if (c.isNotBlank()) "$p/$c" else p
+        }
+        val def = flat.takeIf { it.isNotBlank() }?.let {
+            shortOf(it.substringBefore('/'), it.substringAfter('/', ""))
+        }
+        val names = services.map {
+            shortOf(it.serviceInfo.packageName, it.serviceInfo.name)
+        }.distinct()
+        if (names.isEmpty()) return def ?: "?"
+        if (names.size == 1) return names.first()
+        val lines = names.map { if (it == def) "$it（默认）" else it }.toMutableList()
+        if (def != null && def !in names) lines.add(0, "$def（默认）")
+        return "共${lines.size}个：\n" + lines.joinToString("\n")
     }
 
     /**
