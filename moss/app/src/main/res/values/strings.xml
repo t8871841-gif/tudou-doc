@@ -84,35 +84,7 @@
     <string name="settings_vault_empty_note">还没有存账号 —— 存了之后，Moss 办事时可以直接用它们登录</string>
     <string name="settings_vault_count_note">已存 %1$d 个账号 —— 手机号邮箱大脑读得到，密码只由设备替你敲进输入框</string>
     <string name="settings_vault_manage">管理</string>
-    <string name="settings_section_voice">火山接口地址</string>
     <string name="settings_section_voice_key">语音</string>
-    <string name="settings_voice_factory_note">源码不带密钥。填上自己的 Key 才听得见、说得出;下面几行留空用默认地址即可。</string>
-    <string name="settings_voice_api_key">火山 API Key</string>
-    <string name="settings_voice_api_key_hint">火山引擎语音服务的 Key,听和说都靠它</string>
-    <string name="settings_voice_in_use">现在用的</string>
-    <string name="settings_voice_in_use_own">你自己填的那个火山账号</string>
-    <string name="settings_voice_in_use_factory">还没填,听和说都用不了</string>
-    <string name="settings_voice_asr_endpoint">识别地址</string>
-    <string name="settings_voice_asr_resource_id">识别资源 ID</string>
-    <string name="settings_voice_tts_endpoint">合成地址</string>
-    <string name="settings_voice_tts_resource_id">合成资源 ID</string>
-    <string name="settings_voice_tts_sample_rate">合成采样率</string>
-    <string name="settings_voice_provider">语音服务商</string>
-    <string name="settings_voice_provider_huoshan">火山</string>
-    <string name="settings_voice_provider_edge">Edge</string>
-    <string name="settings_voice_provider_google">谷歌</string>
-    <string name="settings_google_api_key">Google API Key</string>
-    <string name="settings_google_api_key_hint">Vertex Express Key,听和说都用它</string>
-    <string name="settings_google_key_builtin">已内置(编译时写入),留空即用它</string>
-    <string name="settings_google_project">项目号</string>
-    <string name="settings_google_project_hint">GCP 的项目编号(不是项目名),识别要用</string>
-    <string name="settings_google_location">区域</string>
-    <string name="settings_google_asr_model">识别模型</string>
-    <string name="settings_google_tts_model">合成模型</string>
-    <string name="settings_google_base_url">接口地址</string>
-    <string name="settings_google_language">语言</string>
-    <string name="settings_google_language_hint">留空 = 自动判断</string>
-    <string name="settings_voice_google_note">识别走 Gemini Live(需要项目号和区域),合成走 HTTP。密钥只存在这台设备上。</string>
     <string name="settings_voice_edge_note">播报走 Edge 神经网络语音，识别走系统语音识别，两者都不需要 Key。系统识别的效果取决于这台设备的识别服务。</string>
     <string name="settings_section_diagnostics">诊断</string>
     <string name="settings_section_advanced">高级</string>
@@ -191,7 +163,7 @@
 
     <!-- The 恢复出厂设置 confirmation list: one line per thing wiped.
          Kept beside config/FactoryReset.kt, which walks them in this order. -->
-    <string name="factory_reset_target_keys">火山 key、DeepSeek key，以及所有语音与大脑的设置</string>
+    <string name="factory_reset_target_keys">大模型 Key 与全部设置</string>
     <string name="factory_reset_target_notebook">小本本：记住的事、答应过还没办的事</string>
     <string name="factory_reset_target_vault">保险箱里存的账号密码和银行卡</string>
     <string name="factory_reset_target_wake">唤醒词的录音（要重新录一遍）</string>
@@ -553,7 +525,7 @@
     <string name="check_title_typing_channel">打字通道</string>
     <string name="check_title_adb_keyboard">ADB 键盘</string>
     <string name="check_title_secure_settings">免 root 输入</string>
-    <string name="check_title_voice_key">语音密钥</string>
+    <string name="check_title_voice_key">系统语音识别</string>
     <string name="check_title_voice_host">语音服务可达</string>
     <string name="check_title_wake">唤醒词</string>
     <string name="check_title_battery">后台运行</string>
@@ -603,8 +575,8 @@
     <string name="check_detail_secure_spare">没授权，不过不影响打字 —— 现在走的是无障碍输入法。它只给上面那条备用通道用，没有也行。</string>
     <string name="check_detail_mic_on">已允许。</string>
     <string name="check_detail_mic_off">没允许。点球不会有任何反应 —— 这是最不像权限问题的一条。</string>
-    <string name="check_detail_voice_key_ok">已填。识别和合成用它连服务商。</string>
-    <string name="check_detail_voice_key_missing">还没填。源码里不带密钥，得你自己去开一个语音服务,把 Key 填进 ⚙ →「后端」→「本机」。没有它，听和说都连不上 —— 报出来的却是连接超时，看着像网络坏了。其余功能照常。</string>
+    <string name="check_detail_voice_key_ok">这台设备有语音识别服务，听得见。</string>
+    <string name="check_detail_voice_key_missing">这台设备没有语音识别服务，听不见。播报不受影响，其余功能照常。</string>
     <string name="check_detail_voice_host_ok">%1$s 可达。</string>
     <string name="check_detail_voice_host_bad">连不上 %1$s：%2$s。识别和合成都会超时。</string>
     <string name="check_detail_wake_on">已录入，喊一声就醒。</string>

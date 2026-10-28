@@ -3,19 +3,15 @@ package com.moss.app.asr
 /**
  * One speech-recognition session, whichever backend is behind it.
  *
- * The shape is 火山's, because 火山 was here first: open a session, push PCM
- * into it as it arrives, ask it to finish, wait for the final line. Both
- * backends fit it and neither had to be reshaped to fit the other, which is
- * the only reason this interface exists rather than a branch inside
- * [AsrController].
+ * The shape is a streaming session's: open it, push PCM into it as it
+ * arrives, ask it to finish, wait for the final line. The interface exists
+ * rather than a branch inside [AsrController] so the caller never knows
+ * which backend is behind it.
  *
- * Both backends are streaming ones — 火山 over its own binary protocol, Google
- * over the Gemini Live API — which is why they reduce to the same five calls.
- * **The caller's silence rule reads [Listener.onPartial] and nothing else**,
- * which is what makes the two engines interchangeable rather than merely
- * similar: both keep reporting while the user talks, so a window that exceeds
- * their reporting cadence needs to know nothing about the room, the microphone
- * or which vendor is behind it.
+ * **The caller's silence rule reads [Listener.onPartial] and nothing else**:
+ * the engine keeps reporting while the user talks, so a window that exceeds
+ * its reporting cadence needs to know nothing about the room or the
+ * microphone.
  */
 interface AsrEngine {
 
@@ -23,19 +19,12 @@ interface AsrEngine {
      * How long [waitFinished] should be given — **this engine's own doing
      * included**.
      *
-     * Asked of the engine rather than fixed by the caller, because the two
-     * differ by more than a fudge factor and the reason is structural. 火山
-     * produces a final *only* in response to being told the utterance is over,
-     * so its answer is on its way as soon as the question is asked and half a
-     * second covers it. The Gemini Live API ends turns on its own voice
-     * detector, so by the time it is asked it has usually already answered and
-     * the request is what provokes a last push of trailing silence plus the
-     * wait for its reply — see `GoogleAsr.finishTurn`.
-     *
-     * One shared number therefore cannot be right for both, and the earlier
-     * version of this was exactly that mistake in reverse: raising the shared
-     * value to suit Google quietly made 火山 slower to give up on a server that
-     * had stopped answering.
+     * Asked of the engine rather than fixed by the caller, because how a
+     * final arrives is structural to the backend: a recogniser that ends
+     * turns on its own voice detector has usually already answered by the
+     * time it is asked, while one that only produces a final in response to
+     * being told the utterance is over needs the wait to cover the round
+     * trip. One shared number cannot be right for both shapes.
      */
     val finalWaitMs: Long
 
@@ -44,15 +33,14 @@ interface AsrEngine {
      * itself.
      *
      * **Two meanings, and which one applies depends on the engine.** For one
-     * that never announces an end of turn this *is* what ends the turn — 火山
-     * has no such signal, so a pause is all there is. For one that does
-     * (the Live API reports `turnComplete` from its own voice detector), this
-     * is the backstop for when that report does not arrive, and the only thing
-     * that closes a microphone on a connection that has gone quiet.
+     * that never announces an end of turn this *is* what ends the turn — a
+     * pause is all there is. For one that does (the system recogniser ends
+     * turns on its own voice detection), this is the backstop for when that
+     * report does not arrive, and the only thing that closes a microphone
+     * that has gone quiet.
      *
      * Per-engine for the same reason as [finalWaitMs]: a single shared value
-     * cannot be right for both, and changing it for one silently changes the
-     * other.
+     * cannot be right for every backend.
      */
     val silenceMs: Long
 
@@ -78,7 +66,7 @@ interface AsrEngine {
         /**
          * What has been heard so far, good enough to draw but not to act on.
          *
-         * **Both backends call this while the user is still talking**, and
+         * **The engine calls this while the user is still talking**, and
          * `AsrController` depends on it: the silence watchdog that closes the
          * microphone is fed from these calls and from nothing else.
          */
@@ -122,9 +110,8 @@ interface AsrEngine {
     /**
      * Block until the final line has been delivered, or [timeoutMs] passes.
      *
-     * The timeout is the caller's because the two backends need very different
-     * ones: 火山 answers in ~500 ms, while a Google request carries the whole
-     * utterance and has a network round trip of its own.
+     * The timeout is the caller's because how long a final takes to arrive
+     * depends on the backend behind the session.
      */
     fun waitFinished(timeoutMs: Long): Boolean
 

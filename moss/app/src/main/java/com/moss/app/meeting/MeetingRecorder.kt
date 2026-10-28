@@ -7,11 +7,9 @@ import android.os.SystemClock
 import android.util.Log
 import com.moss.app.R
 import com.moss.app.asr.AsrEngine
-import com.moss.app.asr.GoogleAsr
-import com.moss.app.asr.HuoshanAsr
+import com.moss.app.asr.SystemAsrEngine
 import com.moss.app.audio.AudioFocusGate
 import com.moss.app.audio.AudioIO
-import com.moss.app.config.VoiceConfig
 import com.moss.app.i18n.AppLocale
 import com.moss.app.ui.FloatingWindowUi
 import org.json.JSONObject
@@ -48,18 +46,18 @@ import java.util.concurrent.atomic.AtomicInteger
  * rotation free: if the replacement cannot connect, the old segment is still
  * receiving and the meeting carries on.
  *
- * **Why the recogniser is not 火山-specific.** The three properties this class
+ * **Why the recogniser is the system one.** The three properties this class
  * needs are the three [AsrEngine] already promises: audio goes in as it
  * arrives, listening continues while it does, and one final comes back when
- * the caller says the segment is over. 火山 and the Google Live API both have
- * them, so a segment is built from [VoiceConfig.voiceProvider] like every
- * other listener on this device. A meeting is not a different kind of
- * listening, and a device configured only for Google can take minutes.
+ * the caller says the segment is over. The system recogniser owns the
+ * microphone itself, so a segment's pushed audio is discarded and its text
+ * comes from the recogniser's own capture — a meeting is not a different
+ * kind of listening, and the segment is built from the same engine the
+ * conversation uses.
  *
- * The wait in [retire] is provider-dependent, and that is why it is asked of
- * the engine rather than named here: 火山 answers a retiring segment in about
- * half a second, while the Google engine pushes trailing silence and waits for
- * the reply. A single constant in this file could only ever suit one of them.
+ * The wait in [retire] is the engine's own final wait, and that is why it is
+ * asked of the engine rather than named here: how long a final takes to
+ * arrive depends on the backend behind the session.
  */
 class MeetingRecorder(
     private val context: Context,
@@ -342,10 +340,7 @@ class MeetingRecorder(
 
     private fun retire(seg: Segment, waitForFinal: Boolean = true) {
         runCatching { seg.asr.sendAudio(ByteArray(0), isLast = true) }
-        // The deadline is the engine's own: 火山 answers a retiring segment in
-        // about half a second, while the Google engine pushes trailing silence
-        // and waits for the reply. One shared number could only be right for
-        // one of them — see [AsrEngine.finalWaitMs].
+        // The deadline is the engine's own — see [AsrEngine.finalWaitMs].
         if (waitForFinal) runCatching { seg.asr.waitFinished(seg.asr.finalWaitMs) }
         runCatching { seg.asr.close() }
         // The latch also trips on error and on close, so a final is not
@@ -478,19 +473,12 @@ class MeetingRecorder(
 
     private inner class Segment(val index: Int) : AsrEngine.Listener {
         // Whichever service hears, the same one the conversation uses — a
-        // meeting is not a different kind of listening. Both engines suit a
-        // segment exactly: audio goes in for as long as the segment lives,
-        // and one final comes back when it is told the segment is over.
-        val asr: AsrEngine = when (VoiceConfig.voiceProvider(context)) {
-            VoiceConfig.VOICE_GOOGLE -> GoogleAsr(VoiceConfig.load(context), this)
-            VoiceConfig.VOICE_EDGE ->
-                if (com.moss.app.asr.SystemAsrEngine.isAvailable(context)) {
-                    com.moss.app.asr.SystemAsrEngine(context, this)
-                } else {
-                    HuoshanAsr(VoiceConfig.load(context), this)
-                }
-            else -> HuoshanAsr(VoiceConfig.load(context), this)
-        }
+        // meeting is not a different kind of listening. The recogniser owns
+        // the microphone, so the pushed audio is discarded and the segment's
+        // text comes from its own capture; if the device has no recognition
+        // service, [SystemAsrEngine.start] reports it and the segment
+        // settles empty rather than hanging the meeting.
+        val asr: AsrEngine = SystemAsrEngine(context, this)
 
         /** Reset by [rotate] when a replacement could not be opened. */
         @Volatile
@@ -556,16 +544,6 @@ class MeetingRecorder(
 
         /** Quiet this long and the seam is safe to put here. */
         const val PAUSE_MS = 800L
-
-        /**
-         * How long a retiring segment waits for its final.
-         *
-         * 火山 answers in about half a second; the Google engine holds the
-         * segment's text for its own grace first (`GoogleAsr.EMIT_GRACE_MS`)
-         * and that has to fit inside this. A caller that has already given up
-         * is one nobody can hand a transcript to.
-         */
-        const val FINAL_WAIT_MS = 3000L
 
         /** Roughly a four-hour Chinese meeting. Beyond it, see [elide]. */
         const val MAX_RETURN_CHARS = 60_000

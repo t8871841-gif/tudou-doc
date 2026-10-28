@@ -3,21 +3,19 @@ package com.moss.app.tts
 /**
  * One utterance, whichever backend speaks it.
  *
- * The call sequence is 火山's and both backends honour it: [open], then
- * [push] with the text (once, from the driver's `onOpen`) — for a backend that
- * synthesises on demand, however many times — then [finish]. Audio comes back
- * through [Listener.onAudio] as raw 16-bit little-endian PCM.
+ * The call sequence is fixed: [open], then [push] with the text (once, from
+ * the driver's `onOpen`) — for a backend that synthesises on demand, however
+ * many times — then [finish]. Audio comes back through [Listener.onAudio] as
+ * raw 16-bit little-endian PCM.
  *
  * **What a backend cannot promise is when the text arrives relative to the
- * network call.** 火山 accepts text into an open socket, so it can report its
- * sample rate before it has seen a word; a backend that sends one HTTP request
- * per utterance only learns the rate from the response. [Listener.onOpen] is
- * therefore called *before* [push] by construction — see `GoogleTts` for what
- * that forces it to declare up front.
+ * network call.** Edge's output format is fixed at 24 kHz, so the rate is
+ * known before any text arrives. [Listener.onOpen] is therefore called
+ * *before* [push] by construction, and the driver pushes from that callback.
  */
 interface TtsEngine {
 
-    /** Why a session ended. Narrated to nobody; used to describe a dead socket. */
+    /** Why a session ended. Narrated to nobody; used to describe a dead session. */
     enum class CloseReason { USER, SERVER, ERROR }
 
     interface Listener {

@@ -8,13 +8,12 @@ import android.util.Log
 import com.moss.app.audio.AudioFocusGate
 import com.moss.app.audio.AudioIO
 import com.moss.app.brain.SpeechMood
-import com.moss.app.config.VoiceConfig
 import com.moss.app.ui.FloatingWindowUi
 import java.util.concurrent.Executors
 
 /**
- * One-shot TTS: speak a single string through whichever engine the settings
- * name, stream PCM to AudioIO.
+ * One-shot TTS: speak a single string through the Edge engine, stream PCM
+ * to AudioIO.
  *
  *   IDLE ── speak(text) ─→ SPEAKING (engine open, push, finish)
  *                          │
@@ -129,15 +128,10 @@ class TtsController(
     //
     // The hard part is that there is no clock in common: the markers are at
     // character offsets into our string, and the thing the user is actually
-    // hearing is an AudioTrack. The obvious bridge is 火山's own
-    // TTSSentenceStart, which would pin each sentence in both clocks at once —
-    // and it does not work. Measured on device: the server sends that event
-    // **once per [HuoshanTts.push]**, not once per sentence, and with an
-    // **empty** text field, so there is nothing to locate and nothing to
-    // locate it with. Pushing each sentence as its own call would get one
-    // event each, but then the events race the audio (the server may announce
-    // all of them before much sound has arrived) and serialising the pushes
-    // risks an audible gap mid-reply.
+    // hearing is an AudioTrack. The sentence callbacks do not bridge it:
+    // Edge fires them when a sentence is fetched, before its audio is fed —
+    // and the fed audio queues behind whatever is still draining — so they
+    // mark fetch order, not what is being heard.
     //
     // So the mapping is arithmetic instead of protocol: assume the utterance
     // is read at a constant number of characters per millisecond. That is
@@ -145,8 +139,8 @@ class TtsController(
     // the question being answered is "which of two faces", at one-sentence
     // resolution, where a few hundred milliseconds of error is invisible.
     // Total length comes from [AudioIO.queuedMs] at [onDone] (the producer's
-    // clock, known within the first fraction of playback because 火山 streams
-    // far faster than real time) and the position from [AudioIO.playedMs]
+    // clock, known within the first fraction of playback because Edge
+    // delivers far faster than real time) and the position from [AudioIO.playedMs]
     // (the track's own head, so real time). Until the total is known the
     // opening face holds, which is the same fallback as having no cues.
     //
@@ -302,7 +296,6 @@ class TtsController(
     }
 
     private fun speakImpl(text: String, cues: List<SpeechMood.Cue>) {
-        val cfg = VoiceConfig.load(context)
         // Interrupted while this utterance sat in the executor queue.
         if (cancelled) return
 
@@ -367,8 +360,8 @@ class TtsController(
                 // the one moment the producer's clock is known to be final,
                 // and it is read on the same thread the audio arrived on.
                 cueTotalMs = audio.queuedMs()
-                // SessionFinished means the *server* has stopped sending, not
-                // that the user has stopped hearing: every engine delivers audio far
+                // onDone means the utterance has been fully produced, not
+                // that the user has stopped hearing: Edge delivers audio far
                 // faster than real time, so most of the utterance is usually
                 // still queued at this point. The ball therefore goes IDLE on
                 // the other side of the drain, not here — otherwise it drops
@@ -413,12 +406,8 @@ class TtsController(
             }
         }
 
-        // Which service speaks. Same fail-to-火山 rule as the listening side.
-        val c: TtsEngine = when (cfg.voiceProvider) {
-            VoiceConfig.VOICE_GOOGLE -> GoogleTts(cfg, listener)
-            VoiceConfig.VOICE_EDGE -> EdgeTtsEngine(listener)
-            else -> HuoshanTts(cfg, listener)
-        }
+        // Speaking is Edge, the only voice left.
+        val c: TtsEngine = EdgeTtsEngine(listener)
         client = c
         c.open()
     }
@@ -427,8 +416,8 @@ class TtsController(
         private const val TAG = "Tts"
 
         // Watchdog cadence: check every 5s, declare the utterance dead after
-        // 20s without a single pcm chunk. Generous for a slow network (volcano
-        // streams pcm faster than realtime even on a bad one) and far shorter
+        // 20s without a single pcm chunk. Generous for a slow network (Edge
+        // delivers pcm faster than realtime even on a bad one) and far shorter
         // than "until the next turn".
         private const val STALL_CHECK_MS = 5_000L
         private const val STALL_AFTER_MS = 20_000L

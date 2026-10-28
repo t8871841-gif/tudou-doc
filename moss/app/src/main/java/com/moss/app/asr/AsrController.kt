@@ -7,7 +7,6 @@ import android.os.SystemClock
 import android.util.Log
 import com.moss.app.audio.AudioFocusGate
 import com.moss.app.audio.AudioIO
-import com.moss.app.config.VoiceConfig
 import com.moss.app.i18n.AppLocale
 import com.moss.app.ui.FloatingWindowUi
 import java.util.concurrent.Executors
@@ -15,7 +14,7 @@ import java.util.concurrent.Executors
 /**
  * ASR session lifecycle glued to [FloatingWindowUi].
  *
- *   IDLE ── toggle() ─→ RECORDING (mic open, WS streaming)
+ *   IDLE ── toggle() ─→ RECORDING (mic open)
  *                      │
  *                      ├── partial   → subtitle PARTIAL, resets the silence clock
  *                      ├── SILENCE   → stop() exactly as if the user had tapped
@@ -108,8 +107,8 @@ class AsrController(
 
     /**
      * How long a silence ends this turn, as answered by the engine in play —
-     * see [AsrEngine.silenceMs]. Seeded with 火山's value so that the watchdog
-     * has something sane to use in the window before an engine is built.
+     * see [AsrEngine.silenceMs]. Seeded with a sane default so that the
+     * watchdog has something to use in the window before an engine is built.
      */
     @Volatile
     private var turnSilenceMs = 3000L
@@ -146,16 +145,26 @@ class AsrController(
     }
 
     private fun startImpl(userInitiated: Boolean) {
-        val cfg = VoiceConfig.load(context)
-        // Set here, not in [armSilenceWatchdog], because 火山 reports
-        // [AsrEngine.Listener.onReady] from *inside* its own connect — before
+        // Set here, not in [armSilenceWatchdog], because the engine reports
+        // [AsrEngine.Listener.onReady] from *inside* its own start — before
         // the capture starts and before that method runs. Measuring the
         // connection from a timestamp this turn had not set yet produced
         // "engine ready after 206230301ms": the process's uptime, reported as
         // if it were a handshake.
         turnStartedAt = SystemClock.uptimeMillis()
         heardAnything = false
-        // First thing, so the media app has the whole 火山 handshake to actually
+        // Hearing is the system recogniser, full stop. If the device has no
+        // recognition service there is nothing to fall back to: report it
+        // here, before the focus is taken and the turn is announced, rather
+        // than opening a turn that can never hear.
+        if (!SystemAsrEngine.isAvailable(context)) {
+            Log.w(TAG, "system ASR unavailable")
+            engineReady = false
+            window.setState(FloatingWindowUi.State.ERROR)
+            onError("系统语音识别不可用")
+            return
+        }
+        // First thing, so the media app has the whole handshake to actually
         // stop in — asking and then opening the mic in the same breath would
         // still catch the tail of whatever was playing. A phone call takes the
         // floor back: end the turn rather than transcribe one side of a call.
@@ -212,44 +221,25 @@ class AsrController(
             override fun onClosed() {}
         }
 
-        // Which service hears. The pick is a string and the failure direction
-        // is 火山 — see [VoiceConfig.voiceProvider] — so an unrecognised value
-        // can only ever mean "keep doing what this device already did".
-        val client: AsrEngine = when (cfg.voiceProvider) {
-            VoiceConfig.VOICE_GOOGLE -> GoogleAsr(cfg, listener)
-            VoiceConfig.VOICE_EDGE -> if (SystemAsrEngine.isAvailable(context)) {
-                SystemAsrEngine(context, listener)
-            } else {
-                // No recognition service on this device: hearing falls back
-                // to 火山 rather than failing every turn. Speaking stays
-                // Edge — the two controllers pick independently.
-                Log.w(TAG, "system ASR unavailable, falling back to huoshan")
-                HuoshanAsr(cfg, listener)
-            }
-            else -> HuoshanAsr(cfg, listener)
-        }
+        // Which service hears: the system recogniser. There is no other.
+        val client: AsrEngine = SystemAsrEngine(context, listener)
         turnSilenceMs = client.silenceMs
         Log.i(
             TAG,
             "engine: silence=${client.silenceMs}ms finalWait=${client.finalWaitMs}ms",
         )
         // **Cleared here, before the engine exists, and not in [armSilenceWatchdog].**
-        // 火山 reports [AsrEngine.Listener.onReady] from inside its own connect —
-        // its `start` blocks on the handshake and calls it before returning — so
-        // clearing this anywhere after that would erase the readiness the engine
-        // had just declared, and the silence rule would never fire: the
-        // microphone would sit open until [MAX_TURN_MS].
+        // The engine reports [AsrEngine.Listener.onReady] from inside its own
+        // start, so clearing this anywhere after that would erase the readiness
+        // the engine had just declared, and the silence rule would never fire:
+        // the microphone would sit open until [MAX_TURN_MS].
         engineReady = false
 
         // **The microphone and the tap's acknowledgement come first; the
-        // handshake follows them.** 火山's `start` blocks on its own connect —
-        // 1.7–2.2 s measured, and it is the CodeFlying path as much as the
-        // direct one, since the gateway speaks the same protocol — so under the
-        // old order the ball sat unchanged for two seconds after the tap and
-        // the microphone did not open until it was over. The first words of the
-        // sentence were never captured at all. Google's engine never had this,
-        // because its `start` returns at once and its `sendAudio` holds what
-        // arrives early; [HuoshanAsr] now does the same, so the two agree.
+        // recogniser starts after them.** Under the old order the ball sat
+        // unchanged for two seconds after the tap and the microphone did not
+        // open until the handshake was over, so the first words of the
+        // sentence were never captured at all.
         asr = client
         window.setState(FloatingWindowUi.State.RECORDING)
         window.setSubtitle(
@@ -260,8 +250,8 @@ class AsrController(
         audio.startStreaming(sampleRate = 16_000, chunkMs = 100) { chunk ->
             // Logged rather than swallowed: a send that throws every time looks
             // from the outside exactly like a mic that produces nothing — the
-            // session stays open with no packets in it and 火山 ends it after
-            // eight seconds, which reads as a network timeout and is not one.
+            // session stays open with no packets in it and ends after eight
+            // seconds, which reads as a network timeout and is not one.
             runCatching { asr?.sendAudio(chunk, isLast = false) }
                 .onFailure { Log.w(TAG, "sendAudio failed", it) }
         }
@@ -304,9 +294,8 @@ class AsrController(
      * path, and finally deleted: every version of it was a threshold that
      * separated the user from their room, and every room is different. The
      * device has a better answer available — the recogniser is already telling
-     * us what it hears, at 火山's few-hundred-millisecond cadence and at
-     * roughly one result a second from Gemini — so the only thing the window
-     * has to exceed is that cadence, not any property of the room.
+     * us what it hears, at its own reporting cadence — so the only thing the
+     * window has to exceed is that cadence, not any property of the room.
      *
      * Two rules hold the edges, and neither needs calibrating:
      *

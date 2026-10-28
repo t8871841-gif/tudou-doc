@@ -49,8 +49,8 @@ object WakeTemplates {
      * The band is deliberately biased low. The two failure modes are not
      * symmetric: too tight and the user taps the ball instead — a small
      * annoyance with an obvious workaround. Too loose and a stray sentence
-     * opens the microphone and ships audio to 火山 without anyone asking, which
-     * is both a surprise and a cost. So when in doubt, be deaf.
+     * opens the microphone and ships audio to the recogniser without anyone
+     * asking, which is both a surprise and a cost. So when in doubt, be deaf.
      *
      * **The upper bound is no longer a guess.** It was 2.8, which was picked as
      * "the widest thing that could still be called a threshold" and never
@@ -177,8 +177,8 @@ object WakeTemplates {
      * takes that come out *unusually* alike give a tight door and a phrase that
      * has to be repeated carefully forever. [MIN_THRESHOLD] bounds that; the
      * alternative it replaces — a door so wide the room walks in — costs the
-     * user an upload to 火山 they never asked for, which is the worse side of
-     * the asymmetry the bounds are built on.
+     * user an upload to the speech service they never asked for, which is the
+     * worse side of the asymmetry the bounds are built on.
      */
     private fun thresholdFor(templates: List<Array<FloatArray>>): Float {
         var best = Float.MAX_VALUE

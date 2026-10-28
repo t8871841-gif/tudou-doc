@@ -61,9 +61,9 @@ import java.util.concurrent.atomic.AtomicReference
  * microphone-typed foreground service), from [BodyCoreService] when
  * accessibility comes up, and from the notification's own action.
  *
- * Tap the ball → AsrController.toggle() → 火山 streaming ASR.
+ * Tap the ball → AsrController.toggle() → system speech recognition.
  * Long-press → TTS test (temporary).
- * ⚙       → SettingsUi (voice config).
+ * ⚙       → SettingsUi.
  *
  * Exposes ScreenController over WebSocket on port 9008 so the brain (or the
  * viewer, historically) can drive tap/swipe/type/screenshot/ui_tree.
@@ -2340,21 +2340,6 @@ class BodyCoreService : Service() {
      */
     private fun startBrain(announce: Boolean = true) {
         val bc = com.moss.app.config.VoiceConfig.brainConfig(this)
-        // One line that answers "is my override in effect?" without reading
-        // shared_prefs over adb. The api key is overridable now, and a setting
-        // whose effect cannot be seen is indistinguishable from one that did not
-        // take. The speaker prints what it is so the imp's voice change is
-        // verifiable the same way — it follows the ball's look, not a setting.
-        android.util.Log.i(
-            "Body",
-            "voice: 火山 key from " +
-                if (com.moss.app.config.VoiceConfig.usingOwnCredentials(this)) {
-                    "settings"
-                } else {
-                    "factory"
-                } + ", speaker=" +
-                com.moss.app.config.VoiceConfig.load(this).ttsSpeaker,
-        )
         if (!bc.isLocal) {
             // A device with nowhere to send a sentence is silent, and silence
             // with no explanation reads as broken rather than as unconfigured.
@@ -2621,7 +2606,7 @@ class BodyCoreService : Service() {
             // else touches the string. This is the one place the answer is
             // turned from what the model wrote into what the user gets, and a
             // tag that survives it reaches *both* the scrollback (visible
-            // junk) and 火山 (read out loud as the word "happy").
+            // junk) and the speaker (read out loud as the word "happy").
             val script = SpeechMood.parse(stripMarkdown(END_MARKER.replace(text, "")))
             val plain = script.text
             // The finished answer is the end of the task as far as the

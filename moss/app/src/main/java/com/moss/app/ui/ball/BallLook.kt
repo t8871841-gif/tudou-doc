@@ -10,18 +10,18 @@ import com.moss.app.R
  * how it breathes, when it fidgets, when it clings to the ledge lives in
  * [EmotionState], [Mood] and [EmotionBallRenderer].res`.resolveMood`.
  *
- * The two exceptions are [voice] and [persona], at the bottom, and they are the
+ * The exception is [persona], at the bottom, and it is the
  * reason this KDoc no longer says "this file is only the surface". A look the
  * user can swipe to is a character they are choosing, and a character that looks
- * like an imp and then answers in the house voice with the house manner is a
- * costume. See those two fields for what each one can and cannot reach.
+ * like an imp and then answers with the plain prompt is a
+ * costume. See that field for what it can and cannot reach.
  *
  * It exists because the ball has several looks that are worth keeping, and
  * swapping between them used to mean editing constants in four files:
  *
  *  - [BAJIE] — a pink pig: muzzle and nostrils, floppy ears, small dark bead
  *    eyes. The first look that reads as an *animal* rather than a material, and
- *    the one that carries the grumbly-but-diligent manner and a man's voice.
+ *    the one that carries the grumbly-but-diligent manner.
  *  - [CREAM] — pale, glossy-but-soft, dark bead eyes with a wet catchlight, a
  *    pair of upright ears, and a hard dark outline instead of a glow. Reads as
  *    a mascot rather than an appliance, at the cost of being a different
@@ -772,36 +772,16 @@ class BallLook(
 
     // ---- Who it is ----
     //
-    // The two fields that are not about drawing at all, and the reason the class
+    // The one field that is not about drawing at all, and the reason the class
     // KDoc above no longer claims this file is "only the surface": a look is a
-    // *character*, and a character that looks like an imp and then answers in
-    // the house voice with the house manner is a costume rather than a
-    // character. Both are zero-is-off like the accessories, so the two looks
-    // that shipped before this keep the factory voice and the plain prompt
-    // without having to name either.
+    // *character*, and a character that looks like an imp and then answers
+    // with the plain prompt is a costume rather than a character. It is
+    // zero-is-off like the accessories, so the looks that shipped before this
+    // keep the plain prompt without having to name it.
     //
-    // They live here — on the look — rather than in a table of their own keyed
+    // It lives here — on the look — rather than in a table of its own keyed
     // by [name]. A second list keyed by the same strings is exactly the drift
-    // this codebase already pays `tools/check_look_sync.py` to catch, and the
-    // cost of avoiding it is one dependency pointing the odd way: `config` now
-    // reads `ui.ball` (see `VoiceConfig.lookSpeaker`). `ui.ball` imports nothing
-    // but `R` and its own `gl`, so there is no cycle to walk into.
-
-    /**
-     * 火山 TTS speaker id this character speaks with, or blank for the fallback
-     * in `VoiceConfig.lookSpeaker` (the compiled-in [VoiceConfig.TTS_SPEAKER]).
-     *
-     * Blank is **not** "silent" — it means *this look has no opinion* and the
-     * device falls back to the house voice. There is no settings row and no
-     * override in the way: the voice is the character's, full stop, so filling
-     * this in is the only voice control there is and the user always hears it
-     * (a deliberate removal of the earlier three-way precedence — see the commit
-     * that dropped the `tts_speaker` setting).
-     *
-     * Unlike [persona] this works in **both** brain modes, because TTS is the
-     * device's own and `TtsController` re-reads the config per utterance.
-     */
-    val voice: String = "",
+    // this codebase already pays `tools/check_look_sync.py` to catch.
 
     /**
      * How this character talks, appended to the local brain's system prompt.
@@ -912,8 +892,8 @@ private val BAJIE_PERSONA = """
  * * **A wide lazy grin** and a faint ruddy cheek instead of anime blush: a
  *   weathered complexion, not makeup.
  *
- * [voice] and [persona] carry the same read — see their caveats, in particular
- * that the persona reaches the local brain only.
+ * See [persona]'s caveats, in particular
+ * that it reaches the local brain only.
  */
 val BAJIE = BallLook(
     name = "bajie",
@@ -1029,9 +1009,6 @@ val BAJIE = BallLook(
     browY = 0.140f,
     browTilt = 9f,
 
-    // A man's voice. Same `*_uranus_bigtts` family as the fallback, so it needs
-    // no change to `tts_resource_id`.
-    voice = "zh_male_zhubajie_uranus_bigtts",
     persona = BAJIE_PERSONA,
 )
 
@@ -1383,12 +1360,11 @@ private val IMP_PERSONA = """
  * needed most — see below.
  *
  * It was also the first look that is a different character *off* the screen:
- * [voice] and [persona] are both set here, so swiping to the imp changes what
- * the device sounds like and how it talks, not only what it looks like. That is
- * no longer the distinction it was — [BAJIE] and [RABBIT] both do it now, and
- * [ANDEE] and [CREAM] are the looks left wearing the house voice and the plain
- * prompt, which is the right place for them to be: [ANDEE] is the one a factory
- * reset lands on. Read the caveats on those two fields — in
+ * [persona] is set here, so swiping to the imp changes how it talks, not only
+ * what it looks like. That is no longer the distinction it was — [BAJIE] and
+ * [RABBIT] both do it now, and [ANDEE] and [CREAM] are the looks left wearing
+ * the plain prompt, which is the right place for them to be: [ANDEE] is the
+ * one a factory reset lands on. Read the caveats on that field — in
  * particular, the persona reaches the local brain only.
  *
  * **It is black, and the black is the design.** The first build made it a
@@ -1615,13 +1591,6 @@ val IMP = BallLook(
     eyeCut = 0.48f,
     eyeTilt = 12f,
 
-    // A man's voice, and the only look that asks for one. The fallback
-    // (`zh_female_vv_uranus_bigtts`) is bright and young, which is the whole
-    // house manner and exactly wrong coming out of a mouth full of teeth — the
-    // face and the voice disagreeing is more unsettling than either on its own,
-    // and not in the way this look is going for. Same `*_uranus_bigtts` family
-    // as the fallback, so it needs no change to `tts_resource_id`.
-    voice = "zh_male_lubanqihao_uranus_bigtts",
     persona = IMP_PERSONA,
 )
 
@@ -1762,17 +1731,6 @@ private val RABBIT_PERSONA = """
  * owns is a tapering chain ending in a barb — a devil's tail, drawn as an arc
  * that hooks back up. Making it a puff is a mesh job, not a number, and it is
  * the one signal here nobody misses at this size.
- *
- * [voice] is `zh_female_peiqi_uranus_bigtts`, and it is worth recording that it
- * was blank for a pass on an argument that sounded right: the house voice
- * (`VoiceConfig.TTS_SPEAKER`, `zh_female_vv_uranus_bigtts`) is bright and young,
- * which [IMP]'s own note calls exactly wrong for a mouth full of teeth and is
- * exactly right for this one — so why name a second copy of it. What that misses
- * is that bright-and-young is what this device sounds like with *no* character
- * selected. Matching it does not give the rabbit a voice, it gives the rabbit
- * the absence of one, and three of the four looks here would then be a face
- * change over an unchanged speaker. [BAJIE] and [IMP] are each legible before
- * the first sentence ends; this one has to be too.
  */
 val RABBIT = BallLook(
     name = "rabbit",
@@ -1948,15 +1906,10 @@ val RABBIT = BallLook(
     // down from a white app behind them and reads as the same animal's fur.
     earShade = 0.88f,
 
-    // Peppa. The house voice (`zh_female_vv_uranus_bigtts`) was left in place
-    // for one pass on the argument that it is already bright and young, which is
-    // this character — and that argument was about the wrong axis. Bright and
-    // young is the *house* manner: it is the voice this device uses when it has
-    // no character at all, so a look wearing it is a look that sounds like the
-    // tablet. 贱贱兔 is a bit, and a bit has to be audible the moment it opens
-    // its mouth. Same `*_uranus_bigtts` family as the fallback, so it needs no
-    // change to `tts_resource_id`.
-    voice = "zh_female_peiqi_uranus_bigtts",
+    // Peppa. Bright and young is the *house* manner: it is the voice this
+    // device uses when it has no character at all, so a look wearing it is a
+    // look that sounds like the tablet. 贱贱兔 is a bit, and a bit has to be
+    // audible the moment it opens its mouth.
     persona = RABBIT_PERSONA,
 )
 
@@ -2255,9 +2208,6 @@ val BEAR = BallLook(
     // downward direction needs none of the care the upward one did.
     browShade = 0.42f,
 
-    // The speaker id the user asked for. Same `*_uranus_bigtts` family as the
-    // fallback, so it needs no change to `tts_resource_id`.
-    voice = "zh_male_xionger_uranus_bigtts",
     persona = BEAR_PERSONA,
 )
 
@@ -2332,8 +2282,7 @@ object BallLooks {
 
     /**
      * The look a saved name refers to, for the things that need the *character*
-     * rather than the drawing: the voice ([BallLook.voice], resolved in
-     * `VoiceConfig`) and the manner ([BallLook.persona], appended by
+     * rather than the drawing: the manner ([BallLook.persona], appended by
      * `LocalBrain`).
      *
      * By name from the preference rather than off [active] or [requestedLook],

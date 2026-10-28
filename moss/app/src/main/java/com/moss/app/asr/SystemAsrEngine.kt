@@ -24,8 +24,8 @@ package com.moss.app.asr
 // caller's silence watchdog and the tap would look dead.
 //
 // No key, no download, no account. Quality depends on this device's speech
-// service, which is why the caller falls back to 火山 when
-// [isAvailable] is false — and why this still needs a real-device test.
+// service, which is why the caller checks [isAvailable] before starting a
+// turn — and why this still needs a real-device test.
 
 import android.content.Context
 import android.content.Intent
@@ -73,9 +73,9 @@ class SystemAsrEngine(
 
     /**
      * Backstop only: the recogniser ends turns on its own voice detection
-     * first. Longer than 火山's because the system service's own endpointing
-     * is what normally fires, and cutting in earlier would clip trailing
-     * words the service had not finished settling.
+     * first. Long, because the system service's own endpointing is what
+     * normally fires, and cutting in earlier would clip trailing words the
+     * service had not finished settling.
      */
     override val silenceMs: Long = 5000L
 

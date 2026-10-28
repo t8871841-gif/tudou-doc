@@ -109,10 +109,10 @@ class AudioIO {
      * neither.
      *
      * Ten seconds of dead microphone is not a degradation, it is the whole
-     * turn. 火山 ends a session that has gone eight seconds without a packet,
-     * so the user taps the ball, says their piece into nothing, and gets back
-     * a server-side timeout — a message about the network, which was never
-     * the problem. That failure is worth far more than the effects were: the
+     * turn: the recogniser hears nothing for the whole window, so the user
+     * taps the ball, says their piece into nothing, and gets back a timeout
+     * — a message about the network, which was never the problem. That
+     * failure is worth far more than the effects were: the
      * VOICE_RECOGNITION source already runs the platform's own noise
      * suppression and AGC, tuned for exactly this.
      */
@@ -156,10 +156,10 @@ class AudioIO {
                         val n = rec.read(buf, off, buf.size - off)
                         // A recorder that hands back nothing is the one failure
                         // mode with no symptom of its own: the loop just ends,
-                        // the websocket sits there with an open session and no
-                        // packets, and eight seconds later 火山 kills it for
-                        // inactivity — which surfaces to the user as "ASR
-                        // 连接超时", pointing at the network, which is fine.
+                        // the session sits there open with no audio, and the
+                        // recogniser's own timeout ends it — which surfaces
+                        // to the user as "ASR 连接超时", pointing at the
+                        // network, which is fine.
                         if (n <= 0) {
                             why = "read=$n after $chunks chunks"
                             return@Thread
@@ -290,7 +290,7 @@ class AudioIO {
      * to the track.
      *
      * Two counters because there are two clocks and the gap between them is the
-     * whole reason this class has a queue: 火山 delivers an utterance far faster
+     * whole reason this class has a queue: Edge delivers an utterance far faster
      * than it plays, so at any moment "audio we have been given" runs seconds
      * ahead of "audio the user has heard". Anything lining text up against
      * sound needs both — the producer's clock to say where a sentence *starts*,
@@ -304,12 +304,11 @@ class AudioIO {
      *
      * The hand-off is the whole point. `AudioTrack.write` on a MODE_STREAM track
      * blocks until the buffer has room, and the buffer holds well under a second
-     * — while 火山 pushes a whole utterance's audio far faster than real time. Fed
-     * directly, the websocket's reader thread therefore sat inside `write` for
-     * essentially the entire utterance, which meant it never processed a pong
-     * either, and Java-WebSocket's own lost-connection detector closed the socket
-     * after ~120 s. Long answers stopped mid-sentence with no error anywhere; short
-     * ones finished before the timer noticed, so it only ever looked like a bug in
+     * — while Edge pushes a whole utterance's audio far faster than real time. Fed
+     * directly, the producer thread therefore sat inside `write` for
+     * essentially the entire utterance and stopped reading frames from the
+     * socket. Long answers stopped mid-sentence with no error anywhere; short
+     * ones finished before anything noticed, so it only ever looked like a bug in
      * long answers.
      *
      * Unbounded on purpose: any bound is a blocking producer again, which is the
@@ -433,7 +432,7 @@ class AudioIO {
      * and for the track to drain, then releases.
      *
      * Blocks for the full remaining length of the utterance, which is now most of
-     * it rather than the tail — the audio arrives from 火山 far faster than it
+     * it rather than the tail — the audio arrives from Edge far faster than it
      * plays. Callers must not be holding anything that a barge-in needs; see
      * [TtsController.stopSpeaking].
      */
