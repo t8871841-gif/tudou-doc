@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- 背景 -->
+    <radialGradient id="bg" cx="50%" cy="42%" r="75%">
+      <stop offset="0%"   stop-color="#1b0a0b"/>
+      <stop offset="50%"  stop-color="#0a0304"/>
+      <stop offset="100%" stop-color="#020101"/>
+    </radialGradient>
+
+    <!-- 红色光晕 -->
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#ff3a1e" stop-opacity="0.75"/>
+      <stop offset="30%"  stop-color="#e0140a" stop-opacity="0.42"/>
+      <stop offset="62%"  stop-color="#8a0a04" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- 眼球渐变 -->
+    <radialGradient id="eyeG" cx="41%" cy="34%" r="72%">
+      <stop offset="0%"   stop-color="#ffc4b0"/>
+      <stop offset="12%"  stop-color="#ff6238"/>
+      <stop offset="38%"  stop-color="#e51709"/>
+      <stop offset="72%"  stop-color="#8c0702"/>
+      <stop offset="100%" stop-color="#330100"/>
+    </radialGradient>
+
+    <!-- 瞳孔 -->
+    <radialGradient id="pupilG" cx="48%" cy="44%" r="60%">
+      <stop offset="0%"   stop-color="#1a0000"/>
+      <stop offset="55%"  stop-color="#0a0000"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+
+    <!-- 中心光核 -->
+    <radialGradient id="coreG" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#ffffff"/>
+      <stop offset="35%"  stop-color="#ffc9b8"/>
+      <stop offset="70%"  stop-color="#ff3a1e" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#ff3a1e" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- 顶部柔光 -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- 暗角 -->
+    <radialGradient id="vig" cx="50%" cy="50%" r="72%">
+      <stop offset="62%"  stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.78"/>
+    </radialGradient>
+
+    <filter id="b1" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="42"/>
+    </filter>
+    <filter id="b2" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <filter id="b3" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+
+    <clipPath id="clip">
+      <rect x="0" y="0" width="1024" height="1024" rx="232"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#clip)">
+    <!-- 底 -->
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- 微弱的背景同心环 -->
+    <g fill="none" stroke="#ff3a1e" opacity="0.10">
+      <circle cx="512" cy="512" r="474" stroke-width="1"/>
+      <circle cx="512" cy="512" r="458" stroke-width="1" stroke-dasharray="2 10"/>
+    </g>
+
+    <!-- 红色光晕 -->
+    <circle cx="512" cy="512" r="330" fill="url(#halo)"/>
+    <circle cx="512" cy="512" r="240" fill="#ff2a12" opacity="0.35" filter="url(#b1)"/>
+
+    <!-- ===== 机械环 ===== -->
+    <!-- 外圈分段环 -->
+    <circle cx="512" cy="512" r="404" fill="none" stroke="#6e1310"
+            stroke-width="2" stroke-dasharray="40 52" opacity="0.5"/>
+    <!-- 刻度环 -->
+    <circle cx="512" cy="512" r="366" fill="none" stroke="#ff3a1e"
+            stroke-width="7" stroke-dasharray="3 29" stroke-linecap="round" opacity="0.42"/>
+    <!-- 弧形段环 -->
+    <circle cx="512" cy="512" r="330" fill="none" stroke="#ff3a1e"
+            stroke-width="3" stroke-dasharray="120 62" opacity="0.55"
+            transform="rotate(-30 512 512)"/>
+    <!-- 细环 -->
+    <circle cx="512" cy="512" r="300" fill="none" stroke="#8d1a12"
+            stroke-width="1.5" opacity="0.65"/>
+
+    <!-- ===== 镜头底座 ===== -->
+    <circle cx="512" cy="512" r="252" fill="#0e0203"/>
+    <circle cx="512" cy="512" r="252" fill="none" stroke="#4a0b07" stroke-width="3"/>
+    <circle cx="512" cy="512" r="238" fill="none" stroke="#ff3a1e"
+            stroke-width="1.5" opacity="0.35"/>
+
+    <!-- 底座卡扣 -->
+    <g fill="#160303" stroke="#5e0f09" stroke-width="2.5">
+      <circle cx="348" cy="348" r="9"/>
+      <circle cx="676" cy="348" r="9"/>
+      <circle cx="348" cy="676" r="9"/>
+      <circle cx="676" cy="676" r="9"/>
+    </g>
+
+    <!-- ===== 眼睛本体 ===== -->
+    <!-- 内圈辉光 -->
+    <circle cx="512" cy="512" r="210" fill="#ff2a12" opacity="0.5" filter="url(#b2)"/>
+    <!-- 虹膜 -->
+    <circle cx="512" cy="512" r="196" fill="url(#eyeG)"/>
+    <circle cx="512" cy="512" r="196" fill="none" stroke="#ff7a55"
+            stroke-width="2.5" opacity="0.6"/>
+    <circle cx="512" cy="512" r="176" fill="none" stroke="#2a0000"
+            stroke-width="14" opacity="0.3"/>
+
+    <!-- 瞳孔 -->
+    <circle cx="512" cy="512" r="98" fill="url(#pupilG)"/>
+    <circle cx="512" cy="512" r="98" fill="none" stroke="#ff2a12"
+            stroke-width="10" opacity="0.35" filter="url(#b3)"/>
+    <circle cx="512" cy="512" r="98" fill="none" stroke="#ff4a28"
+            stroke-width="3" opacity="0.75"/>
+
+    <!-- 中心光核 -->
+    <circle cx="512" cy="512" r="34" fill="url(#coreG)"/>
+    <circle cx="512" cy="512" r="12" fill="#fff5f2" filter="url(#b3)"/>
+
+    <!-- 高光弧 -->
+    <g transform="rotate(-155 512 512)">
+      <circle cx="512" cy="512" r="168" fill="none" stroke="#ffe6de"
+              stroke-width="9" stroke-linecap="round"
+              stroke-dasharray="110 950" opacity="0.28"/>
+    </g>
+
+    <!-- 顶部柔光 + 暗角 -->
+    <rect width="1024" height="1024" fill="url(#sheen)"/>
+    <rect width="1024" height="1024" fill="url(#vig)"/>
+  </g>
+</svg>
