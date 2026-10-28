@@ -803,7 +803,9 @@ object SelfCheck {
         val flat = runCatching {
             android.provider.Settings.Secure.getString(
                 context.contentResolver,
-                android.provider.Settings.Secure.VOICE_RECOGNITION_SERVICE,
+                // The key as a literal: the Settings.Secure constant for it
+                // is hidden, so naming it does not compile.
+                "voice_recognition_service",
             )
         }.getOrNull().orEmpty()
         val count = runCatching {
