@@ -12,7 +12,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * The fullscreen card's backdrop: one fixed image, blurred and darkened.
+ * The fullscreen card's backdrop: one fixed image, sharp and veiled.
  *
  * The card used to be a window onto whatever was behind it. That was the whole
  * point of [Glass.frost] — `FLAG_BLUR_BEHIND` defocuses the home screen or the
@@ -33,13 +33,12 @@ import kotlin.math.roundToInt
  *    It is also what makes the card's look independent of
  *    `isCrossWindowBlurEnabled`, which is false on battery saver, on devices
  *    that cannot afford it, and whenever the developer option is off.
- *  * **The blur here is ours**, and it is a plain box blur run three times. Not
- *    `RenderEffect` (API 31+, and it blurs a View's *own* content — the same
- *    tool that cannot help the pills, see `CLAUDE.md`), and not a downscale-
- *    upscale, which is bilinear and leaves the image looking smeared rather than
- *    frosted. Three box passes approximate a Gaussian closely enough that the
- *    result reads as glass, and on a [TARGET_W]-wide bitmap the whole thing is
- *    a few milliseconds.
+ *  * **There is no blur on the image itself either.** It used to be a plain
+ *    box blur run three times, which read as frosted glass over a photograph.
+ *    The photograph is the user's own wallpaper now, and it is shown sharp,
+ *    at up to [TARGET_W] wide and never upscaled past its native size — the
+ *    veil below is the only film over it, and the veil is brightness, not
+ *    softness, so text stays readable without the image going murky.
  *  * **It runs off the main thread, at build time.** The window is built folded
  *    and the backdrop is `GONE` while that runs, so nothing ever blocks the
  *    main thread for it.
@@ -57,7 +56,7 @@ import kotlin.math.roundToInt
  *
  * **One photograph serves both palettes, veiled in opposite directions.** The image is
  * the landscape this app shipped with, and it is the only texture in a UI that is
- * otherwise flat vector shapes. It is blurred once and then filmed over:
+ * otherwise flat vector shapes. It is filmed over:
  *
  *  * under the **night** palette it takes a black veil, 0.22 / 0.38 as it always was,
  *    which is why the page reads `#243C49` — the original `backdrop.jpg` behaviour, kept
@@ -68,7 +67,7 @@ import kotlin.math.roundToInt
  *    enough for the type. That target is the dial for how visible the image is — see
  *    [DAY_TARGET_LUMA].
  *
- * That is the whole difference. Nothing about the file, the blur or the box changes
+ * That is the whole difference. Nothing about the file changes
  * between the two — see [veilFor] for the arithmetic, and the constants under it for why
  * one direction needs a floor and the other a ceiling.
  *
@@ -83,23 +82,13 @@ object Backdrop {
     private const val TAG = "Body"
 
     /**
-     * The blurred copy's width, in pixels. Fixed rather than screen-relative on
-     * purpose: it is the *blur* that is being sized here, and every screen this
-     * runs on stretches it further than this anyway (`CENTER_CROP` on a phone
-     * scales it up ~3x), so a larger source would only cost work to produce
-     * detail the frost then removes.
+     * The decode's width cap, in pixels. Fixed rather than screen-relative on
+     * purpose: beyond this the extra pixels cost memory for detail the
+     * `CENTER_CROP` stretch cannot show, and a source narrower than the cap
+     * is never upscaled — upscaling invents nothing, it only smooths what
+     * is there, which is the murk the blur removal was for.
      */
-    private const val TARGET_W = 512
-
-    /** Blur radius in [TARGET_W]-space. ~8 dp once the view stretches it. */
-    private const val BLUR_RADIUS = 8
-
-    /**
-     * Three passes. One box pass is a visibly square blur — its kernel is a
-     * rectangle, and on a photo with any structure in it the directions read as
-     * a cross. Three is where the difference stops being visible.
-     */
-    private const val BLUR_PASSES = 3
+    private const val TARGET_W = 1080
 
     /**
      * How far the photograph is pushed, and which way.
@@ -168,7 +157,7 @@ object Backdrop {
 
     @Volatile private var ready = false
 
-    /** The blurred bitmap, whole. `CENTER_CROP` does the cropping, not this. */
+    /** The bitmap, whole. `CENTER_CROP` does the cropping, not this. */
     @Volatile private var bitmap: Bitmap? = null
 
     /** ARGB fill that goes over [bitmap] and under everything else. */
@@ -201,7 +190,7 @@ object Backdrop {
     fun scrim(): Int = scrim
 
     /**
-     * Decode, blur and measure the backdrop, then hand the result to [onReady] on
+     * Decode and measure the backdrop, then hand the result to [onReady] on
      * the main thread. Safe to call more than once; only the first does work.
      */
     fun warm(context: Context, onReady: (Bitmap) -> Unit) {
@@ -221,7 +210,7 @@ object Backdrop {
         }
     }
 
-    /** Decode → shrink → blur → measure. Worker thread only. */
+    /** Decode → cap → measure. Worker thread only. */
     private fun build(context: Context): Pair<Bitmap, Int> {
         val src = decode(context)
         val w = src.width
@@ -229,8 +218,6 @@ object Backdrop {
         val px = IntArray(w * h)
         src.getPixels(px, 0, w, 0, 0, w, h)
         src.recycle()
-
-        boxBlur(px, w, h)
 
         val luma = meanLuma(px)
         val veil = veilFor(luma)
@@ -267,13 +254,15 @@ object Backdrop {
     }
 
     /**
-     * The image, at [TARGET_W] wide.
+     * The image, at up to [TARGET_W] wide, never upscaled past native.
      *
      * Two steps rather than one: `inSampleSize` is only cheap *and* predictable
      * in powers of two, so it takes the width down to somewhere at or above the
-     * target and a scaled copy finishes the job. A single non-power-of-two
+     * cap and a scaled copy finishes the job. A single non-power-of-two
      * `inSampleSize` is honoured on API 26+ but not exact, and the arithmetic
-     * that decides it is more code than the scaled copy it saves.
+     * that decides it is more code than the scaled copy it saves. A source
+     * already narrower than the cap is returned as decoded — stretching it
+     * here would only smooth it.
      */
     private fun decode(context: Context): Bitmap {
         // One file, both palettes. What differs between day and night is the *veil*
@@ -293,61 +282,11 @@ object Backdrop {
         val raw = requireNotNull(BitmapFactory.decodeResource(context.resources, id, opts)) {
             "backdrop.jpg did not decode"
         }
-        if (raw.width == TARGET_W) return raw
+        if (raw.width <= TARGET_W) return raw
         val h = max(1, (raw.height * TARGET_W.toFloat() / raw.width).roundToInt())
         val scaled = Bitmap.createScaledBitmap(raw, TARGET_W, h, true)
         if (scaled != raw) raw.recycle()
         return scaled
-    }
-
-    /**
-     * Three separable box passes — horizontal then vertical, three times.
-     *
-     * A running sum per row and per column is what makes this linear in the
-     * pixel count rather than quadratic in the radius: the window slides one
-     * pixel at a time and each step adds one sample and drops one. Edges sample
-     * the border pixel rather than wrapping or darkening, because a dark rim
-     * around the image would read as a vignette the user did not ask for.
-     */
-    private fun boxBlur(px: IntArray, w: Int, h: Int) {
-        val tmp = IntArray(px.size)
-        val r = BLUR_RADIUS
-        val n = r * 2 + 1
-        repeat(BLUR_PASSES) {
-            // Horizontal: px → tmp
-            for (y in 0 until h) {
-                val row = y * w
-                var sr = 0; var sg = 0; var sb = 0
-                for (i in -r..r) {
-                    val c = px[row + i.coerceIn(0, w - 1)]
-                    sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
-                }
-                for (x in 0 until w) {
-                    tmp[row + x] = -0x1000000 or ((sr / n) shl 16) or ((sg / n) shl 8) or (sb / n)
-                    val add = px[row + (x + r + 1).coerceIn(0, w - 1)]
-                    val sub = px[row + (x - r).coerceIn(0, w - 1)]
-                    sr += ((add shr 16) and 0xFF) - ((sub shr 16) and 0xFF)
-                    sg += ((add shr 8) and 0xFF) - ((sub shr 8) and 0xFF)
-                    sb += (add and 0xFF) - (sub and 0xFF)
-                }
-            }
-            // Vertical: tmp → px
-            for (x in 0 until w) {
-                var sr = 0; var sg = 0; var sb = 0
-                for (i in -r..r) {
-                    val c = tmp[i.coerceIn(0, h - 1) * w + x]
-                    sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
-                }
-                for (y in 0 until h) {
-                    px[y * w + x] = -0x1000000 or ((sr / n) shl 16) or ((sg / n) shl 8) or (sb / n)
-                    val add = tmp[(y + r + 1).coerceIn(0, h - 1) * w + x]
-                    val sub = tmp[(y - r).coerceIn(0, h - 1) * w + x]
-                    sr += ((add shr 16) and 0xFF) - ((sub shr 16) and 0xFF)
-                    sg += ((add shr 8) and 0xFF) - ((sub shr 8) and 0xFF)
-                    sb += (add and 0xFF) - (sub and 0xFF)
-                }
-            }
-        }
     }
 
     /** Rec. 709 relative luminance, averaged. Worker thread only. */
