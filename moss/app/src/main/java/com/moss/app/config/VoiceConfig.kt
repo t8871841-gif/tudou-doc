@@ -581,18 +581,13 @@ class VoiceConfig {
         }
 
         /**
-         * Which face the ball is wearing — a [com.moss.app.ui.ball.BallLook]
-         * name, or blank for the first one.
+         * The saved ball-look name, or blank for the first one.
          *
-         * Like [uiLanguage] and unlike everything else here, it is written the
-         * moment the user swipes rather than on 保存, and for the same reason:
-         * the ball changing *is* the confirmation, and there is no card to
-         * press a button on. It is also not in [current] — it has no settings
-         * row, because the control is the ball itself.
-         *
-         * It is read from more than the ball now: the look carries the voice and
-         * the manner as well as the drawing, so `LocalBrain` resolves it
-         * through [com.moss.app.ui.ball.BallLooks.byName].
+         * Retained for the preference only: nothing reads it anymore. The
+         * character ball (and its swipe-to-change-look gesture) was replaced
+         * by the orb, which has no looks — so the value is inert, like the
+         * old voice preferences left behind by earlier deletions. It is not
+         * in [current] and has no settings row.
          */
         fun ballLook(context: Context): String =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

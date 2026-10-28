@@ -27,17 +27,12 @@ import com.moss.app.R
 import com.moss.app.audio.Earcon
 import com.moss.app.config.VoiceConfig
 import com.moss.app.i18n.AppLocale
-import com.moss.app.ui.ball.Action
-import com.moss.app.ui.ball.BallLooks
-import com.moss.app.ui.ball.CLING_HIDDEN
-import com.moss.app.ui.ball.EmotionBallTextureView
-import com.moss.app.ui.ball.Mood
-import com.moss.app.ui.ball.SPHERE_RADIUS_FRACTION
+import com.moss.app.ui.ball.MossOrbView
+import com.moss.app.ui.ball.OrbState
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
-import kotlin.random.Random
 
 /**
  * The floating window IS the ball. Fullscreen by default.
@@ -273,7 +268,7 @@ class FloatingWindowUi(
 
     private var root: BallHostFrame? = null
     private var params: WindowManager.LayoutParams? = null
-    private var ball: EmotionBallTextureView? = null
+    private var ball: MossOrbView? = null
     private var topBarView: View? = null
     private var historyView: HistoryListView? = null
 
@@ -402,12 +397,6 @@ class FloatingWindowUi(
      */
     private var perchApplied = false
 
-    // ---- Idle fidget (see [strollStep]) ----
-    private val strollRunnable = Runnable { strollStep() }
-
-    /** Hops left in the current burst before the next long rest. */
-    private var strollLeft = 0
-
     private var slide: ValueAnimator? = null
 
     fun isShown(): Boolean = root != null
@@ -418,18 +407,13 @@ class FloatingWindowUi(
      * a widget they reposition.
      *
      * Format stays TRANSLUCENT and the fill is the background colour's job —
-     * see [paintCard]. The ball is a TextureView that blends its GL surface
-     * against whatever the card is filled with, and [setVisibleForCapture]
-     * drives window alpha to 0; both need a window the compositor is willing
-     * to blend, whatever the card's own alpha happens to be.
+     * see [paintCard]. The ball is a plain view drawn over whatever the
+     * card is filled with, and [setVisibleForCapture] drives window alpha
+     * to 0; both need a window the compositor is willing to blend,
+     * whatever the card's own alpha happens to be.
      */
     fun show(): Boolean {
         if (root != null) return true
-        // Before the ball exists, so the first frame is already the look the
-        // user left it on. A no-op when nothing is saved, and a no-op for a
-        // name that no longer matches a look — which is what makes deleting a
-        // look from [BallLooks.ALL] safe.
-        BallLooks.requestByName(VoiceConfig.ballLook(context))
         val v = build()
         val dm = context.resources.displayMetrics
         val side = dp(COMPACT_DP)
@@ -510,7 +494,6 @@ class FloatingWindowUi(
                     runCatching { wm.updateViewLayout(v, pp) }
                 }
             }
-            retimeStroll()
             true
         } catch (_: Throwable) {
             false
@@ -593,7 +576,6 @@ class FloatingWindowUi(
         val ballY = if (perchApplied) homeY else p.y
         slide?.cancel()
         perchApplied = false
-        syncWorking()
         p.width = w
         p.height = h
         p.x = (p.x + side / 2) - w / 2
@@ -679,8 +661,6 @@ class FloatingWindowUi(
             homeX = p.x
             homeY = p.y
         }
-        syncWorking()
-        retimeStroll()
     }
 
     /**
@@ -813,7 +793,6 @@ class FloatingWindowUi(
     fun hide(): Boolean {
         val v = root ?: return true
         return try {
-            ui.removeCallbacks(strollRunnable)
             slide?.cancel()
             parkedFrom = null
             wm.removeView(v)
@@ -831,32 +810,20 @@ class FloatingWindowUi(
 
     fun setState(s: State) {
         ui.post {
-            val mood = when (s) {
-                State.IDLE -> Mood.CALM
-                State.RECORDING -> Mood.LISTENING
-                State.THINKING -> Mood.THINKING
-                State.SPEAKING -> Mood.SPEAKING
-                State.ERROR -> Mood.CONCERNED
-            }
-            ball?.setMood(mood)
-            ball?.setListening(s == State.RECORDING)
-            // The model's face belongs to one utterance. Anything that is not
-            // speaking has ended that utterance — including the IDLE the drain
-            // posts — so the channel is dropped here rather than at each of the
-            // places that stop the voice. Missing one of those would leave the
-            // ball wearing an emotion into the next conversation.
-            if (s != State.SPEAKING) ball?.setEmotion(null)
-            // Two transitions are worth a gesture, and only two: the mic
-            // opening is the one moment the user is waiting for an acknowledgement
-            // before speaking, and an error is the one moment a face alone is
-            // easy to miss. Animating every transition makes the ball twitch its
-            // way through a conversation.
-            //
-            // The same two moments get a tone, for the same reason turned up a
-            // notch: a face only lands if the user is looking at it, and having
-            // just spoken to the room is precisely when they are not. Speaking
-            // gets none — it announces itself — and errors get none either, now
-            // that they arrive as a card. See [Earcon].
+            ball?.setOrbState(
+                when (s) {
+                    State.IDLE -> OrbState.IDLE
+                    State.RECORDING -> OrbState.LISTENING
+                    State.THINKING -> OrbState.THINKING
+                    State.SPEAKING -> OrbState.SPEAKING
+                    State.ERROR -> OrbState.ERROR
+                },
+            )
+            // The mic opening and an error get a tone, for the same reason
+            // turned up a notch: a light only lands if the user is looking at
+            // it, and having just spoken to the room is precisely when they
+            // are not. Speaking gets none — it announces itself — and errors
+            // get none either, now that they arrive as a card. See [Earcon].
             if (s != lastState) {
                 // A haptic for the hand that just touched the ball. Through the
                 // view, not a Vibrator: no permission, it honours the system's
@@ -870,46 +837,13 @@ class FloatingWindowUi(
                 }
                 if (haptic != null) root?.performHapticFeedback(haptic)
                 when (s) {
-                    State.RECORDING -> {
-                        ball?.trigger(Action.NOD)
-                        Earcon.listening()
-                    }
+                    State.RECORDING -> Earcon.listening()
                     State.THINKING -> Earcon.thinking()
-                    State.ERROR -> ball?.trigger(Action.SHAKE)
                     else -> {}
                 }
                 lastState = s
             }
-            // Real state driving disables demo cycling.
-            ball?.setDemoCycle(false)
-            retimeStroll()
         }
-    }
-
-    /**
-     * The face the model picked for the reply it is saying right now.
-     *
-     * Posted to the same handler as [setState], which is what keeps the two
-     * ordered: the emotion is applied by [com.moss.app.tts.TtsController]
-     * immediately after it asks for SPEAKING, and a null arriving from any
-     * other state transition lands after it rather than racing it.
-     */
-    fun setEmotion(m: Mood?) {
-        ui.post { ball?.setEmotion(m) }
-    }
-
-    /**
-     * The agent ran a tool against the device. Shows as a nod plus the
-     * SEARCHING face, which decays on its own — so this is fire-and-forget and
-     * there is no matching "stopped" call to forget to make.
-     */
-    fun pulseTool() {
-        ui.post { ball?.pulseTool() }
-    }
-
-    /** A task ended. A brief pleased or flinching face, then back to normal. */
-    fun signalOutcome(ok: Boolean) {
-        ui.post { ball?.signalOutcome(ok) }
     }
 
     /**
@@ -1037,32 +971,6 @@ class FloatingWindowUi(
     }
 
     fun clearSubtitle() = setSubtitle("")
-
-    /**
-     * Move the ball one look along and say which one it landed on.
-     *
-     * The renderer reads [BallLooks] on its own thread and latches it at the
-     * top of a frame, so all this side has to do is *ask*; there is nothing to
-     * post to the GL thread and nothing to wait for.
-     *
-     * Three things happen together on purpose. The pick is written to prefs
-     * immediately rather than on some later 保存 — the ball changing in front
-     * of the user is the confirmation, and there is no card here to put a
-     * button on. The name is announced, because the looks are close enough
-     * relatives that a user who swiped past one should be told what they now
-     * have. And the ball pops, so the change reads as the ball *doing*
-     * something rather than as a redraw.
-     *
-     * The announcement goes through the transcript's transient line
-     * ([SubtitleKind.FINAL]) rather than being committed as a row: it is a
-     * label on a control, not something anybody said, and it clears itself.
-     */
-    private fun stepBallLook(delta: Int) {
-        val next = BallLooks.step(delta)
-        VoiceConfig.save(context, mapOf("ball" to next.name))
-        ball?.trigger(Action.POP)
-        setSubtitle(AppLocale.str(context, next.labelRes), SubtitleKind.FINAL)
-    }
 
     /**
      * Temporarily make the whole overlay non-touchable so a synthesized
@@ -1337,8 +1245,6 @@ class FloatingWindowUi(
             if (on) dropSignboardBeforePerch()
             perchedByTask = on
             applyPerch()
-            syncWorking()
-            retimeStroll()
         }
     }
 
@@ -1360,26 +1266,8 @@ class FloatingWindowUi(
             if (on) dropSignboardBeforePerch()
             perchedByPage = on
             applyPerch()
-            syncWorking()
-            retimeStroll()
         }
     }
-
-    /**
-     * Tell the ball whether it is currently hanging off a screen edge.
-     *
-     * Conditional on being folded, not just on there being a task: the ball
-     * grows paws, stretches and swings from them, and in the middle of a
-     * fullscreen card there is no edge for any of that to hang off — it would
-     * read as a ball sprouting hands into thin air. Main thread only.
-     */
-    private fun syncWorking() {
-        ball?.setWorking(compact && perched)
-        ball?.setAtLedge(compact && perchApplied && !slideRunning())
-    }
-
-    /** True while a perch/home slide animation is in flight. Main thread only. */
-    private fun slideRunning(): Boolean = slide?.isRunning == true
 
     /**
      * The drawn sphere's on-screen bounding box, for anyone anchoring
@@ -1402,13 +1290,13 @@ class FloatingWindowUi(
             val area: View = v.ballAreaView ?: v
             val loc = IntArray(2)
             area.getLocationOnScreen(loc)
-            // The same two numbers the renderer uses: the sphere is a fixed
+            // The same two numbers the layout uses: the orb rect is a fixed
             // fraction of the surface's shorter side, times the view scale the
             // ball is drawn at (1f when folded — see applyCompactAppearance).
             val scale = if (compact) 1f else BALL_SCALE
             val r = (min(area.width, area.height) * SPHERE_RADIUS_FRACTION * scale).toInt()
             val cx = loc[0] + area.width / 2
-            // The sphere may be drawn below the area's centre while it is
+            // The orb may be drawn below the area's centre while it is
             // dodging the control cluster — see [ballDrop].
             val cy = loc[1] + area.height / 2 + (ball?.translationY ?: 0f).toInt()
             cb(intArrayOf(cx - r, cy - r, cx + r, cy + r))
@@ -1420,20 +1308,6 @@ class FloatingWindowUi(
         if (!compact || signboard == null) return
         signboardEvictor?.invoke()
         if (signboard != null) hideSignboard()
-    }
-
-    /** A signboard is up — the ball waits, attending, instead of idling. */
-    fun setHolding(on: Boolean) {
-        ui.post {
-            ball?.setHolding(on)
-            if (on) {
-                // Stand still while asking: a ball that fidgets through its own
-                // question doesn't look like it cares about the answer.
-                ui.removeCallbacks(strollRunnable)
-            } else {
-                retimeStroll()
-            }
-        }
     }
 
     /**
@@ -1479,11 +1353,9 @@ class FloatingWindowUi(
      * across it: this picks the Y, [perchX] picks the X, and "which side of the
      * screen" is answered by [perchX] rather than left to the finger.
      *
-     * The sphere is centred in the compact window at [SPHERE_RADIUS_FRACTION]
+     * The orb is centred in the compact window at [SPHERE_RADIUS_FRACTION]
      * of it; putting [CLING_HIDDEN] of it below the edge puts its centre at
-     * `edge + r * (2 * CLING_HIDDEN - 1)`. [EmotionBallRenderer] derives the
-     * paws' world Y from the same expression, which is why both fractions are
-     * shared rather than local to either. At `CLING_HIDDEN = 0.5` the radius
+     * `edge + r * (2 * CLING_HIDDEN - 1)`. At `CLING_HIDDEN = 0.5` the radius
      * term is zero and the expression is just "centre on the edge" — the
      * fraction only starts to matter if that half ever moves.
      */
@@ -1694,79 +1566,8 @@ class FloatingWindowUi(
                 p.y = fromY + (dy * t).roundToInt()
                 runCatching { wm.updateViewLayout(v, p) }
             }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
-                    // The geometry is now truly where perchApplied said it was.
-                    // This is the moment the cling (paws, half-sunk body) may
-                    // start — before it, the ball was travelling and a cling
-                    // drawn mid-flight read as chopped-in-half.
-                    syncWorking()
-                }
-            })
             start()
         }
-    }
-
-    // ---- Idle fidget ----
-
-    /**
-     * Hop on the spot, every so often, when there is nothing else going on.
-     *
-     * A corner ball that holds one pixel for an hour reads as a decal. A few
-     * hops every half-minute is the cheapest way to say there is something alive
-     * in there — and because the ball *is* the only way to reach the assistant
-     * once the card is folded, looking alive is also the thing that makes it
-     * look tappable.
-     *
-     * On the spot, not travelling: the window stays exactly where the user put
-     * it. A ball that wanders has to be re-found every time it is wanted, which
-     * costs more than the liveliness is worth.
-     *
-     * Main thread only.
-     */
-    private fun strollStep() {
-        if (!strollWanted()) {
-            retimeStroll()
-            return
-        }
-        ball?.trigger(Action.HOP)
-
-        strollLeft--
-        // Two to four hops, then stand still for a while. A ball that hopped on
-        // a fixed tick would be a metronome; the point is to look idle, not
-        // scheduled.
-        val delay = if (strollLeft > 0) {
-            STROLL_HOP_MS
-        } else {
-            strollLeft = 2 + Random.nextInt(3)
-            STROLL_REST_MS + Random.nextInt(STROLL_REST_JITTER_MS).toLong()
-        }
-        ui.postDelayed(strollRunnable, delay)
-    }
-
-    /**
-     * Only when folded, idle, and awake.
-     *
-     * Not while working — it is hanging off the edge by its paws, and a ball
-     * that bounces while gripping is doing two incompatible things. Not while
-     * dozing either: the point of SLEEPING is that the device reads as off, and
-     * a ball twitching in its sleep undoes that on its own.
-     *
-     * Main thread only.
-     */
-    private fun strollWanted(): Boolean =
-        root != null && compact && !perched && signboard == null &&
-                lastState.let { it == null || it == State.IDLE } &&
-                ball?.isDozing() != true
-
-    /** Push the next hop out to a full rest. Main thread only. */
-    private fun retimeStroll() {
-        ui.removeCallbacks(strollRunnable)
-        strollLeft = 2 + Random.nextInt(3)
-        ui.postDelayed(
-            strollRunnable,
-            STROLL_REST_MS + Random.nextInt(STROLL_REST_JITTER_MS).toLong(),
-        )
     }
 
     /**
@@ -1775,10 +1576,10 @@ class FloatingWindowUi(
      * so both go rather than getting squeezed into something illegible.
      *
      * The window background goes with them, and the ball carries its own dark
-     * fill instead (`EmotionBallRenderer.drawBody`). A background can only be a
-     * rectangle or an oval filling the window, which is bigger than the sphere:
+     * fill instead (the orb draws its own dark disc). A background can only be a
+     * rectangle or an oval filling the window, which is bigger than the orb:
      * the two then read as one ball inside another, and the outer one wins —
-     * larger, harder-edged, and unable to squash or hop with the ball it is
+     * larger, harder-edged, and unable to move with the ball it is
      * supposed to be part of.
      *
      * Ball at view scale 1: [BALL_SCALE] is the full card's magnification, and
@@ -2001,8 +1802,6 @@ class FloatingWindowUi(
         perchApplied = perched
         if (perched) p.y = perchY()
         applyCompactAppearance()
-        syncWorking()
-        retimeStroll()
         // Everything above is placed from whatever [winYOrigin] the *last* fold
         // measured, because the square's own frame does not exist until this one
         // has been laid out. Re-measure as soon as it does.
@@ -2079,8 +1878,6 @@ class FloatingWindowUi(
         historyView?.refresh()
         ball?.scaleX = BALL_SCALE
         ball?.scaleY = BALL_SCALE
-        syncWorking()
-        retimeStroll()
     }
 
     /**
@@ -2287,20 +2084,13 @@ class FloatingWindowUi(
         // the card's real height, which is the only place it is known, and the
         // ball has to keep its whole area when the card folds to the corner.
         val ballArea = FrameLayout(context)
-        val b = EmotionBallTextureView(context).apply {
-            // No demo cycling from birth. It used to read "cycle moods until
-            // real state driving takes over" — but real driving only begins
-            // with the first setState, and a device idling at a desk never
-            // sends one. The ball then cycled all fourteen moods every 5.5 s
-            // forever: wearing SPEAKING (mouth sine and all) with no sound,
-            // and resetting the CALM→SLEEP accumulator so it could never
-            // doze either. CALM says "I am here, not busy" all by itself.
-            // Scaled rather than sized down: the sphere's diameter is a fixed
-            // fraction of the surface's shorter side, so a fixed dp size would
-            // need a matching floor on the window's own minimum or the ball
-            // gets cropped when the card is resized small. A view scale tracks
+        val b = MossOrbView(context).apply {
+            // Scaled rather than sized down: the orb draws off the shorter
+            // side of whatever area it gets, so a fixed dp size would need a
+            // matching floor on the window's own minimum or the ball gets
+            // cropped when the card is resized small. A view scale tracks
             // whatever geometry the card ends up with. Pivot defaults to the
-            // view's center, which is where the sphere already is.
+            // view's center, which is where the orb already is.
             scaleX = BALL_SCALE
             scaleY = BALL_SCALE
         }
@@ -2728,8 +2518,7 @@ class FloatingWindowUi(
                         if (e.y > ballH) return false
                         if (!isOnBall(e.x, e.y, ballH)) return false
                     }
-                    // Don't let it bounce under a finger that is already on it.
-                    ui.removeCallbacks(strollRunnable)
+                    // Don't let a slide run under a finger that is already on it.
                     slide?.cancel()
                     startX = e.rawX; startY = e.rawY
                     startParamsX = p.x; startParamsY = p.y
@@ -2785,7 +2574,6 @@ class FloatingWindowUi(
                                 perchedByTask = false
                                 perchedByPage = false
                             }
-                            syncWorking()
                         }
                         if (!perchApplied) {
                             homeX = p.x
@@ -2801,20 +2589,14 @@ class FloatingWindowUi(
                     ui.removeCallbacks(longPressRunnable)
                     val wasTap = !moved && !longPressed
                     // Only a compact drag moved the window, so only it has
-                    // anything to settle — a swipe switched looks, and a
-                    // full-card touch never moved the window at all.
+                    // anything to settle — a full-card touch never moved the
+                    // window at all.
                     val wasDrag = moved && !swiping && compact
-                    val flick = if (swiping) e.rawX - startX else 0f
                     tracking = false
                     moved = false
                     swiping = false
                     if (wasDrag) settleAfterDrag()
-                    retimeStroll()
                     if (wasTap) registerTap()
-                    // Right means forward, the way a stack of cards is dealt.
-                    if (abs(flick) > slop * SWIPE_COMMIT) {
-                        stepBallLook(if (flick > 0) 1 else -1)
-                    }
                     return true
                 }
 
@@ -2826,7 +2608,6 @@ class FloatingWindowUi(
                     moved = false
                     swiping = false
                     if (wasDrag) settleAfterDrag()
-                    retimeStroll()
                     return true
                 }
             }
@@ -2873,22 +2654,17 @@ class FloatingWindowUi(
          */
         private const val BALL_SCALE = 1.05f
 
+        // Window geometry the compact window shares with the orb, moved out
+        // of the deleted ui.ball package; values unchanged.
+        private const val CLING_HIDDEN = 0.5f
+        private const val SPHERE_RADIUS_FRACTION = 0.24f
+
         /**
          * How much more sideways than vertical a drag on the ball must be
          * before it counts as a look-change swipe rather than a drag of the
          * card. See [BallHostFrame.swiping].
          */
         private const val SWIPE_BIAS = 1.4f
-
-        /**
-         * Distance, in slops, a swipe must actually cover to change anything.
-         *
-         * Three rather than one: crossing the slop only means the gesture
-         * stopped being a tap, and a look change is not something to do to
-         * somebody by accident. Short of this the swipe is simply dropped —
-         * nothing moved, so there is nothing to undo.
-         */
-        private const val SWIPE_COMMIT = 3f
 
         /**
          * Where the card splits: ball above, scrollback below. Also the touch
@@ -2986,12 +2762,5 @@ class FloatingWindowUi(
          * [wantsPerch] — the only tuned number in the magnet.
          */
         private const val SNAP_GRACE_DP = 18
-
-        /** Gap between hops within one burst. */
-        private const val STROLL_HOP_MS = 640L
-
-        /** Standing still between bursts, plus up to [STROLL_REST_JITTER_MS]. */
-        private const val STROLL_REST_MS = 6_000L
-        private const val STROLL_REST_JITTER_MS = 14_000
     }
 }

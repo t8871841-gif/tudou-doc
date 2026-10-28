@@ -2650,7 +2650,7 @@ class BodyCoreService : Service() {
             // scrollback row above is already the answer; the user
             // reads it after they hang up.
             if (!meeting.isActive() && !com.moss.app.device.CallState.isActive) {
-                tts.speak(plain, script.cues)
+                tts.speak(plain)
             }
         }
     }
@@ -2693,7 +2693,7 @@ class BodyCoreService : Service() {
         // the mic must not come up hunting for an answer to either.
         expectFollowUp = listen
         val script = SpeechMood.parse(stripMarkdown(text))
-        tts.speak(script.text, script.cues)
+        tts.speak(script.text)
         return true
     }
 
@@ -2886,7 +2886,7 @@ class BodyCoreService : Service() {
         lastAnswer = script.text
         expectFollowUp = false
         if (!meeting.isActive() && !com.moss.app.device.CallState.isActive) {
-            tts.speak(script.text, script.cues)
+            tts.speak(script.text)
         }
     }
 

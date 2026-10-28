@@ -1,6 +1,6 @@
 // Moss: derived from Andee (KUAFUAI, Apache-2.0 + conditions). Expression layer
 // disabled: this file only strips bracket tags so they are never spoken or
-// shown. It never sets a face; cues are always empty.
+// shown. It never sets a face; no cues are recorded.
 package com.moss.app.brain
 
 /**
@@ -19,14 +19,8 @@ package com.moss.app.brain
  */
 object SpeechMood {
 
-    /** Retained for API compatibility with [com.moss.app.tts.TtsController]. Never populated. */
-    data class Cue(val at: Int, val mood: com.moss.app.ui.ball.Mood)
-
-    /** A reply with its markers removed. `cues` is always empty. */
-    data class Script(val text: String, val cues: List<Cue>) {
-        /** Always null: no face is ever set from text. */
-        val opening: com.moss.app.ui.ball.Mood? get() = null
-    }
+    /** A reply with its markers removed. */
+    data class Script(val text: String)
 
     private val MARKER = Regex("[\\[\\uFF3B\\u3010]\\s*([A-Za-z\\u4e00-\\u9fff]{1,12})\\s*[\\]\\uFF3D\\u3011]")
 
@@ -36,9 +30,9 @@ object SpeechMood {
             after != '('
 
     fun parse(raw: String): Script {
-        if (raw.isEmpty()) return Script(raw, emptyList())
+        if (raw.isEmpty()) return Script(raw)
         val matches = MARKER.findAll(raw).toList()
-        if (matches.isEmpty()) return Script(raw, emptyList())
+        if (matches.isEmpty()) return Script(raw)
 
         val out = StringBuilder(raw.length)
         var cursor = 0
@@ -69,8 +63,8 @@ object SpeechMood {
         out.append(raw, cursor, raw.length)
 
         val text = out.toString()
-        if (text.isBlank() && raw.isNotBlank()) return Script(raw, emptyList())
-        return Script(text, emptyList())
+        if (text.isBlank() && raw.isNotBlank()) return Script(raw)
+        return Script(text)
     }
 
     /** [parse] for callers that only need the words. */

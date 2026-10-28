@@ -1261,11 +1261,9 @@ class LocalBrain(
     /**
      * The system message for this turn: the standing prompt, plus the active scene.
      *
-     * Read from the preference through [com.moss.app.ui.ball.BallLooks.byName]
-     * rather than from `BallLooks.active`, because `active` is the GL thread's
-     * latched value and only exists once the ball has been built — this runs on
-     * the loop thread and can run before there is a ball at all. The preference
-     * is written the instant the user swipes, so it is never behind the screen.
+     * Moss has no face/persona layer: the look's persona is never read, and
+     * the persona slot is always blank (see the note on [systemPrompt]).
+     * The preference naming the old ball look is retained but unapplied.
      *
      * The active scene rides in the same message for the same reason, and
      * [reseatPersona] picks up entering or leaving one without knowing scenes

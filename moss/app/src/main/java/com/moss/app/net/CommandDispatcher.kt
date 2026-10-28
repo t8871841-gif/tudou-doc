@@ -390,10 +390,8 @@ class CommandDispatcher(
         if (driving && method.startsWith("screen.")) {
             ensureCompact()
             // Unconditional among drivers, unlike [touchBusy]: "a tool just
-            // ran" is true whoever asked, and a ball that nods when the top bar
-            // drives the device is telling the truth. Only the glow needs to
-            // know whose tool call it was.
-            window.pulseTool()
+            // ran" is true whoever asked. Only the glow needs to know whose
+            // tool call it was.
         }
         return when (method) {
             // ---- device.* : read-only context queries ----------------------
@@ -508,7 +506,6 @@ class CommandDispatcher(
             }
             "device.vault.fill" -> {
                 ensureCompact()
-                window.pulseTool()
                 val who = requireNotNull(params?.optString("entry")?.ifEmpty { null }) {
                     "device.vault.fill requires entry"
                 }
@@ -528,8 +525,7 @@ class CommandDispatcher(
                         "read the rest with get_vault, or ask the user to add it in 设置 → 保险箱"
                     )
                 // The device is typing the user's own secret for them, so say
-                // so. `pulseTool()` above is the live tell while the card is
-                // folded; the subtitle is the record, readable the moment the
+                // so. The subtitle is the record, readable the moment the
                 // user unfolds. Not a Toast: toasts are gated on the
                 // notification appop, which is off for a service with no
                 // launcher icon, and a silently dropped promise is worse than
@@ -568,9 +564,6 @@ class CommandDispatcher(
                 // the brain reads back, and that one belongs in the card.
                 if (confirm) {
                     ensureCompact()
-                    // Folded, so the nod is the only thing left saying "the
-                    // device just did something" — same as `device.vault.fill`.
-                    window.pulseTool()
                 }
                 permissions.request(
                     ids = requireNotNull(params?.optJSONArray("ids")) {
@@ -1864,17 +1857,10 @@ class CommandDispatcher(
      * Task over because the final answer arrived. This is the one thing that
      * puts the glow out — the card stays folded either way, so whatever the
      * assistant leaves on screen stays visible.
-     *
-     * The ball gets a brief pleased face out of it. "The answer came back" is
-     * the only success signal this side of the wire has: the brain reports
-     * failures as prose, indistinguishable here from any other answer, so a
-     * task that ended badly still ends with a pop. Overclaiming a little beats
-     * a device that never looks pleased about anything.
      */
     fun endTask() {
         ui.post {
             setBusy(false)
-            window.signalOutcome(true)
         }
     }
 

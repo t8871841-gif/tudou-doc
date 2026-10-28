@@ -34,9 +34,8 @@ import com.moss.app.i18n.AppLocale
  *
  * The card is not a free-floating box: it is anchored to the ball. A tail
  * on the card's underside points at the ball, the card sits just above it,
- * and while the card is up the ball itself attends — setHolding(true) puts
- * a listening face on it and stops the idle fidget. The user is deciding
- * something; the ball waits for the answer like it waits for speech.
+ * and while the card is up the ball waits for the answer like it waits for
+ * speech: the user is deciding something, and nothing fidgets through it.
  *
  * One card at a time — a new card replaces the old one (the old one's
  * callback fires with "superseded"). Queues of cards are just push spam
@@ -254,9 +253,6 @@ object CardUi {
                 runCatching { wm?.removeView(view) }
             }
             if (current === this) current = null
-            // The ball can stop attending — the question is answered, timed
-            // out, or was replaced by a newer one (which re-arms it below).
-            ballWindow()?.setHolding(false)
             onDone?.invoke(Result(button, how, heard))
         }
     }
@@ -491,10 +487,6 @@ object CardUi {
                 cardReal.pivotX = cardReal.measuredWidth / 2f
                 cardReal.pivotY = cardReal.measuredHeight.toFloat()
                 Glass.enter(cardReal)
-                // The ball holds still and attends while its question is up.
-                // Armed after hosting so a throw in between can't leave the
-                // ball frozen mid-attend.
-                host.setHolding(true)
             } else {
                 handle.finished = true
                 handle.timeout?.let { t -> main.removeCallbacks(t) }
