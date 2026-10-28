@@ -8,10 +8,10 @@ package com.moss.app.asr
 // Shape mismatch, and how it is bridged: this interface was drawn for
 // streaming backends that take PCM pushed into them, while the system
 // recogniser owns the microphone itself and decides on its own when an
-// utterance ends. So [sendAudio] is a no-op — the caller's capture thread
-// keeps running (and keeps the turn machinery's `isStreaming` true, which the
-// silence watchdog and stop path depend on), and the PCM is discarded. What
-// the recogniser hears comes from its own capture, not from these calls.
+// utterance ends. So [sendAudio] is a no-op and the caller opens no capture
+// of its own for this engine ([ownsMicrophone]) — the turn's liveness is
+// tracked by the caller instead of read off its own stream. What the
+// recogniser hears comes from its own capture, not from these calls.
 //
 // Turn end: the recogniser usually ends the turn itself ([onResults]), and
 // [endOfTurn]/[close] cover the rest by settling the last partial heard, so a
@@ -78,6 +78,9 @@ class SystemAsrEngine(
      * service had not finished settling.
      */
     override val silenceMs: Long = 5000L
+
+    /** The system recogniser owns the microphone; see [AsrEngine.ownsMicrophone]. */
+    override val ownsMicrophone: Boolean = true
 
     private val main = Handler(Looper.getMainLooper())
 

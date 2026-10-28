@@ -70,6 +70,14 @@ class MeetingRecorder(
      * back would stop it folding for the next `screen.*` call.
      */
     private val expand: () -> Unit,
+    /**
+     * Whether a voice turn is live. The recorder shares the one microphone
+     * with the conversation, so it must not start while a turn holds it —
+     * and a turn whose engine owns the microphone holds no stream of its
+     * own ([AsrEngine.ownsMicrophone]), so [AudioIO.isStreaming] alone
+     * cannot answer that. Supplied by the owner, which holds the controller.
+     */
+    private val voiceBusy: () -> Boolean,
     /** Fired for every end except the brain's own `stop_meeting` — see [endAndNotify]. */
     private val onEnded: (JSONObject) -> Unit,
 ) {
@@ -142,7 +150,7 @@ class MeetingRecorder(
         if (recording.get()) {
             throw IllegalStateException("a meeting is already being recorded — stop_meeting first")
         }
-        if (audio.isStreaming()) {
+        if (audio.isStreaming() || voiceBusy()) {
             throw IllegalStateException("the microphone is busy with a voice turn; try again in a moment")
         }
         // The fallback is a resource, not a literal: this title ends up as the

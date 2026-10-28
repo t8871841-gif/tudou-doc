@@ -560,6 +560,7 @@ class BodyCoreService : Service() {
         meeting = com.moss.app.meeting.MeetingRecorder(
             this, audio, window,
             expand = { dispatcher.expand() },
+            voiceBusy = { asr.isActive() },
         ) { payload ->
             // The user ended it (or a phone call did), so the brain has no idea
             // the meeting is over and no transcript in hand. Ask it for the
@@ -833,9 +834,10 @@ class BodyCoreService : Service() {
      * special case bolted on — it is the *only* control the user has left,
      * since the recorder holds the microphone and the wake word is gated off,
      * so they cannot ask for anything by voice. It also closes a trap: the two
-     * share one [AudioIO], and [AsrController.isActive] is literally
-     * `audio.isStreaming()`, so without this a tap would fall into the "off"
-     * half of the toggle and tear the recording down with no error anywhere.
+     * share one [AudioIO], and [AsrController.isActive] is true whenever a
+     * stream is open — and a meeting holds one — so without this a tap would
+     * fall into the "off" half of the toggle and tear the recording down
+     * with no error anywhere.
      */
     private fun startTurn() {
         if (exitRequested) return
@@ -1217,10 +1219,10 @@ class BodyCoreService : Service() {
      * - **TTS quiet.** Otherwise Andee can hear itself say something close to
      *   the wake word and wake up to its own voice.
      * - **No meeting running.** `asr.isActive()` happens to cover this today
-     *   (it is `audio.isStreaming()`, which a meeting also sets), but that is a
-     *   coincidence inside a method named for the ASR. Spelled out so a future
-     *   narrowing of that method doesn't hand the wake word the microphone in
-     *   the middle of an hour-long recording.
+     *   (it is true whenever a stream is open, which a meeting also holds),
+     *   but that is a coincidence inside a method named for the ASR. Spelled
+     *   out so a future narrowing of that method doesn't hand the wake word
+     *   the microphone in the middle of an hour-long recording.
      */
     private fun startWakeWord() {
         screenOn = (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive

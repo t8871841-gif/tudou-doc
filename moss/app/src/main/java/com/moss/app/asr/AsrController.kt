@@ -113,13 +113,23 @@ class AsrController(
     @Volatile
     private var turnSilenceMs = 3000L
 
-    fun isActive(): Boolean = audio.isStreaming()
+    /**
+     * A turn is live from the tap's acknowledgement until [stopImpl], whether
+     * or not the caller holds a capture of its own. Read by [checkSilence]
+     * and [isActive] for engines that own the microphone
+     * ([AsrEngine.ownsMicrophone]): with no stream of ours, `audio.isStreaming()`
+     * alone cannot tell a live turn from an idle one.
+     */
+    @Volatile
+    private var turnLive = false
+
+    fun isActive(): Boolean = turnLive || audio.isStreaming()
 
     /** Called from the UI thread when the user taps the ball. */
     fun toggle(userInitiated: Boolean = true) {
         executor.execute {
             try {
-                if (audio.isStreaming()) stopImpl() else startImpl(userInitiated)
+                if (isActive()) stopImpl() else startImpl(userInitiated)
             } catch (t: Throwable) {
                 Log.e(TAG, "toggle failed", t)
                 runCatching { stopImpl() }
@@ -241,28 +251,35 @@ class AsrController(
         // open until the handshake was over, so the first words of the
         // sentence were never captured at all.
         asr = client
+        turnLive = true
         window.setState(FloatingWindowUi.State.RECORDING)
         window.setSubtitle(
             AppLocale.str(context, com.moss.app.R.string.asr_listening),
             FloatingWindowUi.SubtitleKind.PARTIAL,
         )
 
-        audio.startStreaming(sampleRate = 16_000, chunkMs = 100) { chunk ->
-            // Logged rather than swallowed: a send that throws every time looks
-            // from the outside exactly like a mic that produces nothing — the
-            // session stays open with no packets in it and ends after eight
-            // seconds, which reads as a network timeout and is not one.
-            runCatching { asr?.sendAudio(chunk, isLast = false) }
-                .onFailure { Log.w(TAG, "sendAudio failed", it) }
+        // No capture of our own when the engine owns the microphone: two
+        // captures on one mic starve each other, and the pushed PCM is
+        // discarded. The turn's liveness is [turnLive], not this stream.
+        if (!client.ownsMicrophone) {
+            audio.startStreaming(sampleRate = 16_000, chunkMs = 100) { chunk ->
+                // Logged rather than swallowed: a send that throws every time looks
+                // from the outside exactly like a mic that produces nothing — the
+                // session stays open with no packets in it and ends after eight
+                // seconds, which reads as a network timeout and is not one.
+                runCatching { asr?.sendAudio(chunk, isLast = false) }
+                    .onFailure { Log.w(TAG, "sendAudio failed", it) }
+            }
         }
 
         client.start(sampleRate = 16_000, channels = 1)
 
-        // **Armed after the capture starts, and that ordering is load-bearing
-        // too.** [checkSilence] opens by giving up when there is no stream — the
-        // normal case being a turn that has already ended — so arming this
-        // before [audio.startStreaming] means the very first tick, 250 ms in,
-        // finds no stream and stops the watchdog permanently.
+        // **Armed after the turn is marked live, and that ordering is
+        // load-bearing too.** [checkSilence] opens by giving up when there is
+        // neither a stream nor a live turn — the normal case being a turn that
+        // has already ended — so arming this before [turnLive] is set means
+        // the very first tick, 250 ms in, finds nothing live and stops the
+        // watchdog permanently.
         armSilenceWatchdog()
     }
 
@@ -309,7 +326,7 @@ class AsrController(
      *    slow would be cut off before it ever spoke.
      */
     private fun checkSilence() {
-        if (!audio.isStreaming()) return  // finished already
+        if (!audio.isStreaming() && !turnLive) return  // finished already
         val now = SystemClock.uptimeMillis()
         if (now - turnStartedAt >= MAX_TURN_MS) {
             Log.i(TAG, "turn hit ${MAX_TURN_MS}ms ceiling — auto-stop")
@@ -341,8 +358,10 @@ class AsrController(
     private fun stopImpl(bySilence: Boolean = false) {
         silence.removeCallbacks(silenceWatchdog)
         val client = asr
-        if (audio.isStreaming()) {
-            audio.stopStreaming()
+        val wasLive = turnLive
+        turnLive = false
+        if (audio.isStreaming() || wasLive) {
+            if (audio.isStreaming()) audio.stopStreaming()
             runCatching { client?.endOfTurn(bySilence) }
             runCatching { client?.sendAudio(ByteArray(0), isLast = true) }
                 .onFailure { Log.w(TAG, "isLast failed", it) }

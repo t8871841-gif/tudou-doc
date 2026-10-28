@@ -44,6 +44,19 @@ interface AsrEngine {
      */
     val silenceMs: Long
 
+    /**
+     * Whether this engine captures the microphone itself.
+     *
+     * False for engines that take pushed PCM ([sendAudio]); true for the
+     * system recogniser, which owns the microphone and decides on its own
+     * when an utterance ends. When true, the caller must not open its own
+     * capture alongside it: two captures on one microphone starve each
+     * other, and the pushed PCM is discarded anyway. The caller tracks the
+     * turn's liveness itself instead of reading it off its own stream.
+     */
+    val ownsMicrophone: Boolean
+        get() = false
+
     interface Listener {
         /**
          * The engine is connected and can hear.
