@@ -14,6 +14,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # 统一 debug 签名：Secret 缺失时跳过（走 runner 默认 debug key）；正式发版密钥
+      #（KEYSTORE_BASE64）不受影响。共享 debug keystore 由 ANDROID_DEBUG_KEYSTORE_BASE64
+      # Secret 恢复到 ~/.android/debug.keystore，Gradle/Flutter 默认 debug 签名即用它。
+      - name: Restore shared debug keystore
+        env:
+          ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
+            mkdir -p ~/.android
+            printf '%s' "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+            if [ ! -s ~/.android/debug.keystore ] || [ "$(wc -c < ~/.android/debug.keystore)" -lt 1000 ]; then
+              echo "Shared debug keystore looks invalid, falling back to runner default signing"
+              rm -f ~/.android/debug.keystore
+            fi
+          fi
       # 离线语音识别模型不提交进仓库（release tarball 约 500MB）。
       # 从 sherpa-onnx 官方 release 下载流式 zipformer 双语模型，
       # 只取 App 需要的 4 个文件 staging 到 assets/asr/（Jarvis 同款做法）。
