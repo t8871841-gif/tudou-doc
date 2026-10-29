@@ -120,43 +120,21 @@ object LocalLlm {
     }
 
     /**
-     * 视觉问答（Gemma 3n 多模态）：会话开视觉模态，先喂图再喂文字，done=true 那次回调带的是完整回答。任何失败返回 null（上层回退云端）；会话失败不卸载模型，文字路还能用。
-     * 超时 90 秒没答完也判失败，不让看屏流程无限等。
+     * 视觉问答（Gemma 3n 多模态）：暂不可用，固定返回 null，上层回退云端看屏。
+     *
+     * 2026-10-29 核实（tasks-genai 0.10.24 发布件字节码 + Google Maven）：旧写法调的三个 API 在该版本里都不存在——
+     * 视觉开关不在 `LlmInferenceSessionOptions` 上，在 `GraphOptions.Builder.setEnableVisionModality`；
+     * 建会话不是 `LlmInference.createSession`，是静态 `LlmInferenceSession.createFromOptions`；
+     * `generateResponseAsync` 的回调是 `ProgressListener`（run(partial, done)），不是 lambda。
+     * 且喂图要的 `MPImage` / `BitmapImageBuilder` 根本不在 tasks-genai 0.10.24 发布件里（66 个类，无 framework/image），
+     * Google Maven 上也没有提供它们的 0.10.24 构件（tasks-core / tasks-vision 均 404；0.10.27 发布件同样没有）。
+     * 恢复接线（等 MPImage 依赖解决后）：加载时 `LlmInferenceOptions.setMaxNumImages(1)`；
+     * 会话用 `createFromOptions` + `GraphOptions.setEnableVisionModality(true)`；
+     * `addImage(BitmapImageBuilder(bitmap).build())` 后 `generateResponseAsync(ProgressListener)`。
+     * 在此之前不要恢复旧写法——编不过。文字路不受影响。
      */
-    suspend fun generateWithImage(ctx: Context, prompt: String, bitmap: Bitmap): String? = withContext(dispatcher) {
-        val path = JarvisPrefs.getLocalLlmPath(ctx)
-        if (path.isBlank() || !File(path).exists()) return@withContext null
-        val maxTokens = JarvisPrefs.getLocalMaxTokens(ctx)
-        try {
-            if (!ensureLoaded(ctx, path, maxTokens)) return@withContext null
-            val llmNow = llm ?: return@withContext null
-            val safeBmp = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap
-                else bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: return@withContext null
-            val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
-                .setTemperature(0.7f)
-                .setTopK(40)
-                .setTopP(0.95f)
-                .setEnableVisionModality(true)
-                .setMaxNumImages(1)
-                .build()
-            val session = llmNow.createSession(sessionOptions)
-            try {
-                session.addImage(safeBmp)
-                session.addQueryChunk(buildVisionPrompt(prompt))
-                val raw = withTimeoutOrNull(90_000) {
-                    suspendCancellableCoroutine<String?> { cont ->
-                        session.generateResponseAsync { partial, done ->
-                            if (done && cont.isActive) cont.resume(partial)
-                        }
-                    }
-                } ?: return@withContext null
-                cleanOutput(raw)
-            } finally {
-                try { session.close() } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) {
-            null
-        }
+    suspend fun generateWithImage(ctx: Context, prompt: String, bitmap: Bitmap): String? {
+        return null
     }
 
     /** 视觉问答的模板：只套 Gemma 对话壳，不加文字路那段 Jarvis 人设（看屏提示词自带完整指令，勿冲突）。 */
