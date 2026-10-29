@@ -62,6 +62,17 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_MEMORY_ENABLED, on).apply()
     }
 
+    // ---------- 第一梯队批一：记忆语义化——自然语言隐式提取总开关 ----------
+    // 独立于 KEY_MEMORY_ENABLED（总开关关了这个也不会跑）：隐式提取每轮多打一次模型请求，
+    // 有费用/延迟成本，允许用户单独关掉只用显式「记住：」那条路。默认开。
+    private const val KEY_MEMORY_AUTO_EXTRACT = "memory_auto_extract"
+
+    fun isMemoryAutoExtractEnabled(ctx: Context): Boolean =
+        p(ctx).getBoolean(KEY_MEMORY_AUTO_EXTRACT, true)
+    fun setMemoryAutoExtractEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_MEMORY_AUTO_EXTRACT, on).apply()
+    }
+
     // ---------- 批四：技能固化总开关（技能本体存独立 Room 库 jarvis_skills.db） ----------
 
     private const val KEY_SKILL_ENABLED = "skill_enabled"
@@ -165,6 +176,11 @@ object JarvisPrefs {
     }
 
     fun getDepartureLeadMin(ctx: Context): Int = p(ctx).getInt(KEY_DEPARTURE_LEAD, 30)
+
+    // 第二梯队批六修正：这里原本打算加一份新的"晨报天气城市"设置项，后来发现下面
+    // （批十那段）已经有同名的 getWeatherCity/setWeatherCity 了——两份同名函数会直接
+    // 编译报错（Kotlin 不允许同一个 object 里重复声明）。晨报改接既有这份，这里不再
+    // 重复定义，晨报和平时问天气现在共用同一个"默认城市"设置，不是各管各的两份。
     fun setDepartureLeadMin(ctx: Context, v: Int) {
         p(ctx).edit().putInt(KEY_DEPARTURE_LEAD, v.coerceIn(1, 720)).apply()
     }

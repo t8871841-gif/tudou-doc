@@ -15,6 +15,7 @@ import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.net.ChatRouter
 import com.jarvis.app.skill.SkillItem
 import com.jarvis.app.skill.SkillRunner
+import com.jarvis.app.skill.SkillResumeState
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.tts.TtsRouter
 import com.jarvis.app.vision.ScreenVisionAgent
@@ -185,6 +186,18 @@ object JarvisAgent {
             maybeStartWakeLoop()
             return
         }
+        // 第一梯队批三：技能断点续播——先看有没有技能卡在某一步等"继续"，这句话优先
+        // 当作回答解析。命中就从断点接着做，不再往下走记忆/技能匹配/聊天这套正常流程；
+        // 没命中（不是"继续"类说法）SkillResumeState 会自己清掉状态，交还下面继续处理。
+        if (SkillResumeState.hasPending()) {
+            val resume = SkillResumeState.tryResolve(text)
+            if (resume != null) {
+                onUserText?.invoke(text)
+                setState(ctx, "thinking")
+                runSkillResume(ctx, mySeq, resume)
+                return
+            }
+        }
         // 批三：先拦截显式记忆指令；未命中再取长期记忆，随问答一起注入。
         scope.launch {
             if (mySeq != genSeq) return@launch
@@ -195,7 +208,8 @@ object JarvisAgent {
                 speakReply(ctx, mySeq, ack)
                 return@launch
             }
-            val mem = MemoryService.getInjectableMemories(ctx)
+            // 第一梯队批一：注入改按这句话做相关性检索，不再是「最近 15 条全量拼」。
+            val mem = MemoryService.getInjectableMemories(ctx, text)
             if (mySeq != genSeq) return@launch
             // 批四：技能命中先于视觉意图判定（命中即重播，不再走现场流程）
             // 批九：多步任务句式不参与技能匹配——它必须走任务循环现场执行，
@@ -241,10 +255,7 @@ object JarvisAgent {
         }
         if (skill != null) {
             setState(ctx, "thinking")
-            SkillRunner.run(ctx, skill) { ok, detail ->
-                if (mySeq != genSeq) return@run
-                speakReply(ctx, mySeq, if (ok) "技能「${skill.name}」执行完了" else "技能「${skill.name}」$detail，已停下")
-            }
+            runSkillFromStart(ctx, mySeq, skill)
             return
         }
         val tapMatch = TAP_INTENT.find(text)
@@ -277,17 +288,21 @@ object JarvisAgent {
             }
             return
         }
-        // 问答路由（批五原版 + 批十调配）：「智能调配」开时——问答求知类云端优先、
-        // 闲聊类本地优先（net/ChatRouter 判定）；调配关或本地没就绪 → 云端优先、
-        // 云端失败再用本地兜底。本地只喂原话，不带记忆注入（gemma3 上限 1024 塞不下）。
+        // 问答路由（批五原版 + 批十调配 + 第二梯队批六再调配）：「智能调配」开时——
+        // net/ChatRouter 综合内容/网络/电量/隐私信号判定本地优先还是云端优先；
+        // 调配关或本地没就绪 → 云端优先、云端失败再用本地兜底。本地现在会带一份精简版
+        // 记忆（见 MemoryService.getInjectableMemories 的 topN 参数），不再是完全空着问。
         setState(ctx, "thinking")
         val localReady = JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
-        if (localReady && JarvisPrefs.isLocalLlmPrefer(ctx) && !ChatRouter.cloudFirst(text)) {
+        if (localReady && JarvisPrefs.isLocalLlmPrefer(ctx) && !ChatRouter.cloudFirst(ctx, text)) {
             scope.launch {
-                val local = LocalLlm.generate(ctx, text)
+                // 本地模型上下文预算小，只要 Top-2 条最相关的，不是云端那份 Top-8。
+                val localMem = MemoryService.getInjectableMemories(ctx, text, topN = 2)
+                val local = LocalLlm.generate(ctx, text, localMem)
                 if (mySeq != genSeq) return@launch
                 if (!local.isNullOrBlank()) {
                     speakReply(ctx, mySeq, local)
+                    triggerMemoryExtraction(ctx, text, local)
                 } else {
                     askAgnes(ctx, mySeq, text, memoryContext, localTried = true)
                 }
@@ -297,10 +312,48 @@ object JarvisAgent {
         askAgnes(ctx, mySeq, text, memoryContext, localTried = false)
     }
 
+    /**
+     * 第一梯队批一：问答类聊天回复之后，异步触发一次隐式记忆提取（不阻塞朗读/显示，
+     * 失败也不影响主流程）。只在这几处真正的"聊天回复"落点调用，天气/看屏/技能/
+     * 本地指令这些结构化回复不走这里。
+     */
+    private fun triggerMemoryExtraction(ctx: Context, userText: String, reply: String) {
+        scope.launch { MemoryService.extractImplicit(ctx, userText, reply) }
+    }
+
+    /** 第一梯队批三：技能从第一步开始重播，失败时登记断点，成功/用户不理会则清掉。 */
+    private fun runSkillFromStart(ctx: Context, mySeq: Int, skill: SkillItem) {
+        SkillRunner.run(ctx, skill) { ok, detail, failedIndex ->
+            if (mySeq != genSeq) return@run
+            if (ok) {
+                speakReply(ctx, mySeq, "技能「${skill.name}」执行完了")
+            } else {
+                if (failedIndex != null) SkillResumeState.offer(skill, failedIndex)
+                speakReply(ctx, mySeq, "技能「${skill.name}」$detail，想接着做就说「继续」")
+            }
+        }
+    }
+
+    /** 第一梯队批三：从登记的断点续播，而不是整条重放。 */
+    private fun runSkillResume(ctx: Context, mySeq: Int, resume: SkillResumeState.ResumeInfo) {
+        SkillRunner.run(ctx, resume.skill, fromIndex = resume.fromIndex) { ok, detail, failedIndex ->
+            if (mySeq != genSeq) return@run
+            if (ok) {
+                speakReply(ctx, mySeq, "技能「${resume.skill.name}」接着做完了")
+            } else {
+                if (failedIndex != null) SkillResumeState.offer(resume.skill, failedIndex)
+                speakReply(ctx, mySeq, "技能「${resume.skill.name}」$detail，想接着做就说「继续」")
+            }
+        }
+    }
+
     private fun askAgnes(ctx: Context, mySeq: Int, text: String, memoryContext: String, localTried: Boolean) {
         AgnesClient.ask(
             ctx, text, memoryContext = memoryContext,
-            onResult = { reply -> main.post { if (mySeq == genSeq) speakReply(ctx, mySeq, reply) } },
+            onResult = { reply ->
+                main.post { if (mySeq == genSeq) speakReply(ctx, mySeq, reply) }
+                triggerMemoryExtraction(ctx, text, reply)
+            },
             onError = { msg ->
                 main.post {
                     if (mySeq != genSeq) return@post
@@ -313,11 +366,13 @@ object JarvisAgent {
                     }
                     // 云端失败 → 本地兜底：答出来就播，答不出再走原来的报错收尾
                     scope.launch {
-                        val local = LocalLlm.generate(ctx, text)
+                        val localMem = MemoryService.getInjectableMemories(ctx, text, topN = 2)
+                        val local = LocalLlm.generate(ctx, text, localMem)
                         if (mySeq != genSeq) return@launch
                         if (!local.isNullOrBlank()) {
                             OrbController.showBubble("云端连不上，已用本地模型回答")
                             speakReply(ctx, mySeq, local)
+                            triggerMemoryExtraction(ctx, text, local)
                         } else {
                             OrbController.showBubble("出错了：$msg")
                             setState(ctx, "idle")

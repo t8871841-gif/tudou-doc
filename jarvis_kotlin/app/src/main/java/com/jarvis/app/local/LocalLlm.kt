@@ -44,10 +44,25 @@ object LocalLlm {
         return "当前模型：${f.name}（${"%.0f".format(mb)} MB）"
     }
 
-    /** 把用户的话套进 Gemma 指令模型的对话模板（jk-v11 真机教训：直喂原话会胡言乱语、复读数字串）。 */
-    private fun buildPrompt(userText: String): String =
+    // 第二梯队批六：给本地模型的记忆片段，字符数硬顶一个上限——即使调用方按 topN=2 要了精简版，
+    // 单条记忆内容本身长度不受 MemoryService 控制（用户可以"记住："一大段话），这里再兜底
+    // 截一刀，确保不会把 1024 token 的上下文预算大半吃掉在记忆片段上。
+    private const val MEMORY_CONTEXT_MAX_CHARS = 150
+
+    /**
+     * 把用户的话套进 Gemma 指令模型的对话模板（jk-v11 真机教训：直喂原话会胡言乱语、复读数字串）。
+     * 第二梯队批六新增 [memoryContext]：原来本地模型完全不带记忆注入（见本文件头部注释的
+     * 历史说明），现在调用方可以传一份已经按 topN 精简过的记忆片段，这里再做一次字符数
+     * 兜底截断后拼进提示词——这是本地模型第一次真正用上检索到的记忆，不再是空着问。
+     */
+    private fun buildPrompt(userText: String, memoryContext: String = ""): String {
+        val memPart = if (memoryContext.isBlank()) "" else {
+            val trimmed = memoryContext.trim().take(MEMORY_CONTEXT_MAX_CHARS)
+            "\n\n$trimmed"
+        }
         // 批九硬约束（与 AgnesClient 同一条线）：本地模型同样不许编造实时信息。
-        "<start_of_turn>user\n你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。天气、气温、时间、新闻、价格这类实时信息你没有数据来源，查不到就明说查不到，绝对不要编造具体数值。\n\n$userText<end_of_turn>\n<start_of_turn>model\n"
+        return "<start_of_turn>user\n你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。天气、气温、时间、新闻、价格这类实时信息你没有数据来源，查不到就明说查不到，绝对不要编造具体数值。$memPart\n\n$userText<end_of_turn>\n<start_of_turn>model\n"
+    }
 
     /** 清洗模型输出：砍模板残留、截断复读、数字垃圾直接判失败（返回 null 让上层回退云端）。 */
     private fun cleanOutput(raw: String): String? {
@@ -103,14 +118,17 @@ object LocalLlm {
         }
     }
 
-    /** 确保已加载并生成；任何失败返回 null（上层据此回退云端），不在这里抛错或假装答了。 */
-    suspend fun generate(ctx: Context, prompt: String): String? = withContext(dispatcher) {
+    /**
+     * 确保已加载并生成；任何失败返回 null（上层据此回退云端），不在这里抛错或假装答了。
+     * [memoryContext] 第二梯队批六新增，可选——不传就是原来的行为（空着问，不带记忆）。
+     */
+    suspend fun generate(ctx: Context, prompt: String, memoryContext: String = ""): String? = withContext(dispatcher) {
         val path = JarvisPrefs.getLocalLlmPath(ctx)
         if (path.isBlank() || !File(path).exists()) return@withContext null
         val maxTokens = JarvisPrefs.getLocalMaxTokens(ctx)
         try {
             if (!ensureLoaded(ctx, path, maxTokens)) return@withContext null
-            llm!!.generateResponse(buildPrompt(prompt))?.let { cleanOutput(it) }
+            llm!!.generateResponse(buildPrompt(prompt, memoryContext))?.let { cleanOutput(it) }
         } catch (_: Throwable) {
             try { llm?.close() } catch (_: Throwable) {}
             llm = null

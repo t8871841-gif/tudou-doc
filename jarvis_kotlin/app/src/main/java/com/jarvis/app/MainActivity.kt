@@ -4,8 +4,12 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
+import android.util.Base64
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -331,15 +335,20 @@ class MainActivity : Activity() {
                 }
                 return@launch
             }
-            val mem = MemoryService.getInjectableMemories(this@MainActivity)
-            // 批十调配：智能调配开时问答类云端优先、闲聊类才本地先答（与语音同路）
+            // 第一梯队批一：注入改按这句话做相关性检索，不再是「最近 15 条全量拼」。
+            val mem = MemoryService.getInjectableMemories(this@MainActivity, text)
+            // 批十调配 + 第二梯队批六再调配：智能调配开时 ChatRouter 综合内容/网络/电量/
+            // 隐私信号判定，不只是"问答云端、闲聊本地"（与语音同路）
             val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
-            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity) && !com.jarvis.app.net.ChatRouter.cloudFirst(text)) {
-                val local = LocalLlm.generate(this@MainActivity, text)
+            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity) && !com.jarvis.app.net.ChatRouter.cloudFirst(this@MainActivity, text)) {
+                // 本地模型上下文预算小，只要精简版记忆（Top-2），不是云端那份 mem（Top-8）。
+                val localMem = MemoryService.getInjectableMemories(this@MainActivity, text, topN = 2)
+                val local = LocalLlm.generate(this@MainActivity, text, localMem)
                 if (!local.isNullOrBlank()) {
                     chatInFlight = false
                     addBubble(local, mine = false)
                     speakReplyIfEnabled(local)
+                    triggerMemoryExtraction(text, local)
                     return@launch
                 }
                 askChatAgnes(text, mem, localTried = true)
@@ -356,6 +365,47 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * 第一梯队批二：视觉链路自测——现画一张白底黑字写着一个随机数字的小图，发给
+     * AgnesClient.askVision 问"图里是什么数字"，回复里包含这个数字才算真正识图成功。
+     * 只是"接口没报 HTTP 错误"不算数——模型完全可能忽略图片、只按文字瞎编一个答案，
+     * 那种情况下旧的"接口通不通"判断法会误报"能用"。
+     */
+    private fun runVisionProbe(onDone: (Boolean, String) -> Unit) {
+        val digit = (1..9).random()
+        val bmp = Bitmap.createBitmap(300, 300, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.WHITE)
+        val paint = Paint().apply {
+            color = Color.BLACK
+            textSize = 180f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+        }
+        canvas.drawText(digit.toString(), 150f, 210f, paint)
+        val out = java.io.ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
+        val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        AgnesClient.askVision(
+            this, "这张图片正中央写着一个阿拉伯数字，只回答这一个数字，不要任何其他文字。", b64,
+            onResult = { reply ->
+                val got = Regex("\\d").find(reply)?.value
+                if (got == digit.toString()) {
+                    onDone(true, "视觉链路正常：发了数字 $digit，模型答对了。")
+                } else {
+                    onDone(false, "视觉链路不可靠：发了数字 $digit，模型回答「${reply.take(40)}」——" +
+                        "接口没报错，但没能正确识图，可能是模型不支持识图或在瞎猜。")
+                }
+            },
+            onError = { msg -> onDone(false, "视觉链路不通：$msg") }
+        )
+    }
+
+    /** 第一梯队批一：问答回复之后异步触发隐式记忆提取，不阻塞 UI，失败不影响对话。 */
+    private fun triggerMemoryExtraction(userText: String, reply: String) {
+        uiScope.launch { MemoryService.extractImplicit(this@MainActivity, userText, reply) }
+    }
+
     private fun askChatAgnes(text: String, mem: String, localTried: Boolean) {
         AgnesClient.ask(this, text, memoryContext = mem,
             onResult = { reply ->
@@ -364,6 +414,7 @@ class MainActivity : Activity() {
                     addBubble(reply, mine = false)
                     speakReplyIfEnabled(reply)
                 }
+                triggerMemoryExtraction(text, reply)
             },
             onError = { e ->
                 val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(this) && LocalLlm.isReady(this)
@@ -376,11 +427,13 @@ class MainActivity : Activity() {
                 }
                 // 云端失败 → 本地兜底（批五），答不出再报原来的错
                 uiScope.launch {
-                    val local = LocalLlm.generate(this@MainActivity, text)
+                    val localMem = MemoryService.getInjectableMemories(this@MainActivity, text, topN = 2)
+                    val local = LocalLlm.generate(this@MainActivity, text, localMem)
                     chatInFlight = false
                     if (!local.isNullOrBlank()) {
                         addBubble("（云端连不上，本地模型答）$local", mine = false)
                         speakReplyIfEnabled(local)
+                        triggerMemoryExtraction(text, local)
                     } else {
                         addBubble("出错了：$e（Key 在设置里填）", mine = false)
                     }
@@ -858,6 +911,20 @@ class MainActivity : Activity() {
             JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(this))
             toast("已保存")
         })
+        // 第一梯队批二：视觉链路从未实测过"模型到底支不支持识图"——这条链路不行的话，
+        // 看屏/跨应用截图兜底全都是摆设。按下按钮现画一张带数字的测试图发过去，
+        // 模型答对数字才算真的通了，不是"接口没报错"就算数。
+        val visionTestResult = TextView(this).apply {
+            textSize = 12f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, 0)
+        }
+        root.addView(btn("测试视觉模型是否真的能识图") {
+            visionTestResult.text = "测试中…（发一张图过去，等模型回答）"
+            runVisionProbe { ok, detail ->
+                runOnUiThread { visionTestResult.text = detail }
+                AuditLog.append(this, "视觉链路自测", if (ok) "通过" else "未通过", detail)
+            }
+        })
+        root.addView(visionTestResult)
         // 批十四补线：Andee 的 ScreenCapture（录屏截图兜底）授权入口——授权必须从 Activity 发起。
         // 无障碍截图拿不到图时任务循环才走这条；不授权不影响主链路（自动退回纯界面树）。
         root.addView(btn("录屏授权（跨应用截图兜底）") {
@@ -914,6 +981,12 @@ class MainActivity : Activity() {
             JarvisPrefs.setMemoryEnabled(this@MainActivity, checked)
             refreshMemoryList()
         })
+        // 第一梯队批一新增：自然语言隐式提取——不用说"记住"，聊天里提到的长期信息自动识别写入。
+        // 每轮多打一次模型请求，不想要这个开销可以单独关掉（显式"记住："不受影响）。
+        root.addView(switchRow("自动从聊天中学习", "不用说“记住”，Jarvis 自己判断要不要记（需额外一次模型请求）",
+            JarvisPrefs.isMemoryAutoExtractEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setMemoryAutoExtractEnabled(this@MainActivity, checked)
+        })
         memoryListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(memoryListContainer)
         root.addView(btn("刷新记忆列表") { refreshMemoryList() })
@@ -958,8 +1031,12 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(0, dp(4), 0, dp(4))
                 }
+                // 第一梯队批一：标出来源（手动/自动）与是否永久，方便用户辨认哪些是自己要求记的、
+                // 哪些是 Jarvis 自己猜的、猜的那些什么时候会自动过期。
+                val sourceTag = if (item.source == com.jarvis.app.memory.MemorySource.STATED.name) "手动" else "自动"
+                val expiryTag = if (item.expiresAt == null) "永久" else "至 ${fmt.format(Date(item.expiresAt))}"
                 row.addView(TextView(this@MainActivity).apply {
-                    text = "[${item.domain}] ${item.content} · ${fmt.format(Date(item.timestamp))}"
+                    text = "[${item.domain}·$sourceTag·$expiryTag] ${item.content} · ${fmt.format(Date(item.timestamp))}"
                     textSize = 13f
                     setTextColor(0xFFE8ECF4.toInt())
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -1027,7 +1104,8 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
         }
         val newSteps = EditText(this).apply {
-            hint = "步骤，一行一步：开：包名 / 点：目标 / 等：800 / 滑：下"
+            hint = "步骤，一行一步：开：包名 / 点：目标 / 输：要打的字 / 等：800 / 滑：下 / " +
+                "场：${com.jarvis.app.command.DeviceCommands.sceneActionHints()}"
             setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
             minLines = 3
         }
@@ -1053,6 +1131,18 @@ class MainActivity : Activity() {
                         JSONObject().put("t", "open").put("pkg", line.removePrefix("开：").trim())
                     line.startsWith("点：") ->
                         JSONObject().put("t", "tap").put("target", line.removePrefix("点：").trim())
+                    // 第一梯队批三新增：输入步骤，紧跟在点开了输入框的"点：…"行之后才有意义，
+                    // 这里不做这种上下文校验（校验起来太复杂），交给重播时如实报错。
+                    line.startsWith("输：") ->
+                        line.removePrefix("输：").trim().takeIf { it.isNotEmpty() }?.let {
+                            JSONObject().put("t", "input").put("text", it)
+                        }
+                    // 第二梯队批六新增：场景动作步骤，action 用英文关键字，手写技能脚本时
+                    // 提示里已经列出了可用值（见上面 hint 里的 sceneActionHints()）。
+                    line.startsWith("场：") ->
+                        line.removePrefix("场：").trim().takeIf { it.isNotEmpty() }?.let {
+                            JSONObject().put("t", "sys").put("action", it)
+                        }
                     line.startsWith("等：") ->
                         line.removePrefix("等：").trim().toLongOrNull()?.let {
                             JSONObject().put("t", "wait").put("ms", it)
@@ -1353,13 +1443,22 @@ class MainActivity : Activity() {
             toast("晨报已关闭")
         })
         root.addView(btn("现在试听一份晨报") {
-            val text = com.jarvis.app.proactive.BriefComposer.compose(this@MainActivity)
-            if (JarvisPrefs.isMuted(this@MainActivity)) {
-                toast(text.take(120))
-            } else {
-                toast("正在生成晨报语音…")
-                com.jarvis.app.tts.TtsRouter.speak(this@MainActivity, text, onStart = {}, onDone = {})
+            toast("正在组稿（含天气查询，稍等）…")
+            uiScope.launch {
+                val text = com.jarvis.app.proactive.BriefComposer.compose(this@MainActivity)
+                if (JarvisPrefs.isMuted(this@MainActivity)) {
+                    toast(text.take(120))
+                } else {
+                    com.jarvis.app.tts.TtsRouter.speak(this@MainActivity, text, onStart = {}, onDone = {})
+                }
             }
+        })
+        root.addView(TextView(this).apply {
+            // 第二梯队批六：晨报的天气就是用这个城市——不在这里重复加一个输入框，
+            // 复用"聊天"分区里已有的"天气默认城市"那一份设置，两处编辑同一个值容易让人
+            // 以为是两份独立配置。
+            text = "晨报播的天气城市，跟「天气默认城市」是同一个设置（在上面聊天分区里改）"
+            textSize = 12f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, dp(8))
         })
         root.addView(switchRow("出发提醒", "带地点的日程，按固定提前量提醒；没有路程估算",
             JarvisPrefs.isDepartureEnabled(this@MainActivity)) { checked ->
@@ -1381,13 +1480,16 @@ class MainActivity : Activity() {
                 toast("已保存")
             }
         })
-        root.addView(btn("立即扫描今日日程排出发提醒") {
+        root.addView(btn("立即扫描今日日程排出发提醒 + 冲突提醒") {
             val n = com.jarvis.app.proactive.DeparturePlanner.scan(this@MainActivity)
+            // 第二梯队批四：日程冲突提醒复用同一个"出发提醒"总开关和同一次扫描动作，
+            // 不单独加开关——冲突检测本来就是"带地点的日程"之外对日程本身的另一种关心。
+            val c = com.jarvis.app.proactive.DeparturePlanner.scanConflicts(this@MainActivity)
             toast(
                 when {
                     !JarvisPrefs.isDepartureEnabled(this@MainActivity) -> "出发提醒没开"
-                    n == 0 -> "没派出新的（没有带地点且来得及的日程，或日历没授权）"
-                    else -> "已排上 $n 条出发提醒"
+                    n == 0 && c == 0 -> "没派出新的（没有带地点且来得及的日程/没有撞车的日程，或日历没授权）"
+                    else -> "出发提醒 $n 条，冲突提醒 $c 条"
                 }
             )
         })

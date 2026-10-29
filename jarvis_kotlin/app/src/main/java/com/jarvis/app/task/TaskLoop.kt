@@ -256,10 +256,22 @@ object TaskLoop {
                 } else {
                     userText
                 }
+                // 第一梯队批二·失败后换策略：同一个动作签名已经连续出现到快要触发重复守卫
+                // （repeats 从上一步执行后带到这里），提前一步给出强提示，逼模型主动换一种
+                // 真正不同的做法，而不是等拦停了才回报失败——拦停是整场任务直接结束，没有
+                // 重试机会，能提前破局就不要走到那一步。
+                val strategyNudge = if (repeats >= MAX_REPEATS - 1) {
+                    "\n【重要】你前面已经连续${repeats + 1}次做了几乎一样的动作、界面却没有真正推进。" +
+                        "再重复一次相似的动作这个任务就会被强制中止，没有下次机会了。现在必须换一种" +
+                        "完全不同的思路：比如滚动页面找找看有没有别的入口、点搜索图标直接搜目标文字、" +
+                        "先返回上一页换条路线、或者先 zoom 放大看清楚这个点有没有点偏了。" +
+                        "不要再输出和前面几步相似的动作。"
+                } else ""
+                val askTextBase = askBase + strategyNudge
                 // ---------- 问模型（解析失败带原因重试一次，再不行记一步失败继续） ----------
                 var action: JSONObject? = null
                 var attempt = 0
-                var askText = askBase
+                var askText = askTextBase
                 var badReply: String? = null
                 while (action == null && attempt < 2) {
                     attempt++

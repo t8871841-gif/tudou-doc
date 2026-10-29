@@ -126,6 +126,16 @@ object ReminderScheduler {
         }
     }
 
+    // 第二梯队批五新增：语音指令临时排的一次性提醒（"10分钟后提醒我喝水"这类）用这个
+    // 拿不会撞车的 id——出发提醒用 700000 段、冲突提醒用 710000 段，这里单独开 720000 段，
+    // 持久化一个自增计数器，不用随机数赌不撞车。
+    fun nextAdHocId(ctx: Context): Int {
+        val p = prefs(ctx)
+        val next = p.getInt("adhoc_seq", 0) + 1
+        p.edit().putInt("adhoc_seq", next).apply()
+        return 720000 + (next % 200000)
+    }
+
     fun isBriefOn(ctx: Context): Boolean = prefs(ctx).getBoolean("brief_on", false)
     fun briefHour(ctx: Context): Int = prefs(ctx).getInt("brief_h", 7)
     fun briefMinute(ctx: Context): Int = prefs(ctx).getInt("brief_m", 30)
@@ -168,11 +178,26 @@ class ReminderReceiver : BroadcastReceiver() {
         val title = intent.getStringExtra("title") ?: "Jarvis 提醒"
         var body = intent.getStringExtra("body") ?: ""
         val kind = intent.getStringExtra("kind") ?: "reminder"
-        // 批六：晨报到点现组稿（日期/今日日程/提醒数），不再用预订时的占位文案；
-        // 顺带扫一遍今日日程排出发提醒（出发提醒的每日节奏挂在这里）。
         if (kind == "brief") {
-            body = com.jarvis.app.proactive.BriefComposer.compose(ctx)
-            com.jarvis.app.proactive.DeparturePlanner.scan(ctx)
+            // 第二梯队批四：晨报组稿现在带天气查询（网络 I/O），BroadcastReceiver.onReceive
+            // 默认在主线程跑、系统给的执行窗口很短，直接 runBlocking 会有 ANR 风险——
+            // 用 goAsync() 拿到一个延长的执行窗口，把组稿挪到后台线程，完事调 finish()。
+            val pending = goAsync()
+            val appCtx = ctx.applicationContext
+            Thread {
+                try {
+                    val composed = kotlinx.coroutines.runBlocking {
+                        com.jarvis.app.proactive.BriefComposer.compose(appCtx)
+                    }
+                    com.jarvis.app.proactive.DeparturePlanner.scan(appCtx)
+                    com.jarvis.app.proactive.DeparturePlanner.scanConflicts(appCtx)
+                    deliverBriefNotification(appCtx, id, title, composed)
+                    ReminderScheduler.rescheduleBriefIfOn(appCtx)
+                } finally {
+                    pending.finish()
+                }
+            }.start()
+            return
         }
         ReminderScheduler.ensureChannel(ctx)
         val pi = PendingIntent.getActivity(
@@ -183,13 +208,29 @@ class ReminderReceiver : BroadcastReceiver() {
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(title).setContentText(body)
             .setContentIntent(pi).setAutoCancel(true)
-        if (kind == "brief") nb.setStyle(android.app.Notification.BigTextStyle().bigText(body))
         val n = nb.build()
         try {
             (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, n)
         } catch (_: Exception) {
         }
-        if (kind == "brief") ReminderScheduler.rescheduleBriefIfOn(ctx) else ReminderScheduler.remove(ctx, id)
+        ReminderScheduler.remove(ctx, id)
+    }
+
+    private fun deliverBriefNotification(ctx: Context, id: Int, title: String, body: String) {
+        ReminderScheduler.ensureChannel(ctx)
+        val pi = PendingIntent.getActivity(
+            ctx, id, ReminderScheduler.launchIntent(ctx, "brief", body),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val nb = ReminderScheduler.builder(ctx)
+            .setSmallIcon(android.R.drawable.ic_popup_reminder)
+            .setContentTitle(title).setContentText(body)
+            .setContentIntent(pi).setAutoCancel(true)
+            .setStyle(android.app.Notification.BigTextStyle().bigText(body))
+        try {
+            (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, nb.build())
+        } catch (_: Exception) {
+        }
     }
 }
 

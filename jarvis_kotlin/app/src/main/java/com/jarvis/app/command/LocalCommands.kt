@@ -64,11 +64,25 @@ object LocalCommands {
     fun tryHandle(ctx: Context, text: String, speak: (String) -> Unit): Boolean {
         val t = text.trim()
         if (t.isEmpty()) return false
+
+        // 第一梯队批二：先看有没有待澄清的选择（比如上一句问了"给哪个？"），这句话
+        // 优先当作回答来解析；命中就在这里直接执行完，不再往下走别的指令匹配。
+        // 没命中（文字既不是取消也配不上任何一项）会被 PendingClarification 自己
+        // 清掉状态并返回 false，交还给下面的正常流程继续处理这句话。
+        if (PendingClarification.hasPending() && PendingClarification.tryResolve(text)) {
+            return true
+        }
+
         if (QUESTION_HINTS.any { t.contains(it) }) return false
         if (TASK_SHAPED.containsMatchIn(t)) return false
 
         // 批十三：系统功能（手电筒/截屏/锁屏等）不是应用，先于「打开应用」拦截
         if (DeviceCommands.tryHandle(ctx, t, speak)) return true
+
+        // 第二梯队批五：定时提醒句式（"10分钟后提醒我…""晚上10点提醒我…"）优先于
+        // 「打开应用」「打电话」判定——这类句子里常常带"我"这种不像应用名/人名的词，
+        // 放在后面容易被其他正则抢先误吞。
+        if (ReminderCommands.tryHandle(ctx, t, speak)) return true
 
         // 批二十四：关闭应用（与「打开应用」对称）。DeviceCommands 已先行，
         // 所以「关手电筒/关闭手电筒」这类系统功能不会落到这里。
@@ -133,18 +147,36 @@ object LocalCommands {
             main.post { speak("通讯录里没找到$name") }
             return
         }
-        val exactCount = matches.count { it.display == name }
-        val pick = matches.first()
-        main.post {
-            openDialer(ctx, pick.number)
-            AuditLog.append(ctx, "本地指令", "打电话给${pick.display}", "已跳拨号盘（${pick.numberType}）")
-            val extra = if (exactCount > 1) "，通讯录里有$exactCount 个叫$name 的，先用第一个" else ""
-            speak(
-                (if (pick.display == name) "给${name}打，号码已经填好了，点一下就拨"
-                else "找到${pick.display}，号码已经填好了，点一下就拨") + extra
+        // 第一梯队批二：原来是"不管几个，直接用第一个、顺带告知有几个同名的"——
+        // 现在改成真的问一句，等用户下一句话选。只有唯一命中才直接拨。
+        if (matches.size == 1) {
+            val pick = matches.first()
+            main.post {
+                openDialer(ctx, pick.number)
+                AuditLog.append(ctx, "本地指令", "打电话给${pick.display}", "已跳拨号盘（${pick.numberType}）")
+                speak(if (pick.display == name) "给${name}打，号码已经填好了，点一下就拨"
+                      else "找到${pick.display}，号码已经填好了，点一下就拨")
+            }
+            return
+        }
+        val top = matches.take(5)
+        val options = top.map { hit ->
+            PendingClarification.Option(
+                label = "${hit.display} 尾号${hit.number.takeLast(4)}（${hit.numberType}）",
+                payload = hit.number,
+                matchNumberTail = hit.number.takeLast(4)
             )
         }
-
+        main.post {
+            PendingClarification.ask(options) { chosen ->
+                openDialer(ctx, chosen.payload)
+                AuditLog.append(ctx, "本地指令", "打电话（澄清后选定）", chosen.label)
+                speak("好，${chosen.label}，号码已经填好了，点一下就拨")
+            }
+            val listText = top.mapIndexed { i, h -> "第${i + 1}个，${h.display} 尾号${h.number.takeLast(4)}" }.joinToString("；")
+            AuditLog.append(ctx, "本地指令", "打电话给$name·需要澄清", "${matches.size}个匹配，已反问")
+            speak("通讯录里有${matches.size}个叫$name 的：$listText。你说第几个，或者报号码后几位")
+        }
     }
 
     private data class ContactHit(val display: String, val number: String, val contactId: String, val numberType: String)
