@@ -13,6 +13,10 @@ object HudPalette {
     const val GALAXY_CORE = 0xFFFFB347.toInt()   // 橙核
     const val GALAXY_MID = 0xFF9B6BFF.toInt()    // 紫（旋臂中段，也是"思考"色）
     const val GALAXY_OUTER = 0xFF2B2FA8.toInt()  // 靛蓝（外围尘埃）
+    // 第二梯队批九新增：最外圈尘埃带的青蓝色，参考图里旋臂外侧是发青发蓝的尘埃雾，
+    // 不是一路暗下去的纯靛蓝。只在 GalaxyHoloStageView 的配色渐变里新增这一档，
+    // 不改动 GALAXY_OUTER 本身的值——GALAXY_OUTER 还被冲击波环等别处引用，原样留着。
+    const val GALAXY_TEAL = 0xFF35D6D6.toInt()   // 青蓝（旋臂最外侧尘埃带）
 
     const val BLUE2 = GALAXY_MID            // 待命态主题色沿用旋臂紫，跟星系视觉统一
     const val ROSE = 0xFFFF5F8F.toInt()     // 聆听：玫瑰
