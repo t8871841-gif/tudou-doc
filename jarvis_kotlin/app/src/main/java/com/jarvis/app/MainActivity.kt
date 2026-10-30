@@ -184,6 +184,20 @@ class MainActivity : Activity() {
         }
         addView(gear, LinearLayout.LayoutParams(dp(38), dp(38)))
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
+        // 全息 HUD 入口（2026-10-30）：与齿轮同款圆钮，点开 HudActivity（WebView 原样跑 GDDXX 的 hud/）。
+        val hud = ImageButton(this@MainActivity).apply {
+            setImageResource(android.R.drawable.ic_menu_slideshow)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x0DFFFFFF)
+                setStroke(dp(1), 0x29FFFFFF)
+            }
+            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setOnClickListener { startActivity(Intent(this@MainActivity, HudActivity::class.java)) }
+            contentDescription = "全息 HUD"
+        }
+        addView(hud, LinearLayout.LayoutParams(dp(38), dp(38)))
     }
 
     // ---------- 中央区域：银河舞台动画（2026-10-27，用户令复活全套动态效果；照片舞台已删）；

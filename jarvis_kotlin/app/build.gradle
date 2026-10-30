@@ -32,6 +32,10 @@ android {
 
 dependencies {
     implementation libs.androidx.core.ktx
+    // 全息 HUD（GDDXX-Jarvis 的 hud/，GPL-3.0，见 app/src/main/assets/hud/NOTICE.md）
+    // 用 WebViewAssetLoader 把 assets/hud/ 以 https 域名形式交给 WebView，
+    // 否则 file:// 下 ES 模块与 importmap 会被跨域拦截、页面跑不起来。
+    implementation libs.androidx.webkit
     // Agnes 对话(REST) 用的 HTTP 客户端。来源：Maven Central，com.squareup.okhttp3:okhttp 4.12.0。
     implementation libs.okhttp
     // 批三：长期记忆的 Room 持久化 + 协程（版本对应见 gradle/libs.versions.toml：
