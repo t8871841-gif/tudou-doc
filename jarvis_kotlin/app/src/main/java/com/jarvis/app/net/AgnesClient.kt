@@ -22,8 +22,9 @@ import java.util.concurrent.TimeUnit
  * 超过 MAX_TURNS 轮后从最早的一轮开始丢弃，避免单次请求体无限增长。
  */
 object AgnesClient {
-    private const val BASE_URL = "https://apihub.agnes-ai.com/v1"
-    private const val MODEL = "agnes-3.0-flash"
+    // 第 2 步桥接要把模型信息喂给 HUD（getModelInfo），BASE_URL/MODEL 从 private 改公开；值与逻辑不动。
+    const val BASE_URL = "https://apihub.agnes-ai.com/v1"
+    const val MODEL = "agnes-3.0-flash"
     private const val MAX_TURNS = 12
     private const val SYSTEM_PROMPT =
         "你是 Jarvis，用户的个人智能助理。自称 Jarvis，称呼用户\"先生\"。默认使用中文回答，" +

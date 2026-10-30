@@ -23,8 +23,9 @@ import java.util.concurrent.TimeUnit
  * 传入的图片会被忽略——任务循环靠无障碍界面树文字推进（Andee 同款路线）。
  */
 object DeepSeekClient {
-    private const val BASE_URL = "https://api.deepseek.com/v1"
-    private const val MODEL = "deepseek-chat"
+    // 第 2 步桥接要把模型信息喂给 HUD（getModelInfo），BASE_URL/MODEL 从 private 改公开；值与逻辑不动。
+    const val BASE_URL = "https://api.deepseek.com/v1"
+    const val MODEL = "deepseek-chat"
 
     private val client by lazy {
         OkHttpClient.Builder()

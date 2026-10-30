@@ -23,6 +23,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -46,6 +47,7 @@ import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.DeepSeekClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
 import kotlinx.coroutines.Dispatchers
@@ -112,27 +114,13 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
 
     // 彻底融合第 1 步：HUD WebView 从 HudActivity 搬进来，常驻只建一次；
-    // 竖屏藏起来停渲染，横屏全屏显示。页面本身仍是 jk-v43 的状态（演示版说话、假面板），
-    // 桥接在第 2 步做，真数据在第 3 步接。
+    // 竖屏藏起来停渲染，横屏全屏显示。
+    // 第 2 步（桥接）：页面说话/打字改走原生 HudBridge；状态改 onStateChanged 回调推送，
+    // 500ms 轮询已删。面板假数据不动，等第 3 步接真数据。
     private lateinit var hudWebView: WebView
     private lateinit var hudAssetLoader: WebViewAssetLoader
     private var hudPageLoaded = false
     private var hudLastPushedState: String? = null
-
-    // 原生语音状态与 HUD 的 setState 是同一套词，变化时推一次；500ms 轮询只在横屏看 HUD 时跑，
-    // 竖屏/设置页/退后台时停掉（第 2 步会改成 onStateChanged 回调推送）。
-    private val hudStatePoll = object : Runnable {
-        override fun run() {
-            val s = JarvisAgent.currentState()
-            if (hudPageLoaded && s != hudLastPushedState) {
-                hudLastPushedState = s
-                hudWebView.evaluateJavascript(
-                    "try{if(typeof setState==='function')setState('$s')}catch(e){}", null
-                )
-            }
-            main.postDelayed(this, 500)
-        }
-    }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -190,7 +178,10 @@ class MainActivity : Activity() {
         setupHudWebView(root)
         applyOrientationLayout()
 
-        JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s) } }
+        // 第 2 步：状态变化同时推给 HUD（setState）；问答文字走 addBubble 时一并推给 HUD 字幕
+        // （addBubble 是打字与语音两条路的唯一汇合点——语音回复走 onReplyText、打字回复走
+        // sendChat/askChatAgnes，都落进 addBubble；只在回调里推会漏掉打字回复）。
+        JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s); pushHudState(s) } }
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
         JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
         JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false) } }
@@ -295,6 +286,8 @@ class MainActivity : Activity() {
         hudWebView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            // 第 2 步：挂原生桥（window.JarvisBridge），必须在 loadUrl 之前挂。
+            addJavascriptInterface(HudBridge(), "JarvisBridge")
             // hud 是 Three.js 全屏 WebGL，竖屏藏起来时要停渲染，回来再续。
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
@@ -307,6 +300,11 @@ class MainActivity : Activity() {
                 override fun onPageFinished(view: WebView, url: String) {
                     hudPageLoaded = true
                     injectDemoMenu()
+                    injectHudBridge()
+                    // 页面刚加载完，把当前状态同步一次（横屏启动时 applyOrientationLayout
+                    // 里的推送因页面没加载完被拦掉了，这里补上）。
+                    hudLastPushedState = null
+                    pushHudState(JarvisAgent.currentState())
                 }
             }
             // 把页面 console 打到 logcat，tag HudWebView：真机上 HUD 出问题先看这里。
@@ -328,13 +326,14 @@ class MainActivity : Activity() {
         settingsScroll.bringToFront()
     }
 
-    /** 按当前方向摆两套内容：竖屏原生界面、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。 */
+    /** 按当前方向摆两套内容：竖屏原生界面、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。
+     * 第 2 步：500ms 轮询已删；切到横屏时把当前状态与模型配置再推一次（竖屏期间状态变过，
+     * hudLastPushedState 已记下最新值，先清掉再推，否则去重会吞掉这次同步）。 */
     private fun applyOrientationLayout() {
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (showingSettings) {
             contentView.visibility = View.GONE
             hudWebView.visibility = View.GONE
-            main.removeCallbacks(hudStatePoll)
             hudWebView.onPause()
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             return
@@ -343,12 +342,12 @@ class MainActivity : Activity() {
             contentView.visibility = View.GONE
             hudWebView.visibility = View.VISIBLE
             hudWebView.onResume()
-            main.removeCallbacks(hudStatePoll)
-            main.post(hudStatePoll)
+            hudLastPushedState = null
+            pushHudState(JarvisAgent.currentState())
+            hudWebView.evaluateJavascript("try{if(window.__jarvisRefreshModel)__jarvisRefreshModel()}catch(e){}", null)
             // 横屏看 HUD 时不熄屏；回竖屏即恢复。
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
-            main.removeCallbacks(hudStatePoll)
             hudWebView.onPause()
             hudWebView.visibility = View.GONE
             contentView.visibility = View.VISIBLE
@@ -446,6 +445,210 @@ class MainActivity : Activity() {
         )
     }
 
+    // ---------- 彻底融合第 2 步：HudBridge 桥接 ----------
+
+    /**
+     * 原生 → 页面 的桥（挂为 window.JarvisBridge）。
+     * 注意：@JavascriptInterface 方法跑在 WebView 的桥接线程上，不是主线程，
+     * 所以凡是碰 UI / 走 Agent 的都先 main.post 回主线程。
+     * 绝不返回 Key 本身：getModelInfo 只给模型 id、Key 是否已填、本地开关。
+     */
+    inner class HudBridge {
+        @JavascriptInterface
+        fun startListening() {
+            main.post { JarvisAgent.triggerListenFromAssist(this@MainActivity) }
+        }
+
+        @JavascriptInterface
+        fun sendText(text: String) {
+            val q = text.trim()
+            if (q.isEmpty()) return
+            main.post { submitText(q) }
+        }
+
+        @JavascriptInterface
+        fun interrupt() {
+            // 只在有进行中的环节时才急停；idle 时按 Esc 不做任何事（否则在输入框里按 Esc 也会把 Agent 重置一遍）。
+            main.post {
+                if (JarvisAgent.currentState() != "idle") JarvisAgent.stopAll(this@MainActivity)
+            }
+        }
+
+        @JavascriptInterface
+        fun openSettings() {
+            main.post { if (!showingSettings) toggleSettings() }
+        }
+
+        /** 翻转原生朗读开关，返回翻转后“语音播报是否开着”（开 = 没静音）。 */
+        @JavascriptInterface
+        fun toggleVoice(): Boolean {
+            val nextMuted = !JarvisPrefs.isMuted(this@MainActivity)
+            JarvisPrefs.setMuted(this@MainActivity, nextMuted)
+            main.post {
+                if (::muteButton.isInitialized) {
+                    muteButton.setImageResource(if (nextMuted) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
+                }
+            }
+            return !nextMuted
+        }
+
+        /** 朗读是否开着（供页面同步“语音播报”按钮的初始文案）。 */
+        @JavascriptInterface
+        fun isVoiceOn(): Boolean = !JarvisPrefs.isMuted(this@MainActivity)
+
+        /**
+         * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
+         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：agnes 默认 / deepseek）。
+         */
+        @JavascriptInterface
+        fun getModelInfo(): String {
+            return try {
+                val o = JSONObject()
+                if (JarvisPrefs.getTaskBrain(this@MainActivity) == "deepseek") {
+                    o.put("provider", "deepseek")
+                    o.put("base_url", DeepSeekClient.BASE_URL)
+                    o.put("model", DeepSeekClient.MODEL)
+                    o.put("has_key", JarvisPrefs.getDeepSeekKey(this@MainActivity).isNotBlank())
+                } else {
+                    o.put("provider", "agnes")
+                    o.put("base_url", AgnesClient.BASE_URL)
+                    o.put("model", AgnesClient.MODEL)
+                    o.put("has_key", JarvisPrefs.getAgnesKey(this@MainActivity).isNotBlank())
+                }
+                o.put("local_enabled", JarvisPrefs.isLocalLlmEnabled(this@MainActivity))
+                o.put("name", "")
+                o.toString()
+            } catch (e: Exception) {
+                "{\"provider\":\"agnes\",\"base_url\":\"\",\"model\":\"\",\"has_key\":false,\"local_enabled\":false,\"name\":\"\"}"
+            }
+        }
+    }
+
+    /** 只在横屏且页面加载完时，把一句话推给 HUD 字幕（typeOut，js/subtitles.js:77）。
+     * 文本用 JSONObject.quote 转义，绝不直接拼进 JS。 */
+    private fun pushHudSubtitle(who: String, text: String) {
+        if (!::hudWebView.isInitialized || !hudPageLoaded) return
+        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
+        if (showingSettings) return
+        val speed = if (who == "jarvis") 40 else 12
+        hudWebView.evaluateJavascript(
+            "try{if(typeof typeOut==='function')typeOut(" + JSONObject.quote(who) + "," + JSONObject.quote(text) + "," + speed + ")}catch(e){}",
+            null
+        )
+    }
+
+    /** 状态变化时推给 HUD（setState），只在横屏且页面加载完时推；替代已删的 500ms 轮询。 */
+    private fun pushHudState(s: String) {
+        if (s == hudLastPushedState) return
+        hudLastPushedState = s
+        if (!::hudWebView.isInitialized || !hudPageLoaded) return
+        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
+        if (showingSettings) return
+        hudWebView.evaluateJavascript(
+            "try{if(typeof setState==='function')setState(" + JSONObject.quote(s) + ")}catch(e){}",
+            null
+        )
+    }
+
+    // 运行时注入桥接改写（hud/ 文件一个字不改）：沿用页面自己的“联网版改写”模式
+    // （live.js 在 ws 连上后改写 handle/startListen/stopListen 的做法）。
+    // 改写后：说话按钮与打字走原生 HudBridge；演示版假听写、本机正则 respond()、
+    // speechSynthesis 全都不再走；菜单“语音播报”改成原生朗读开关；“大脑 模型”
+    // 浮层喂原生模型配置（ONBOARD.msg 的 status 入口）；Esc 键补一个原生急停，
+    // 否则页面只停显示、原生还在听，状态会对不上。
+    private fun injectHudBridge() {
+        hudWebView.evaluateJavascript(
+            """
+            (function(){
+              try {
+                if (typeof JarvisBridge === 'undefined') return;
+                if (!window.__jarvisBridgeOn) {
+                  window.__jarvisBridgeOn = true;
+                  handle = function(q){
+                    q = (q || '').trim(); if (!q) return;
+                    try { openTalk(); } catch(e){}
+                    JarvisBridge.sendText(q);
+                  };
+                  startListen = function(){
+                    try { openTalk(); } catch(e){}
+                    JarvisBridge.startListening();
+                  };
+                  stopListen = function(){};
+                  try {
+                    addEventListener('keydown', function(e){
+                      if (e.key === 'Escape') { try { JarvisBridge.interrupt(); } catch(err){} }
+                    }, true);
+                  } catch(e){}
+                  var vb = document.getElementById('btnVoice');
+                  if (vb) {
+                    var nb = vb.cloneNode(true);
+                    vb.parentNode.replaceChild(nb, vb);
+                    var syncVoice = function(){
+                      try {
+                        var on = JarvisBridge.isVoiceOn();
+                        var b = nb.querySelector('b'); if (b) b.textContent = on ? '开' : '关';
+                        nb.setAttribute('aria-pressed', String(on));
+                      } catch(e){}
+                    };
+                    nb.addEventListener('click', function(){
+                      try { JarvisBridge.toggleVoice(); } catch(e){}
+                      syncVoice();
+                    });
+                    syncVoice();
+                  }
+                  window.__jarvisPushModel = function(force){
+                    try {
+                      if (typeof ONBOARD === 'undefined') return;
+                      var info = JSON.parse(JarvisBridge.getModelInfo());
+                      if (!info.has_key && !force) return;
+                      var presets = [];
+                      if (info.provider === 'deepseek') {
+                        presets.push({id:'deepseek', name:'DeepSeek', base_url: info.base_url, model: info.model, key: true, key_url: 'https://platform.deepseek.com'});
+                      } else {
+                        presets.push({id:'agnes', name:'Agnes', base_url: info.base_url, model: info.model, key: true, key_url: ''});
+                      }
+                      ONBOARD.msg({kind:'status', presets: presets, configured: !!info.has_key, provider: info.provider, base_url: info.base_url, model: info.model, has_key: !!info.has_key, name: info.name || ''});
+                    } catch(e){ console.warn('hud model:', e); }
+                  };
+                  window.__jarvisRefreshModel = function(){
+                    try { var p = document.getElementById('llmPanel'); if (p && !p.hidden) return; } catch(e){}
+                    window.__jarvisPushModel();
+                  };
+                  var pop = document.getElementById('menuPop');
+                  if (pop) {
+                    var btns = pop.querySelectorAll('button');
+                    for (var i = 0; i < btns.length; i++) {
+                      var b = btns[i];
+                      if (b.textContent && b.textContent.indexOf('大脑') === 0) {
+                        b.addEventListener('click', function(){ setTimeout(function(){ window.__jarvisPushModel(true); }, 60); });
+                        break;
+                      }
+                    }
+                    if (!document.getElementById('hudSettingsBtn')) {
+                      var sep2 = document.createElement('div');
+                      sep2.style.cssText = 'height:1px;background:var(--line);margin:4px 0';
+                      pop.appendChild(sep2);
+                      var sb = document.createElement('button');
+                      sb.type = 'button'; sb.id = 'hudSettingsBtn';
+                      sb.innerHTML = '设置<b>原生</b>';
+                      sb.addEventListener('click', function(){
+                        pop.hidden = true;
+                        var m = document.getElementById('btnMenu');
+                        if (m) m.setAttribute('aria-expanded','false');
+                        try { JarvisBridge.openSettings(); } catch(e){}
+                      });
+                      pop.appendChild(sb);
+                    }
+                  }
+                }
+                window.__jarvisPushModel();
+              } catch(e){ console.warn('hud bridge:', e); }
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
     // ---------- 彻底融合第 1 步：竖屏舞台静图 ----------
 
     /** 舞台图：没选过用内置默认静帧；选过用图库那张（按宽度等比缩小解码，大照片不占满内存）。
@@ -529,6 +732,8 @@ class MainActivity : Activity() {
         chatList.addView(tv)
         // 彻底融合第 1 步：竖屏不要任何动效——新消息滑入动画已删，气泡直接出现。
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+        // 第 2 步：气泡同时推给 HUD 字幕（见 onCreate 注释——这是两条路的唯一汇合点）。
+        pushHudSubtitle(if (mine) "you" else "jarvis", text)
     }
 
     /** 设置里「清空对话」：只清对话框气泡，回到刚打开时的问候语；长期记忆库不受影响。 */
@@ -540,13 +745,21 @@ class MainActivity : Activity() {
 
     private fun sendChat() {
         val text = chatInput.text.toString().trim()
-        if (text.isEmpty() || chatInFlight) return
-        chatInFlight = true
+        if (text.isEmpty()) return
         chatInput.text.clear()
-        addBubble(text, mine = true)
+        submitText(text)
+    }
+
+    /** 打字与 HUD 桥接共用的提交入口（第 2 步抽出来）：记忆拦截→本地指令→天气→记忆注入→本地/云端。
+     * 行为与原来 sendChat 里那段一字不差，只是入口从输入框改成参数。 */
+    private fun submitText(text: String) {
+        val q = text.trim()
+        if (q.isEmpty() || chatInFlight) return
+        chatInFlight = true
+        addBubble(q, mine = true)
         // 批三：打字对话与语音同路——先拦截显式记忆指令，未命中再带长期记忆提问。
         uiScope.launch {
-            val ack = MemoryService.processExplicitMemory(this@MainActivity, text)
+            val ack = MemoryService.processExplicitMemory(this@MainActivity, q)
             if (ack != null) {
                 chatInFlight = false
                 addBubble(ack, mine = false)
@@ -554,7 +767,7 @@ class MainActivity : Activity() {
                 return@launch
             }
             // 批八：打字路径与语音同路过本地指令层（打电话/打开应用），命中直接办、回执进气泡不朗读。
-            if (com.jarvis.app.command.LocalCommands.tryHandle(this@MainActivity, text) { reply ->
+            if (com.jarvis.app.command.LocalCommands.tryHandle(this@MainActivity, q) { reply ->
                     runOnUiThread { addBubble(reply, mine = false) }
                 }
             ) {
@@ -562,9 +775,9 @@ class MainActivity : Activity() {
                 return@launch
             }
             // 批十：打字路径同路——天气走真数据工具，不进模型。
-            if (com.jarvis.app.data.WeatherTool.looksLikeWeather(text)) {
-                val city = com.jarvis.app.data.WeatherTool.extractCity(text) ?: JarvisPrefs.getWeatherCity(this@MainActivity)
-                com.jarvis.app.data.WeatherTool.fetch(city, tomorrow = text.contains("明天")) { answer ->
+            if (com.jarvis.app.data.WeatherTool.looksLikeWeather(q)) {
+                val city = com.jarvis.app.data.WeatherTool.extractCity(q) ?: JarvisPrefs.getWeatherCity(this@MainActivity)
+                com.jarvis.app.data.WeatherTool.fetch(city, tomorrow = q.contains("明天")) { answer ->
                     runOnUiThread {
                         chatInFlight = false
                         val a = answer ?: "天气没查到，可能是网络不通，你再试一次"
@@ -575,25 +788,25 @@ class MainActivity : Activity() {
                 return@launch
             }
             // 第一梯队批一：注入改按这句话做相关性检索，不再是「最近 15 条全量拼」。
-            val mem = MemoryService.getInjectableMemories(this@MainActivity, text)
+            val mem = MemoryService.getInjectableMemories(this@MainActivity, q)
             // 批十调配 + 第二梯队批六再调配：智能调配开时 ChatRouter 综合内容/网络/电量/
             // 隐私信号判定，不只是"问答云端、闲聊本地"（与语音同路）
             val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
-            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity) && !com.jarvis.app.net.ChatRouter.cloudFirst(this@MainActivity, text)) {
+            if (localReady && JarvisPrefs.isLocalLlmPrefer(this@MainActivity) && !com.jarvis.app.net.ChatRouter.cloudFirst(this@MainActivity, q)) {
                 // 本地模型上下文预算小，只要精简版记忆（Top-2），不是云端那份 mem（Top-8）。
-                val localMem = MemoryService.getInjectableMemories(this@MainActivity, text, topN = 2)
-                val local = LocalLlm.generate(this@MainActivity, text, localMem)
+                val localMem = MemoryService.getInjectableMemories(this@MainActivity, q, topN = 2)
+                val local = LocalLlm.generate(this@MainActivity, q, localMem)
                 if (!local.isNullOrBlank()) {
                     chatInFlight = false
                     addBubble(local, mine = false)
                     speakReplyIfEnabled(local)
-                    triggerMemoryExtraction(text, local)
+                    triggerMemoryExtraction(q, local)
                     return@launch
                 }
-                askChatAgnes(text, mem, localTried = true)
+                askChatAgnes(q, mem, localTried = true)
                 return@launch
             }
-            askChatAgnes(text, mem, localTried = false)
+            askChatAgnes(q, mem, localTried = false)
         }
     }
 
@@ -781,7 +994,6 @@ class MainActivity : Activity() {
             // 设置页是根布局上的覆盖层，横竖屏都能打开；打开时两套主界面内容都藏起来，WebView 也停渲染。
             contentView.visibility = View.GONE
             hudWebView.visibility = View.GONE
-            main.removeCallbacks(hudStatePoll)
             hudWebView.onPause()
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             closeSettingsPage()
@@ -1836,17 +2048,17 @@ class MainActivity : Activity() {
         super.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
-        // 横屏看 HUD 时恢复渲染与状态推送；竖屏或设置页开着时 WebView 保持暂停。
+        // 横屏看 HUD 时恢复渲染，并把当前状态与模型配置再推一次；竖屏或设置页开着时 WebView 保持暂停。
         if (!showingSettings && resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE && ::hudWebView.isInitialized) {
             hudWebView.onResume()
-            main.removeCallbacks(hudStatePoll)
-            main.post(hudStatePoll)
+            hudLastPushedState = null
+            pushHudState(JarvisAgent.currentState())
+            hudWebView.evaluateJavascript("try{if(window.__jarvisRefreshModel)__jarvisRefreshModel()}catch(e){}", null)
         }
     }
 
     override fun onPause() {
         if (::hudWebView.isInitialized) {
-            main.removeCallbacks(hudStatePoll)
             hudWebView.onPause()
         }
         OrbController.setAppForeground(false)
@@ -1854,7 +2066,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        main.removeCallbacks(hudStatePoll)
         if (::hudWebView.isInitialized) {
             // WebView 必须从父布局摘掉再 destroy，否则下次打开可能白屏。
             (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)

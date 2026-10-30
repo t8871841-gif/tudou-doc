@@ -89,6 +89,11 @@ object JarvisAgent {
         }
     }
 
+    /** 桥接急停（彻底融合第 2 步）：与内部 hardResetToIdle 同逻辑，公开给 HudBridge 用，内部逻辑不动。 */
+    fun stopAll(ctx: Context) {
+        hardResetToIdle(ctx.applicationContext)
+    }
+
     private fun onOrbEvent(ctx: Context, event: String, ack: (Boolean) -> Unit) {
         when (event) {
             "tap" -> {
