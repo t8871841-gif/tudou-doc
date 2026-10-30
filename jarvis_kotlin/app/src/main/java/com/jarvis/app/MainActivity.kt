@@ -4,12 +4,15 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
 import android.util.Base64
+import android.util.Log
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -18,6 +21,13 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -29,19 +39,20 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.webkit.WebViewAssetLoader
 import com.jarvis.app.asr.OfflineAsrSession
-import com.jarvis.app.hud.GalaxyHoloStageView
 import com.jarvis.app.hud.GradientLayerView
-import com.jarvis.app.hud.HudBackgroundView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -63,6 +74,8 @@ class MainActivity : Activity() {
         const val EXTRA_TEXT = "jarvis_text"
         const val REQ_PICK_MODEL = 5151
         const val REQ_PROJECTION = 5152
+        // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
+        const val REQ_PICK_PORTRAIT_BG = 5153
     }
 
     private lateinit var statusView: TextView
@@ -70,13 +83,13 @@ class MainActivity : Activity() {
     private var orbSwitch: android.widget.Switch? = null
     private var orbSwitchUpdating = false
     private lateinit var homePanel: LinearLayout
+    private lateinit var contentView: LinearLayout
     private lateinit var settingsScroll: ScrollView
     private lateinit var chatList: LinearLayout
     private lateinit var chatScroll: ScrollView
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
-    private var bgView: HudBackgroundView? = null
-    private var stageView: GalaxyHoloStageView? = null
+    private var stageImageView: ImageView? = null
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
@@ -97,6 +110,29 @@ class MainActivity : Activity() {
     private var chatInFlight = false
 
     private val main = Handler(Looper.getMainLooper())
+
+    // 彻底融合第 1 步：HUD WebView 从 HudActivity 搬进来，常驻只建一次；
+    // 竖屏藏起来停渲染，横屏全屏显示。页面本身仍是 jk-v43 的状态（演示版说话、假面板），
+    // 桥接在第 2 步做，真数据在第 3 步接。
+    private lateinit var hudWebView: WebView
+    private lateinit var hudAssetLoader: WebViewAssetLoader
+    private var hudPageLoaded = false
+    private var hudLastPushedState: String? = null
+
+    // 原生语音状态与 HUD 的 setState 是同一套词，变化时推一次；500ms 轮询只在横屏看 HUD 时跑，
+    // 竖屏/设置页/退后台时停掉（第 2 步会改成 onStateChanged 回调推送）。
+    private val hudStatePoll = object : Runnable {
+        override fun run() {
+            val s = JarvisAgent.currentState()
+            if (hudPageLoaded && s != hudLastPushedState) {
+                hudLastPushedState = s
+                hudWebView.evaluateJavascript(
+                    "try{if(typeof setState==='function')setState('$s')}catch(e){}", null
+                )
+            }
+            main.postDelayed(this, 500)
+        }
+    }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -122,17 +158,13 @@ class MainActivity : Activity() {
             ),
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         )
-        val bg = HudBackgroundView(this).apply {
-            mode = { JarvisAgent.currentState() }
-            micLevel = { OfflineAsrSession.currentLevel() }
-        }
-        bgView = bg
-        root.addView(bg, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        // 彻底融合第 1 步：竖屏不要任何动效——动态光晕点阵背景（HudBackgroundView）
+        // 不再加进来；背景只留上面那层 GradientLayerView 纯色渐变。
         // 批八：原先这里还盖着一层全屏黑色半透明渐变膜（上 65% 黑→中透明→下 80% 黑），
         // 整个界面发朦就是它——按用户要求撤掉；背景的光晕+点阵（上一层）与底部玻璃框保留不动。
 
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(buildTopBar())
+        contentView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        contentView.addView(buildTopBar())
 
         homePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -142,16 +174,21 @@ class MainActivity : Activity() {
         buildChatPanel()
         homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         homePanel.addView(buildBottomPanel())
-        content.addView(homePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        contentView.addView(homePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         settingsScroll = buildSettingsPanel().apply {
             visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         }
-        content.addView(settingsScroll)
+        // 设置页是根布局上的覆盖层（不再塞进竖屏内容列里），横竖屏都能打开。
+        root.addView(settingsScroll)
 
-        root.addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        root.addView(contentView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         setContentView(root)
+
+        // HUD WebView 常驻（只建一次），竖屏藏起来停渲染，横屏全屏显示；再按当前方向摆一次。
+        setupHudWebView(root)
+        applyOrientationLayout()
 
         JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s) } }
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
@@ -183,35 +220,22 @@ class MainActivity : Activity() {
             contentDescription = "设置"
         }
         addView(gear, LinearLayout.LayoutParams(dp(38), dp(38)))
-        addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f))
-        // 全息 HUD 入口（2026-10-30）：与齿轮同款圆钮，点开 HudActivity（WebView 原样跑 GDDXX 的 hud/）。
-        val hud = ImageButton(this@MainActivity).apply {
-            setImageResource(android.R.drawable.ic_menu_slideshow)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0x0DFFFFFF)
-                setStroke(dp(1), 0x29FFFFFF)
-            }
-            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            setOnClickListener { startActivity(Intent(this@MainActivity, HudActivity::class.java)) }
-            contentDescription = "全息 HUD"
-        }
-        addView(hud, LinearLayout.LayoutParams(dp(38), dp(38)))
     }
 
-    // ---------- 中央区域：银河舞台动画（2026-10-27，用户令复活全套动态效果；照片舞台已删）；
-    // 舞台占上部区域 2/3（权重 2:1），对话与底部面板位置不动 ----------
+    // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
+    // 银河动画已封存：舞台不再建 GalaxyHoloStageView，改成一张静图（居中裁剪），
+    // 默认图是 HUD 默认皮肤静帧，设置「主界面」里可从图库自选；唤醒词胶囊保留在舞台底部。
+    // 舞台仍占上部区域 2/3（权重 2:1），对话与底部面板位置不动 ----------
 
     private fun buildStage(): FrameLayout {
         val stage = FrameLayout(this)
         stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f)
-        stageView = GalaxyHoloStageView(this).apply {
-            mode = { JarvisAgent.currentState() }
-            micLevel = { OfflineAsrSession.currentLevel() }
+        stageImageView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
         }.also {
             stage.addView(it, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
+        refreshStageImage()
         wakeChip = TextView(this).apply {
             text = "唤醒词 · 关"
             textSize = 12f
@@ -260,6 +284,210 @@ class MainActivity : Activity() {
         refreshWakeChip()
     }
 
+    // ---------- 彻底融合第 1 步：HUD WebView 常驻 + 横竖屏切换 ----------
+
+    /** HUD WebView 从 HudActivity 原样搬进来：WebViewAssetLoader 喂 assets、
+     * onPageFinished 注入演示菜单、500ms 状态轮询；只建一次，竖屏停渲染、横屏全屏。 */
+    private fun setupHudWebView(parent: FrameLayout) {
+        hudAssetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+        hudWebView = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            // hud 是 Three.js 全屏 WebGL，竖屏藏起来时要停渲染，回来再续。
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest
+                ): WebResourceResponse? {
+                    return hudAssetLoader.shouldInterceptRequest(request.url)
+                }
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    hudPageLoaded = true
+                    injectDemoMenu()
+                }
+            }
+            // 把页面 console 打到 logcat，tag HudWebView：真机上 HUD 出问题先看这里。
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                    Log.d(
+                        "HudWebView",
+                        "[${message.messageLevel()}] ${message.message()} " +
+                            "(${message.sourceId()}:${message.lineNumber()})"
+                    )
+                    return true
+                }
+            }
+        }
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
+        parent.addView(hudWebView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        hudWebView.loadUrl("https://appassets.androidplatform.net/assets/hud/index.html")
+        // 设置页永远在最上面（WebView 后加会盖住它，打开设置时 applyOrientationLayout 也会藏起 WebView）。
+        settingsScroll.bringToFront()
+    }
+
+    /** 按当前方向摆两套内容：竖屏原生界面、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。 */
+    private fun applyOrientationLayout() {
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (showingSettings) {
+            contentView.visibility = View.GONE
+            hudWebView.visibility = View.GONE
+            main.removeCallbacks(hudStatePoll)
+            hudWebView.onPause()
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            return
+        }
+        if (landscape) {
+            contentView.visibility = View.GONE
+            hudWebView.visibility = View.VISIBLE
+            hudWebView.onResume()
+            main.removeCallbacks(hudStatePoll)
+            main.post(hudStatePoll)
+            // 横屏看 HUD 时不熄屏；回竖屏即恢复。
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            main.removeCallbacks(hudStatePoll)
+            hudWebView.onPause()
+            hudWebView.visibility = View.GONE
+            contentView.visibility = View.VISIBLE
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyOrientationLayout()
+    }
+
+    /** 横屏看 HUD 时返回键先退演示，没演示在播才退出 App；竖屏返回键行为不变。 */
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (landscape && ::hudWebView.isInitialized && hudPageLoaded) {
+            hudWebView.evaluateJavascript("typeof demoLive==='function'?demoLive():false") { r ->
+                if (r == "true") {
+                    hudWebView.evaluateJavascript("if(typeof demoExit==='function')demoExit()", null)
+                } else {
+                    finishBackPress()
+                }
+            }
+            return
+        }
+        finishBackPress()
+    }
+
+    /** onBackPressed 的默认行为抽出来：evaluateJavascript 的回调是非内联 lambda，
+     * 里面不能直接写 super.xxx，改走这里。 */
+    @Suppress("DEPRECATION")
+    private fun finishBackPress() {
+        super.onBackPressed()
+    }
+
+    // 在 HUD 自己的菜单里加四个演示按钮（点“菜单”可见，与“语音播报”同款式）。
+    // 再点一次同一个演示即收起（与桌面键盘快捷键同款切换逻辑）。
+    // 猛禽拆解的中文标签抄自桌面语音服务的 hologram.py（ZH['raptor']）。
+    private fun injectDemoMenu() {
+        hudWebView.evaluateJavascript(
+            """
+            (function(){
+              var pop = document.getElementById('menuPop');
+              if (!pop || document.getElementById('hudDemoBtns')) return;
+              var sep = document.createElement('div');
+              sep.style.cssText = 'height:1px;background:var(--line);margin:4px 0';
+              pop.appendChild(sep);
+              var box = document.createElement('div');
+              box.id = 'hudDemoBtns';
+              pop.appendChild(box);
+              function closeMenu(){
+                pop.hidden = true;
+                var m = document.getElementById('btnMenu');
+                if (m) m.setAttribute('aria-expanded','false');
+              }
+              function add(label, sub, fn){
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.innerHTML = label + '<b>' + sub + '</b>';
+                b.addEventListener('click', function(){ closeMenu(); try { fn(); } catch(e){ console.warn('hud demo:', e); } });
+                box.appendChild(b);
+              }
+              add('星舰发射', 'STARSHIP', function(){
+                if (typeof SHIP !== 'undefined' && SHIP && SHIP.state.on && !SHIP.state.ending) SHIP.hide();
+                else if (typeof shipCommand === 'function') shipCommand({action:'play'});
+              });
+              add('Roadster 悬停', 'ROADSTER', function(){
+                if (typeof RD !== 'undefined' && RD && RD.state.on && !RD.state.ending) RD.hide();
+                else if (typeof roadsterCommand === 'function') roadsterCommand({action:'play'});
+              });
+              add('Optimus 行走', 'OPTIMUS', function(){
+                if (typeof OP !== 'undefined' && OP && OP.state.on && !OP.state.ending) OP.hide();
+                else if (typeof optimusCommand === 'function') optimusCommand({action:'play'});
+              });
+              add('猛禽拆解', 'RAPTOR', function(){
+                if (typeof MACH !== 'undefined' && MACH && MACH.on) { if (typeof machineHide === 'function') machineHide(); }
+                else if (typeof machineCommand === 'function') machineCommand({action:'show', src:'figure-raptor.html', title:'RAPTOR 2 · 全流量分级燃烧发动机', labels:{
+                  nozzle:{name:'喷管',say:'出口 1.3 米 · 甲烷冷却'},
+                  downcomer:{name:'下降管与主燃料阀',say:'甲烷送进冷却夹套'},
+                  controller:{name:'发动机控制器与线束',say:'7 根线缆'},
+                  plumbing:{name:'管路',say:'7 根传感管汇入一块 · 9 根供给、吹扫与点火管'},
+                  lox:{name:'液氧导管与主阀',say:'从泵送往预燃室'},
+                  ftp:{name:'甲烷涡轮泵与富燃预燃室',say:'由富燃燃气驱动'},
+                  hotgas:{name:'热燃气歧管',say:'富燃燃气送往喷注器'},
+                  chamber:{name:'喷注器与主燃烧室',say:'300 bar · 不用点火器'},
+                  orpb:{name:'富氧预燃室',say:'全部液氧都从这里经过'},
+                  otp:{name:'液氧涡轮泵',say:'由富氧燃气驱动'},
+                  gimbal:{name:'万向节与推力座',say:'把 230 吨推力传给试车台'}
+                }});
+              });
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
+    // ---------- 彻底融合第 1 步：竖屏舞台静图 ----------
+
+    /** 舞台图：没选过用内置默认静帧；选过用图库那张（按宽度等比缩小解码，大照片不占满内存）。
+     * 授权丢了或解不出来就回默认图，不报错。 */
+    private fun refreshStageImage() {
+        val iv = stageImageView ?: return
+        val uriStr = JarvisPrefs.getPortraitBgUri(this)
+        if (uriStr.isBlank()) {
+            iv.setImageResource(R.drawable.hud_default_still)
+            return
+        }
+        val uri = try {
+            Uri.parse(uriStr)
+        } catch (e: Exception) {
+            null
+        }
+        if (uri == null) {
+            iv.setImageResource(R.drawable.hud_default_still)
+            return
+        }
+        uiScope.launch(Dispatchers.IO) {
+            val bmp = decodeSampledBitmap(uri, 1080)
+            withContext(Dispatchers.Main) {
+                if (bmp != null) iv.setImageBitmap(bmp) else iv.setImageResource(R.drawable.hud_default_still)
+            }
+        }
+    }
+
+    private fun decodeSampledBitmap(uri: Uri, reqWidth: Int): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            var sample = 1
+            val w = bounds.outWidth
+            while (w / sample > reqWidth) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     // ---------- 对话气泡流 ----------
 
     private fun buildChatPanel() {
@@ -299,10 +527,7 @@ class MainActivity : Activity() {
             }
         }
         chatList.addView(tv)
-        // 新消息滑入动效（玻璃框本身不动）：从下方 12dp 处 220ms 滑入并淡入。
-        tv.translationY = dp(12).toFloat()
-        tv.alpha = 0f
-        tv.animate().translationY(0f).alpha(1f).setDuration(220).start()
+        // 彻底融合第 1 步：竖屏不要任何动效——新消息滑入动画已删，气泡直接出现。
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
@@ -551,14 +776,21 @@ class MainActivity : Activity() {
 
     private fun toggleSettings() {
         showingSettings = !showingSettings
-        homePanel.visibility = if (showingSettings) View.GONE else View.VISIBLE
         settingsScroll.visibility = if (showingSettings) View.VISIBLE else View.GONE
         if (showingSettings) {
+            // 设置页是根布局上的覆盖层，横竖屏都能打开；打开时两套主界面内容都藏起来，WebView 也停渲染。
+            contentView.visibility = View.GONE
+            hudWebView.visibility = View.GONE
+            main.removeCallbacks(hudStatePoll)
+            hudWebView.onPause()
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             closeSettingsPage()
             refresh()
             refreshMemoryList()
             refreshSkillList()
             refreshLocalStatus()
+        } else {
+            applyOrientationLayout()
         }
     }
 
@@ -596,6 +828,7 @@ class MainActivity : Activity() {
         val pages = listOf<Triple<String, String, (LinearLayout) -> Unit>>(
             Triple("✅", "功能自检", { v -> buildSelfCheckSection(v) }),
             Triple("💬", "对话与语音", { v -> buildVoiceSettingsSection(v) }),
+            Triple("🖼️", "主界面", { v -> buildHomeScreenSection(v) }),
             Triple("👁️", "视觉看屏", { v -> buildVisionSection(v) }),
             Triple("🚀", "常驻与入口", { v -> buildEntrySection(v) }),
             Triple("🧠", "记忆", { v -> buildMemorySection(v) }),
@@ -993,6 +1226,44 @@ class MainActivity : Activity() {
         })
     }
 
+    /** 彻底融合第 1 步：「主界面」分区——竖屏舞台背景图（图库自选，未选时用内置默认静帧）。 */
+    private fun buildHomeScreenSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "主界面"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        val statusText = TextView(this).apply {
+            textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        }
+        fun refreshStatus() {
+            statusText.text = if (JarvisPrefs.getPortraitBgUri(this).isBlank()) {
+                "竖屏舞台现在用默认图（HUD 默认皮肤静帧）"
+            } else {
+                "竖屏舞台现在用你选的图"
+            }
+        }
+        refreshStatus()
+        root.addView(statusText)
+        root.addView(btn("从图库选一张竖屏背景图") {
+            try {
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "image/*"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(i, REQ_PICK_PORTRAIT_BG)
+            } catch (e: Exception) {
+                toast("打不开图库：${e.message}")
+            }
+        })
+        root.addView(btn("恢复默认图") {
+            JarvisPrefs.setPortraitBgUri(this, "")
+            refreshStageImage()
+            refreshStatus()
+            toast("已恢复默认图")
+        })
+    }
+
     /** 批三新增：「记忆」分区——总开关、列表（分域+时间）、逐条删除、一键清空。数据在 MemoryService（Room）。 */
     private fun buildMemorySection(root: LinearLayout) {
         root.addView(TextView(this).apply {
@@ -1339,6 +1610,21 @@ class MainActivity : Activity() {
             }
             return
         }
+        // 彻底融合第 1 步：竖屏舞台背景图——图库选图回调，拿持久授权存起来，立即换图。
+        if (requestCode == REQ_PICK_PORTRAIT_BG) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: Exception) {
+                    // 拿不到持久授权也先用着：本次能显示，下次打开可能回默认图。
+                }
+                JarvisPrefs.setPortraitBgUri(this, uri.toString())
+                refreshStageImage()
+                toast("竖屏背景图已换")
+            }
+            return
+        }
         if (requestCode != REQ_PICK_MODEL) return
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) return
@@ -1550,14 +1836,30 @@ class MainActivity : Activity() {
         super.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
+        // 横屏看 HUD 时恢复渲染与状态推送；竖屏或设置页开着时 WebView 保持暂停。
+        if (!showingSettings && resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE && ::hudWebView.isInitialized) {
+            hudWebView.onResume()
+            main.removeCallbacks(hudStatePoll)
+            main.post(hudStatePoll)
+        }
     }
 
     override fun onPause() {
+        if (::hudWebView.isInitialized) {
+            main.removeCallbacks(hudStatePoll)
+            hudWebView.onPause()
+        }
         OrbController.setAppForeground(false)
         super.onPause()
     }
 
     override fun onDestroy() {
+        main.removeCallbacks(hudStatePoll)
+        if (::hudWebView.isInitialized) {
+            // WebView 必须从父布局摘掉再 destroy，否则下次打开可能白屏。
+            (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
+            hudWebView.destroy()
+        }
         if (JarvisAgent.onStateChanged != null) JarvisAgent.onStateChanged = null
         JarvisAgent.onUserText = null
         JarvisAgent.onReplyText = null

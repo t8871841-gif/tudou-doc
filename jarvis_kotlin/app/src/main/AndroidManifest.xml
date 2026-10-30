@@ -52,16 +52,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 全息 HUD：GDDXX-Jarvis 的 hud/ 原样嵌 WebView（2026-10-30），不导出、硬件加速开；
-             锁横屏：HUD 按桌面宽屏排的，竖屏会挤 -->
-        <activity
-            android:name=".HudActivity"
-            android:exported="false"
-            android:theme="@style/AppTheme"
-            android:screenOrientation="landscape"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-            android:hardwareAccelerated="true" />
-
         <service
             android:name=".JarvisForegroundService"
             android:exported="false"

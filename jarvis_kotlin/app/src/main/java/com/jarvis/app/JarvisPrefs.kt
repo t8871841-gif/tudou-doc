@@ -295,4 +295,15 @@ object JarvisPrefs {
     fun setContinuousChat(ctx: Context, on: Boolean) {
         p(ctx).edit().putBoolean(KEY_CONTINUOUS_CHAT, on).apply()
     }
+
+    // ---------- 彻底融合第 1 步：竖屏舞台背景图（图库自选） ----------
+    // 存图库 URI 字符串；空 = 用内置默认静帧。URI 拿的是持久授权
+    // （takePersistableUriPermission），重启后还在；授权丢了就回默认图
+    // （MainActivity.refreshStageImage 里兜底）。
+    private const val KEY_PORTRAIT_BG_URI = "portrait_bg_uri"
+
+    fun getPortraitBgUri(ctx: Context): String = p(ctx).getString(KEY_PORTRAIT_BG_URI, "") ?: ""
+    fun setPortraitBgUri(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_PORTRAIT_BG_URI, v).apply()
+    }
 }
