@@ -103,11 +103,9 @@ object DeviceCommands {
 
     private fun openBluetoothPanel(ctx: Context, speak: (String) -> Unit) {
         try {
-            val intent = if (Build.VERSION.SDK_INT >= 29) {
-                Intent(Settings.Panel.ACTION_BLUETOOTH)
-            } else {
-                @Suppress("DEPRECATION") Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
-            }
+            // Settings.Panel 没有蓝牙项（只有 WIFI/NFC/INTERNET/VOLUME），别按 WiFi 对称硬编——
+            // jk-v38 即因此行编译失败。蓝牙直接走整页设置，所有版本通用。
+            val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
             ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             AuditLog.append(ctx, "系统功能", "蓝牙", "已跳转系统设置（需用户自己点一下）")
             speak("蓝牙设置打开了，同样这个开关系统不让 App 代点，你自己点一下")
