@@ -129,7 +129,7 @@ class GalaxyHoloStageView @JvmOverloads constructor(
      */
     private fun generateGalaxy(): List<Particle> {
         val rnd = Random(7)
-        val list = ArrayList<Particle>(360)
+        val list = ArrayList<Particle>(560)
         fun lerpF(a: Float, b: Float, t: Float) = a + (b - a) * t
         fun arm(offset: Float, n: Int, a: Float = 6f, b: Float = 0.47f, maxTheta: Float = 6.5f, jitter: Float = 0.16f) {
             for (i in 0 until n) {
@@ -149,34 +149,39 @@ class GalaxyHoloStageView @JvmOverloads constructor(
                     tt < 0.6f -> HudPalette.lerp(HudPalette.GALAXY_MID, HudPalette.GALAXY_OUTER, (tt - 0.3f) / 0.3f)
                     else -> HudPalette.lerp(HudPalette.GALAXY_OUTER, HudPalette.GALAXY_TEAL, (tt - 0.6f) / 0.4f)
                 }
-                val size = max(0.5f, lerpF(3.0f, 0.8f, tt) + (rnd.nextFloat() * 2 - 1) * 0.35f)
-                val alpha = (lerpF(0.95f, 0.22f, tt) + (rnd.nextFloat() * 2 - 1) * 0.05f).coerceIn(0.1f, 1f)
+                // 批十：旋臂粒子加大加亮——之前外臂又小又暗，亮盘看着只有核心那一小团；
+                // 参考图里旋臂是连续发光带，内大外小、内亮外暗的梯度保留，只把整体抬起来。
+                val size = max(0.8f, lerpF(5.0f, 1.6f, tt) + (rnd.nextFloat() * 2 - 1) * 0.5f)
+                val alpha = (lerpF(1.0f, 0.45f, tt) + (rnd.nextFloat() * 2 - 1) * 0.05f).coerceIn(0.1f, 1f)
                 list.add(Particle(x, y, size, alpha, color))
             }
         }
-        arm(0f, 78); arm(2.09f, 78); arm(4.19f, 70)
+        arm(0f, 100); arm(2.09f, 100); arm(4.19f, 90)
         // 臂与臂之间撒一层稀疏的"弥散盘"粒子（半径覆盖到臂展的 1.15 倍左右），
         // 让整团看着是个连续的盘面而不是三条光秃秃的线。
-        repeat(130) {
+        // 批十：盘面粒子加量加亮——之前这层太暗太小，臂与臂之间看着是空的；
+        // 参考图里盘面是连续发光带，不是三条线加黑底。
+        repeat(180) {
             val ang = rnd.nextFloat() * 2 * PI.toFloat()
             // 不是均匀分布半径——越靠外越稀疏（看起来更像真实星系盘的密度衰减）。
             val r = 10 + (rnd.nextFloat().let { it * it }) * 118
             val x = 130 + r * cos(ang)
             val y = 130 + r * sin(ang)
-            val size = 0.35f + rnd.nextFloat() * 0.55f
-            val alpha = (0.06f + rnd.nextFloat() * 0.16f) * (1f - r / 135f).coerceIn(0.25f, 1f)
+            val size = 0.6f + rnd.nextFloat() * 1.0f
+            val alpha = (0.16f + rnd.nextFloat() * 0.26f) * (1f - r / 135f).coerceIn(0.45f, 1f)
             // 弥散盘颜色也跟着半径在靛蓝→青蓝之间过渡，不再是单一的 GALAXY_OUTER 纯色。
             val diskColor = HudPalette.lerp(HudPalette.GALAXY_OUTER, HudPalette.GALAXY_TEAL, (r / 118f).coerceIn(0f, 1f))
             list.add(Particle(x, y, size, alpha, diskColor))
         }
         // 最外层稀薄光晕（原来固定在 70..128，现在跟着新的臂展半径走，紧贴在弥散盘外侧），
         // 颜色用青蓝而不是靛蓝——这是离核心最远的一圈，该是色温最冷的地方。
-        repeat(55) {
+        // 批十：外圈光晕加量加亮——之前这圈几乎看不见，参考图里最外圈青蓝臂是亮的。
+        repeat(90) {
             val ang = rnd.nextFloat() * 2 * PI.toFloat()
             val r = 118 + rnd.nextFloat() * 20
             val x = 130 + r * cos(ang)
             val y = 130 + r * sin(ang)
-            list.add(Particle(x, y, 0.4f + rnd.nextFloat() * 0.6f, 0.05f + rnd.nextFloat() * 0.14f, HudPalette.GALAXY_TEAL))
+            list.add(Particle(x, y, 0.8f + rnd.nextFloat() * 1.0f, 0.18f + rnd.nextFloat() * 0.24f, HudPalette.GALAXY_TEAL))
         }
         return list
     }
@@ -251,8 +256,9 @@ class GalaxyHoloStageView @JvmOverloads constructor(
         val tt = tSec()
         val cx = width / 2f
         val cy = height / 2f
-        // 第二梯队批九：0.36 → 0.42，配合粒子层新的臂展半径，整体再占多一点舞台空间。
-        val r = min(width, height) * 0.42f
+        // 批十：0.42 → 0.50，顶到舞台宽度能容的上限（再大盘面左右会被舞台裁掉）；
+        // 亮核与旋臂的放大主要靠下面核心光斑与粒子尺寸/亮度，不只靠这个数。
+        val r = min(width, height) * 0.50f
         if (r <= 0f) return
 
         // 背景星场：固定天幕，不随星系坍缩/自转，星系在它前面开合，有近景/远景的层次感。
@@ -308,7 +314,9 @@ class GalaxyHoloStageView @JvmOverloads constructor(
         // 核心脉动光——跟旋臂用同一套倾角+压扁，核心光斑画出来才会是和整个盘面一致的
         // 椭圆形，不是一个圆圆的光斑悬在一个斜椭圆星系中间那种违和感。
         val pulse = 0.75f + 0.25f * abs(sin(tt * (2 * PI.toFloat() / 3.6f)))
-        val coreR = 13f * scaleBase * collapseScale * pulse
+        // 批十：核心光斑放大一倍（13 → 26）——之前亮核直径只占屏宽约两成，
+        // 参考图里橙色亮核占近四成；光斑渐变色标也往外推，让橙色区更宽。
+        val coreR = 26f * scaleBase * collapseScale * pulse
         canvas.save()
         canvas.translate(cx, cy)
         canvas.rotate(GALAXY_TILT_DEG)
@@ -322,7 +330,7 @@ class GalaxyHoloStageView @JvmOverloads constructor(
                 HudPalette.withAlpha(0xFFFF6A3D.toInt(), 0.5f * alphaMul),
                 Color.TRANSPARENT
             ),
-            floatArrayOf(0f, 0.35f, 0.65f, 1f), Shader.TileMode.CLAMP
+            floatArrayOf(0f, 0.42f, 0.72f, 1f), Shader.TileMode.CLAMP
         )
         canvas.drawCircle(0f, 0f, max(1f, coreR * 2.2f), paint)
         paint.shader = null
