@@ -43,6 +43,17 @@ import kotlin.math.min
 object OrbController {
     private const val PREFS = "jarvis_orb"
 
+    // 第二梯队批八：悬浮球自由摆放 + 贴边隐藏。
+    // 原来 dragEnd() 不管松手在哪都强制吸到左右边缘——这里改成只有"松手点离某条边够近"
+    // 才吸边，否则就停在用户实际松手的位置，真正支持摆在屏幕任意地方（包括正中间）。
+    private const val EDGE_SNAP_THRESHOLD_DP = 48f
+    // 贴边收起后还留多少比例的球体露在外面（剩下这一截用来给用户看见"球还在"、
+    // 也用来当下一次点击的热区，不是整个球都滑出屏幕消失不见）。
+    private const val COLLAPSED_VISIBLE_FRACTION = 0.38f
+    private const val COLLAPSED_ALPHA = 0.55f
+    private const val COLLAPSE_IDLE_MS = 1600L
+    private const val COLLAPSE_ANIM_MS = 220L
+
     private var svc: AccessibilityService? = null
     private var wm: WindowManager? = null
     private var orb: OrbView? = null
@@ -55,6 +66,17 @@ object OrbController {
     private var startY = 0
     private val main = Handler(Looper.getMainLooper())
     private val hideBubbleRunnable = Runnable { removeBubble() }
+
+    // 第二梯队批八：贴边收起状态。dockedX/dockedY 是"完全展开"时应该在的位置
+    // （要么是吸边吸到的 0/widthPixels-size，要么是自由摆放松手的原始坐标——
+    // 自由摆放的位置不会触发收起，所以只有吸边场景会真正用到这俩字段来做"收起后展开回哪"）。
+    private var collapsed = false
+    private var dockedX = 0
+    private var dockedY = 0
+    private var collapseRunnable: Runnable? = null
+    // 球处于收起状态时的这一次触摸，第一下只负责把球展开，不触发点击/长按的正常动作——
+    // 不然用户好不容易找到那一小截露出来的球，一点就被当成"点一下开始听"，体验很突兀。
+    private var revealOnlyThisGesture = false
 
     @Volatile
     var dartAlive = false
@@ -269,6 +291,84 @@ object OrbController {
         }
     }
 
+    // ---------- 第二梯队批八：贴边收起 ----------
+
+    private fun cancelCollapseSchedule() {
+        collapseRunnable?.let { main.removeCallbacks(it) }
+        collapseRunnable = null
+    }
+
+    /** 停在 dockedX 这个位置算不算"贴着屏幕左右边"——只有贴边才值得收起，停在屏幕中间收起没有意义。 */
+    private fun isAtScreenEdge(x: Int, screenWidth: Int, size: Int): Boolean = x <= 0 || x >= (screenWidth - size)
+
+    /**
+     * 松手安定之后调用：如果设置允许，过一段空闲时间后检查是否确实停在边上、再收起。
+     * “贴边”判定必须放在 Runnable 触发时做、不能在排程时做：dragEnd 里吸边动画
+     * （180ms）还没播完时 lp.x 还是松手位置，按当时位置判会把“拖到边上松手”
+     * 误判成不在边上、收起永远排不上；1.6 秒后再判，动画早已播完，读到的是最终位置。
+     */
+    private fun scheduleCollapseIfDocked() {
+        cancelCollapseSchedule()
+        val s = svc ?: return
+        if (!JarvisPrefs.isOrbEdgeAutoHideEnabled(s)) return
+        val r = Runnable {
+            collapseRunnable = null
+            val lp = orbLp ?: return@Runnable
+            val dm = s.resources.displayMetrics
+            if (!isAtScreenEdge(lp.x, dm.widthPixels, lp.width)) return@Runnable
+            doCollapse()
+        }
+        collapseRunnable = r
+        main.postDelayed(r, COLLAPSE_IDLE_MS)
+    }
+
+    private fun doCollapse() {
+        collapseRunnable = null
+        if (collapsed) return
+        val w = wm ?: return
+        val o = orb ?: return
+        val lp = orbLp ?: return
+        dockedX = lp.x
+        dockedY = lp.y
+        val onLeft = lp.x <= 0
+        val hiddenAmount = (lp.width * (1f - COLLAPSED_VISIBLE_FRACTION)).toInt()
+        val target = if (onLeft) -hiddenAmount else lp.x + hiddenAmount
+        collapsed = true
+        ValueAnimator.ofInt(lp.x, target).apply {
+            duration = COLLAPSE_ANIM_MS
+            addUpdateListener {
+                lp.x = it.animatedValue as Int
+                try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+            }
+            start()
+        }
+        o.animate().alpha(COLLAPSED_ALPHA).setDuration(COLLAPSE_ANIM_MS).start()
+    }
+
+    /**
+     * 从收起状态展开回完整可见。[rescheduleCollapse] 是因为两种触发场景的后续不一样：
+     * 用户手指碰到球时要展开+等它再次空闲才重新收起；而一旦球要真正响应点击/拖动/
+     * 系统让位（dodge）这些场景，外层调用自己会决定后续要不要收起，这里不重复排。
+     */
+    private fun expandFromCollapse(rescheduleCollapse: Boolean) {
+        cancelCollapseSchedule()
+        if (!collapsed) { if (rescheduleCollapse) scheduleCollapseIfDocked(); return }
+        collapsed = false
+        val w = wm ?: return
+        val o = orb ?: return
+        val lp = orbLp ?: return
+        ValueAnimator.ofInt(lp.x, dockedX).apply {
+            duration = COLLAPSE_ANIM_MS
+            addUpdateListener {
+                lp.x = it.animatedValue as Int
+                try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+            }
+            start()
+        }
+        o.animate().alpha(1f).setDuration(COLLAPSE_ANIM_MS).start()
+        if (rescheduleCollapse) scheduleCollapseIfDocked()
+    }
+
     // 急停后的 1.8 秒内球显示“已停止”（红色），不被 Dart 的状态更新盖掉。
     private fun displayState(): String =
         if (System.currentTimeMillis() < stopUntil) "stopped" else state
@@ -318,6 +418,11 @@ object OrbController {
         lp.y = p.getInt("y", d.heightPixels / 3).coerceIn(0, (d.heightPixels - size).coerceAtLeast(0))
         val v = OrbView(s, object : OrbView.Host {
             override fun dragStart() {
+                // 第二梯队批八：球收起时，这一下触摸先只负责展开，不当成"点一下"的正常手势——
+                // 用户摸到那一小截露出来的球，期待的是"球回来了"，不是立刻开始听/打开App。
+                revealOnlyThisGesture = collapsed
+                if (collapsed) expandFromCollapse(rescheduleCollapse = false)
+                else cancelCollapseSchedule()
                 startX = lp.x
                 startY = lp.y
                 removeBubble()
@@ -330,23 +435,51 @@ object OrbController {
             }
 
             override fun dragEnd() {
-                val target = if (lp.x + size / 2 < d.widthPixels / 2) 0 else (d.widthPixels - size).coerceAtLeast(0)
-                ValueAnimator.ofInt(lp.x, target).apply {
-                    duration = 180
-                    addUpdateListener {
-                        lp.x = it.animatedValue as Int
-                        try { w.updateViewLayout(orb, lp) } catch (_: Exception) {}
+                revealOnlyThisGesture = false
+                // 第二梯队批八：原来不管松手在哪都强制吸边，现在只有离左右边缘够近
+                // （EDGE_SNAP_THRESHOLD_DP）才吸边，否则就停在实际松手的位置——
+                // 真正支持摆在屏幕任意地方，不再只能贴在左右两条边上。
+                val snapPx = (EDGE_SNAP_THRESHOLD_DP * d.density).toInt()
+                val distToLeft = lp.x
+                val distToRight = (d.widthPixels - size) - lp.x
+                val nearEdge = minOf(distToLeft, distToRight) <= snapPx
+                val target = if (nearEdge) {
+                    if (distToLeft < distToRight) 0 else (d.widthPixels - size).coerceAtLeast(0)
+                } else {
+                    lp.x // 自由摆放：不挪动，就停在松手的地方
+                }
+                if (target != lp.x) {
+                    ValueAnimator.ofInt(lp.x, target).apply {
+                        duration = 180
+                        addUpdateListener {
+                            lp.x = it.animatedValue as Int
+                            try { w.updateViewLayout(orb, lp) } catch (_: Exception) {}
+                        }
+                        start()
                     }
-                    start()
                 }
                 p.edit().putInt("x", target).putInt("y", lp.y).apply()
+                // 只有确实停在边上才值得排"贴边自动收起"；停在屏幕中间的自由摆放不收起。
+                scheduleCollapseIfDocked()
             }
 
             override fun tap() {
+                if (revealOnlyThisGesture) {
+                    revealOnlyThisGesture = false
+                    scheduleCollapseIfDocked()
+                    return
+                }
+                cancelCollapseSchedule()
                 handleTap()
+                scheduleCollapseIfDocked()
             }
 
             override fun longPress() {
+                if (revealOnlyThisGesture) {
+                    revealOnlyThisGesture = false
+                    scheduleCollapseIfDocked()
+                    return
+                }
                 launchApp(null)
             }
         })
@@ -357,6 +490,9 @@ object OrbController {
             orb = v
             orbLp = lp
             if (captureHidden || taskHidden) v.visibility = View.GONE
+            // 第二梯队批八：这次显示时如果上次保存的位置本来就贴边，空闲一段时间后也该收起，
+            // 不用非得等用户这次又拖一下才开始计时。
+            scheduleCollapseIfDocked()
         } catch (_: Exception) {
             // 系统拒绝（极少见）：不显示，不影响其他功能
         }
@@ -454,6 +590,8 @@ object OrbController {
 
     private fun removeAll() {
         removeBubble()
+        cancelCollapseSchedule()
+        collapsed = false // 球都没了，收起状态没意义；下次 show() 重新按当前持久化坐标判定
         orb?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
         orb = null
         orbLp = null

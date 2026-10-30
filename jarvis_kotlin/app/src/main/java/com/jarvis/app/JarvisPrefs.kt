@@ -62,6 +62,15 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_MEMORY_ENABLED, on).apply()
     }
 
+    // ---------- 第二梯队批八：悬浮球贴边自动收起 ----------
+    // 默认开——配合"自由摆放"一起做：摆在屏幕中间的球不受这个开关影响（只有贴边才谈得上
+    // 收起），只有确实停在左右边缘时才会在空闲一段时间后收起大半，关掉就一直完整显示。
+    private const val KEY_ORB_EDGE_AUTO_HIDE = "orb_edge_auto_hide"
+    fun isOrbEdgeAutoHideEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_ORB_EDGE_AUTO_HIDE, true)
+    fun setOrbEdgeAutoHideEnabled(ctx: Context, on: Boolean) {
+        p(ctx).edit().putBoolean(KEY_ORB_EDGE_AUTO_HIDE, on).apply()
+    }
+
     // ---------- 第一梯队批一：记忆语义化——自然语言隐式提取总开关 ----------
     // 独立于 KEY_MEMORY_ENABLED（总开关关了这个也不会跑）：隐式提取每轮多打一次模型请求，
     // 有费用/延迟成本，允许用户单独关掉只用显式「记住：」那条路。默认开。

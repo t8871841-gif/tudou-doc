@@ -658,6 +658,13 @@ class MainActivity : Activity() {
             OrbController.setEnabled(checked)
             refresh()
         }, onCreated = { orbSwitch = it })
+        // 第二梯队批八：悬浮球现在支持摆在屏幕任意位置（不再强制吸左右边）、贴边一段
+        // 时间不碰会自动收起一部分、腾出手指误触的地方；这个开关只管"贴边自动收起"
+        // 这一下，不想要可以关掉，关了之后贴边也会一直完整显示，不会收起。
+        val orbAutoHideRow = switchRow("悬浮球贴边自动收起", "贴着屏幕左右边一段时间不碰，自动收起大半，留一小截在外面",
+            JarvisPrefs.isOrbEdgeAutoHideEnabled(this@MainActivity)) { checked ->
+            JarvisPrefs.setOrbEdgeAutoHideEnabled(this@MainActivity, checked)
+        }
         val detail2 = TextView(this).apply { textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(12), 0, 0) }
 
         root.addView(statusView)
@@ -672,6 +679,7 @@ class MainActivity : Activity() {
         })
         root.addView(btn("启动常驻服务") { startKeepAlive(manual = true) })
         root.addView(orbRow)
+        root.addView(orbAutoHideRow)
         root.addView(btn("测试：读取当前界面") {
             if (!JarvisAccessibilityService.isRunning()) { toast("无障碍未开启，读不到界面"); return@btn }
             detail2.text = "界面节点树（前 600 字）：\n" + JarvisAccessibilityService.perceiveScreenTree().take(600)
