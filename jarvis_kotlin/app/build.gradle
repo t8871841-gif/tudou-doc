@@ -21,6 +21,12 @@ android {
             minifyEnabled false
         }
     }
+
+    // AGP 8 默认不生成 BuildConfig；HudActivity 靠它判断 debug 才开 WebView 调试，
+    // 不开这里编译就报 Unresolved reference: BuildConfig（jk-v42 失败原因）。
+    buildFeatures {
+        buildConfig = true
+    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
