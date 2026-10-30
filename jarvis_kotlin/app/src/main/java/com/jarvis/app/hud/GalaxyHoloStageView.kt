@@ -274,8 +274,8 @@ class GalaxyHoloStageView @JvmOverloads constructor(
 
     // 第二梯队批九：星系的"观察视角"倾角——参考图是斜着俯瞰一个盘面（椭圆形，不是正圆），
     // 不是正对着盘面拍的。固定不随自转变化（自转是盘面自己转，观察角度不变）。
-    private const val GALAXY_TILT_DEG = -28f  // 整体对角倾斜角度
-    private const val GALAXY_SQUASH = 0.58f   // 垂直方向压扁比例，压扁得越多看起来倾角越大
+    private val GALAXY_TILT_DEG = -28f  // 整体对角倾斜角度
+    private val GALAXY_SQUASH = 0.58f   // 垂直方向压扁比例，压扁得越多看起来倾角越大
 
     private fun drawGalaxy(canvas: Canvas, cx: Float, cy: Float, r: Float, tt: Float, alphaMul: Float) {
         val scaleBase = r / 130f // 逻辑 260 空间 -> 实际半径
