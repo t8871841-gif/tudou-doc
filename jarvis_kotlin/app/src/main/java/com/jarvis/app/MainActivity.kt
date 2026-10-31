@@ -900,6 +900,46 @@ class MainActivity : Activity() {
                   if (route) route.style.display = 'none';
                   var wxH = document.querySelector('#pWeather h2');
                   if (wxH && wxH.firstChild) wxH.firstChild.textContent = '天气 ';
+                  // 面板开关标识：平时一直都在，点一下出面板，再点一下收回去。
+                  // 挂在 body 下（待机 CSS 只藏 .hud 的子元素，挂 body 下才不会被一起藏掉）；
+                  // 演示时用下面的 style 藏掉（演示有自己的返回钮）。
+                  if (!document.getElementById('hudPanelToggle')) {
+                    var ptStyle = document.createElement('style');
+                    ptStyle.textContent = 'body.demo #hudPanelToggle{display:none!important}';
+                    document.head.appendChild(ptStyle);
+                    var pt = document.createElement('button');
+                    pt.type = 'button'; pt.id = 'hudPanelToggle';
+                    pt.setAttribute('aria-label', '显示面板');
+                    pt.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:60;width:40px;height:40px;border-radius:50%;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.72);color:rgb(var(--sk-ink));font-size:19px;line-height:1;display:flex;align-items:center;justify-content:center;opacity:.75;cursor:pointer;padding:0';
+                    var ptSync = function(){
+                      var hidden = document.body.classList.contains('dormant');
+                      pt.textContent = hidden ? '▦' : '✕';
+                      pt.setAttribute('aria-label', hidden ? '显示面板' : '隐藏面板');
+                    };
+                    pt.addEventListener('pointerdown', function(e){
+                      try { e.stopPropagation(); } catch(err){}
+                      try {
+                        if (document.body.classList.contains('dormant')) {
+                          dormHold = false; wakeUI(); sleepUI(30000);
+                        } else {
+                          // 注意：不能调 dormNow()——它会把 dormHold 置 true，此后 setState('listening')
+                          // 调 wakeUI 会直接 return，下一轮说话面板都出不来。这里照抄 sleepUI 定时到点那条
+                          // 路（只加 dormant 类、不动 dormHold），说话时 wakeUI 仍能正常唤醒。
+                          try { holoHide(); } catch(err2){}
+                          clearTimeout(dormT);
+                          document.body.classList.add('dormant');
+                        }
+                      } catch(err){}
+                      ptSync();
+                    });
+                    // 图标跟实际走：面板被别的途径唤醒/藏起来时也同步（说话、15 秒定时等）。
+                    try {
+                      var ptObs = new MutationObserver(function(){ ptSync(); });
+                      ptObs.observe(document.body, {attributes:true, attributeFilter:['class']});
+                    } catch(err){}
+                    ptSync();
+                    document.body.appendChild(pt);
+                  }
                 }
                 window.__jarvisPushModel();
               } catch(e){ console.warn('hud bridge:', e); }
