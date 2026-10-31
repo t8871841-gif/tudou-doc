@@ -2,7 +2,9 @@ package com.jarvis.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -13,11 +15,14 @@ import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
 import android.util.Base64
 import android.util.Log
+import android.net.TrafficStats
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -58,6 +63,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -121,6 +127,15 @@ class MainActivity : Activity() {
     private lateinit var hudAssetLoader: WebViewAssetLoader
     private var hudPageLoaded = false
     private var hudLastPushedState: String? = null
+
+    // 彻底融合第 3 步：面板真数据。
+    // 对话记录（内存，addBubble 时追加，上限 20 条；页面加载完后推给 subsHistory）。
+    private val hudChatHistory = ArrayList<Triple<String, String, Long>>()
+    // 上下行速率采样基线（TrafficStats 累计值 + 采样时刻；两次推送之间算平均速率，
+    // 基线在 setupHudWebView 里先取一次，第一次推送就有约 1~2 秒的短窗口速率）。
+    private var hudLastRxBytes = -1L
+    private var hudLastTxBytes = -1L
+    private var hudLastNetMs = 0L
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -305,6 +320,9 @@ class MainActivity : Activity() {
                     // 里的推送因页面没加载完被拦掉了，这里补上）。
                     hudLastPushedState = null
                     pushHudState(JarvisAgent.currentState())
+                    // 第 3 步：面板真数据 + 对话记录进 HUD。
+                    pushHudPanels()
+                    pushHudHistory()
                 }
             }
             // 把页面 console 打到 logcat，tag HudWebView：真机上 HUD 出问题先看这里。
@@ -322,6 +340,11 @@ class MainActivity : Activity() {
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
         parent.addView(hudWebView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         hudWebView.loadUrl("https://appassets.androidplatform.net/assets/hud/index.html")
+        // 第 3 步：上下行速率的采样基线先取一次，页面加载完第一次推系统状态时，
+        // 距此约 1~2 秒，算出的就是短窗口内的真实平均速率。
+        hudLastRxBytes = TrafficStats.getTotalRxBytes()
+        hudLastTxBytes = TrafficStats.getTotalTxBytes()
+        hudLastNetMs = SystemClock.elapsedRealtime()
         // 设置页永远在最上面（WebView 后加会盖住它，打开设置时 applyOrientationLayout 也会藏起 WebView）。
         settingsScroll.bringToFront()
     }
@@ -345,6 +368,8 @@ class MainActivity : Activity() {
             hudLastPushedState = null
             pushHudState(JarvisAgent.currentState())
             hudWebView.evaluateJavascript("try{if(window.__jarvisRefreshModel)__jarvisRefreshModel()}catch(e){}", null)
+            // 第 3 步：切横屏时面板真数据再推一次。
+            pushHudPanels()
             // 横屏看 HUD 时不熄屏；回竖屏即恢复。
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
@@ -548,6 +573,234 @@ class MainActivity : Activity() {
             "try{if(typeof setState==='function')setState(" + JSONObject.quote(s) + ")}catch(e){}",
             null
         )
+        // 第 3 步：状态变了，大脑那格的 Agent 调度也顺手刷新（不另起轮询）。
+        pushHudAgents()
+    }
+
+    // ---------- 彻底融合第 3 步：面板真数据 ----------
+
+    /** 面板总推送：日程/调度/系统状态一次推完；天气是异步，到货后单独再推一次。
+     * 只在横屏且页面加载完、设置页没开时推；三个调用点：onPageFinished、切横屏、
+     * onResume 回横屏。天气失败也推一版占位，不留上海假天气。 */
+    private fun pushHudPanels() {
+        if (!::hudWebView.isInitialized || !hudPageLoaded) return
+        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
+        if (showingSettings) return
+        val reminders = ReminderScheduler.list(this)
+        pushHudSchedule(reminders)
+        pushHudAgents(reminders.size)
+        pushHudSys()
+        fetchHudWeather()
+    }
+
+    /** 今日安排 + 工作汇报：原生提醒（ReminderScheduler.list，只取今天还没触发的）
+     * + 今日晨报（开着且还没到点才算）；没有就推空列表——面板显示空态，6 条假日程不再留。
+     * applySchedule 会同时改写汇报的 done/total 与任务列表。 */
+    private fun pushHudSchedule(reminders: List<Map<String, Any?>>) {
+        val items = JSONArray()
+        val nowMs = System.currentTimeMillis()
+        val dayStart = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val dayEnd = dayStart + 24L * 60 * 60 * 1000
+        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val rows = ArrayList<Triple<Long, String, String>>() // atMs, title, note
+        for (r in reminders) {
+            val at = (r["atMs"] as? Long) ?: continue
+            if (at < dayStart || at >= dayEnd) continue
+            // 标题绝不能空：页面 applySchedule 用 x.title || x.title_en，空标题会变成 undefined，
+            // 页面的 escapeHtml(undefined) 会抛错，整个日程面板都渲染不出来。
+            rows.add(Triple(at, (r["title"] as? String).orEmpty().ifEmpty { "提醒" }, (r["body"] as? String).orEmpty()))
+        }
+        if (ReminderScheduler.isBriefOn(this)) {
+            val bc = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, ReminderScheduler.briefHour(this@MainActivity))
+                set(Calendar.MINUTE, ReminderScheduler.briefMinute(this@MainActivity))
+                set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }
+            if (bc.timeInMillis > nowMs) rows.add(Triple(bc.timeInMillis, "Jarvis 晨报", "每日晨报"))
+        }
+        rows.sortedBy { it.first }.forEach { (at, title, note) ->
+            val endCal = Calendar.getInstance().apply { timeInMillis = at + 30L * 60 * 1000 }
+            items.put(JSONObject().apply {
+                put("start", fmt.format(Date(at)))
+                put("end", fmt.format(endCal.time))
+                put("title", title)
+                put("note", note)
+                put("done", false)
+            })
+        }
+        hudWebView.evaluateJavascript(
+            "try{if(typeof applySchedule==='function')applySchedule(" + items.toString() + ")}catch(e){}",
+            null
+        )
+    }
+
+    /** Agent 调度：只映射原生真实能读到的状态，读不到的不编。
+     * 大脑=对话状态；后台任务=TaskLoop 是否在跑（没跑时报已安排的提醒数）；
+     * 学习=记忆系统就绪（没有“正在提取”的实时信号，不装成在跑）；
+     * 复盘=无原生对应物，固定 off“暂无”。 */
+    private fun pushHudAgents(pendingCount: Int = ReminderScheduler.list(this).size) {
+        val state = JarvisAgent.currentState()
+        val brainDesc = when (state) {
+            "listening" -> "正在聆听"
+            "thinking" -> "正在思考"
+            "speaking" -> "正在说话"
+            else -> "待命"
+        }
+        val jobsRunning = com.jarvis.app.task.TaskLoop.isRunning()
+        val jobsDesc = if (jobsRunning) "跨应用任务进行中"
+            else if (pendingCount > 0) "$pendingCount 条提醒已安排"
+            else "暂无后台任务"
+        val items = JSONArray().apply {
+            put(agentItem("brain", if (state == "idle") "off" else "run", brainDesc, 0.5))
+            put(agentItem("jobs", if (jobsRunning) "run" else "off", jobsDesc, 0.5))
+            put(agentItem("learn", "off", "记忆就绪", 0.0))
+            put(agentItem("review", "off", "暂无", 0.0))
+        }
+        hudWebView.evaluateJavascript(
+            "try{if(typeof agentsUpdate==='function')agentsUpdate(" +
+                JSONObject().put("items", items).toString() + ")}catch(e){}",
+            null
+        )
+    }
+
+    private fun agentItem(id: String, state: String, desc: String, progress: Double): JSONObject =
+        JSONObject().apply {
+            put("id", id)
+            put("state", state)
+            put("desc", desc)
+            put("progress", progress)
+        }
+
+    /** 系统状态：内存、上下行、电量都是真值；CPU 没有简单可靠的接口，固定 "--"
+     * （页面渲染成 "--%"）。上下行是 TrafficStats 两次推送之间的平均速率；
+     * 竖屏待久了第一次切回横屏，窗口很长、速率会很小，是真平均值，下次推送就恢复。 */
+    private fun pushHudSys() {
+        var memPct: Int? = null
+        try {
+            val am = getSystemService(ACTIVITY_SERVICE) as? ActivityManager
+            if (am != null) {
+                val mi = ActivityManager.MemoryInfo()
+                am.getMemoryInfo(mi)
+                if (mi.totalMem > 0) {
+                    memPct = ((1.0 - mi.availMem.toDouble() / mi.totalMem.toDouble()) * 100).toInt()
+                }
+            }
+        } catch (_: Exception) {
+        }
+        val nowMs = SystemClock.elapsedRealtime()
+        val rx = TrafficStats.getTotalRxBytes()
+        val tx = TrafficStats.getTotalTxBytes()
+        var down = 0L
+        var up = 0L
+        if (rx >= 0 && tx >= 0) {
+            if (hudLastNetMs > 0 && hudLastRxBytes >= 0 && hudLastTxBytes >= 0) {
+                val dt = ((nowMs - hudLastNetMs) / 1000.0).coerceAtLeast(1.0)
+                down = ((rx - hudLastRxBytes).coerceAtLeast(0) / dt).toLong()
+                up = ((tx - hudLastTxBytes).coerceAtLeast(0) / dt).toLong()
+            }
+            hudLastRxBytes = rx
+            hudLastTxBytes = tx
+            hudLastNetMs = nowMs
+        }
+        val bm = getSystemService(BATTERY_SERVICE) as? BatteryManager
+        val level = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        val charging = try {
+            val f = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val st = f?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            st == BatteryManager.BATTERY_STATUS_CHARGING || st == BatteryManager.BATTERY_STATUS_FULL
+        } catch (_: Exception) {
+            false
+        }
+        val o = JSONObject().apply {
+            put("cpu", "--")
+            if (memPct != null) put("mem", memPct) else put("mem", "--")
+            put("down", down)
+            put("up", up)
+            if (level in 0..100) put("battery", level)
+            put("charging", charging)
+        }
+        hudWebView.evaluateJavascript(
+            "try{if(typeof sysUpdate==='function')sysUpdate(" + o.toString() + ")}catch(e){}",
+            null
+        )
+    }
+
+    /** 天气：结构化取数（WeatherTool.fetchStructured，Open-Meteo），城市取原生默认
+     * （JarvisPrefs.getWeatherCity，默认新乡）。到货后单独推 wxUpdate；失败也推一版
+     * 占位（"--" / 未更新），不让上海假天气一直留在面板上。回调在 OkHttp 线程，
+     * 推页面必须回主线程。 */
+    private fun fetchHudWeather() {
+        val city = JarvisPrefs.getWeatherCity(this)
+        com.jarvis.app.data.WeatherTool.fetchStructured(city) { info ->
+            main.post {
+                if (!::hudWebView.isInitialized || !hudPageLoaded) return@post
+                if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return@post
+                if (showingSettings) return@post
+                pushHudWeather(info)
+            }
+        }
+    }
+
+    private fun pushHudWeather(info: com.jarvis.app.data.WeatherTool.WeatherInfo?) {
+        val o = JSONObject()
+        if (info == null) {
+            o.put("temp", "--")
+            o.put("now", "未更新")
+            o.put("city", JarvisPrefs.getWeatherCity(this))
+            o.put("humidity", "--")
+            val days = JSONArray()
+            val todayWeek = (Calendar.getInstance().get(Calendar.DAY_OF_WEEK) - 1) % 7
+            for (i in 0 until 3) {
+                days.put(JSONObject().apply {
+                    put("week", (todayWeek + i) % 7)
+                    put("day", "暂无")
+                    put("low", "--")
+                    put("high", "--")
+                })
+            }
+            o.put("days", days)
+        } else {
+            o.put("temp", info.temp)
+            o.put("now", info.now)
+            o.put("city", info.city)
+            o.put("humidity", info.humidity)
+            val days = JSONArray()
+            info.days.forEach { d ->
+                days.put(JSONObject().apply {
+                    put("week", d.week)
+                    put("day", d.day)
+                    put("low", d.low)
+                    put("high", d.high)
+                })
+            }
+            o.put("days", days)
+        }
+        hudWebView.evaluateJavascript(
+            "try{if(typeof wxUpdate==='function')wxUpdate(" + o.toString() + ")}catch(e){}",
+            null
+        )
+    }
+
+    /** 对话记录进 HUD：把内存里的最近 20 条（addBubble 时记的）推给 subsHistory；
+     * 只在页面加载完推一次。页面自己的 localStorage 会接着保存，之后的新消息走 typeOut。 */
+    private fun pushHudHistory() {
+        if (hudChatHistory.isEmpty()) return
+        val items = JSONArray()
+        hudChatHistory.forEach { (who, text, t) ->
+            items.put(JSONObject().apply {
+                put("who", who)
+                put("en", text)
+                put("zh", "")
+                put("t", t)
+            })
+        }
+        hudWebView.evaluateJavascript(
+            "try{if(typeof subsHistory==='function')subsHistory(" + items.toString() + ")}catch(e){}",
+            null
+        )
     }
 
     // 运行时注入桥接改写（hud/ 文件一个字不改）：沿用页面自己的“联网版改写”模式
@@ -640,6 +893,13 @@ class MainActivity : Activity() {
                       pop.appendChild(sb);
                     }
                   }
+                  // 第 3 步：出行块没有真实数据源，隐藏（不改 hud/ 文件）；面板标题也改回“天气”。
+                  var trip = document.querySelector('#pWeather .trip');
+                  if (trip) trip.style.display = 'none';
+                  var route = document.getElementById('route');
+                  if (route) route.style.display = 'none';
+                  var wxH = document.querySelector('#pWeather h2');
+                  if (wxH && wxH.firstChild) wxH.firstChild.textContent = '天气 ';
                 }
                 window.__jarvisPushModel();
               } catch(e){ console.warn('hud bridge:', e); }
@@ -734,12 +994,18 @@ class MainActivity : Activity() {
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
         // 第 2 步：气泡同时推给 HUD 字幕（见 onCreate 注释——这是两条路的唯一汇合点）。
         pushHudSubtitle(if (mine) "you" else "jarvis", text)
+        // 第 3 步：对话记进内存列表（上限 20 条），页面加载完后推给 HUD 字幕记录。
+        hudChatHistory.add(Triple(if (mine) "you" else "jarvis", text, System.currentTimeMillis() / 1000))
+        if (hudChatHistory.size > 20) hudChatHistory.removeAt(0)
     }
 
     /** 设置里「清空对话」：只清对话框气泡，回到刚打开时的问候语；长期记忆库不受影响。 */
     private fun clearChat() {
         if (!::chatList.isInitialized) return
         chatList.removeAllViews()
+        // 第 3 步：对话记录也清掉（下面 addBubble 会把问候语重新记进去），
+        // 否则下次页面加载还会把清掉之前的对话推回 HUD 字幕记录。
+        hudChatHistory.clear()
         addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
     }
 
@@ -2054,6 +2320,8 @@ class MainActivity : Activity() {
             hudLastPushedState = null
             pushHudState(JarvisAgent.currentState())
             hudWebView.evaluateJavascript("try{if(window.__jarvisRefreshModel)__jarvisRefreshModel()}catch(e){}", null)
+            // 第 3 步：回横屏时面板真数据再推一次。
+            pushHudPanels()
         }
     }
 

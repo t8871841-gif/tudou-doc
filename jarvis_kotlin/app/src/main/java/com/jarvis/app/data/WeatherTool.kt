@@ -58,6 +58,93 @@ object WeatherTool {
         }
     }
 
+    /** 结构化天气（彻底融合第 3 步）：给 HUD 天气面板用，直接返回字段，不拼聊天文本。
+     * 地理编码与 fetch 共用同一条路；预报多要一个 daily weather_code（给 3 天小格的图标用）。
+     * 任何失败回调 null。 */
+    data class DayForecast(val week: Int, val day: String, val low: String, val high: String)
+    data class WeatherInfo(val temp: String, val now: String, val city: String, val humidity: String, val days: List<DayForecast>)
+
+    fun fetchStructured(city: String, cb: (WeatherInfo?) -> Unit) {
+        geocodeNominatim(city) { loc ->
+            if (loc != null) {
+                fetchForecastStructured(city, loc.first, loc.second, cb)
+            } else {
+                geocodeOpenMeteo(city) { loc2 ->
+                    if (loc2 != null) fetchForecastStructured(city, loc2.first, loc2.second, cb) else cb(null)
+                }
+            }
+        }
+    }
+
+    private fun fetchForecastStructured(cityName: String, lat: Double, lon: Double, cb: (WeatherInfo?) -> Unit) {
+        if (lat.isNaN() || lon.isNaN()) {
+            cb(null)
+            return
+        }
+        val url = "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon" +
+            "&current=temperature_2m,relative_humidity_2m,weather_code" +
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min" +
+            "&timezone=Asia%2FShanghai&forecast_days=3"
+        client.newCall(Request.Builder().url(url).build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) = cb(null)
+            override fun onResponse(call: Call, resp: Response) {
+                cb(try {
+                    parseStructured(cityName, JSONObject(resp.body?.string().orEmpty()))
+                } catch (_: Exception) {
+                    null
+                })
+            }
+        })
+    }
+
+    private fun parseStructured(city: String, root: JSONObject): WeatherInfo? {
+        val cur = root.optJSONObject("current") ?: return null
+        val daily = root.optJSONObject("daily") ?: return null
+        val maxArr = daily.optJSONArray("temperature_2m_max") ?: return null
+        val minArr = daily.optJSONArray("temperature_2m_min") ?: return null
+        val codeArr = daily.optJSONArray("weather_code")
+        val timeArr = daily.optJSONArray("time")
+        val temp = cur.optDouble("temperature_2m", Double.NaN)
+        val hum = cur.optInt("relative_humidity_2m", -1)
+        // 周几（0=周日…6=周六，对应页面 WD 数组）；日期串解析失败就用今天顺延兜底，
+        // 绝不把 -1 传过去（页面 WD[-1] 是 undefined，会渲染出 "undefined"）。
+        val todayWeek = (java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_WEEK) - 1) % 7
+        val days = ArrayList<DayForecast>()
+        val n = minOf(maxArr.length(), minArr.length(), 3)
+        for (i in 0 until n) {
+            val hi = maxArr.optDouble(i, Double.NaN)
+            val lo = minArr.optDouble(i, Double.NaN)
+            val week = dayOfWeek(timeArr?.optString(i)).let { if (it < 0) (todayWeek + i) % 7 else it }
+            days.add(
+                DayForecast(
+                    week = week,
+                    day = codeText(codeArr?.optInt(i, -1) ?: -1),
+                    low = if (lo.isNaN()) "--" else fmt(lo),
+                    high = if (hi.isNaN()) "--" else fmt(hi)
+                )
+            )
+        }
+        return WeatherInfo(
+            temp = if (temp.isNaN()) "--" else fmt(temp),
+            now = codeText(cur.optInt("weather_code", -1)),
+            city = city,
+            humidity = if (hum < 0) "--" else hum.toString(),
+            days = days
+        )
+    }
+
+    /** "yyyy-MM-dd" → 周几（0=周日…6=周六）；解析失败返回 -1（调用方兜底）。 */
+    private fun dayOfWeek(dateStr: String?): Int {
+        if (dateStr.isNullOrBlank()) return -1
+        return try {
+            val d = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).parse(dateStr) ?: return -1
+            val c = java.util.Calendar.getInstance().apply { time = d }
+            (c.get(java.util.Calendar.DAY_OF_WEEK) - 1) % 7
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
     private fun geocodeNominatim(city: String, cb: (Pair<Double, Double>?) -> Unit) {
         val url = "https://nominatim.openstreetmap.org/search?q=${Uri.encode(city)}&format=json&limit=5&accept-language=zh"
         val req = Request.Builder().url(url)

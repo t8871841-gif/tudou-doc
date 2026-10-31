@@ -79,6 +79,13 @@ object TaskLoop {
     }
     private val runSeq = AtomicInteger(0)
 
+    /** 任务循环是否正在执行（彻底融合第 3 步：HUD Agent 调度面板要读的真状态）。
+     * 在 runBlocking 的 try 之前置位、finally 里复位；无障碍未开那条早退路在置位之前，
+     * 不会把标志留在 true。 */
+    @Volatile
+    private var running = false
+    fun isRunning(): Boolean = running
+
     // 「在<应用>里/上给<人>发信息…」「给<人>发微信…」「打开/用<应用>…发/给…」。
     // 保守优先：必须同时出现「应用或发送动作」与「收件/发送对象」两类信号才算任务；
     // 拿不准放行原流程（聊天/技能/单步指令）。
@@ -153,6 +160,7 @@ object TaskLoop {
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
         var prevScreenSig = ""
+        running = true
         try {
             var step = 0
             stepLoop@ while (step < MAX_STEPS) {
@@ -376,6 +384,7 @@ object TaskLoop {
             finalReply = "任务执行中出错：${e.message}"
             AuditLog.append(ctx, "任务循环", "异常", e.message ?: e.javaClass.simpleName)
         } finally {
+            running = false
             TakeoverBorder.hide()
             com.jarvis.app.OrbController.setTaskHidden(false)
             if (JarvisAccessibilityService.screenController === controller) {
