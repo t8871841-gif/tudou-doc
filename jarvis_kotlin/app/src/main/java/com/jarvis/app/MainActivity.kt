@@ -911,6 +911,9 @@ class MainActivity : Activity() {
                     pt.type = 'button'; pt.id = 'hudPanelToggle';
                     pt.setAttribute('aria-label', '显示面板');
                     pt.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:60;width:40px;height:40px;border-radius:50%;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.72);color:rgb(var(--sk-ink));font-size:19px;line-height:1;display:flex;align-items:center;justify-content:center;opacity:.75;cursor:pointer;padding:0';
+                    // 点按前是否在待机（MutationObserver 回调是异步微任务，本次点按的事件派发
+                    // 完成前它还不会跑，所以这里存的值永远是点按发生之前的状态）。
+                    var ptDormant = document.body.classList.contains('dormant');
                     var ptSync = function(){
                       var hidden = document.body.classList.contains('dormant');
                       pt.textContent = hidden ? '▦' : '✕';
@@ -919,22 +922,31 @@ class MainActivity : Activity() {
                     pt.addEventListener('pointerdown', function(e){
                       try { e.stopPropagation(); } catch(err){}
                       try {
-                        if (document.body.classList.contains('dormant')) {
+                        // 关键：不能读实时的 class。页面级唤醒监听挂在 window 的 pointerdown 上且是
+                        // 捕获阶段（interaction.js:19，第三个参数 true），比按钮目标阶段的处理先跑。
+                        // 待机时点按钮，捕获监听先把 dormant 摘了，处理再读 class 读到的已是“不在待
+                        // 机”，于是走了收起分支又藏回去，一次点击净效果为零。改读点按前状态 ptDormant。
+                        if (ptDormant) {
+                          // 点按前在待机：捕获监听已经唤醒了，这里再调一次是幂等的、无害。
                           dormHold = false; wakeUI(); sleepUI(30000);
+                          ptDormant = false;
                         } else {
+                          // 点按前面板在外面：收起来。
                           // 注意：不能调 dormNow()——它会把 dormHold 置 true，此后 setState('listening')
                           // 调 wakeUI 会直接 return，下一轮说话面板都出不来。这里照抄 sleepUI 定时到点那条
                           // 路（只加 dormant 类、不动 dormHold），说话时 wakeUI 仍能正常唤醒。
                           try { holoHide(); } catch(err2){}
                           clearTimeout(dormT);
                           document.body.classList.add('dormant');
+                          ptDormant = true;
                         }
                       } catch(err){}
                       ptSync();
                     });
-                    // 图标跟实际走：面板被别的途径唤醒/藏起来时也同步（说话、15 秒定时等）。
+                    // 图标跟实际走：面板被别的途径唤醒/藏起来时也同步（说话、15 秒定时等），
+                    // 同时把 ptDormant 同步成最新值（下次点按读到的就是点按前的状态）。
                     try {
-                      var ptObs = new MutationObserver(function(){ ptSync(); });
+                      var ptObs = new MutationObserver(function(){ ptDormant = document.body.classList.contains('dormant'); ptSync(); });
                       ptObs.observe(document.body, {attributes:true, attributeFilter:['class']});
                     } catch(err){}
                     ptSync();
