@@ -90,10 +90,9 @@ class MainActivity : Activity() {
         const val REQ_PROJECTION = 5152
         // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
         const val REQ_PICK_PORTRAIT_BG = 5153
-        // 竖屏第 3 批修正：手势起点的分区（对话框区 / 面板区 / 不在手势区）。
+        // 竖屏面板重做：手势只认对话框区（下 2/5）；上 3/5（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
-        const val SWIPE_ZONE_PANEL = 2
     }
 
     private lateinit var statusView: TextView
@@ -108,6 +107,9 @@ class MainActivity : Activity() {
     private lateinit var settingsScroll: ScrollView
     private lateinit var chatList: LinearLayout
     private lateinit var chatScroll: ScrollView
+    // 原生竖屏面板（下 2/5）：panelScroll 与 chatScroll 同占权重 2 的位置，二选一显示。
+    private lateinit var panelList: LinearLayout
+    private lateinit var panelScroll: ScrollView
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
     private var stageImageView: ImageView? = null
@@ -145,9 +147,9 @@ class MainActivity : Activity() {
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
     private var showingSettings = false
-    // 竖屏第 3 批：左滑进 HUD 面板、右滑回对话框的手势跟踪（只看不拦，见 dispatchTouchEvent）。
-    // 修正：只认指定分区里的手势——对话框区（下 2/5）左滑开面板，面板区（上 3/5）右滑回对话框；
-    // 面板开合状态由原生布尔值跟踪（panelSet 只在这里调用，所以不会跑偏）。
+    // 竖屏面板重做：左滑进原生面板、右滑回对话框的手势跟踪（只看不拦，见 dispatchTouchEvent）。
+    // 只认对话框区（下 2/5）里的手势——上 3/5（HUD 动画）不再参与手势；
+    // 面板开合状态由原生布尔值跟踪（setNativePanel 是唯一改它的地方，所以不会跑偏）。
     private var swipeStartX = 0f
     private var swipeStartY = 0f
     private var swipePointerId = -1
@@ -176,6 +178,10 @@ class MainActivity : Activity() {
     private var hudLastRxBytes = -1L
     private var hudLastTxBytes = -1L
     private var hudLastNetMs = 0L
+
+    // 原生竖屏面板的数据缓存：今日提醒行（渲染面板时现算现存）与天气（取数后缓存）。
+    private var lastScheduleRows: List<Triple<Long, String, String>> = emptyList()
+    private var lastWeatherInfo: com.jarvis.app.data.WeatherTool.WeatherInfo? = null
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -218,6 +224,10 @@ class MainActivity : Activity() {
         homePanel.addView(stageLayout)
         buildChatPanel()
         homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
+        // 原生竖屏面板重做：panelScroll 与 chatScroll 同占下 2/5（权重 2），初始藏起；
+        // 开面板时两者互换显示，stageLayout（上 3/5）不动，buildBottomPanel() 始终可见。
+        buildNativePanel()
+        homePanel.addView(panelScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
         homePanel.addView(buildBottomPanel())
         contentView.addView(homePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -310,6 +320,8 @@ class MainActivity : Activity() {
         // 状态只靠徽章/悬浮球颜色与动效表达；这里只刷新唤醒词胶囊。
         refreshWakeChip()
         updateMicFx(state)
+        // 原生竖屏面板开着时，大脑那格的 Agent 调度跟着状态刷新。
+        if (hudPanelOpen) renderNativePanel()
     }
 
     /** 麦克风动效：按 JarvisAgent 状态切动画（idle 无动效；listening 脉冲环；thinking 旋转弧；speaking 均衡条）。
@@ -529,10 +541,10 @@ class MainActivity : Activity() {
         return super.dispatchTouchEvent(ev)
     }
 
-    /** 竖屏第 3 批修正：分区横滑判定。只在竖屏、非设置页时生效；横向位移 ≥60dp 且横向明显大于纵向
-     * （|dx| > 2|dy|），纵向滚动不会误触发；多指触摸直接取消跟踪。分区规则（起点定分区，抬手时判定）：
-     * 对话框区（chatScroll 顶到 homePanel 底，即下 2/5）左滑开面板；面板区（stageLayout，即上 3/5，
-     * 面板打开时）右滑回对话框；其他方向/分区不触发。 */
+    /** 竖屏面板重做：对话框区横滑判定。只在竖屏、非设置页时生效；横向位移 ≥60dp 且横向明显大于纵向
+     * （|dx| > 2|dy|），纵向滚动不会误触发；多指触摸直接取消跟踪。只认对话框区（chatScroll 顶到
+     * homePanel 底，即下 2/5，含底部输入行）的手势，起点定分区、抬手时判定：左滑开原生面板，
+     * 面板开着时右滑回对话框；上 3/5（HUD 动画）不参与手势；其他方向不触发。 */
     private fun trackPanelSwipe(ev: MotionEvent) {
         if (resources.configuration.orientation != Configuration.ORIENTATION_PORTRAIT || showingSettings) {
             swipeTracking = false
@@ -556,15 +568,10 @@ class MainActivity : Activity() {
                 val dx = ev.getX(upIndex) - swipeStartX
                 val dy = ev.getY(upIndex) - swipeStartY
                 if (Math.abs(dx) >= dp(60).toFloat() && Math.abs(dx) > 2f * Math.abs(dy)) {
-                    if (!::hudWebView.isInitialized) return
                     if (swipeZone == SWIPE_ZONE_DIALOG && dx < 0 && !hudPanelOpen) {
-                        hudPanelOpen = true
-                        refreshSettingsGear()
-                        hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(true)", null)
-                    } else if (swipeZone == SWIPE_ZONE_PANEL && dx > 0 && hudPanelOpen) {
-                        hudPanelOpen = false
-                        refreshSettingsGear()
-                        hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(false)", null)
+                        setNativePanel(true)
+                    } else if (swipeZone == SWIPE_ZONE_DIALOG && dx > 0 && hudPanelOpen) {
+                        setNativePanel(false)
                     }
                 }
             }
@@ -572,14 +579,11 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 竖屏第 3 批修正：按触点的屏幕坐标判定手势起点在哪个分区。面板区是 stageLayout（上 3/5，
-     * 面板打开时 WebView 就在这里）；对话框区是 chatScroll 顶到 homePanel 底（下 2/5，含底部
-     * 输入行——它未存字段，是 homePanel 最后一个孩子、紧贴 chatScroll 下方）。第 4 批撤掉顶栏后，
-     * 两个分区拼满整个 homePanel。 */
+    /** 竖屏面板重做：按触点的屏幕坐标判定手势起点是否在对话框区。对话框区是 chatScroll 顶到
+     * homePanel 底（下 2/5，含底部输入行——它未存字段，是 homePanel 最后一个孩子、紧贴
+     * chatScroll 下方）。上 3/5（HUD 动画）不是手势区，起点落在那里直接返回 NONE。 */
     private fun swipeZoneAt(rawX: Float, rawY: Float): Int {
-        if (!::stageLayout.isInitialized || !::chatScroll.isInitialized || !::homePanel.isInitialized) return SWIPE_ZONE_NONE
-        val stage = screenBounds(stageLayout)
-        if (rawX >= stage[0] && rawX < stage[2] && rawY >= stage[1] && rawY < stage[3]) return SWIPE_ZONE_PANEL
+        if (!::chatScroll.isInitialized || !::homePanel.isInitialized) return SWIPE_ZONE_NONE
         val chat = screenBounds(chatScroll)
         val home = screenBounds(homePanel)
         if (rawX >= home[0] && rawX < home[2] && rawY >= chat[1] && rawY < home[3]) return SWIPE_ZONE_DIALOG
@@ -801,24 +805,21 @@ class MainActivity : Activity() {
         fetchHudWeather()
     }
 
-    /** 今日安排 + 工作汇报：原生提醒（ReminderScheduler.list，只取今天还没触发的）
-     * + 今日晨报（开着且还没到点才算）；没有就推空列表——面板显示空态，6 条假日程不再留。
-     * applySchedule 会同时改写汇报的 done/total 与任务列表。 */
-    private fun pushHudSchedule(reminders: List<Map<String, Any?>>) {
-        val items = JSONArray()
+    /** 今日提醒行（原生提醒 + 今日晨报）：HUD 推送与原生竖屏面板共用同一份 rows。
+     * 只取今天还没触发的提醒；晨报开着且还没到点才算；按时间排序。标题绝不能空
+     * （页面 applySchedule 用 x.title || x.title_en，空标题会变成 undefined，
+     * 页面的 escapeHtml(undefined) 会抛错，整个日程面板都渲染不出来）。 */
+    private fun todayScheduleRows(reminders: List<Map<String, Any?>>): List<Triple<Long, String, String>> {
         val nowMs = System.currentTimeMillis()
         val dayStart = Calendar.getInstance().apply {
             set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
             set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
         }.timeInMillis
         val dayEnd = dayStart + 24L * 60 * 60 * 1000
-        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
         val rows = ArrayList<Triple<Long, String, String>>() // atMs, title, note
         for (r in reminders) {
             val at = (r["atMs"] as? Long) ?: continue
             if (at < dayStart || at >= dayEnd) continue
-            // 标题绝不能空：页面 applySchedule 用 x.title || x.title_en，空标题会变成 undefined，
-            // 页面的 escapeHtml(undefined) 会抛错，整个日程面板都渲染不出来。
             rows.add(Triple(at, (r["title"] as? String).orEmpty().ifEmpty { "提醒" }, (r["body"] as? String).orEmpty()))
         }
         if (ReminderScheduler.isBriefOn(this)) {
@@ -829,7 +830,17 @@ class MainActivity : Activity() {
             }
             if (bc.timeInMillis > nowMs) rows.add(Triple(bc.timeInMillis, "Jarvis 晨报", "每日晨报"))
         }
-        rows.sortedBy { it.first }.forEach { (at, title, note) ->
+        return rows.sortedBy { it.first }
+    }
+
+    /** 今日安排 + 工作汇报：todayScheduleRows 组出来的行推给 HUD；没有就推空列表——
+     * 面板显示空态，6 条假日程不再留。applySchedule 会同时改写汇报的 done/total 与任务列表。 */
+    private fun pushHudSchedule(reminders: List<Map<String, Any?>>) {
+        val items = JSONArray()
+        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val rows = todayScheduleRows(reminders)
+        lastScheduleRows = rows
+        rows.forEach { (at, title, note) ->
             val endCal = Calendar.getInstance().apply { timeInMillis = at + 30L * 60 * 1000 }
             items.put(JSONObject().apply {
                 put("start", fmt.format(Date(at)))
@@ -845,11 +856,15 @@ class MainActivity : Activity() {
         )
     }
 
+    /** Agent 调度的一行：id / 状态（run=在跑，off=待命）/ 中文描述 / 进度。
+     * HUD 推送与原生竖屏面板共用 computeAgentRows()。 */
+    private data class AgentRow(val id: String, val state: String, val desc: String, val progress: Double)
+
     /** Agent 调度：只映射原生真实能读到的状态，读不到的不编。
      * 大脑=对话状态；后台任务=TaskLoop 是否在跑（没跑时报已安排的提醒数）；
      * 学习=记忆系统就绪（没有“正在提取”的实时信号，不装成在跑）；
      * 复盘=无原生对应物，固定 off“暂无”。 */
-    private fun pushHudAgents(pendingCount: Int = ReminderScheduler.list(this).size) {
+    private fun computeAgentRows(pendingCount: Int = ReminderScheduler.list(this).size): List<AgentRow> {
         val state = JarvisAgent.currentState()
         val brainDesc = when (state) {
             "listening" -> "正在聆听"
@@ -861,11 +876,18 @@ class MainActivity : Activity() {
         val jobsDesc = if (jobsRunning) "跨应用任务进行中"
             else if (pendingCount > 0) "$pendingCount 条提醒已安排"
             else "暂无后台任务"
-        val items = JSONArray().apply {
-            put(agentItem("brain", if (state == "idle") "off" else "run", brainDesc, 0.5))
-            put(agentItem("jobs", if (jobsRunning) "run" else "off", jobsDesc, 0.5))
-            put(agentItem("learn", "off", "记忆就绪", 0.0))
-            put(agentItem("review", "off", "暂无", 0.0))
+        return listOf(
+            AgentRow("brain", if (state == "idle") "off" else "run", brainDesc, 0.5),
+            AgentRow("jobs", if (jobsRunning) "run" else "off", jobsDesc, 0.5),
+            AgentRow("learn", "off", "记忆就绪", 0.0),
+            AgentRow("review", "off", "暂无", 0.0)
+        )
+    }
+
+    private fun pushHudAgents(pendingCount: Int = ReminderScheduler.list(this).size) {
+        val items = JSONArray()
+        computeAgentRows(pendingCount).forEach { row ->
+            items.put(agentItem(row.id, row.state, row.desc, row.progress))
         }
         hudWebView.evaluateJavascript(
             "try{if(typeof agentsUpdate==='function')agentsUpdate(" +
@@ -937,13 +959,17 @@ class MainActivity : Activity() {
     }
 
     /** 天气：结构化取数（WeatherTool.fetchStructured，Open-Meteo），城市取原生默认
-     * （JarvisPrefs.getWeatherCity，默认新乡）。到货后单独推 wxUpdate；失败也推一版
-     * 占位（"--" / 未更新），不让上海假天气一直留在面板上。回调在 OkHttp 线程，
+     * （JarvisPrefs.getWeatherCity，默认新乡）。任何方向都取数并缓存到 lastWeatherInfo，
+     * 只在横屏时才推给 HUD（pushHudWeather）；原生竖屏面板用缓存渲染。失败时缓存 null，
+     * 面板显示“天气未更新”，不让上海假天气一直留在面板上。回调在 OkHttp 线程，
      * 推页面必须回主线程。 */
     private fun fetchHudWeather() {
         val city = JarvisPrefs.getWeatherCity(this)
         com.jarvis.app.data.WeatherTool.fetchStructured(city) { info ->
             main.post {
+                lastWeatherInfo = info
+                // 原生竖屏面板开着时，天气到货就刷新一次。
+                if (hudPanelOpen) renderNativePanel()
                 if (!::hudWebView.isInitialized || !hudPageLoaded) return@post
                 if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return@post
                 if (showingSettings) return@post
@@ -1168,6 +1194,145 @@ class MainActivity : Activity() {
         }
         chatScroll = ScrollView(this).apply { addView(chatList) }
         addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
+    }
+
+    // ---------- 原生竖屏面板（下 2/5） ----------
+    // 用户确认的设计：默认是对话框；左滑在下 2/5（对话区）触发，面板就在下 2/5 里；
+    // 上 3/5（HUD 动画）不动、不换。面板里从上往下是 Agent 调度 / 工作汇报 / 天气 / 日程，
+    // buildBottomPanel()（输入行+麦克风行）始终可见，是面板里最下面的对话区，面板里能直接说话。
+    // 四块内容全部用原生已有的数据（computeAgentRows / todayScheduleRows / lastWeatherInfo），
+    // 不读 HUD 的 DOM、不编假数据。样式跟原生对话区一致：深色底、浅色字，不加半透明大面积背景。
+
+    /** 周几（0=周日…6=周六），与 HUD 的 WD 数组一致（hud/js/creator.js）。 */
+    private val WEEK_NAMES = arrayOf("周日", "周一", "周二", "周三", "周四", "周五", "周六")
+
+    private fun buildNativePanel() {
+        panelList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        panelScroll = ScrollView(this).apply {
+            addView(panelList)
+            visibility = View.GONE
+        }
+    }
+
+    /** 原生面板开合的唯一入口：开时 chatScroll 藏、panelScroll 显并渲染一次；
+     * 关时反过来，对话记录滑到底。stageLayout（上 3/5）不做任何改动。 */
+    private fun setNativePanel(open: Boolean) {
+        if (open == hudPanelOpen) return
+        hudPanelOpen = open
+        if (open) {
+            // 没取过天气就触发一次取数（到货后 fetchHudWeather 的回调会再刷新面板）。
+            if (lastWeatherInfo == null) fetchHudWeather()
+            renderNativePanel()
+            chatScroll.visibility = View.GONE
+            panelScroll.visibility = View.VISIBLE
+            panelScroll.post { panelScroll.fullScroll(View.FOCUS_UP) }
+        } else {
+            panelScroll.visibility = View.GONE
+            chatScroll.visibility = View.VISIBLE
+            chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+        }
+        refreshSettingsGear()
+    }
+
+    /** 原生面板四块内容重渲染：每次都现算（Agent 调度读当前状态、日程读当天提醒、
+     * 天气读缓存），所以状态变了、提醒改了、天气到货了，面板都能跟上。 */
+    private fun renderNativePanel() {
+        if (!::panelList.isInitialized) return
+        lastScheduleRows = todayScheduleRows(ReminderScheduler.list(this))
+        panelList.removeAllViews()
+        // Agent 调度
+        panelList.addView(panelSectionTitle("Agent 调度"))
+        computeAgentRows().forEach { row ->
+            panelList.addView(panelLine("${agentRowName(row.id)} · ${row.desc}"))
+        }
+        // 工作汇报：原生提醒不记完成态，done 恒为 0，如实写。
+        panelList.addView(panelSectionTitle("工作汇报"))
+        panelList.addView(panelLine("今日 ${lastScheduleRows.size} 项 · 已完成 0 项"))
+        reportTaskRows(lastScheduleRows).take(4).forEach { (title, word) ->
+            panelList.addView(panelLine("$title · $word"))
+        }
+        // 天气
+        panelList.addView(panelSectionTitle("天气"))
+        val info = lastWeatherInfo
+        if (info == null) {
+            panelList.addView(panelLine("天气未更新"))
+        } else {
+            panelList.addView(panelLine("${info.city} ${info.temp}° · ${info.now} · 湿度 ${info.humidity}%"))
+            info.days.take(3).forEach { d ->
+                panelList.addView(panelLine("${WEEK_NAMES[d.week % 7]} ${d.day} ${d.low}°/${d.high}°"))
+            }
+        }
+        // 日程
+        panelList.addView(panelSectionTitle("日程"))
+        if (lastScheduleRows.isEmpty()) {
+            panelList.addView(panelLine("今天还没有安排"))
+        } else {
+            renderScheduleRows(lastScheduleRows)
+        }
+    }
+
+    /** 工作汇报的任务行：标题 + 状态词。状态词按 panels.js 里 applySchedule 的 word()
+     * 办法：进行中 / 待确认 / 未来显示开始时间；原生提醒不记完成态，没有“完成”。 */
+    private fun reportTaskRows(rows: List<Triple<Long, String, String>>): List<Pair<String, String>> {
+        val nowMs = System.currentTimeMillis()
+        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+        return rows.map { (at, title, _) ->
+            val word = when {
+                nowMs >= at + 30L * 60 * 1000 -> "待确认"
+                nowMs >= at -> "进行中"
+                else -> fmt.format(Date(at))
+            }
+            Pair(title, word)
+        }
+    }
+
+    /** 日程行：时间段 + 标题，备注另起一行（灰字）；按 panels.js 里 schedInfo 的办法标出
+     * 当前进行中与下一项（每项 30 分钟，pushHudSchedule 里 end = start + 30 分钟）。 */
+    private fun renderScheduleRows(rows: List<Triple<Long, String, String>>) {
+        val nowMs = System.currentTimeMillis()
+        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val curIdx = rows.indexOfFirst { (at, _, _) -> nowMs >= at && nowMs < at + 30L * 60 * 1000 }
+        val nextIdx = rows.indexOfFirst { (at, _, _) -> at > nowMs }
+        rows.forEachIndexed { i, (at, title, note) ->
+            val mark = when (i) {
+                curIdx -> " · 进行中"
+                nextIdx -> " · 下一项"
+                else -> ""
+            }
+            panelList.addView(panelLine("${fmt.format(Date(at))}–${fmt.format(Date(at + 30L * 60 * 1000))} $title$mark"))
+            if (note.isNotEmpty()) panelList.addView(panelNoteLine(note))
+        }
+    }
+
+    private fun panelSectionTitle(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(0xB3FFFFFF.toInt())
+        setPadding(0, dp(12), 0, dp(4))
+    }
+
+    private fun panelLine(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 14f
+        setTextColor(HudPalette.ICE)
+        setPadding(0, dp(3), 0, dp(3))
+    }
+
+    private fun panelNoteLine(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 12f
+        setTextColor(0x99FFFFFF.toInt())
+        setPadding(0, 0, 0, dp(3))
+    }
+
+    private fun agentRowName(id: String): String = when (id) {
+        "brain" -> "大脑"
+        "jobs" -> "后台任务"
+        "learn" -> "学习"
+        else -> "复盘"
     }
 
     private fun addBubble(text: String, mine: Boolean) {
