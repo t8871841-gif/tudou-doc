@@ -70,7 +70,7 @@ import java.util.Locale
 
 /**
  * 批一：主页复刻 Flutter 版 `home_screen.dart` 的 HUD 布局——深夜蓝对角渐变背景 + 点阵/极光层
- * + 中央呼吸光球舞台 + 对话气泡流 + 底部麦克风/输入区。自检与设置挪到二级页（点舞台左上角
+ * + 中央呼吸光球舞台 + 对话气泡流 + 底部麦克风/输入区。自检与设置挪到二级页（点屏幕右下角
  * 齿轮图标切换），内容和二期/三期交付时一样，没有改动。
  *
  * 没有照搬的部分（见 V3_CHANGES.md「批一」一节的完整偏差说明）：开机页呼吸 Logo 动画、
@@ -109,6 +109,8 @@ class MainActivity : Activity() {
     private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
+    // 竖屏第 4 批：设置齿轮从顶栏移到屏幕右下角（底部麦克风行最右端），只在竖屏对话框态显示。
+    private lateinit var settingsGearButton: ImageButton
     private lateinit var memoryListContainer: LinearLayout
     private lateinit var skillListContainer: LinearLayout
     private lateinit var localStatusView: TextView
@@ -184,8 +186,8 @@ class MainActivity : Activity() {
         // 批八：原先这里还盖着一层全屏黑色半透明渐变膜（上 65% 黑→中透明→下 80% 黑），
         // 整个界面发朦就是它——按用户要求撤掉；背景的光晕+点阵（上一层）与底部玻璃框保留不动。
 
+        // 竖屏第 4 批：顶栏已撤（齿轮移到屏幕右下角），内容列只剩 homePanel（舞台 + 对话 + 输入行）。
         contentView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        contentView.addView(buildTopBar())
 
         homePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -224,27 +226,6 @@ class MainActivity : Activity() {
         handleAssistIntent(intent)
         // 批二：常驻与否现在是"设置里记住的选择"，不再是每次开 App 都无条件偷偷启动。
         if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
-    }
-
-    // ---------- 顶栏：只留齿轮设置图标（2026-10-24 用户定：徽章移居中，SYSTEM ACTIVE 整行删除） ----------
-
-    private fun buildTopBar(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(20), dp(14), dp(20), 0)
-        val gear = ImageButton(this@MainActivity).apply {
-            setImageResource(android.R.drawable.ic_menu_manage)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0x0DFFFFFF)
-                setStroke(dp(1), 0x29FFFFFF)
-            }
-            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            setOnClickListener { toggleSettings() }
-            contentDescription = "设置"
-        }
-        addView(gear, LinearLayout.LayoutParams(dp(38), dp(38)))
     }
 
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
@@ -383,6 +364,7 @@ class MainActivity : Activity() {
         if (landscape) {
             moveHudWebViewToRoot()
             contentView.visibility = View.GONE
+            refreshSettingsGear()
             hudWebView.visibility = View.VISIBLE
             hudWebView.onResume()
             hudLastPushedState = null
@@ -399,7 +381,16 @@ class MainActivity : Activity() {
             hudWebView.onResume()
             contentView.visibility = View.VISIBLE
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            refreshSettingsGear()
         }
+    }
+
+    /** 竖屏第 4 批：设置齿轮只在竖屏对话框态显示——左滑进 HUD 面板时藏起，横屏也藏起。
+     * 设置页打开时 contentView 整个藏起，齿轮自然不可见，这里不用另判 showingSettings。 */
+    private fun refreshSettingsGear() {
+        if (!::settingsGearButton.isInitialized) return
+        val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        settingsGearButton.visibility = if (portrait && !hudPanelOpen) View.VISIBLE else View.GONE
     }
 
     /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 3/5），静图藏起来，唤醒词胶囊浮在 WebView 上面。 */
@@ -467,9 +458,11 @@ class MainActivity : Activity() {
                     if (!::hudWebView.isInitialized) return
                     if (swipeZone == SWIPE_ZONE_DIALOG && dx < 0 && !hudPanelOpen) {
                         hudPanelOpen = true
+                        refreshSettingsGear()
                         hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(true)", null)
                     } else if (swipeZone == SWIPE_ZONE_PANEL && dx > 0 && hudPanelOpen) {
                         hudPanelOpen = false
+                        refreshSettingsGear()
                         hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(false)", null)
                     }
                 }
@@ -480,7 +473,8 @@ class MainActivity : Activity() {
 
     /** 竖屏第 3 批修正：按触点的屏幕坐标判定手势起点在哪个分区。面板区是 stageLayout（上 3/5，
      * 面板打开时 WebView 就在这里）；对话框区是 chatScroll 顶到 homePanel 底（下 2/5，含底部
-     * 输入行——它未存字段，是 homePanel 最后一个孩子、紧贴 chatScroll 下方）。顶栏不在任何分区里。 */
+     * 输入行——它未存字段，是 homePanel 最后一个孩子、紧贴 chatScroll 下方）。第 4 批撤掉顶栏后，
+     * 两个分区拼满整个 homePanel。 */
     private fun swipeZoneAt(rawX: Float, rawY: Float): Int {
         if (!::stageLayout.isInitialized || !::chatScroll.isInitialized || !::homePanel.isInitialized) return SWIPE_ZONE_NONE
         val stage = screenBounds(stageLayout)
@@ -1297,9 +1291,17 @@ class MainActivity : Activity() {
         }
         addView(inputRow)
 
+        // 竖屏第 4 批：设置齿轮移到这里——麦克风行最右端（屏幕右下角），与顶栏齿轮同一个入口（toggleSettings）。
+        // 三个主按钮放进一个占满剩余宽度的居中容器，齿轮固定在行尾；输入行在上面一行，发送按钮不在同一行，
+        // 互不重叠；齿轮在底部面板里，不盖聊天记录。
         val micRow = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val micCenter = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         muteButton = ImageButton(this@MainActivity).apply {
             setImageResource(if (JarvisPrefs.isMuted(this@MainActivity)) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
@@ -1318,7 +1320,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
         muteCol.addView(muteButton, LinearLayout.LayoutParams(dp(44), dp(40)))
-        micRow.addView(muteCol)
+        micCenter.addView(muteCol)
 
         val micButton = View(this@MainActivity).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF00F0FF.toInt(), 0xFF7000FF.toInt())).apply {
@@ -1328,7 +1330,7 @@ class MainActivity : Activity() {
                 JarvisAgent.triggerListenFromAssist(this@MainActivity)
             }
         }
-        micRow.addView(micButton, LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginStart = dp(20); marginEnd = dp(20) })
+        micCenter.addView(micButton, LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginStart = dp(20); marginEnd = dp(20) })
 
         keyboardToggle = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_edit)
@@ -1339,7 +1341,22 @@ class MainActivity : Activity() {
                 if (showInput) chatInput.requestFocus()
             }
         }
-        micRow.addView(keyboardToggle, LinearLayout.LayoutParams(dp(44), dp(44)))
+        micCenter.addView(keyboardToggle, LinearLayout.LayoutParams(dp(44), dp(44)))
+        micRow.addView(micCenter)
+
+        settingsGearButton = ImageButton(this@MainActivity).apply {
+            setImageResource(android.R.drawable.ic_menu_manage)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x0DFFFFFF)
+                setStroke(dp(1), 0x29FFFFFF)
+            }
+            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setOnClickListener { toggleSettings() }
+            contentDescription = "设置"
+        }
+        micRow.addView(settingsGearButton, LinearLayout.LayoutParams(dp(48), dp(48)))
         addView(micRow)
 
         // 竖屏第 1 批：下面的「点击麦克风开始语音交互」提示字已删。
