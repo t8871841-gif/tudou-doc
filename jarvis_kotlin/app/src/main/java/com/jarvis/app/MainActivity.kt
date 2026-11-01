@@ -1,5 +1,7 @@
 package com.jarvis.app
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
@@ -13,6 +15,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.util.Base64
 import android.util.Log
@@ -29,6 +32,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.LinearInterpolator
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -112,6 +116,18 @@ class MainActivity : Activity() {
     private lateinit var keyboardToggle: ImageButton
     // 竖屏第 4 批：设置齿轮从顶栏移到屏幕右下角（底部麦克风行最右端），只在竖屏对话框态显示。
     private lateinit var settingsGearButton: ImageButton
+    // 麦克风动效（默认对话框）：待机无动效；聆听脉冲环、思考旋转弧、回复均衡条。
+    // 状态源是 JarvisAgent.onStateChanged（idle/listening/thinking/speaking），见 onAgentStateChanged。
+    private lateinit var micButton: View
+    private lateinit var micFxWrap: FrameLayout
+    private lateinit var micPulseRing1: View
+    private lateinit var micPulseRing2: View
+    private lateinit var micArcView: View
+    private lateinit var micEqRow: LinearLayout
+    private var micEqBars: List<View> = emptyList()
+    private var micPulseAnimator: ValueAnimator? = null
+    private var micArcAnimator: ObjectAnimator? = null
+    private val micEqAnimators = mutableListOf<ObjectAnimator>()
     private lateinit var memoryListContainer: LinearLayout
     private lateinit var skillListContainer: LinearLayout
     private lateinit var localStatusView: TextView
@@ -293,6 +309,86 @@ class MainActivity : Activity() {
         // 主界面已无状态文字（舞台与 SYSTEM ACTIVE 行均按用户要求删除），
         // 状态只靠徽章/悬浮球颜色与动效表达；这里只刷新唤醒词胶囊。
         refreshWakeChip()
+        updateMicFx(state)
+    }
+
+    /** 麦克风动效：按 JarvisAgent 状态切动画（idle 无动效；listening 脉冲环；thinking 旋转弧；speaking 均衡条）。
+     * 先停掉当前所有动效再起新的；回 idle 时只停不停留。onAgentStateChanged 里调用（主线程）。 */
+    private fun updateMicFx(state: String) {
+        if (!::micFxWrap.isInitialized) return
+        stopMicFx()
+        when (state) {
+            "listening" -> {
+                micPulseRing1.visibility = View.VISIBLE
+                micPulseRing2.visibility = View.VISIBLE
+                micPulseAnimator?.start()
+            }
+            "thinking" -> {
+                micArcView.visibility = View.VISIBLE
+                micArcAnimator?.start()
+            }
+            "speaking" -> {
+                micEqRow.visibility = View.VISIBLE
+                micEqAnimators.forEach { it.start() }
+            }
+            // "idle" 及其他：无动效，恢复静态。
+        }
+    }
+
+    /** 停掉麦克风全部动效并恢复静态：取消 Animator、藏起动效层、复位各属性。 */
+    private fun stopMicFx() {
+        micPulseAnimator?.cancel()
+        micArcAnimator?.cancel()
+        micEqAnimators.forEach { it.cancel() }
+        if (!::micFxWrap.isInitialized) return
+        micPulseRing1.visibility = View.GONE
+        micPulseRing2.visibility = View.GONE
+        micArcView.visibility = View.GONE
+        micEqRow.visibility = View.GONE
+        micPulseRing1.scaleX = 1f
+        micPulseRing1.scaleY = 1f
+        micPulseRing1.alpha = 0f
+        micPulseRing2.scaleX = 1f
+        micPulseRing2.scaleY = 1f
+        micPulseRing2.alpha = 0f
+        micArcView.rotation = 0f
+        micEqBars.forEach { it.scaleY = 1f }
+    }
+
+    /** 脉冲环的一帧：从麦克风大小向外扩到 1.45 倍、同时渐隐。 */
+    private fun setPulseRing(ring: View, p: Float) {
+        val s = 1f + 0.45f * p
+        ring.scaleX = s
+        ring.scaleY = s
+        ring.alpha = 0.9f * (1f - p)
+    }
+
+    /** 脉冲环的描边：透明底、2dp 青色圆环。 */
+    private fun makeMicRingDrawable(): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(Color.TRANSPARENT)
+        setStroke(dp(2), 0xFF00F0FF.toInt())
+    }
+
+    /** 思考态的旋转弧：270° 圆弧，3dp 青色描边，圆角端点；用 View.onDraw 直接画，不另建 Drawable 类。 */
+    private fun makeMicArcView(): View = object : View(this) {
+        init {
+            setWillNotDraw(false)
+        }
+
+        private val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = 0xFF00F0FF.toInt()
+            strokeWidth = dp(3).toFloat()
+            strokeCap = Paint.Cap.ROUND
+        }
+        private val arcRect = RectF()
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val inset = arcPaint.strokeWidth / 2f + dp(1).toFloat()
+            arcRect.set(inset, inset, width - inset, height - inset)
+            canvas.drawArc(arcRect, -90f, 270f, false, arcPaint)
+        }
     }
 
     // ---------- 彻底融合第 1 步：HUD WebView 常驻 + 横竖屏切换 ----------
@@ -1327,7 +1423,12 @@ class MainActivity : Activity() {
         muteCol.addView(muteButton, LinearLayout.LayoutParams(dp(44), dp(40)))
         micCenter.addView(muteCol)
 
-        val micButton = View(this@MainActivity).apply {
+        // 麦克风动效：64dp 圆钮本身不动，外面套一个 96dp 的框（动效圈有地方伸展），
+        // 脉冲环/旋转弧/均衡条都居中叠在框里，平时 GONE，只在对应状态才显示。
+        micFxWrap = FrameLayout(this@MainActivity).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(96), dp(96)).apply { marginStart = dp(20); marginEnd = dp(20) }
+        }
+        micButton = View(this@MainActivity).apply {
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF00F0FF.toInt(), 0xFF7000FF.toInt())).apply {
                 shape = GradientDrawable.OVAL
             }
@@ -1335,7 +1436,70 @@ class MainActivity : Activity() {
                 JarvisAgent.triggerListenFromAssist(this@MainActivity)
             }
         }
-        micCenter.addView(micButton, LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginStart = dp(20); marginEnd = dp(20) })
+        micFxWrap.addView(micButton, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        micPulseRing1 = View(this@MainActivity).apply {
+            background = makeMicRingDrawable()
+            visibility = View.GONE
+        }
+        micFxWrap.addView(micPulseRing1, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        micPulseRing2 = View(this@MainActivity).apply {
+            background = makeMicRingDrawable()
+            visibility = View.GONE
+        }
+        micFxWrap.addView(micPulseRing2, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        micArcView = makeMicArcView().apply { visibility = View.GONE }
+        micFxWrap.addView(micArcView, FrameLayout.LayoutParams(dp(80), dp(80), Gravity.CENTER))
+        micEqRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        val bars = mutableListOf<View>()
+        repeat(5) {
+            val bar = View(this@MainActivity).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(2).toFloat()
+                    setColor(0xE6FFFFFF.toInt())
+                }
+            }
+            micEqRow.addView(bar, LinearLayout.LayoutParams(dp(4), dp(20)).apply {
+                marginStart = dp(2); marginEnd = dp(2)
+            })
+            bars.add(bar)
+        }
+        micEqBars = bars
+        micFxWrap.addView(micEqRow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        micCenter.addView(micFxWrap)
+        // 动效的 Animator 只建一次，状态切换时只 start/cancel。
+        // 脉冲环（聆听）：一个 ValueAnimator 驱动两圈涟漪，第二圈错开半个周期。
+        micPulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 1400
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            addUpdateListener { anim ->
+                val t = anim.animatedValue as Float
+                setPulseRing(micPulseRing1, t)
+                setPulseRing(micPulseRing2, (t + 0.5f) % 1f)
+            }
+        }
+        // 旋转弧（思考）：整圈 360° 匀速转。
+        micArcAnimator = ObjectAnimator.ofFloat(micArcView, "rotation", 0f, 360f).apply {
+            duration = 1200
+            repeatCount = ObjectAnimator.INFINITE
+            interpolator = LinearInterpolator()
+        }
+        // 均衡条（回复）：每根条独立的 scaleY 往返动画，时长与起延错开。
+        micEqBars.forEachIndexed { i, bar ->
+            ObjectAnimator.ofFloat(bar, "scaleY", 0.35f, 1f).apply {
+                duration = 320L + i * 60L
+                startDelay = (i * 90).toLong()
+                repeatCount = ObjectAnimator.INFINITE
+                repeatMode = ObjectAnimator.REVERSE
+                interpolator = LinearInterpolator()
+                micEqAnimators.add(this)
+            }
+        }
 
         keyboardToggle = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_edit)
@@ -2512,6 +2676,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        stopMicFx()
         if (::hudWebView.isInitialized) {
             // WebView 必须从父布局摘掉再 destroy，否则下次打开可能白屏。
             (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
