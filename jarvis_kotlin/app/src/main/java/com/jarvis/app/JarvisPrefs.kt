@@ -306,4 +306,14 @@ object JarvisPrefs {
     fun setPortraitBgUri(ctx: Context, v: String) {
         p(ctx).edit().putString(KEY_PORTRAIT_BG_URI, v).apply()
     }
+
+    // ---------- 竖屏舞台动态/静态 ----------
+    // 竖屏舞台用动画还是静态图；默认 false=动画。静态时竖屏舞台显示静图
+    // （自定义 URI 或默认静帧），WebView 藏起暂停以省电；横屏不受影响，永远是 WebView 全屏。
+    private const val KEY_PORTRAIT_USE_STATIC = "portrait_use_static"
+
+    fun isPortraitUseStatic(ctx: Context): Boolean = p(ctx).getBoolean(KEY_PORTRAIT_USE_STATIC, false)
+    fun setPortraitUseStatic(ctx: Context, v: Boolean) {
+        p(ctx).edit().putBoolean(KEY_PORTRAIT_USE_STATIC, v).apply()
+    }
 }

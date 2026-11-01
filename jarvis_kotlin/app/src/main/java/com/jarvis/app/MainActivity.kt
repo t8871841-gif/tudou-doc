@@ -143,6 +143,14 @@ class MainActivity : Activity() {
     private lateinit var hudSkinStatusText: TextView
     private var hudSkinId = "jarvis"
 
+    // 竖屏舞台动态/静态（设置「主界面」）：模式状态行 + 静图状态行，字段化以便
+    // onActivityResult 与 openSettingsPage 都能刷新（设置页只建一次，状态行不跟着重建）。
+    private lateinit var stageModeStatusText: TextView
+    private lateinit var portraitBgStatusText: TextView
+    // 长期记忆条数（原生面板 Agent 调度 LEARNING 行的真实信号），null=还没取到。
+    private var lastMemoryCount: Int? = null
+    private var memoryCountLoading = false
+
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
     private var showingSettings = false
@@ -448,10 +456,8 @@ class MainActivity : Activity() {
             // 横屏看 HUD 时不熄屏；回竖屏即恢复。
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
-            // 竖屏第 1 批：WebView 进舞台（上 2/3）继续渲染，不再藏起；对话框在下 1/3。
-            moveHudWebViewToStage()
-            hudWebView.visibility = View.VISIBLE
-            hudWebView.onResume()
+            // 竖屏：舞台按动态/静态偏好摆（动画=WebView 进舞台，静态=WebView 藏起暂停、静图显示）；对话框在下 1/3。
+            applyPortraitStage()
             contentView.visibility = View.VISIBLE
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             refreshSettingsGear()
@@ -485,6 +491,56 @@ class MainActivity : Activity() {
         }
         stageImageView?.visibility = View.VISIBLE
         settingsScroll.bringToFront()
+    }
+
+    /** 竖屏舞台动态/静态：动画=WebView 进舞台（静图藏），静态=WebView 留在舞台里藏起暂停
+     * （省电）、静图显示。只管舞台本身（WebView 与静图的显隐/归属），不管 contentView
+     * 与设置页；横屏不调这里。静态模式下四个演示快捷键跟着 WebView 一起没了，是对的
+     * （演示要动画才能播）；切回动画用设置里的切换，齿轮在底部常驻，随时能进设置。 */
+    private fun applyPortraitStage() {
+        if (!::hudWebView.isInitialized || !::stageLayout.isInitialized) return
+        if (JarvisPrefs.isPortraitUseStatic(this)) {
+            if (hudWebView.parent !== stageLayout) {
+                (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
+                stageLayout.addView(hudWebView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            }
+            hudWebView.visibility = View.GONE
+            hudWebView.onPause()
+            refreshStageImage()
+            stageImageView?.visibility = View.VISIBLE
+        } else {
+            moveHudWebViewToStage()
+            hudWebView.visibility = View.VISIBLE
+            hudWebView.onResume()
+        }
+    }
+
+    /** 竖屏舞台当前模式状态行：动画 / 静态图（+用的是默认静帧还是你选的图）。 */
+    private fun refreshStageModeStatus() {
+        if (!::stageModeStatusText.isInitialized) return
+        stageModeStatusText.text = if (JarvisPrefs.isPortraitUseStatic(this)) {
+            if (JarvisPrefs.getPortraitBgUri(this).isBlank()) "竖屏舞台：静态图（默认静帧）" else "竖屏舞台：静态图（你选的图）"
+        } else {
+            "竖屏舞台：动画"
+        }
+    }
+
+    /** 竖屏静图状态行：现在用的是默认静帧还是你选的图。 */
+    private fun refreshPortraitBgStatus() {
+        if (!::portraitBgStatusText.isInitialized) return
+        portraitBgStatusText.text = if (JarvisPrefs.getPortraitBgUri(this).isBlank()) {
+            "竖屏舞台现在用默认图（HUD 默认皮肤静帧）"
+        } else {
+            "竖屏舞台现在用你选的图"
+        }
+    }
+
+    /** 竖屏舞台动态/静态切换的唯一入口：写偏好、刷状态行、立即改舞台。
+     * 正在设置页里时不直接碰 WebView（设置页关掉时 applyOrientationLayout 会统一应用）。 */
+    private fun setPortraitStageMode(useStatic: Boolean) {
+        JarvisPrefs.setPortraitUseStatic(this, useStatic)
+        refreshStageModeStatus()
+        if (!showingSettings) applyPortraitStage()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -821,8 +877,9 @@ class MainActivity : Activity() {
 
     /** Agent 调度：只映射原生真实能读到的状态，读不到的不编。
      * 大脑=对话状态；后台任务=TaskLoop 是否在跑（没跑时报已安排的提醒数）；
-     * 学习=记忆系统就绪（没有“正在提取”的实时信号，不装成在跑）；
-     * 复盘=无原生对应物，固定 off“暂无”。 */
+     * 学习=长期记忆已记条数（没有“正在提取”的实时信号，所以用条数这个真值；
+     * 还没取到时显示“记忆就绪”）；复盘=无原生对应物，固定 off“暂无”，
+     * 但行要点上去能要复盘建议（见 agentRowView 的点击）。 */
     private fun computeAgentRows(pendingCount: Int = ReminderScheduler.list(this).size): List<AgentRow> {
         val state = JarvisAgent.currentState()
         val brainDesc = when (state) {
@@ -835,12 +892,32 @@ class MainActivity : Activity() {
         val jobsDesc = if (jobsRunning) "跨应用任务进行中"
             else if (pendingCount > 0) "$pendingCount 条提醒已安排"
             else "暂无后台任务"
+        val learnDesc = lastMemoryCount?.let { "已记 $it 条" } ?: "记忆就绪"
         return listOf(
             AgentRow("brain", if (state == "idle") "off" else "run", brainDesc, 0.5),
             AgentRow("jobs", if (jobsRunning) "run" else "off", jobsDesc, 0.5),
-            AgentRow("learn", "off", "记忆就绪", 0.0),
+            AgentRow("learn", "off", learnDesc, 0.0),
             AgentRow("review", "off", "暂无", 0.0)
         )
+    }
+
+    /** 取长期记忆条数（LEARNING 行的真实信号）：面板打开时取一次，到货后
+     * 面板还开着就重渲染一次；取不到就留 null，LEARNING 行仍显示“记忆就绪”。 */
+    private fun refreshMemoryCount() {
+        if (memoryCountLoading) return
+        memoryCountLoading = true
+        uiScope.launch {
+            val n = try {
+                MemoryService.getAllMemories(this@MainActivity).size
+            } catch (_: Exception) {
+                null
+            }
+            memoryCountLoading = false
+            if (n != null && n != lastMemoryCount) {
+                lastMemoryCount = n
+                if (hudPanelOpen) renderNativePanel()
+            }
+        }
     }
 
     private fun pushHudAgents(pendingCount: Int = ReminderScheduler.list(this).size) {
@@ -1191,6 +1268,8 @@ class MainActivity : Activity() {
         if (open) {
             // 没取过天气就触发一次取数（到货后 fetchHudWeather 的回调会再刷新面板）。
             if (lastWeatherInfo == null) fetchHudWeather()
+            // LEARNING 行的记忆条数每次打开面板都重新取一次，保持新鲜。
+            refreshMemoryCount()
             renderNativePanel()
             chatScroll.visibility = View.GONE
             panelScroll.visibility = View.VISIBLE
@@ -1379,6 +1458,8 @@ class MainActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(6), 0, dp(6))
+            // 行要点上去有真行为（复用 HUD 的 agentClick），不是纯展示。
+            setOnClickListener { onAgentRowClick(row.id) }
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -1438,6 +1519,23 @@ class MainActivity : Activity() {
                     }
                 })
             }
+        }
+    }
+
+    /** 原生面板 Agent 调度行点击：复用 HUD 的 agentClick（真行为——BRAIN 开大脑窗口，
+     * LEARNING 开能力视图，JOBS/REVIEW 发问句走对话）。WebView 可用（已初始化、页面已加载、
+     * 竖屏非静态模式）时走 HUD；不可用时 jobs/review 退回走原生 submitText 发同样那句话，
+     * brain/learn 没有原生等价物，toast 提示。 */
+    private fun onAgentRowClick(id: String) {
+        val webOk = ::hudWebView.isInitialized && hudPageLoaded && !JarvisPrefs.isPortraitUseStatic(this)
+        if (webOk) {
+            hudWebView.evaluateJavascript("if(typeof agentClick==='function')agentClick('$id')", null)
+            return
+        }
+        when (id) {
+            "jobs" -> submitText("后台任务进行得怎么样了？")
+            "review" -> submitText("昨天的复盘有什么建议？")
+            else -> toast("HUD 还没加载好，稍后再点")
         }
     }
 
@@ -2007,7 +2105,11 @@ class MainActivity : Activity() {
         settingsListPanel.visibility = View.GONE
         settingsPageHost.visibility = View.VISIBLE
         settingsScroll.scrollTo(0, 0)
-        if (title == "主界面") refreshHudSkinStatus()
+        if (title == "主界面") {
+            refreshHudSkinStatus()
+            refreshPortraitBgStatus()
+            refreshStageModeStatus()
+        }
     }
 
     private fun closeSettingsPage() {
@@ -2428,18 +2530,11 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "主界面"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        val statusText = TextView(this).apply {
+        portraitBgStatusText = TextView(this).apply {
             textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
         }
-        fun refreshStatus() {
-            statusText.text = if (JarvisPrefs.getPortraitBgUri(this).isBlank()) {
-                "竖屏舞台现在用默认图（HUD 默认皮肤静帧）"
-            } else {
-                "竖屏舞台现在用你选的图"
-            }
-        }
-        refreshStatus()
-        root.addView(statusText)
+        refreshPortraitBgStatus()
+        root.addView(portraitBgStatusText)
         root.addView(btn("从图库选一张竖屏背景图") {
             try {
                 val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -2456,8 +2551,23 @@ class MainActivity : Activity() {
         root.addView(btn("恢复默认图") {
             JarvisPrefs.setPortraitBgUri(this, "")
             refreshStageImage()
-            refreshStatus()
+            refreshPortraitBgStatus()
+            refreshStageModeStatus()
             toast("已恢复默认图")
+        })
+        // 竖屏舞台动态/静态切换：当前模式 + 动画/静态图两项，点中即切换并立即生效。
+        stageModeStatusText = TextView(this).apply {
+            textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        }
+        refreshStageModeStatus()
+        root.addView(stageModeStatusText)
+        root.addView(btn("竖屏舞台用动画") {
+            setPortraitStageMode(false)
+            toast("竖屏舞台已切到动画")
+        })
+        root.addView(btn("竖屏舞台用静态图") {
+            setPortraitStageMode(true)
+            toast("竖屏舞台已切到静态图")
         })
         hudSkinStatusText = TextView(this).apply {
             text = "HUD 皮肤：默认"
@@ -2824,6 +2934,9 @@ class MainActivity : Activity() {
                     // 拿不到持久授权也先用着：本次能显示，下次打开可能回默认图。
                 }
                 JarvisPrefs.setPortraitBgUri(this, uri.toString())
+                refreshPortraitBgStatus()
+                // 选了图就自动切到静态图，让用户马上看到效果（设置页关掉就看到变化）。
+                setPortraitStageMode(true)
                 refreshStageImage()
                 toast("竖屏背景图已换")
             }
