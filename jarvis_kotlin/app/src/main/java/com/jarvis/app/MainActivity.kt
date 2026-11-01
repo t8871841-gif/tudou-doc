@@ -90,7 +90,7 @@ class MainActivity : Activity() {
         const val REQ_PROJECTION = 5152
         // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
         const val REQ_PICK_PORTRAIT_BG = 5153
-        // 竖屏面板重做：手势只认对话框区（下 2/5）；上 3/5（HUD 动画）不再参与手势。
+        // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
     }
@@ -101,13 +101,13 @@ class MainActivity : Activity() {
     private var orbSwitchUpdating = false
     private lateinit var homePanel: LinearLayout
     private lateinit var contentView: LinearLayout
-    // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 3/5）。
+    // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 2/3）。
     private lateinit var rootLayout: FrameLayout
     private lateinit var stageLayout: FrameLayout
     private lateinit var settingsScroll: ScrollView
     private lateinit var chatList: LinearLayout
     private lateinit var chatScroll: ScrollView
-    // 原生竖屏面板（下 2/5）：panelScroll 与 chatScroll 同占权重 2 的位置，二选一显示。
+    // 原生竖屏面板（下 1/3）：panelScroll 与 chatScroll 同占权重 1 的位置，二选一显示。
     private lateinit var panelList: LinearLayout
     private lateinit var panelScroll: ScrollView
     private lateinit var chatInput: EditText
@@ -147,7 +147,7 @@ class MainActivity : Activity() {
     private val uiScope = MainScope()
     private var showingSettings = false
     // 竖屏面板重做：左滑进原生面板、右滑回对话框的手势跟踪（只看不拦，见 dispatchTouchEvent）。
-    // 只认对话框区（下 2/5）里的手势——上 3/5（HUD 动画）不再参与手势；
+    // 只认对话框区（下 1/3）里的手势——上 2/3（HUD 动画）不再参与手势；
     // 面板开合状态由原生布尔值跟踪（setNativePanel 是唯一改它的地方，所以不会跑偏）。
     private var swipeStartX = 0f
     private var swipeStartY = 0f
@@ -161,7 +161,7 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
 
     // 彻底融合第 1 步：HUD WebView 从 HudActivity 搬进来，常驻只建一次；
-    // 竖屏第 1 批：竖屏进舞台（上 3/5）继续渲染，横屏回根布局全屏显示。
+    // 竖屏第 1 批：竖屏进舞台（上 2/3）继续渲染，横屏回根布局全屏显示。
     // 第 2 步（桥接）：页面说话/打字改走原生 HudBridge；状态改 onStateChanged 回调推送，
     // 500ms 轮询已删。面板假数据不动，等第 3 步接真数据。
     private lateinit var hudWebView: WebView
@@ -222,11 +222,11 @@ class MainActivity : Activity() {
         stageLayout = buildStage()
         homePanel.addView(stageLayout)
         buildChatPanel()
-        homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
-        // 原生竖屏面板重做：panelScroll 与 chatScroll 同占下 2/5（权重 2），初始藏起；
-        // 开面板时两者互换显示，stageLayout（上 3/5）不动，buildBottomPanel() 始终可见。
+        homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        // 原生竖屏面板重做：panelScroll 与 chatScroll 同占下 1/3（权重 1），初始藏起；
+        // 开面板时两者互换显示，stageLayout（上 2/3）不动，buildBottomPanel() 始终可见。
         buildNativePanel()
-        homePanel.addView(panelScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
+        homePanel.addView(panelScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         homePanel.addView(buildBottomPanel())
         contentView.addView(homePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -261,12 +261,12 @@ class MainActivity : Activity() {
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
     // 银河动画已封存：舞台不再建 GalaxyHoloStageView，改成一张静图（居中裁剪），
     // 默认图是 HUD 默认皮肤静帧，设置「主界面」里可从图库自选；唤醒词胶囊已撤（开关在设置里），
-    // 舞台上 3/5 只留核心动画与四个演示快捷键。
-    // 竖屏第 1 批：舞台改占上部 3/5（权重 3:2），里面放 HUD WebView（动画），静图藏起来；对话在下 2/5 ----------
+    // 舞台上 2/3 只留核心动画与四个演示快捷键。
+    // 竖屏第 1 批：舞台改占上部 2/3（权重 2:1），里面放 HUD WebView（动画），静图藏起来；对话在下 1/3 ----------
 
     private fun buildStage(): FrameLayout {
         val stage = FrameLayout(this)
-        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 3f)
+        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f)
         stageImageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
         }.also {
@@ -366,7 +366,7 @@ class MainActivity : Activity() {
     // ---------- 彻底融合第 1 步：HUD WebView 常驻 + 横竖屏切换 ----------
 
     /** HUD WebView 从 HudActivity 原样搬进来：WebViewAssetLoader 喂 assets、
-     * onPageFinished 注入演示菜单、500ms 状态轮询；只建一次，竖屏在舞台里（上 3/5）、横屏回根布局全屏。 */
+     * onPageFinished 注入演示菜单、500ms 状态轮询；只建一次，竖屏在舞台里（上 2/3）、横屏回根布局全屏。 */
     private fun setupHudWebView(parent: FrameLayout) {
         hudAssetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -422,7 +422,7 @@ class MainActivity : Activity() {
         settingsScroll.bringToFront()
     }
 
-    /** 按当前方向摆两套内容：竖屏 HUD 在舞台（上 3/5）+ 原生对话（下 2/5）、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。
+    /** 按当前方向摆两套内容：竖屏 HUD 在舞台（上 2/3）+ 原生对话（下 1/3）、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。
      * 第 2 步：500ms 轮询已删；切到横屏时把当前状态与模型配置再推一次（竖屏期间状态变过，
      * hudLastPushedState 已记下最新值，先清掉再推，否则去重会吞掉这次同步）。 */
     private fun applyOrientationLayout() {
@@ -448,7 +448,7 @@ class MainActivity : Activity() {
             // 横屏看 HUD 时不熄屏；回竖屏即恢复。
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
-            // 竖屏第 1 批：WebView 进舞台（上 3/5）继续渲染，不再藏起；对话框在下 2/5。
+            // 竖屏第 1 批：WebView 进舞台（上 2/3）继续渲染，不再藏起；对话框在下 1/3。
             moveHudWebViewToStage()
             hudWebView.visibility = View.VISIBLE
             hudWebView.onResume()
@@ -466,7 +466,7 @@ class MainActivity : Activity() {
         settingsGearButton.visibility = if (portrait && !hudPanelOpen) View.VISIBLE else View.GONE
     }
 
-    /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 3/5），静图藏起来。唤醒词胶囊已撤，舞台只留核心动画与四个演示快捷键。 */
+    /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 2/3），静图藏起来。唤醒词胶囊已撤，舞台只留核心动画与四个演示快捷键。 */
     private fun moveHudWebViewToStage() {
         if (!::hudWebView.isInitialized || !::stageLayout.isInitialized) return
         if (hudWebView.parent !== stageLayout) {
@@ -502,8 +502,8 @@ class MainActivity : Activity() {
 
     /** 竖屏面板重做：对话框区横滑判定。只在竖屏、非设置页时生效；横向位移 ≥60dp 且横向明显大于纵向
      * （|dx| > 2|dy|），纵向滚动不会误触发；多指触摸直接取消跟踪。只认对话框区（chatScroll 顶到
-     * homePanel 底，即下 2/5，含底部输入行）的手势，起点定分区、抬手时判定：左滑开原生面板，
-     * 面板开着时右滑回对话框；上 3/5（HUD 动画）不参与手势；其他方向不触发。 */
+     * homePanel 底，即下 1/3，含底部输入行）的手势，起点定分区、抬手时判定：左滑开原生面板，
+     * 面板开着时右滑回对话框；上 2/3（HUD 动画）不参与手势；其他方向不触发。 */
     private fun trackPanelSwipe(ev: MotionEvent) {
         if (resources.configuration.orientation != Configuration.ORIENTATION_PORTRAIT || showingSettings) {
             swipeTracking = false
@@ -539,8 +539,8 @@ class MainActivity : Activity() {
     }
 
     /** 竖屏面板重做：按触点的屏幕坐标判定手势起点是否在对话框区。对话框区是 chatScroll 顶到
-     * homePanel 底（下 2/5，含底部输入行——它未存字段，是 homePanel 最后一个孩子、紧贴
-     * chatScroll 下方）。上 3/5（HUD 动画）不是手势区，起点落在那里直接返回 NONE。 */
+     * homePanel 底（下 1/3，含底部输入行——它未存字段，是 homePanel 最后一个孩子、紧贴
+     * chatScroll 下方）。上 2/3（HUD 动画）不是手势区，起点落在那里直接返回 NONE。 */
     private fun swipeZoneAt(rawX: Float, rawY: Float): Int {
         if (!::chatScroll.isInitialized || !::homePanel.isInitialized) return SWIPE_ZONE_NONE
         val chat = screenBounds(chatScroll)
@@ -1151,13 +1151,18 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(8))
         }
-        chatScroll = ScrollView(this).apply { addView(chatList) }
+        chatScroll = ScrollView(this).apply {
+            // 竖屏精修：下半部分底色改纯黑，与上面 2/3 的黑色统一（原来透出根布局的
+            // 深紫渐变，分色看着割裂）。对话气泡自己的玻璃质感不动，只改背后的底色。
+            setBackgroundColor(0xFF000000.toInt())
+            addView(chatList)
+        }
         addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
     }
 
-    // ---------- 原生竖屏面板（下 2/5） ----------
-    // 用户确认的设计：默认是对话框；左滑在下 2/5（对话区）触发，面板就在下 2/5 里；
-    // 上 3/5（HUD 动画）不动、不换。面板里从上往下是 Agent 调度 / 工作汇报 / 天气 / 日程，
+    // ---------- 原生竖屏面板（下 1/3） ----------
+    // 用户确认的设计：默认是对话框；左滑在下 1/3（对话区）触发，面板就在下 1/3 里；
+    // 上 2/3（HUD 动画）不动、不换。面板里从上往下是 Agent 调度 / 工作汇报 / 天气 / 日程，
     // buildBottomPanel()（输入行+麦克风行）始终可见，是面板里最下面的对话区，面板里能直接说话。
     // 四块内容全部用原生已有的数据（computeAgentRows / todayScheduleRows / lastWeatherInfo），
     // 不读 HUD 的 DOM、不编假数据。样式跟原生对话区一致：深色底、浅色字，不加半透明大面积背景。
@@ -1171,13 +1176,15 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(8), dp(16), dp(8))
         }
         panelScroll = ScrollView(this).apply {
+            // 竖屏精修：底色纯黑，与上面统一（见 chatScroll）。
+            setBackgroundColor(0xFF000000.toInt())
             addView(panelList)
             visibility = View.GONE
         }
     }
 
     /** 原生面板开合的唯一入口：开时 chatScroll 藏、panelScroll 显并渲染一次；
-     * 关时反过来，对话记录滑到底。stageLayout（上 3/5）不做任何改动。 */
+     * 关时反过来，对话记录滑到底。stageLayout（上 2/3）不做任何改动。 */
     private fun setNativePanel(open: Boolean) {
         if (open == hudPanelOpen) return
         hudPanelOpen = open
@@ -1197,7 +1204,9 @@ class MainActivity : Activity() {
     }
 
     /** 原生面板四块内容重渲染：每次都现算（Agent 调度读当前状态、日程读当天提醒、
-     * 天气读缓存），所以状态变了、提醒改了、天气到货了，面板都能跟上。 */
+     * 天气读缓存），所以状态变了、提醒改了、天气到货了，面板都能跟上。
+     * 竖屏精修：四块做成像 HUD 面板那样的完整呈现（圆环图标+状态点+进度条、
+     * 天气图标+预报行、时间线行），不再是纯文字行；数据仍用原生已有的那几份，不编假数据。 */
     private fun renderNativePanel() {
         if (!::panelList.isInitialized) return
         lastScheduleRows = todayScheduleRows(ReminderScheduler.list(this))
@@ -1205,13 +1214,19 @@ class MainActivity : Activity() {
         // Agent 调度
         panelList.addView(panelSectionTitle("Agent 调度"))
         computeAgentRows().forEach { row ->
-            panelList.addView(panelLine("${agentRowName(row.id)} · ${row.desc}"))
+            panelList.addView(agentRowView(row))
         }
         // 工作汇报：原生提醒不记完成态，done 恒为 0，如实写。
         panelList.addView(panelSectionTitle("工作汇报"))
-        panelList.addView(panelLine("今日 ${lastScheduleRows.size} 项 · 已完成 0 项"))
+        val total = lastScheduleRows.size
+        panelList.addView(panelLine("今日 $total 项 · 已完成 0 项"))
+        panelList.addView(progressBar(0f, HudPalette.AQUA).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
+                topMargin = dp(6); bottomMargin = dp(4)
+            }
+        })
         reportTaskRows(lastScheduleRows).take(4).forEach { (title, word) ->
-            panelList.addView(panelLine("$title · $word"))
+            panelList.addView(taskRowView(title, word))
         }
         // 天气
         panelList.addView(panelSectionTitle("天气"))
@@ -1219,9 +1234,14 @@ class MainActivity : Activity() {
         if (info == null) {
             panelList.addView(panelLine("天气未更新"))
         } else {
-            panelList.addView(panelLine("${info.city} ${info.temp}° · ${info.now} · 湿度 ${info.humidity}%"))
-            info.days.take(3).forEach { d ->
-                panelList.addView(panelLine("${WEEK_NAMES[d.week % 7]} ${d.day} ${d.low}°/${d.high}°"))
+            panelList.addView(weatherNowView(info))
+            info.days.take(3).forEachIndexed { i, d ->
+                val label = when (i) {
+                    0 -> "今天"
+                    1 -> "明天"
+                    else -> WEEK_NAMES[d.week % 7]
+                }
+                panelList.addView(forecastRowView(label, d.day, d.low, d.high))
             }
         }
         // 日程
@@ -1248,29 +1268,70 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 日程行：时间段 + 标题，备注另起一行（灰字）；按 panels.js 里 schedInfo 的办法标出
-     * 当前进行中与下一项（每项 30 分钟，pushHudSchedule 里 end = start + 30 分钟）。 */
+    /** 日程行：时间段（固定宽）+ 内容列（标题，备注另起灰字行）；按 panels.js 里 schedInfo 的
+     * 办法标出当前进行中与下一项（每项 30 分钟，pushHudSchedule 里 end = start + 30 分钟）。
+     * 进行中的标题用青色，其余近白。 */
     private fun renderScheduleRows(rows: List<Triple<Long, String, String>>) {
         val nowMs = System.currentTimeMillis()
         val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
         val curIdx = rows.indexOfFirst { (at, _, _) -> nowMs >= at && nowMs < at + 30L * 60 * 1000 }
         val nextIdx = rows.indexOfFirst { (at, _, _) -> at > nowMs }
         rows.forEachIndexed { i, (at, title, note) ->
-            val mark = when (i) {
-                curIdx -> " · 进行中"
-                nextIdx -> " · 下一项"
+            val isCur = i == curIdx
+            val isNext = i == nextIdx
+            val mark = when {
+                isCur -> " · 进行中"
+                isNext -> " · 下一项"
                 else -> ""
             }
-            panelList.addView(panelLine("${fmt.format(Date(at))}–${fmt.format(Date(at + 30L * 60 * 1000))} $title$mark"))
-            if (note.isNotEmpty()) panelList.addView(panelNoteLine(note))
+            panelList.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(5), 0, dp(5))
+                addView(TextView(this@MainActivity).apply {
+                    text = "${fmt.format(Date(at))}–${fmt.format(Date(at + 30L * 60 * 1000))}"
+                    textSize = 12f
+                    setTextColor(if (isCur) HudPalette.AQUA else 0x99FFFFFF.toInt())
+                    maxLines = 1
+                    layoutParams = LinearLayout.LayoutParams(dp(96), LinearLayout.LayoutParams.WRAP_CONTENT)
+                })
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    addView(TextView(this@MainActivity).apply {
+                        text = "$title$mark"
+                        textSize = 14f
+                        setTextColor(if (isCur) HudPalette.AQUA else HudPalette.ICE)
+                    })
+                    if (note.isNotEmpty()) addView(TextView(this@MainActivity).apply {
+                        text = note
+                        textSize = 12f
+                        setTextColor(0x99FFFFFF.toInt())
+                        setPadding(0, dp(2), 0, 0)
+                    })
+                })
+            })
         }
     }
 
-    private fun panelSectionTitle(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 13f
-        setTextColor(0xB3FFFFFF.toInt())
-        setPadding(0, dp(12), 0, dp(4))
+    /** 区块标题：左边一条 3dp 青色竖条 + 标题字（13sp 70% 白），与 HUD 面板的标题样式呼应。 */
+    private fun panelSectionTitle(text: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(14), 0, dp(4))
+        addView(View(this@MainActivity).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(2).toFloat()
+                setColor(HudPalette.AQUA)
+            }
+        }, LinearLayout.LayoutParams(dp(3), dp(14)))
+        addView(TextView(this@MainActivity).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(0xB3FFFFFF.toInt())
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = dp(8)
+            }
+        })
     }
 
     private fun panelLine(text: String): TextView = TextView(this).apply {
@@ -1280,18 +1341,216 @@ class MainActivity : Activity() {
         setPadding(0, dp(3), 0, dp(3))
     }
 
-    private fun panelNoteLine(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 12f
-        setTextColor(0x99FFFFFF.toInt())
-        setPadding(0, 0, 0, dp(3))
-    }
-
     private fun agentRowName(id: String): String = when (id) {
         "brain" -> "大脑"
         "jobs" -> "后台任务"
         "learn" -> "学习"
         else -> "复盘"
+    }
+
+    // Agent 圆环颜色与 HUD 默认皮肤一致（skins.js jarvis：pri 青 / acc 橙 / soft 柔色 / ink 墨色）。
+    private fun agentColor(id: String): Int = when (id) {
+        "brain" -> 0xFF7FDBFF.toInt()
+        "jobs" -> 0xFFFFAE6B.toInt()
+        "learn" -> 0xFF9FDDF5.toInt()
+        else -> 0xFFDCEFF7.toInt()
+    }
+
+    private fun agentEnName(id: String): String = when (id) {
+        "brain" -> "BRAIN"
+        "jobs" -> "JOBS"
+        "learn" -> "LEARNING"
+        else -> "REVIEW"
+    }
+
+    private fun agentLetter(id: String): String = when (id) {
+        "brain" -> "B"
+        "jobs" -> "J"
+        "learn" -> "L"
+        else -> "R"
+    }
+
+    /** Agent 调度的一行：圆环图标（agent 色描边 + 居中字母）+ 英文名与中文名 + 状态描述，
+     * 右边一个状态点（在跑亮 agent 色，否则暗灰）；在跑的那行下面一条细进度条。
+     * HUD 那种实时波形 canvas 原生复刻太复杂，用状态点+进度条代替。 */
+    private fun agentRowView(row: AgentRow): View {
+        val color = agentColor(row.id)
+        val running = row.state == "run"
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(6), 0, dp(6))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(FrameLayout(this@MainActivity).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setStroke(dp(2), color)
+                        setColor(Color.TRANSPARENT)
+                    }
+                    addView(TextView(this@MainActivity).apply {
+                        text = agentLetter(row.id)
+                        textSize = 16f
+                        setTextColor(color)
+                        gravity = Gravity.CENTER
+                    }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+                }, LinearLayout.LayoutParams(dp(44), dp(44)))
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginStart = dp(12)
+                    }
+                    addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(TextView(this@MainActivity).apply {
+                            text = agentEnName(row.id)
+                            textSize = 14f
+                            setTextColor(HudPalette.ICE)
+                        })
+                        addView(TextView(this@MainActivity).apply {
+                            text = agentRowName(row.id)
+                            textSize = 12f
+                            setTextColor(0x99FFFFFF.toInt())
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                                marginStart = dp(6)
+                            }
+                        })
+                    })
+                    addView(TextView(this@MainActivity).apply {
+                        text = row.desc
+                        textSize = 12f
+                        setTextColor(0x99FFFFFF.toInt())
+                        setPadding(0, dp(2), 0, 0)
+                    })
+                })
+                addView(View(this@MainActivity).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(if (running) color else 0x44FFFFFF.toInt())
+                    }
+                }, LinearLayout.LayoutParams(dp(10), dp(10)))
+            })
+            if (running) {
+                addView(progressBar(row.progress.toFloat(), color).apply {
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
+                        topMargin = dp(6)
+                        marginStart = dp(56)
+                    }
+                })
+            }
+        }
+    }
+
+    /** 横向细进度条：底轨半透白，填充按 fraction 占宽；fraction=0 时只剩底轨。 */
+    private fun progressBar(fraction: Float, color: Int): View {
+        val f = fraction.coerceIn(0f, 1f)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(2).toFloat()
+                setColor(0x33FFFFFF)
+            }
+            addView(View(this@MainActivity).apply {
+                background = GradientDrawable().apply { setColor(color) }
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, f))
+            if (f < 1f) {
+                addView(View(this@MainActivity), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f - f))
+            }
+        }
+    }
+
+    /** 工作汇报的任务行：标题在左、状态词在右；进行中青色、待确认橙色、未来时间灰色。 */
+    private fun taskRowView(title: String, word: String): View {
+        val wordColor = when (word) {
+            "进行中" -> HudPalette.AQUA
+            "待确认" -> 0xFFFFAE6B.toInt()
+            else -> 0x99FFFFFF.toInt()
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                textSize = 14f
+                setTextColor(HudPalette.ICE)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = word
+                textSize = 12f
+                setTextColor(wordColor)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = dp(8)
+                }
+            })
+        }
+    }
+
+    /** 天气字 → 文字符号（与 panels.js 的 wxKind 同一套映射）：晴 ☀、多云/阴 ☁、雨 ☂、雪 ❄、雾/霾 ☁。 */
+    private fun wxGlyph(word: String): String = when {
+        word.contains("雪") -> "❄"
+        word.contains("雨") -> "☂"
+        word.contains("晴") -> if (word.contains("云")) "☁" else "☀"
+        else -> "☁"
+    }
+
+    /** 当前天气行：天气小图标 + 城市 + 温度 + 天气字 + 湿度。 */
+    private fun weatherNowView(info: com.jarvis.app.data.WeatherTool.WeatherInfo): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+            addView(TextView(this@MainActivity).apply {
+                text = wxGlyph(info.now)
+                textSize = 20f
+                setTextColor(0xFFFFC27A.toInt())
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    marginEnd = dp(8)
+                }
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "${info.city} ${info.temp}° · ${info.now} · 湿度 ${info.humidity}%"
+                textSize = 14f
+                setTextColor(HudPalette.ICE)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+        }
+    }
+
+    /** 预报行：今天/明天/后天 + 天气字 + 低温/高温；单行、行高留够，不互相挤、不被截断。 */
+    private fun forecastRowView(label: String, day: String, low: String, high: String): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(5), 0, dp(5))
+            minimumHeight = dp(28)
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 14f
+                setTextColor(HudPalette.ICE)
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(dp(56), LinearLayout.LayoutParams.WRAP_CONTENT)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = day
+                textSize = 14f
+                setTextColor(0xCCFFFFFF.toInt())
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "$low°/$high°"
+                textSize = 14f
+                setTextColor(HudPalette.ICE)
+                maxLines = 1
+                gravity = Gravity.END
+            })
+        }
     }
 
     private fun addBubble(text: String, mine: Boolean) {
@@ -1495,6 +1754,8 @@ class MainActivity : Activity() {
 
     private fun buildBottomPanel(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
+        // 竖屏精修：底色纯黑，与上面统一（见 chatScroll）；输入行与麦克风行本身的样式不动。
+        setBackgroundColor(0xFF000000.toInt())
         setPadding(dp(16), dp(4), dp(16), dp(14))
 
         inputRow = LinearLayout(this@MainActivity).apply {
@@ -2779,7 +3040,7 @@ class MainActivity : Activity() {
         super.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
-        // 竖屏第 1 批：HUD WebView 竖屏也在舞台里渲染（上 3/5），回前台时恢复渲染并再推一次状态与面板；设置页开着时保持暂停。
+        // 竖屏第 1 批：HUD WebView 竖屏也在舞台里渲染（上 2/3），回前台时恢复渲染并再推一次状态与面板；设置页开着时保持暂停。
         if (!showingSettings && ::hudWebView.isInitialized) {
             hudWebView.onResume()
             hudLastPushedState = null

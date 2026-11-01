@@ -424,3 +424,18 @@ body[data-live] .demo-tag{display:none}
   .hud > .bottom{display:none}
 }
 /* portrait-bottom-hide>> */
+
+/* <<portrait-body-hide: portrait hides the HUD's own four panels (.hud > .body:
+   Agent 调度 / 工作汇报 / 天气 / 日程) — after the top bar and bottom bar were
+   hidden, a tap still woke the HUD and its panels spread over the top area,
+   covering the four demo buttons (jk-v48 device shot). The portrait rule is
+   that the top holds only the core animation and the four demo buttons; the
+   panels live only in the native bottom panel. Landscape full-screen HUD keeps
+   its panels. #stage and #demoQuick are direct children of <body> (not inside
+   .hud), so the core animation and the four quick buttons are unaffected. The
+   nodes stay in the DOM so the JS that updates them keeps working; only the
+   display is hidden. */
+@media (orientation:portrait){
+  .hud > .body{display:none}
+}
+/* portrait-body-hide>> */
