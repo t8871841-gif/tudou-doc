@@ -85,6 +85,10 @@ class MainActivity : Activity() {
         const val REQ_PROJECTION = 5152
         // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
         const val REQ_PICK_PORTRAIT_BG = 5153
+        // 竖屏第 3 批修正：手势起点的分区（对话框区 / 面板区 / 不在手势区）。
+        const val SWIPE_ZONE_NONE = 0
+        const val SWIPE_ZONE_DIALOG = 1
+        const val SWIPE_ZONE_PANEL = 2
     }
 
     private lateinit var statusView: TextView
@@ -119,10 +123,14 @@ class MainActivity : Activity() {
     private val uiScope = MainScope()
     private var showingSettings = false
     // 竖屏第 3 批：左滑进 HUD 面板、右滑回对话框的手势跟踪（只看不拦，见 dispatchTouchEvent）。
+    // 修正：只认指定分区里的手势——对话框区（下 2/5）左滑开面板，面板区（上 3/5）右滑回对话框；
+    // 面板开合状态由原生布尔值跟踪（panelSet 只在这里调用，所以不会跑偏）。
     private var swipeStartX = 0f
     private var swipeStartY = 0f
     private var swipePointerId = -1
     private var swipeTracking = false
+    private var swipeZone = SWIPE_ZONE_NONE
+    private var hudPanelOpen = false
     private var showInput = false
     private var chatInFlight = false
 
@@ -421,16 +429,18 @@ class MainActivity : Activity() {
         applyOrientationLayout()
     }
 
-    // 竖屏第 3 批：全屏横滑检测。dispatchTouchEvent 是每个触摸事件进 Activity 的第一站，
-    // 在这里被动监听能覆盖整块竖屏（WebView 的上 3/5 + 原生对话框的下 2/5）；只看不拦，
-    // 永远原样交给 super，所以不会打断聊天记录/面板的上下滚动，也不会干扰 WebView 点按。
+    // 竖屏第 3 批修正：分区横滑检测。dispatchTouchEvent 是每个触摸事件进 Activity 的第一站，
+    // 在这里被动监听能看到整块竖屏；只看不拦，永远原样交给 super，所以不会打断聊天记录/
+    // 面板的上下滚动，也不会干扰 WebView 点按。手势只在起点所在的分区里生效（见 trackPanelSwipe）。
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         trackPanelSwipe(ev)
         return super.dispatchTouchEvent(ev)
     }
 
-    /** 竖屏第 3 批：横滑判定。只在竖屏、非设置页时生效；横向位移 ≥60dp 且横向明显大于纵向
-     * （|dx| > 2|dy|），纵向滚动不会误触发；多指触摸直接取消跟踪。左滑开面板，右滑回对话框。 */
+    /** 竖屏第 3 批修正：分区横滑判定。只在竖屏、非设置页时生效；横向位移 ≥60dp 且横向明显大于纵向
+     * （|dx| > 2|dy|），纵向滚动不会误触发；多指触摸直接取消跟踪。分区规则（起点定分区，抬手时判定）：
+     * 对话框区（chatScroll 顶到 homePanel 底，即下 2/5）左滑开面板；面板区（stageLayout，即上 3/5，
+     * 面板打开时）右滑回对话框；其他方向/分区不触发。 */
     private fun trackPanelSwipe(ev: MotionEvent) {
         if (resources.configuration.orientation != Configuration.ORIENTATION_PORTRAIT || showingSettings) {
             swipeTracking = false
@@ -442,6 +452,8 @@ class MainActivity : Activity() {
                 swipePointerId = ev.getPointerId(0)
                 swipeStartX = ev.x
                 swipeStartY = ev.y
+                swipeZone = swipeZoneAt(ev.rawX, ev.rawY)
+                if (swipeZone == SWIPE_ZONE_NONE) swipeTracking = false
             }
             MotionEvent.ACTION_POINTER_DOWN -> swipeTracking = false
             MotionEvent.ACTION_UP -> {
@@ -453,12 +465,37 @@ class MainActivity : Activity() {
                 val dy = ev.getY(upIndex) - swipeStartY
                 if (Math.abs(dx) >= dp(60).toFloat() && Math.abs(dx) > 2f * Math.abs(dy)) {
                     if (!::hudWebView.isInitialized) return
-                    if (dx < 0) hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(true)", null)
-                    else hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(false)", null)
+                    if (swipeZone == SWIPE_ZONE_DIALOG && dx < 0 && !hudPanelOpen) {
+                        hudPanelOpen = true
+                        hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(true)", null)
+                    } else if (swipeZone == SWIPE_ZONE_PANEL && dx > 0 && hudPanelOpen) {
+                        hudPanelOpen = false
+                        hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(false)", null)
+                    }
                 }
             }
             MotionEvent.ACTION_CANCEL -> swipeTracking = false
         }
+    }
+
+    /** 竖屏第 3 批修正：按触点的屏幕坐标判定手势起点在哪个分区。面板区是 stageLayout（上 3/5，
+     * 面板打开时 WebView 就在这里）；对话框区是 chatScroll 顶到 homePanel 底（下 2/5，含底部
+     * 输入行——它未存字段，是 homePanel 最后一个孩子、紧贴 chatScroll 下方）。顶栏不在任何分区里。 */
+    private fun swipeZoneAt(rawX: Float, rawY: Float): Int {
+        if (!::stageLayout.isInitialized || !::chatScroll.isInitialized || !::homePanel.isInitialized) return SWIPE_ZONE_NONE
+        val stage = screenBounds(stageLayout)
+        if (rawX >= stage[0] && rawX < stage[2] && rawY >= stage[1] && rawY < stage[3]) return SWIPE_ZONE_PANEL
+        val chat = screenBounds(chatScroll)
+        val home = screenBounds(homePanel)
+        if (rawX >= home[0] && rawX < home[2] && rawY >= chat[1] && rawY < home[3]) return SWIPE_ZONE_DIALOG
+        return SWIPE_ZONE_NONE
+    }
+
+    /** 返回 view 在屏幕上的 [left, top, right, bottom]。 */
+    private fun screenBounds(v: View): IntArray {
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return intArrayOf(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)
     }
 
     /** 横屏看 HUD 时返回键先退演示，没演示在播才退出 App；竖屏返回键行为不变。 */
