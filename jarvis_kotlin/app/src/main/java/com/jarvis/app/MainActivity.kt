@@ -25,6 +25,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
@@ -117,6 +118,11 @@ class MainActivity : Activity() {
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
     private var showingSettings = false
+    // 竖屏第 3 批：左滑进 HUD 面板、右滑回对话框的手势跟踪（只看不拦，见 dispatchTouchEvent）。
+    private var swipeStartX = 0f
+    private var swipeStartY = 0f
+    private var swipePointerId = -1
+    private var swipeTracking = false
     private var showInput = false
     private var chatInFlight = false
 
@@ -413,6 +419,46 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applyOrientationLayout()
+    }
+
+    // 竖屏第 3 批：全屏横滑检测。dispatchTouchEvent 是每个触摸事件进 Activity 的第一站，
+    // 在这里被动监听能覆盖整块竖屏（WebView 的上 3/5 + 原生对话框的下 2/5）；只看不拦，
+    // 永远原样交给 super，所以不会打断聊天记录/面板的上下滚动，也不会干扰 WebView 点按。
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        trackPanelSwipe(ev)
+        return super.dispatchTouchEvent(ev)
+    }
+
+    /** 竖屏第 3 批：横滑判定。只在竖屏、非设置页时生效；横向位移 ≥60dp 且横向明显大于纵向
+     * （|dx| > 2|dy|），纵向滚动不会误触发；多指触摸直接取消跟踪。左滑开面板，右滑回对话框。 */
+    private fun trackPanelSwipe(ev: MotionEvent) {
+        if (resources.configuration.orientation != Configuration.ORIENTATION_PORTRAIT || showingSettings) {
+            swipeTracking = false
+            return
+        }
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                swipeTracking = true
+                swipePointerId = ev.getPointerId(0)
+                swipeStartX = ev.x
+                swipeStartY = ev.y
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> swipeTracking = false
+            MotionEvent.ACTION_UP -> {
+                if (!swipeTracking) return
+                swipeTracking = false
+                val upIndex = ev.actionIndex
+                if (ev.getPointerId(upIndex) != swipePointerId) return
+                val dx = ev.getX(upIndex) - swipeStartX
+                val dy = ev.getY(upIndex) - swipeStartY
+                if (Math.abs(dx) >= dp(60).toFloat() && Math.abs(dx) > 2f * Math.abs(dy)) {
+                    if (!::hudWebView.isInitialized) return
+                    if (dx < 0) hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(true)", null)
+                    else hudWebView.evaluateJavascript("if(typeof panelSet==='function')panelSet(false)", null)
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> swipeTracking = false
+        }
     }
 
     /** 横屏看 HUD 时返回键先退演示，没演示在播才退出 App；竖屏返回键行为不变。 */

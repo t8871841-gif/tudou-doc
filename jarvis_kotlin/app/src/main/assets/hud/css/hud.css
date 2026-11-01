@@ -399,3 +399,29 @@ body[data-live] .demo-tag{display:none}
 #demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
 @media (orientation:landscape){#demoQuick{display:none}}
 /* demo-quick>> */
+
+/* <<panel-swipe: portrait HUD panel (batch 3). body.panel-open switches the HUD area
+   from the core animation to a vertically scrollable panel: Agent调度 / 工作汇报 /
+   天气 / 日程 (top to bottom), reusing the live sections from panels.js — no DOM
+   moves, the sections are only re-laid-out. Scoped to portrait so the landscape
+   full-screen HUD is untouched. The quick buttons hide with the panel; the hide is
+   driven by a swipe (not by a tap on the button itself), so the capture-phase
+   tap-timing bug does not apply. The native dialogue box (bottom 2/5) is untouched
+   and stays usable in both states. */
+@media (orientation:portrait){
+  body.panel-open #stage,body.panel-open #demoQuick,body.panel-open .vignette,body.panel-open .haze,body.panel-open .shade,body.panel-open .labels{display:none!important}
+  body.panel-open .hud > .top,body.panel-open .hud > .bottom{display:none!important}
+  body.panel-open .core-hit{display:none!important}
+  body.panel-open [aria-label="活动波形"]{display:none!important}
+  body.panel-open .hud{display:block}
+  body.panel-open .hud > .body{display:flex;flex-direction:column;gap:16px;overflow:visible}
+  body.panel-open .col{display:contents}
+  body.panel-open .hud .panel{pointer-events:auto}
+  body.panel-open #pAgents{order:1}
+  body.panel-open #pReport{order:2}
+  body.panel-open #pWeather{order:3}
+  body.panel-open #pSched{order:4}
+  /* keep the panel readable even if the page goes dormant while the user reads it */
+  body.panel-open.dormant #pAgents,body.panel-open.dormant #pReport,body.panel-open.dormant #pWeather,body.panel-open.dormant #pSched{opacity:1!important;filter:none!important;pointer-events:auto!important;transform:none!important}
+}
+/* panel-swipe>> */
