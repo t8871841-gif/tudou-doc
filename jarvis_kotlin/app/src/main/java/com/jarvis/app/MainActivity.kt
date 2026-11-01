@@ -3,6 +3,7 @@ package com.jarvis.app
 import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
@@ -120,6 +121,10 @@ class MainActivity : Activity() {
     private lateinit var settingsPageHost: LinearLayout
     private lateinit var settingsPageContent: LinearLayout
     private val settingsPages = mutableMapOf<String, LinearLayout>()
+
+    // HUD 皮肤行（「主界面」）：当前皮肤状态行 + 原生记的当前皮肤 id（默认 'jarvis'，与 HUD 的 localStorage 同步）。
+    private lateinit var hudSkinStatusText: TextView
+    private var hudSkinId = "jarvis"
 
     // 批三：记忆列表加载/删除等异步 UI 操作的作用域，onDestroy 取消
     private val uiScope = MainScope()
@@ -1453,6 +1458,7 @@ class MainActivity : Activity() {
         settingsListPanel.visibility = View.GONE
         settingsPageHost.visibility = View.VISIBLE
         settingsScroll.scrollTo(0, 0)
+        if (title == "主界面") refreshHudSkinStatus()
     }
 
     private fun closeSettingsPage() {
@@ -1822,6 +1828,53 @@ class MainActivity : Activity() {
         })
     }
 
+    // HUD 皮肤（与 hud/js/skins.js 的 SKINS 逐一对应，顺序一致；skin-picker.js 的 skReady
+    // 过滤后 9 个全在列。皮肤定义与应用逻辑归 HUD 所有，原生只传 id 调 window.applySkin）。
+    private val HUD_SKINS = listOf(
+        "jarvis" to "默认",
+        "ring" to "星环",
+        "forge" to "熔炉",
+        "ion" to "回路",
+        "blueprint" to "图纸",
+        "warroom" to "作战室",
+        "workshop" to "工坊",
+        "nebula" to "星云",
+        "weave" to "织造"
+    )
+
+    /** 读 HUD 存的当前皮肤（localStorage 'jarvis.skin'），刷新「主界面」里的皮肤状态行。 */
+    private fun refreshHudSkinStatus() {
+        if (!::hudSkinStatusText.isInitialized || !::hudWebView.isInitialized) return
+        hudWebView.evaluateJavascript("try{localStorage.getItem('jarvis.skin')||'jarvis'}catch(e){'jarvis'}") { r ->
+            val id = r?.trim()?.trim('"').takeUnless { it.isNullOrBlank() || it == "null" } ?: "jarvis"
+            hudSkinId = id
+            val name = HUD_SKINS.firstOrNull { it.first == id }?.second ?: "默认"
+            hudSkinStatusText.text = "HUD 皮肤：$name"
+        }
+    }
+
+    /** 「主界面」里选 HUD 皮肤：单选列表，点中即调 HUD 的 applySkin 应用（HUD 自己记到 localStorage）。 */
+    private fun showHudSkinPicker() {
+        if (!::hudWebView.isInitialized) {
+            toast("HUD 还没加载好，稍后再试")
+            return
+        }
+        val names = HUD_SKINS.map { it.second }.toTypedArray()
+        val checked = HUD_SKINS.indexOfFirst { it.first == hudSkinId }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("HUD 皮肤")
+            .setSingleChoiceItems(names, checked) { dialog, which ->
+                val (id, name) = HUD_SKINS[which]
+                hudWebView.evaluateJavascript("if(typeof applySkin==='function')applySkin('$id')", null)
+                hudSkinId = id
+                hudSkinStatusText.text = "HUD 皮肤：$name"
+                toast("HUD 皮肤已切换为$name")
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     /** 彻底融合第 1 步：「主界面」分区——竖屏舞台背景图（图库自选，未选时用内置默认静帧）。 */
     private fun buildHomeScreenSection(root: LinearLayout) {
         root.addView(TextView(this).apply {
@@ -1858,6 +1911,13 @@ class MainActivity : Activity() {
             refreshStatus()
             toast("已恢复默认图")
         })
+        hudSkinStatusText = TextView(this).apply {
+            text = "HUD 皮肤：默认"
+            textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        }
+        root.addView(hudSkinStatusText)
+        refreshHudSkinStatus()
+        root.addView(btn("HUD 皮肤") { showHudSkinPicker() })
     }
 
     /** 批三新增：「记忆」分区——总开关、列表（分域+时间）、逐条删除、一键清空。数据在 MemoryService（Room）。 */
