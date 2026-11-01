@@ -410,3 +410,17 @@ body[data-live] .demo-tag{display:none}
   .hud > .top{display:none}
 }
 /* portrait-top-hide>> */
+
+/* <<portrait-bottom-hide: portrait hides the whole HUD bottom bar (subtitle
+   "Hey Jarvis…" / suggestion chips / talk bar) — the user set the rule that
+   the top 3/5 holds only the core animation and the four demo buttons, all
+   other interaction lives in the native bottom 2/5. Landscape full-screen HUD
+   keeps its bottom bar. #demoQuick is a direct child of <body> (not inside
+   .hud > .bottom), so the four quick buttons are unaffected. The nodes stay in
+   the DOM so the JS that reads them keeps working; only the display is hidden.
+   In portrait the .hud grid rows are auto (max-width:900px), so the hidden row
+   collapses to zero height and leaves no gap. */
+@media (orientation:portrait){
+  .hud > .bottom{display:none}
+}
+/* portrait-bottom-hide>> */

@@ -113,7 +113,6 @@ class MainActivity : Activity() {
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
     private var stageImageView: ImageView? = null
-    private lateinit var wakeChip: TextView
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
     // 竖屏第 4 批：设置齿轮从顶栏移到屏幕右下角（底部麦克风行最右端），只在竖屏对话框态显示。
@@ -261,7 +260,8 @@ class MainActivity : Activity() {
 
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
     // 银河动画已封存：舞台不再建 GalaxyHoloStageView，改成一张静图（居中裁剪），
-    // 默认图是 HUD 默认皮肤静帧，设置「主界面」里可从图库自选；唤醒词胶囊保留在舞台底部。
+    // 默认图是 HUD 默认皮肤静帧，设置「主界面」里可从图库自选；唤醒词胶囊已撤（开关在设置里），
+    // 舞台上 3/5 只留核心动画与四个演示快捷键。
     // 竖屏第 1 批：舞台改占上部 3/5（权重 3:2），里面放 HUD WebView（动画），静图藏起来；对话在下 2/5 ----------
 
     private fun buildStage(): FrameLayout {
@@ -273,52 +273,12 @@ class MainActivity : Activity() {
             stage.addView(it, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
         refreshStageImage()
-        wakeChip = TextView(this).apply {
-            text = "唤醒词 · 关"
-            textSize = 12f
-            setPadding(dp(16), dp(7), dp(16), dp(7))
-            setTextColor(0x99FFFFFF.toInt())
-            background = GradientDrawable().apply {
-                cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), 0x2EFFFFFF)
-            }
-            setOnClickListener {
-                val next = !JarvisPrefs.isWakeEnabled(this@MainActivity)
-                JarvisPrefs.setWakeEnabled(this@MainActivity, next)
-                if (next) JarvisAgent.maybeStartWakeLoop() else JarvisAgent.stopWakeLoop()
-                refreshWakeChip()
-            }
-        }
-        stage.addView(wakeChip, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            bottomMargin = dp(4)
-        })
         return stage
-    }
-
-    private fun refreshWakeChip() {
-        val on = JarvisPrefs.isWakeEnabled(this)
-        wakeChip.text = "唤醒词 · ${if (on) "开" else "关"}"
-        wakeChip.setTextColor(if (on) Color.WHITE else 0x99FFFFFF.toInt())
-        val color = HudPalette.colorFor(JarvisAgent.currentState())
-        wakeChip.background = GradientDrawable().apply {
-            cornerRadius = dp(20).toFloat()
-            if (on) {
-                gradientType = GradientDrawable.LINEAR_GRADIENT
-                orientation = GradientDrawable.Orientation.TL_BR
-                colors = intArrayOf(HudPalette.withAlpha(color, 0.30f), HudPalette.withAlpha(color, 0.30f))
-                setStroke(dp(1), HudPalette.withAlpha(color, 0.8f))
-            } else {
-                setColor(Color.TRANSPARENT)
-                setStroke(dp(1), 0x2EFFFFFF)
-            }
-        }
     }
 
     private fun onAgentStateChanged(state: String) {
         // 主界面已无状态文字（舞台与 SYSTEM ACTIVE 行均按用户要求删除），
-        // 状态只靠徽章/悬浮球颜色与动效表达；这里只刷新唤醒词胶囊。
-        refreshWakeChip()
+        // 状态只靠徽章/悬浮球颜色与动效表达；唤醒词胶囊已撤，开关在设置里。
         updateMicFx(state)
         // 原生竖屏面板开着时，大脑那格的 Agent 调度跟着状态刷新。
         if (hudPanelOpen) renderNativePanel()
@@ -506,15 +466,14 @@ class MainActivity : Activity() {
         settingsGearButton.visibility = if (portrait && !hudPanelOpen) View.VISIBLE else View.GONE
     }
 
-    /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 3/5），静图藏起来，唤醒词胶囊浮在 WebView 上面。 */
+    /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 3/5），静图藏起来。唤醒词胶囊已撤，舞台只留核心动画与四个演示快捷键。 */
     private fun moveHudWebViewToStage() {
-        if (!::hudWebView.isInitialized || !::stageLayout.isInitialized || !::wakeChip.isInitialized) return
+        if (!::hudWebView.isInitialized || !::stageLayout.isInitialized) return
         if (hudWebView.parent !== stageLayout) {
             (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
             stageLayout.addView(hudWebView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
         stageImageView?.visibility = View.GONE
-        wakeChip.bringToFront()
     }
 
     /** 横屏：把 HUD WebView 移回根布局全屏，舞台静图恢复；设置页永远在最上面。 */
@@ -2018,7 +1977,6 @@ class MainActivity : Activity() {
             JarvisPrefs.isWakeEnabled(this@MainActivity)) { checked ->
             JarvisPrefs.setWakeEnabled(this@MainActivity, checked)
             if (checked) JarvisAgent.maybeStartWakeLoop() else JarvisAgent.stopWakeLoop()
-            refreshWakeChip()
         })
 
         // ---- 唤醒严格度：严格/标准/宽松三档（批二替换掉原来的 0..100 滑杆） ----
