@@ -399,3 +399,14 @@ body[data-live] .demo-tag{display:none}
 #demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
 @media (orientation:landscape){#demoQuick{display:none}}
 /* demo-quick>> */
+
+/* <<portrait-top-hide: portrait hides the whole HUD top bar (cube logo / J.A.R.V.I.S
+   title / clock / date / icon row) — the user circled it on the device shot.
+   Landscape full-screen HUD keeps its top bar. The nodes stay in the DOM so the
+   JS that reads them (clock text, .top .icons query) keeps working; only the
+   display is hidden. In portrait the .hud grid rows are auto (max-width:900px),
+   so the hidden row collapses to zero height and leaves no gap. */
+@media (orientation:portrait){
+  .hud > .top{display:none}
+}
+/* portrait-top-hide>> */
