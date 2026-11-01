@@ -85,7 +85,7 @@ setInterval(() => {
   /* only for a machine teardown: the Starship launch and the route map are watched, not handled, and the camera costs CPU
      (the Starship launch stuttered with the camera on) */
   const want = HAND.on && document.body.classList.contains('demo') && !!(MACH.on && MACH.mesh), now = performance.now();
-  if (want !== HAND.cam || (want && now - HAND.camSent > 5000)) { if (liveSend({ type: 'camera', on: want })) { HAND.cam = want; HAND.camSent = now; } }
+  if (want !== HAND.cam || (want && now - HAND.camSent > 5000)) { if (typeof liveSend === 'function' && liveSend({ type: 'camera', on: want })) { HAND.cam = want; HAND.camSent = now; } }
   if (!want && HAND.engaged) handIdle();
 }, 500);
 setInterval(() => { document.body.classList.toggle('mach', !!(MACH.on && MACH.mesh)); handCamShow(); }, 250);

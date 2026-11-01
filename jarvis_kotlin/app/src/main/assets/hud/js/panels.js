@@ -28,8 +28,7 @@ function agentsUpdate(m) {
   });
 }
 function agentClick(id) {
-  if (id === 'brain' && typeof brainOpen === 'function') return brainOpen();
-  if (id === 'learn' && typeof brainOpen === 'function') { brainOpen(); try { bwTopView('ab'); liveSend({ type: 'brain_abilities' }); } catch (_) {} return; }
+  if (id === 'brain' || id === 'learn') { try { if (typeof openTalk === 'function') openTalk(); if (typeof input !== 'undefined' && input) input.focus(); } catch (_) {} return; }
   handle(id === 'jobs' ? '后台任务进行得怎么样了？' : '昨天的复盘有什么建议？');
 }
 

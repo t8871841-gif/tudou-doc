@@ -14,18 +14,15 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * 批十二新增：DeepSeek（OpenAI 兼容的 /chat/completions 接口），只给跨应用任务
- * 循环（task/TaskLoop）当可选大脑用。Base URL 固定为 https://api.deepseek.com/v1，
- * 模型固定 deepseek-chat。Key 从设置读取，不写死；未配置 Key 时直接报错，不发请求。
+ * 自定义大模型（OpenAI 兼容的 /chat/completions 接口），只给跨应用任务
+ * 循环（task/TaskLoop）当可选大脑用。接口地址、模型名、Key 都从设置读取，
+ * 不写死；地址或 Key 为空时直接报错，不发请求。
  *
- * deepseek-chat 是纯文本模型：本类只发文本消息，[askOnce] 的 jpegBase64 参数仅为
- * 与 [AgnesClient.askOnce] 保持同一签名（调用方按设置切换时不用改调用形状），
- * 传入的图片会被忽略——任务循环靠无障碍界面树文字推进（Andee 同款路线）。
+ * 与 AgnesClient.askOnce 同一签名、同一多模态格式：jpegBase64 非空时按
+ * image_url + data URL 附图（自定义模型与 Agnes 一样走 OpenAI 兼容接口，
+ * 带图问）。回调在后台线程。
  */
-object DeepSeekClient {
-    // 第 2 步桥接要把模型信息喂给 HUD（getModelInfo），BASE_URL/MODEL 从 private 改公开；值与逻辑不动。
-    const val BASE_URL = "https://api.deepseek.com/v1"
-    const val MODEL = "deepseek-chat"
+object CustomClient {
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -38,28 +35,46 @@ object DeepSeekClient {
 
     /**
      * 单轮调用，不进任何对话历史（任务循环 task/TaskLoop 用）。签名与
-     * [AgnesClient.askOnce] 完全一致；[jpegBase64] 忽略（纯文本模型）。
+     * [AgnesClient.askOnce] 完全一致。
      * 回调在后台线程。
      */
     fun askOnce(
         ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val key = JarvisPrefs.getDeepSeekKey(ctx)
-        if (key.isBlank()) {
-            onError("未配置 DeepSeek API Key，请先去设置里填写")
+        val base = JarvisPrefs.getCustomBaseUrl(ctx).trim().trimEnd('/')
+        val model = JarvisPrefs.getCustomModel(ctx)
+        val key = JarvisPrefs.getCustomKey(ctx)
+        if (base.isBlank() || model.isBlank()) {
+            onError("未配置自定义大模型接口地址或模型名，请先去设置里填写")
             return
+        }
+        if (key.isBlank()) {
+            onError("未配置自定义大模型 API Key，请先去设置里填写")
+            return
+        }
+        val userContent: Any = if (jpegBase64.isNullOrBlank()) {
+            userText
+        } else {
+            JSONArray()
+                .put(JSONObject().put("type", "text").put("text", userText))
+                .put(
+                    JSONObject().put("type", "image_url").put(
+                        "image_url",
+                        JSONObject().put("url", "data:image/jpeg;base64,$jpegBase64")
+                    )
+                )
         }
         val messages = JSONArray()
             .put(JSONObject().put("role", "system").put("content", systemPrompt))
-            .put(JSONObject().put("role", "user").put("content", userText))
+            .put(JSONObject().put("role", "user").put("content", userContent))
         val body = JSONObject()
-            .put("model", MODEL)
+            .put("model", model)
             .put("messages", messages)
             .put("stream", false)
             .put("temperature", 0.2)
         val req = Request.Builder()
-            .url("$BASE_URL/chat/completions")
+            .url("$base/chat/completions")
             .addHeader("Authorization", "Bearer $key")
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -72,7 +87,7 @@ object DeepSeekClient {
             override fun onResponse(call: Call, response: okhttp3.Response) {
                 response.use { resp ->
                     if (!resp.isSuccessful) {
-                        onError("DeepSeek 接口返回错误：HTTP ${resp.code}")
+                        onError("自定义大模型接口返回错误：HTTP ${resp.code}")
                         return
                     }
                     try {
@@ -82,7 +97,7 @@ object DeepSeekClient {
                             .getJSONObject(0).getJSONObject("message").getString("content").trim()
                         onResult(reply)
                     } catch (e: Exception) {
-                        onError("解析 DeepSeek 返回内容失败：${e.message}")
+                        onError("解析自定义大模型返回内容失败：${e.message}")
                     }
                 }
             }

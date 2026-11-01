@@ -10,8 +10,10 @@ import android.content.SharedPreferences
 object JarvisPrefs {
     private const val FILE = "jarvis_settings"
     private const val KEY_AGNES_KEY = "agnes_api_key"
-    private const val KEY_DEEPSEEK_KEY = "deepseek_api_key"
-    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：agnes（默认）/ deepseek
+    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：agnes（默认）/ custom
+    private const val KEY_CUSTOM_BASE_URL = "custom_base_url"
+    private const val KEY_CUSTOM_MODEL = "custom_model"
+    private const val KEY_CUSTOM_API_KEY = "custom_api_key"
     private const val KEY_WAKE_ENABLED = "wake_enabled"
     private const val KEY_BARGE_IN_ENABLED = "barge_in_enabled"
 
@@ -23,11 +25,21 @@ object JarvisPrefs {
         p(ctx).edit().putString(KEY_AGNES_KEY, key.trim()).apply()
     }
 
-    // ---------- 批十二：DeepSeek Key + 跨应用任务模型选择 ----------
+    // ---------- 自定义大模型（OpenAI 兼容接口） + 跨应用任务模型选择 ----------
 
-    fun getDeepSeekKey(ctx: Context): String = p(ctx).getString(KEY_DEEPSEEK_KEY, "") ?: ""
-    fun setDeepSeekKey(ctx: Context, key: String) {
-        p(ctx).edit().putString(KEY_DEEPSEEK_KEY, key.trim()).apply()
+    fun getCustomBaseUrl(ctx: Context): String = p(ctx).getString(KEY_CUSTOM_BASE_URL, "") ?: ""
+    fun setCustomBaseUrl(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_CUSTOM_BASE_URL, v.trim()).apply()
+    }
+
+    fun getCustomModel(ctx: Context): String = p(ctx).getString(KEY_CUSTOM_MODEL, "") ?: ""
+    fun setCustomModel(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_CUSTOM_MODEL, v.trim()).apply()
+    }
+
+    fun getCustomKey(ctx: Context): String = p(ctx).getString(KEY_CUSTOM_API_KEY, "") ?: ""
+    fun setCustomKey(ctx: Context, key: String) {
+        p(ctx).edit().putString(KEY_CUSTOM_API_KEY, key.trim()).apply()
     }
 
     fun getTaskBrain(ctx: Context): String = p(ctx).getString(KEY_TASK_BRAIN, "agnes") ?: "agnes"

@@ -58,7 +58,6 @@ import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.AgnesClient
-import com.jarvis.app.net.DeepSeekClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
 import kotlinx.coroutines.Dispatchers
@@ -750,17 +749,17 @@ class MainActivity : Activity() {
 
         /**
          * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
-         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：agnes 默认 / deepseek）。
+         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：agnes 默认 / custom）。
          */
         @JavascriptInterface
         fun getModelInfo(): String {
             return try {
                 val o = JSONObject()
-                if (JarvisPrefs.getTaskBrain(this@MainActivity) == "deepseek") {
-                    o.put("provider", "deepseek")
-                    o.put("base_url", DeepSeekClient.BASE_URL)
-                    o.put("model", DeepSeekClient.MODEL)
-                    o.put("has_key", JarvisPrefs.getDeepSeekKey(this@MainActivity).isNotBlank())
+                if (JarvisPrefs.getTaskBrain(this@MainActivity) == "custom") {
+                    o.put("provider", "custom")
+                    o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
+                    o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
+                    o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
                 } else {
                     o.put("provider", "agnes")
                     o.put("base_url", AgnesClient.BASE_URL)
@@ -1125,8 +1124,8 @@ class MainActivity : Activity() {
                       var info = JSON.parse(JarvisBridge.getModelInfo());
                       if (!info.has_key && !force) return;
                       var presets = [];
-                      if (info.provider === 'deepseek') {
-                        presets.push({id:'deepseek', name:'DeepSeek', base_url: info.base_url, model: info.model, key: true, key_url: 'https://platform.deepseek.com'});
+                      if (info.provider === 'custom') {
+                        presets.push({id:'custom', name:'自定义', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       } else {
                         presets.push({id:'agnes', name:'Agnes', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       }
@@ -1522,11 +1521,16 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 原生面板 Agent 调度行点击：复用 HUD 的 agentClick（真行为——BRAIN 开大脑窗口，
-     * LEARNING 开能力视图，JOBS/REVIEW 发问句走对话）。WebView 可用（已初始化、页面已加载、
-     * 竖屏非静态模式）时走 HUD；不可用时 jobs/review 退回走原生 submitText 发同样那句话，
-     * brain/learn 没有原生等价物，toast 提示。 */
+    /** 原生面板 Agent 调度行点击：BRAIN/LEARNING 没有单独窗口了（大脑窗口已删），
+     * 点它们就关掉面板、回到主对话——大脑就是对话本身。JOBS/REVIEW 发问句走对话：
+     * WebView 可用（已初始化、页面已加载、竖屏非静态模式）时走 HUD；不可用时
+     * 退回走原生 submitText 发同样那句话。 */
     private fun onAgentRowClick(id: String) {
+        if (id == "brain" || id == "learn") {
+            setNativePanel(false)
+            chatInput.requestFocus()
+            return
+        }
         val webOk = ::hudWebView.isInitialized && hudPageLoaded && !JarvisPrefs.isPortraitUseStatic(this)
         if (webOk) {
             hudWebView.evaluateJavascript("if(typeof agentClick==='function')agentClick('$id')", null)
@@ -2210,30 +2214,39 @@ class MainActivity : Activity() {
             toast("已保存")
         })
 
-        // ---- 批十二：跨应用任务模型切换 + DeepSeek Key ----
-        // 任务循环（task/TaskLoop）的大脑二选一：Agnes 带图问；DeepSeek 纯文本，
-        // 靠无障碍界面树文字推进（Andee 同款路线，识图不是命脉）。
-        root.addView(segmentedRow("跨应用任务模型", listOf("Agnes", "DeepSeek"),
-            if (JarvisPrefs.getTaskBrain(this) == "deepseek") 1 else 0) { i ->
-            val next = if (i == 1) "deepseek" else "agnes"
+        // ---- 跨应用任务模型切换 + 自定义大模型 ----
+        // 任务循环（task/TaskLoop）的大脑二选一：Agnes 带图问；自定义走用户自己填的
+        // OpenAI 兼容接口，同样带图问。
+        root.addView(segmentedRow("跨应用任务模型", listOf("Agnes", "自定义"),
+            if (JarvisPrefs.getTaskBrain(this) == "custom") 1 else 0) { i ->
+            val next = if (i == 1) "custom" else "agnes"
             JarvisPrefs.setTaskBrain(this, next)
             toast(
-                if (next == "deepseek") "跨应用任务改用 DeepSeek（纯文本，看界面树操作）"
+                if (next == "custom") "跨应用任务改用自定义大模型（带截图问）"
                 else "跨应用任务改用 Agnes（带截图问）"
             )
         })
 
-        val dsKeyLabel = TextView(this).apply {
-            text = "DeepSeek API Key（跨应用任务选 DeepSeek 时用）"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt())
+        root.addView(sectionTitle("自定义大模型"))
+        val customBaseInput = EditText(this).apply {
+            hint = "接口地址（如 https://xxx/v1）"; setTextColor(Color.WHITE)
+            setText(JarvisPrefs.getCustomBaseUrl(this@MainActivity))
         }
-        val dsKeyInput = EditText(this).apply {
-            hint = "DeepSeek Key（用 DeepSeek 跑跨应用任务时填）"; setTextColor(Color.WHITE)
-            setText(JarvisPrefs.getDeepSeekKey(this@MainActivity))
+        val customModelInput = EditText(this).apply {
+            hint = "模型名"; setTextColor(Color.WHITE)
+            setText(JarvisPrefs.getCustomModel(this@MainActivity))
         }
-        root.addView(dsKeyLabel)
-        root.addView(dsKeyInput)
-        root.addView(primaryBtn("保存 DeepSeek Key") {
-            JarvisPrefs.setDeepSeekKey(this, dsKeyInput.text.toString())
+        val customKeyInput = EditText(this).apply {
+            hint = "Key（跨应用任务选自定义时用）"; setTextColor(Color.WHITE)
+            setText(JarvisPrefs.getCustomKey(this@MainActivity))
+        }
+        root.addView(customBaseInput)
+        root.addView(customModelInput)
+        root.addView(customKeyInput)
+        root.addView(primaryBtn("保存自定义大模型") {
+            JarvisPrefs.setCustomBaseUrl(this, customBaseInput.text.toString())
+            JarvisPrefs.setCustomModel(this, customModelInput.text.toString())
+            JarvisPrefs.setCustomKey(this, customKeyInput.text.toString())
             toast("已保存")
         })
 

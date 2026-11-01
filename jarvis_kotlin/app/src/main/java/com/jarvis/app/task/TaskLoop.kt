@@ -9,7 +9,7 @@ import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.net.AgnesClient
-import com.jarvis.app.net.DeepSeekClient
+import com.jarvis.app.net.CustomClient
 import com.jarvis.app.screen.ScreenCapture
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   的 MAX_HISTORY_CHARS 截断思路；本工程是一次性提示词，预算按单条提示词定）。
  * - 截图策略（ToolSchemas 的纪律）：界面树大纲是默认观察，截图只在树为空
  *   （自绘界面/被扣留）、上一步失败或界面没变化需要核对、或 zoom 要求时才带；
- *   DeepSeek 纯文本永不带图（批十二路由不变）。无障碍截图拿不到图而录屏通道
+ *   任务大脑（Agnes / 自定义）都带图问。无障碍截图拿不到图而录屏通道
  *   （[ScreenCapture]，批十四移植）可用时用它兜底，图上无网格、只许看不许按
  *   图瞄准，提示词里会标明来源；隐私黑名单包（isShotBlocked）两条通道都不拍。
  *
@@ -210,13 +210,11 @@ object TaskLoop {
                 // 2026-10-24 跨应用修复第 3 件：微信这类屏经常是树“有但没用”——
                 // 有节点、但可用节点极少，模型对着没目标的树只能 wait。加两条：
                 // 可用节点 < 3 时强制带图；连续 2 轮无真交互时强制带图，打破 wait 循环。
-                val taskBrain = JarvisPrefs.getTaskBrain(ctx)
-                val brainWantsImage = taskBrain != "deepseek"
                 var image: String? = pendingImage
                 var imageFromProjection = false
                 pendingImage = null
                 val treeTooThin = nodesUseful >= 0 && nodesUseful < 3
-                val needImage = brainWantsImage &&
+                val needImage =
                     !JarvisAccessibilityService.isShotBlocked(pkg) &&
                     (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false ||
                         treeTooThin || noProgressSteps >= 2)
@@ -227,7 +225,6 @@ object TaskLoop {
                         imageFromProjection = image != null
                     }
                 }
-                if (!brainWantsImage) image = null
 
                 val userText = buildString {
                     append("任务：").append(taskText).append('\n')
@@ -256,9 +253,9 @@ object TaskLoop {
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
-                // 批十二：DeepSeek 是纯文本模型，不带图（循环靠界面树文字推进）；
-                // 界面树空白且最终不带图时，明确告知模型它看不到元素，别让它空转。
-                val sendImage = if (taskBrain == "deepseek") null else image
+                // 任务大脑（Agnes / 自定义）都带图问；界面树空白且最终不带图时，
+                // 明确告知模型它看不到元素，别让它空转。
+                val sendImage = image
                 val askBase = if (elements.isBlank() && sendImage == null) {
                     userText + "\n（注意：本屏界面树不可见，你看不到界面元素，只能根据历史步骤判断；若无法推进请输出 done 并说明卡点）"
                 } else {
@@ -553,11 +550,10 @@ private fun askModel(ctx: Context, userText: String, image: String?): Pair<Strin
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-// 批十二：按设置路由任务大脑。DeepSeek 走纯文本（image 强制传 null，
-// 调用方也已把 sendImage 置空，这里双保险）；Agnes 维持带图。
-if (JarvisPrefs.getTaskBrain(ctx) == "deepseek") {
-DeepSeekClient.askOnce(
-ctx, SYSTEM_PROMPT, userText, null,
+// 按设置路由任务大脑：自定义模型与 Agnes 一样走 OpenAI 兼容接口、带图问。
+if (JarvisPrefs.getTaskBrain(ctx) == "custom") {
+CustomClient.askOnce(
+ctx, SYSTEM_PROMPT, userText, image,
 onResult = { reply = it; latch.countDown()},
 onError = { error = it; latch.countDown()}
 )

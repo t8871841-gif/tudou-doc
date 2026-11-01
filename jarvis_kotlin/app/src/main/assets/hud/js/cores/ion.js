@@ -26,7 +26,7 @@ SKCORES.ion = function () {
   const CARD = [
     [['唤醒词', 'WAKE WORD', 'Hey Jarvis'], ['语音', 'SPEECH', '麦克风'], ['文字', 'TEXT', '输入框'], ['手势', 'GESTURE', '摄像头'], ['系统', 'SYSTEM', 'CPU · 内存 · 网络'], ['定时', 'TIMER', '日程提醒']],
     [['转写', 'TRANSCRIBE', 'Parakeet · SenseVoice'], ['语种', 'LANGUAGE', '中 / 英'], ['声纹', 'VOICEPRINT', '是不是你'], ['意图', 'INTENT', '想让我做什么'], ['上下文', 'CONTEXT', '多轮对话'], ['打断', 'BARGE-IN', 'Stop · Wait']],
-    [['大脑', 'BRAIN', 'DeepSeek'], ['记忆', 'MEMORY', '最近的对话'], ['规划', 'PLAN', '拆成步骤'], ['工具', 'TOOLS', '选哪项能力'], ['翻译', 'TRANSLATE', '中文字幕'], ['直接回答', 'ANSWER', '不用工具']],
+    [['大脑', 'BRAIN', 'Agnes'], ['记忆', 'MEMORY', '最近的对话'], ['规划', 'PLAN', '拆成步骤'], ['工具', 'TOOLS', '选哪项能力'], ['翻译', 'TRANSLATE', '中文字幕'], ['直接回答', 'ANSWER', '不用工具']],
     [['天气', 'WEATHER', '今天 · 三天'], ['导航', 'ROUTE', '路线 · 路况'], ['日程', 'SCHEDULE', '今日安排'], ['米家', 'HOME', '灯 · 晾衣架 · 风扇'], ['全息', 'HOLOGRAM', '模型 · 演示'], ['工坊', 'HARNESS', '文档 · 程序 · 图片']],
     [['安全清单', 'SAFETY', '门锁 · 电磁炉不可控'], ['本地优先', 'LOCAL', '数据不出门'], ['需要确认', 'CONFIRM', '等你点头'], ['置信度', 'CONFIDENCE', '≥ 0.85'], ['密钥', 'SECRETS', '只在本机'], ['限速重试', 'RETRY', '失败自动重试']],
     [['高德', 'AMAP', '天气 · 路线'], ['日程表', 'PLANNER', '本地文件'], ['米家设备', 'MIJIA', '设备指令'], ['全息投影', 'HOLO', '粒子模型'], ['工坊作品', 'HARNESS', '桌面 · Jarvis 作品'], ['语音回答', 'VOICE', 'Jarvis 说话']]
