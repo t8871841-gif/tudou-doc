@@ -387,3 +387,15 @@ body[data-state="listening"] .state-badge,body[data-state="thinking"] .state-bad
 @media (prefers-reduced-motion:reduce){#statsHolo,#statsHolo::before,#statsHolo .sh-grid div,#statsHolo .bar i::after{transition:none;animation:none}}
 body[data-live] .demo-tag{display:none}
 .agent.off{opacity:.42}.agent .name small{font-family:var(--f-cn);font-size:11px;color:var(--ink-3);margin-left:8px;letter-spacing:0}
+
+/* <<demo-quick: portrait quick demo buttons (batch 2) — four icon-only buttons in a row
+   at the bottom edge of the HUD animation area, just above the native dialogue box.
+   Fixed to the HUD page viewport (the WebView is the top 3/5 in portrait), so they can
+   never overlap the native dialogue below. Always visible (not tied to dormant) so a
+   tap works reliably: the capture-phase wake listener must not hide them mid-tap. */
+#demoQuick{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:14px;z-index:8}
+#demoQuick .dq-btn{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.55);color:rgb(var(--sk-ink));cursor:pointer;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 0 14px rgba(var(--sk-pri),.18);padding:0}
+#demoQuick .dq-btn svg{width:30px;height:30px;display:block}
+#demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
+@media (orientation:landscape){#demoQuick{display:none}}
+/* demo-quick>> */
