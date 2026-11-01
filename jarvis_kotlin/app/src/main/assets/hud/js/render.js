@@ -16,14 +16,14 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 
-/* drag to rotate, click to talk */
+/* tap core to talk; drag-to-rotate removed (portrait design, batch 1) */
 let drag = null, rotV = { x: 0, y: 0 }, target = { x: 0, y: 0 }, mouse = { x: 0, y: 0 };
 canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, moved: 0 }; canvas.setPointerCapture(e.pointerId); canvas.classList.add('dragging'); });
 canvas.addEventListener('pointermove', e => {
   mouse.x = e.clientX / innerWidth - 0.5; mouse.y = e.clientY / innerHeight - 0.5;
   if (!drag) return;
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.moved += Math.abs(dx) + Math.abs(dy);
-  rotV.y += dx * 0.0009; rotV.x += dy * 0.0009; drag.x = e.clientX; drag.y = e.clientY;
+  drag.x = e.clientX; drag.y = e.clientY;
 });
 canvas.addEventListener('pointerup', e => {
   canvas.classList.remove('dragging');

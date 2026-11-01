@@ -92,6 +92,9 @@ class MainActivity : Activity() {
     private var orbSwitchUpdating = false
     private lateinit var homePanel: LinearLayout
     private lateinit var contentView: LinearLayout
+    // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 3/5）。
+    private lateinit var rootLayout: FrameLayout
+    private lateinit var stageLayout: FrameLayout
     private lateinit var settingsScroll: ScrollView
     private lateinit var chatList: LinearLayout
     private lateinit var chatScroll: ScrollView
@@ -120,7 +123,7 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
 
     // 彻底融合第 1 步：HUD WebView 从 HudActivity 搬进来，常驻只建一次；
-    // 竖屏藏起来停渲染，横屏全屏显示。
+    // 竖屏第 1 批：竖屏进舞台（上 3/5）继续渲染，横屏回根布局全屏显示。
     // 第 2 步（桥接）：页面说话/打字改走原生 HudBridge；状态改 onStateChanged 回调推送，
     // 500ms 轮询已删。面板假数据不动，等第 3 步接真数据。
     private lateinit var hudWebView: WebView
@@ -152,6 +155,7 @@ class MainActivity : Activity() {
         )
 
         val root = FrameLayout(this)
+        rootLayout = root
         // 全息效果已删（2026-10-27）：背景回到渐变层 + 光晕点阵（原 fallback）。
         root.addView(
             GradientLayerView(
@@ -173,9 +177,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        homePanel.addView(buildStage())
+        stageLayout = buildStage()
+        homePanel.addView(stageLayout)
         buildChatPanel()
-        homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        homePanel.addView(chatScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
         homePanel.addView(buildBottomPanel())
         contentView.addView(homePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -231,11 +236,11 @@ class MainActivity : Activity() {
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
     // 银河动画已封存：舞台不再建 GalaxyHoloStageView，改成一张静图（居中裁剪），
     // 默认图是 HUD 默认皮肤静帧，设置「主界面」里可从图库自选；唤醒词胶囊保留在舞台底部。
-    // 舞台仍占上部区域 2/3（权重 2:1），对话与底部面板位置不动 ----------
+    // 竖屏第 1 批：舞台改占上部 3/5（权重 3:2），里面放 HUD WebView（动画），静图藏起来；对话在下 2/5 ----------
 
     private fun buildStage(): FrameLayout {
         val stage = FrameLayout(this)
-        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f)
+        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 3f)
         stageImageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
         }.also {
@@ -293,7 +298,7 @@ class MainActivity : Activity() {
     // ---------- 彻底融合第 1 步：HUD WebView 常驻 + 横竖屏切换 ----------
 
     /** HUD WebView 从 HudActivity 原样搬进来：WebViewAssetLoader 喂 assets、
-     * onPageFinished 注入演示菜单、500ms 状态轮询；只建一次，竖屏停渲染、横屏全屏。 */
+     * onPageFinished 注入演示菜单、500ms 状态轮询；只建一次，竖屏在舞台里（上 3/5）、横屏回根布局全屏。 */
     private fun setupHudWebView(parent: FrameLayout) {
         hudAssetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -303,7 +308,7 @@ class MainActivity : Activity() {
             settings.domStorageEnabled = true
             // 第 2 步：挂原生桥（window.JarvisBridge），必须在 loadUrl 之前挂。
             addJavascriptInterface(HudBridge(), "JarvisBridge")
-            // hud 是 Three.js 全屏 WebGL，竖屏藏起来时要停渲染，回来再续。
+            // hud 是 Three.js WebGL；竖屏第 1 批起竖屏也在舞台里渲染（不再藏起停渲染）。
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView,
@@ -349,7 +354,7 @@ class MainActivity : Activity() {
         settingsScroll.bringToFront()
     }
 
-    /** 按当前方向摆两套内容：竖屏原生界面、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。
+    /** 按当前方向摆两套内容：竖屏 HUD 在舞台（上 3/5）+ 原生对话（下 2/5）、横屏 HUD 全屏；设置页开着时两套都藏，只留设置层。
      * 第 2 步：500ms 轮询已删；切到横屏时把当前状态与模型配置再推一次（竖屏期间状态变过，
      * hudLastPushedState 已记下最新值，先清掉再推，否则去重会吞掉这次同步）。 */
     private fun applyOrientationLayout() {
@@ -362,6 +367,7 @@ class MainActivity : Activity() {
             return
         }
         if (landscape) {
+            moveHudWebViewToRoot()
             contentView.visibility = View.GONE
             hudWebView.visibility = View.VISIBLE
             hudWebView.onResume()
@@ -373,11 +379,35 @@ class MainActivity : Activity() {
             // 横屏看 HUD 时不熄屏；回竖屏即恢复。
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
-            hudWebView.onPause()
-            hudWebView.visibility = View.GONE
+            // 竖屏第 1 批：WebView 进舞台（上 3/5）继续渲染，不再藏起；对话框在下 2/5。
+            moveHudWebViewToStage()
+            hudWebView.visibility = View.VISIBLE
+            hudWebView.onResume()
             contentView.visibility = View.VISIBLE
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+
+    /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 3/5），静图藏起来，唤醒词胶囊浮在 WebView 上面。 */
+    private fun moveHudWebViewToStage() {
+        if (!::hudWebView.isInitialized || !::stageLayout.isInitialized || !::wakeChip.isInitialized) return
+        if (hudWebView.parent !== stageLayout) {
+            (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
+            stageLayout.addView(hudWebView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+        stageImageView?.visibility = View.GONE
+        wakeChip.bringToFront()
+    }
+
+    /** 横屏：把 HUD WebView 移回根布局全屏，舞台静图恢复；设置页永远在最上面。 */
+    private fun moveHudWebViewToRoot() {
+        if (!::hudWebView.isInitialized || !::rootLayout.isInitialized) return
+        if (hudWebView.parent !== rootLayout) {
+            (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
+            rootLayout.addView(hudWebView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+        stageImageView?.visibility = View.VISIBLE
+        settingsScroll.bringToFront()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -1199,18 +1229,12 @@ class MainActivity : Activity() {
                 toast(if (next) "回答朗读已关，只显示文字" else "回答朗读已开")
             }
         }
-        // 批十：按钮下加「朗读」标签——用户反馈界面上找不到语音播放的开关（原先只有一个没说明的喇叭图标）
+        // 竖屏第 1 批：按钮下的「朗读」标签已删（只留喇叭图标按钮本身）。
         val muteCol = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
         }
         muteCol.addView(muteButton, LinearLayout.LayoutParams(dp(44), dp(40)))
-        muteCol.addView(TextView(this@MainActivity).apply {
-            text = "朗读"
-            textSize = 9f
-            setTextColor(0x99FFFFFF.toInt())
-            gravity = Gravity.CENTER
-        })
         micRow.addView(muteCol)
 
         val micButton = View(this@MainActivity).apply {
@@ -1235,13 +1259,7 @@ class MainActivity : Activity() {
         micRow.addView(keyboardToggle, LinearLayout.LayoutParams(dp(44), dp(44)))
         addView(micRow)
 
-        addView(TextView(this@MainActivity).apply {
-            text = "点击麦克风开始语音交互"
-            textSize = 11f
-            setTextColor(0x99FFFFFF.toInt())
-            gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, 0)
-        })
+        // 竖屏第 1 批：下面的「点击麦克风开始语音交互」提示字已删。
         detailView = TextView(this@MainActivity).apply {
             textSize = 11f
             setTextColor(0x61FFFFFF.toInt())
@@ -2314,8 +2332,8 @@ class MainActivity : Activity() {
         super.onResume()
         OrbController.setAppForeground(true)
         if (showingSettings) refresh()
-        // 横屏看 HUD 时恢复渲染，并把当前状态与模型配置再推一次；竖屏或设置页开着时 WebView 保持暂停。
-        if (!showingSettings && resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE && ::hudWebView.isInitialized) {
+        // 竖屏第 1 批：HUD WebView 竖屏也在舞台里渲染（上 3/5），回前台时恢复渲染并再推一次状态与面板；设置页开着时保持暂停。
+        if (!showingSettings && ::hudWebView.isInitialized) {
             hudWebView.onResume()
             hudLastPushedState = null
             pushHudState(JarvisAgent.currentState())
