@@ -13,6 +13,7 @@ import android.provider.ContactsContract
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import com.jarvis.app.AuditLog
+import com.jarvis.app.task.ShizukuHelper
 import java.util.concurrent.Executors
 
 /**
@@ -398,12 +399,9 @@ object LocalCommands {
             main.post { speak("关闭什么？说个应用名") }
             return
         }
+        // 无障碍服务实例先取出来，但不急着判空：Shizuku 强停不需要无障碍，
+        // 判空只守最近任务兜底那条路（见下面）。以前判空放在这里会把 Shizuku 也挡住。
         val svc = com.jarvis.app.JarvisAccessibilityService.instance
-        if (svc == null) {
-            main.post { speak("关闭应用要用无障碍服务：去设置里把 Jarvis 的无障碍打开") }
-            AuditLog.append(ctx, "本地指令", "关闭$name", "无障碍服务未连接")
-            return
-        }
         // 找目标：常用应用先包名直查（与打开同一张表），否则按标签精确匹配；
         // 关闭错应用比关不成严重，所以这里不用打开那边的模糊匹配。
         val pm = ctx.packageManager
@@ -433,6 +431,28 @@ object LocalCommands {
             return
         }
         val targetLabel = label
+        val targetPkg = pkg
+        // Shizuku 强停优先：不用无障碍、不走最近任务划卡片，更稳。
+        val shizukuAvailable = ShizukuHelper.isShizukuAvailable(ctx)
+        if (shizukuAvailable && ShizukuHelper.hasPermission()) {
+            if (ShizukuHelper.forceStopPackage(ctx, targetPkg)) {
+                AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "Shizuku 强停成功")
+                main.post { speak("${targetLabel}关了") }
+                return
+            }
+            AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "Shizuku 强停失败，走最近任务兜底")
+        } else if (shizukuAvailable) {
+            // 有 Shizuku 但没授权：弹一次授权框，本次仍走最近任务兜底，不等授权结果；
+            // 下次关应用时若已授权就走强停。
+            ShizukuHelper.requestPermission(ctx)
+            AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "Shizuku 未授权，已请求授权，本次走最近任务兜底")
+        }
+        // 最近任务兜底：要无障碍服务，没连上就到此为止。
+        if (svc == null) {
+            main.post { speak("关闭应用要用无障碍服务：去设置里把 Jarvis 的无障碍打开") }
+            AuditLog.append(ctx, "本地指令", "关闭$name", "无障碍服务未连接")
+            return
+        }
         try {
             svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
         } catch (_: Exception) {

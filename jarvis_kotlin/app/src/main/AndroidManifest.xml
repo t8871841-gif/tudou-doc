@@ -115,6 +115,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"/>
         </provider>
+        <!-- Shizuku 12.2.0：与 Shizuku 守护进程通信的入口，没有它 Shizuku.pingBinder() 永远不通。 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:exported="true"
+            android:multiprocess="false"
+            android:enabled="true" />
         <service
             android:name=".JarvisAccessibilityService"
             android:label="Jarvis 跨应用全自动引擎"
@@ -129,6 +136,8 @@
         </service>
     </application>
     <queries>
+        <!-- Shizuku：API 30+ 上要声明才能查到 Shizuku 应用是否已装（isShizukuAvailable 用）。 -->
+        <package android:name="moe.shizuku.privileged.api" />
         <intent>
             <action android:name="android.speech.RecognitionService"/>
         </intent>

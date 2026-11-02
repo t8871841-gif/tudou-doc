@@ -56,4 +56,11 @@ dependencies {
     // sherpa-onnx 1.12.23（流式 zipformer 离线识别）预编译 aar，官方只发 GitHub Releases，
     // 由 CI 构建时下载放到 app/libs/（不进 git），文件名必须完全一致。
     implementation files('libs/sherpa-onnx-1.12.23.aar')
+    // Shizuku 12.2.0 钉住（不要悄悄升到 13.x）：Shizuku.newProcess(String[], String[], String)
+    // 在 12.2.0 是 public，13.0 起改成 private，只能走 bindUserService + UserService
+    //（代码量大、这里没法验）。12.2.0 + newProcess 可直接以 shell 身份跑 `am force-stop <pkg>`。
+    // 若 12.2.0 解析失败，先报出来，不要换版本。
+    // 来源：Maven Central，dev.rikka.shizuku:api / :provider，MIT 协议。
+    implementation libs.shizuku.api
+    implementation libs.shizuku.provider
 }
