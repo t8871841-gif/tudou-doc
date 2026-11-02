@@ -545,12 +545,14 @@ class JarvisAccessibilityService : AccessibilityService() {
      * 批二十四：划掉最近任务里的一张卡片（只给用户亲口说的「关闭 X」用）。
      * 通用 tapXY/swipeScreen 只在白名单 App 内放行，而最近任务界面属于 SystemUI，
      * 不在白名单里；但划卡片是系统界面操作、不是在某个 App 内容里点按，且调用方
-     * 只能是本地指令层的用户原话，不经过模型任务循环。只划与 label 文本相符的卡片，
-     * 一次一划；找不到卡片、发不出手势都如实回报，不装成功。
+     * 只能是本地指令层的用户原话，不经过模型任务循环。先精确匹配 label 文本；
+     * 精确匹配不到时再走一遍宽松匹配（Flyme 卡片标题可能被截断或大小写不同），
+     * 有且仅有一个候选才划，零个或多个都算没找到，不猜。一次一划；找不到卡片、
+     * 发不出手势都如实回报，不装成功。
      */
     fun dismissRecentCard(label: String, done: (Boolean, String) -> Unit) {
         val root = rootInActiveWindow ?: run { done(false, "no_window"); return }
-        val rect = findTextNodeRect(root, label)
+        val rect = findTextNodeRect(root, label) ?: findLenientNodeRect(root, label)
         if (rect == null) { done(false, "not_found"); return }
         val cx = rect.centerX().toFloat()
         val cy = rect.centerY().toFloat()
@@ -604,6 +606,38 @@ class JarvisAccessibilityService : AccessibilityService() {
             if (found != null) return found
         }
         return null
+    }
+
+    /**
+     * 宽松匹配兜底（精确匹配失败时才走）：Flyme 最近任务卡片标题可能被截断或
+     * 大小写不同。收 text/contentDescription（trim + lowercase 后）包含 label
+     * 或被 label 包含、且坐标框非空的节点；有且仅有一个候选才返回它的框，零个
+     * 或多个都返回 null——关错应用比关不成严重，绝不猜。空串不算候选（否则
+     * label.contains("") 恒真，会把所有空文本节点都算进来）。
+     */
+    private fun findLenientNodeRect(node: AccessibilityNodeInfo, label: String): Rect? {
+        val want = label.trim().lowercase()
+        if (want.isEmpty()) return null
+        val hits = LinkedHashSet<Rect>()
+        fun walk(n: AccessibilityNodeInfo) {
+            for (cand in listOf(n.text?.toString(), n.contentDescription?.toString())) {
+                val t = cand?.trim()?.lowercase().orEmpty()
+                if (t.isEmpty()) continue
+                if (t.contains(want) || want.contains(t)) {
+                    val r = Rect()
+                    n.getBoundsInScreen(r)
+                    if (!r.isEmpty) hits.add(r)
+                    break
+                }
+            }
+            for (i in 0 until n.childCount) {
+                val child = n.getChild(i) ?: continue
+                walk(child)
+                child.recycle()
+            }
+        }
+        walk(node)
+        return if (hits.size == 1) hits.first() else null
     }
 
     // ---------- v3：音量键组合急停 ----------
