@@ -399,6 +399,16 @@ body[data-live] .demo-tag{display:none}
 #demoQuick .dq-btn svg{width:32px;height:32px;display:block}
 #demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
 @media (orientation:landscape){#demoQuick{display:none}}
+/* <<landscape-panels-hide: landscape also hides the HUD's four panels (.hud >
+   .body: Agent 调度 / 工作汇报 / 天气 / 日程) and the HUD talk bar (.hud >
+   .bottom). Rotating must not bring them back; landscape is kept only for
+   watching films (e.g. Wandering Earth) full-screen. The nodes stay in the DOM
+   so the JS that updates them keeps working; only the display is hidden. */
+@media (orientation:landscape){
+  .hud > .body{display:none}
+  .hud > .bottom{display:none}
+}
+/* landscape-panels-hide>> */
 /* demo-quick>> */
 
 /* <<portrait-top-hide: portrait hides the whole HUD top bar (cube logo / J.A.R.V.I.S
