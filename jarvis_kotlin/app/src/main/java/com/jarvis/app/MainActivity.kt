@@ -258,6 +258,8 @@ class MainActivity : Activity() {
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
         JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
         JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false) } }
+        // 语音指令动 HUD 的桥：本地指令层（拆解等）把 JS 串交过来，在主线程喂给 HUD WebView。
+        JarvisAgent.onRunHudJs = { js -> runOnUiThread { hudWebView.evaluateJavascript(js, null) } }
         onAgentStateChanged(JarvisAgent.currentState())
 
         handleAssistIntent(intent)
@@ -1720,7 +1722,9 @@ class MainActivity : Activity() {
                 return@launch
             }
             // 批八：打字路径与语音同路过本地指令层（打电话/打开应用），命中直接办、回执进气泡不朗读。
-            if (com.jarvis.app.command.LocalCommands.tryHandle(this@MainActivity, q) { reply ->
+            if (com.jarvis.app.command.LocalCommands.tryHandle(this@MainActivity, q, runJs = { js ->
+                    runOnUiThread { hudWebView.evaluateJavascript(js, null) }
+                }) { reply ->
                     runOnUiThread { addBubble(reply, mine = false) }
                 }
             ) {

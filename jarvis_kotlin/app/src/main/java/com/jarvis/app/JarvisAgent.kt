@@ -55,6 +55,11 @@ object JarvisAgent {
     @Volatile
     var onReplyText: ((String) -> Unit)? = null
 
+    /** MainActivity 注入：把 JS 串送进 HUD WebView（语音路径没有 Activity 引用时为 null，
+     *  本地指令里动 HUD 的那几条会自己回绝，不硬调）。 */
+    @Volatile
+    var onRunHudJs: ((String) -> Unit)? = null
+
     fun currentState(): String = state
 
     @Volatile
@@ -234,7 +239,7 @@ object JarvisAgent {
     private fun handleUtterance(ctx: Context, mySeq: Int, text: String, memoryContext: String, skill: SkillItem?) {
         // 批八：本地指令层——「打电话给X」「打开X」先于技能与聊天执行，命中即办，
         // 不再掉进大模型被学舌反问（jk-v12 真机反馈）。
-        if (LocalCommands.tryHandle(ctx, text) { reply -> speakReply(ctx, mySeq, reply) }) return
+        if (LocalCommands.tryHandle(ctx, text, runJs = onRunHudJs) { reply -> speakReply(ctx, mySeq, reply) }) return
         // 批九：多步跨应用任务句式（「在微信上给桑田发信息：…」）进任务循环
         // （移植的 ScreenController + task/TaskLoop 步进驱动）。放在技能之后、
         // TAP_INTENT 之前：技能匹配在上层已对任务句式让行（见 submitText 处），

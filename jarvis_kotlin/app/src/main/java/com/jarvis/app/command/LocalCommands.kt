@@ -66,8 +66,10 @@ object LocalCommands {
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "LocalCommands").apply { isDaemon = true } }
     private val main = Handler(Looper.getMainLooper())
 
-    /** speak 是结果回报通道（语音路径走 Agent.speakReply，打字路径走加气泡），在主线程回调。 */
-    fun tryHandle(ctx: Context, text: String, speak: (String) -> Unit): Boolean {
+    /** speak 是结果回报通道（语音路径走 Agent.speakReply，打字路径走加气泡），在主线程回调。
+     *  runJs 是可选的 HUD 桥（MainActivity 注入）：本地指令要动 HUD 时把 JS 串传进去执行；
+     *  为空表示主界面没开着，动 HUD 的指令只能回绝，不能硬调。 */
+    fun tryHandle(ctx: Context, text: String, speak: (String) -> Unit, runJs: ((String) -> Unit)? = null): Boolean {
         val t = text.trim()
         if (t.isEmpty()) return false
 
@@ -89,6 +91,35 @@ object LocalCommands {
         // 「打开应用」「打电话」判定——这类句子里常常带"我"这种不像应用名/人名的词，
         // 放在后面容易被其他正则抢先误吞。
         if (ReminderCommands.tryHandle(ctx, t, speak)) return true
+
+        // 全息拆解指令（7 台内置拆解机）：「拆解一台汽车发动机」「拆解变速箱」「收起拆解」。
+        // 走 HUD 的 machineCommand，不进大模型；图已随包内置（holo/ + figure-raptor.html）。
+        // 放在 CLOSE_APP 前面，别让「关闭拆解」被当成关一个叫「拆解」的应用。
+        if (isTeardownHide(t)) {
+            if (runJs != null) {
+                runJs("if(typeof machineHide==='function')machineHide()")
+                AuditLog.append(ctx, "本地指令", "收起拆解", "已收起全息拆解")
+                main.post { speak("拆解收起来了") }
+            } else {
+                main.post { speak("主界面没开着，没什么可收的") }
+            }
+            return true
+        }
+        if (t.contains("拆解")) {
+            val machine = findTeardownMachine(t)
+            if (machine != null) {
+                if (runJs != null) {
+                    val title = machine.title.replace("\\", "\\\\").replace("'", "\\'")
+                    runJs("if(typeof machineCommand==='function')machineCommand({action:'show',src:'${machine.src}',title:'$title'})")
+                    AuditLog.append(ctx, "本地指令", "拆解${machine.shortName}", "已投影全息拆解")
+                    main.post { speak("正在拆解${machine.shortName}") }
+                } else {
+                    main.post { speak("主界面没开着，投影不了，先打开 Jarvis 主界面") }
+                }
+                return true
+            }
+            // 有「拆解」但没指明哪台机器，交给聊天（模型会追问是哪台）。
+        }
 
         // 批二十四：关闭应用（与「打开应用」对称）。DeviceCommands 已先行，
         // 所以「关手电筒/关闭手电筒」这类系统功能不会落到这里。
@@ -138,6 +169,35 @@ object LocalCommands {
             return true
         }
         return false
+    }
+
+    // ---------- 全息拆解：7 台内置机器（名 -> 图 + 标题），列表顺序即匹配优先级 ----------
+    private data class TeardownMachine(val keys: List<String>, val src: String, val title: String, val shortName: String)
+
+    private val TEARDOWN_MACHINES = listOf(
+        TeardownMachine(listOf("航空发动机", "涡扇"), "holo/aircraft-turbofan.html", "航空发动机 · 大涵道比涡扇", "航空发动机"),
+        TeardownMachine(listOf("汽车发动机"), "holo/car-engine.html", "汽车发动机 · 直列四缸涡轮增压", "汽车发动机"),
+        TeardownMachine(listOf("燃气轮机"), "holo/gas-turbine.html", "燃气轮机 · 重型发电", "燃气轮机"),
+        TeardownMachine(listOf("变速箱"), "holo/gearbox.html", "变速箱 · 六速手动", "变速箱"),
+        TeardownMachine(listOf("电动机", "电机"), "holo/electric-motor.html", "电动机 · 永磁同步", "电动机"),
+        TeardownMachine(listOf("离心泵", "水泵"), "holo/centrifugal-pump.html", "离心泵", "离心泵"),
+        TeardownMachine(listOf("猛禽", "raptor"), "figure-raptor.html", "RAPTOR 2 · 全流量分级燃烧发动机", "猛禽发动机"),
+    )
+
+    /** 按优先级找机器：先认具体名（航空/汽车发动机），裸「发动机」默认汽车发动机（最常用）。 */
+    private fun findTeardownMachine(text: String): TeardownMachine? {
+        val lower = text.lowercase()
+        for (m in TEARDOWN_MACHINES) {
+            if (m.keys.any { lower.contains(it.lowercase()) }) return m
+        }
+        if (lower.contains("发动机")) return TEARDOWN_MACHINES[1] // 汽车发动机
+        return null
+    }
+
+    private fun isTeardownHide(text: String): Boolean {
+        val close = text.contains("收起") || text.contains("关闭") || text.contains("关掉")
+        val target = text.contains("拆解") || text.contains("全息")
+        return close && target
     }
 
     private fun cleanName(raw: String): String =
