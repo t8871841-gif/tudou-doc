@@ -39,7 +39,16 @@
 #holoLib .hl-empty{grid-column:1/-1;text-align:center;padding:80px 0;color:var(--ink-3);font:12px/1.8 var(--mono,ui-monospace,monospace);letter-spacing:.12em}
 #holoLib .hl-foot{padding:8px 24px;font:10px/1 var(--mono,ui-monospace,monospace);letter-spacing:.16em;color:var(--ink-3);border-top:1px solid rgba(var(--sk-pri,127,219,255),.12);display:flex;gap:18px}
 @keyframes hlIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-@keyframes hlScan{from{background-position:0 100%}to{background-position:0 -100%}}`;
+@keyframes hlScan{from{background-position:0 100%}to{background-position:0 -100%}}
+/* phone portrait: header wraps so the close button stays reachable; grid is one column */
+@media (max-width:640px){
+#holoLib .hl-head{flex-wrap:wrap;gap:10px;padding:14px 16px 10px}
+#holoLib .hl-chips{order:3;flex-wrap:wrap}
+#holoLib input{order:4;flex:1 1 100%;width:auto;min-width:0}
+#holoLib .hl-x{margin-left:auto}
+#holoLib .hl-grid{padding:12px 16px 16px;grid-template-columns:1fr}
+#holoLib .hl-foot{flex-wrap:wrap;gap:8px}
+}`;
   document.head.appendChild(css);
   const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 4v4"/><path d="M12 3L5 7v4"/><path d="M5 13v4l7 4 7-4v-4"/><path d="M12 13v8"/><path d="M5 7l7 4 7-4"/><path d="M14.5 9.5l3-1.7"/></svg>';
   const btn = Object.assign(document.createElement('button'), { className: 'icon-btn', type: 'button', id: 'holoLibBtn', title: '3D 拆解库' });

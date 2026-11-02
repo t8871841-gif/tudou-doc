@@ -613,9 +613,24 @@ class MainActivity : Activity() {
         return intArrayOf(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)
     }
 
-    /** 横屏看 HUD 时返回键先退演示，没演示在播才退出 App；竖屏返回键行为不变。 */
+    /** 返回键：先关 HUD 里的全屏浮层（拆解库 / 流浪地球），再退演示，最后才退出 App。
+     * 浮层是 WebView 里的 div，原生返回键默认不知道它，得先问 JS 有没有浮层开着。 */
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
+        if (::hudWebView.isInitialized && hudPageLoaded) {
+            hudWebView.evaluateJavascript(
+                "(function(){var h=document.getElementById('holoLib'); if(h && !h.hidden){ if(typeof holoLibClose==='function')holoLibClose(); return 'lib'; } if(window.EM_ON){ if(typeof emClose==='function')emClose(); return 'em'; } return ''; })()"
+            ) { r ->
+                if (r == "\"lib\"" || r == "\"em\"") return@evaluateJavascript
+                backAfterOverlay()
+            }
+            return
+        }
+        finishBackPress()
+    }
+
+    /** 浮层都关了之后再走原来的返回逻辑：横屏有演示在播先退演示，否则退出 App。 */
+    private fun backAfterOverlay() {
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (landscape && ::hudWebView.isInitialized && hudPageLoaded) {
             hudWebView.evaluateJavascript("typeof demoLive==='function'?demoLive():false") { r ->
