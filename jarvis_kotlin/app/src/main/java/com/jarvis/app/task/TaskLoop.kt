@@ -63,7 +63,7 @@ object TaskLoop {
      * （截图策略），让模型有图可破局；真正的兜底是 MAX_STEPS 与重复守卫。
      * 没有把 swipe 算进“真操作”——滑动本身更像是在找东西，不一定代表任务在往前推进。
      */
-    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom")
+    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow")
 
     private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
     private const val ELEMENTS_CHARS = 5000
@@ -423,6 +423,17 @@ object TaskLoop {
     private fun signatureOf(action: JSONObject): String {
         val kind = action.optString("action")
         val sb = StringBuilder(kind)
+        // 本地流：签名按流里各步的动作种类拼（tap→type→tap），同一种流连着发 3 次
+        // 照样被重复守卫拦下；步的种类不同就是另一种流，不算重复。
+        if (kind == "flow") {
+            val steps = action.optJSONArray("steps")
+            if (steps != null) {
+                val types = (0 until steps.length())
+                    .map { steps.optJSONObject(it)?.optString("action").orEmpty() }
+                sb.append('|').append(types.joinToString(">"))
+            }
+            return sb.toString()
+        }
         for (k in listOf("eid", "cell", "part", "on", "text", "app")) {
             val v = action.optString(k)
             if (v.isNotEmpty()) sb.append('|').append(k).append('=').append(v)
@@ -447,6 +458,12 @@ object TaskLoop {
             "swipe" -> "(${action.optInt("x1")},${action.optInt("y1")})→(${action.optInt("x2")},${action.optInt("y2")})"
             "zoom" -> action.optString("cell")
             "wait" -> "${action.optLong("ms", 1200)}ms"
+            "flow" -> {
+                val steps = action.optJSONArray("steps")
+                if (steps == null) "" else (0 until steps.length())
+                    .map { steps.optJSONObject(it)?.optString("action").orEmpty() }
+                    .joinToString("→")
+            }
             else -> ""
         }
         return if (detail.isEmpty()) kind else "$kind $detail"
@@ -588,14 +605,29 @@ val end = reply.lastIndexOf('}')
 if (start < 0 || end <= start) return null
 return try {
 val obj = JSONObject(reply.substring(start, end + 1))
-if (obj.optString("action").isEmpty()) null else obj
+if (obj.optString("action").isEmpty()) null
+else if (obj.optString("action") == "flow" && !isValidFlow(obj)) null
+else obj
 } catch (_: Exception) {
 null
 }
 }
 
-/** 一步执行的结果（摘要、是否成功、界面是否变了、zoom 放大图）。 */
-private data class StepResult(
+/** 本地流的结构校验：steps 必须是 1–15 项的数组，每项是带 action 的 JSON 对象。
+ * 不合规按无法解析处理，模型会收到重试提示。 */
+private fun isValidFlow(obj: JSONObject): Boolean {
+val steps = obj.optJSONArray("steps") ?: return false
+if (steps.length() == 0 || steps.length() > FlowRuntime.MAX_FLOW_STEPS) return false
+for (i in 0 until steps.length()) {
+val s = steps.optJSONObject(i) ?: return false
+if (s.optString("action").isEmpty()) return false
+}
+return true
+}
+
+/** 一步执行的结果（摘要、是否成功、界面是否变了、zoom 放大图）。
+ * internal：FlowRuntime 的变异步复用这里的执行映射。 */
+internal data class StepResult(
 val summary: String,
 val ok: Boolean,
 val screenChanged: Boolean?,
@@ -609,8 +641,9 @@ val zoomImage: String?
 * 0–1000 相对坐标，on 指明读自全屏图 "screen" 还是放大图 "zoom"）；swipe
 * 走 swipeNorm（0–1000 相对坐标直通，可带 screens 连滑多屏）；zoom 走
 * zoomAim（只吃 cell，x/y 先换算成 cell）。
+* internal：FlowRuntime 的变异步复用这里的映射，单步行为不变。
 */
-private fun execute(
+internal fun execute(
 ctx: Context, controller: ScreenController, action: JSONObject
 ): StepResult {
 val kind = action.optString("action")
@@ -726,6 +759,13 @@ val ms = action.optLong("ms", 1200).coerceIn(300, 20000)
 Thread.sleep(ms)
 StepResult("已等待 ${ms}ms", true, null, null)
 }
+"flow" -> {
+// 本地流：一段有界脚本由手机在本地一口气跑完，中间不再问模型；
+// 跑完把每步 trace 压成一句摘要回喂历史，模型据此决定下一步。
+// 流本身算一步（不额外占 25 步额度），成败按流的整体 ok 判定。
+val result = FlowRuntime.run(ctx, controller, action)
+StepResult(summarizeFlow(result), result.optBoolean("ok", false), null, null)
+}
 else -> StepResult("未知动作：$kind", false, null, null)
 }
 } catch (e: InterruptedException) {
@@ -733,6 +773,42 @@ throw e
 } catch (e: Exception) {
 StepResult("执行 $kind 出错：${e.message}", false, null, null)
 }
+}
+
+/**
+* 本地流的结果压成一句给模型看的摘要：整体成败、完成几步、耗时、
+* 每步的动作与状态（✓ 成、✗ 败、跳过），失败的带一句原因。
+* 摘要本身要短，历史段还会再截断一次。
+*/
+private fun summarizeFlow(result: JSONObject): String {
+val total = result.optInt("totalSteps", 0)
+val done = result.optInt("completedSteps", 0)
+val elapsed = result.optLong("elapsedMs", 0)
+val ok = result.optBoolean("ok", false)
+val sb = StringBuilder()
+sb.append("本地流").append(if (ok) "完成" else "未完成")
+    .append("：完成 $done/$total 步，耗时 ${elapsed}ms")
+if (result.optBoolean("timedOut", false)) sb.append("（超时）")
+if (result.optBoolean("outcomeUnknown", false)) sb.append("（有一步结果未知，别当它成功了）")
+val steps = result.optJSONArray("steps")
+if (steps != null) {
+val parts = mutableListOf<String>()
+for (i in 0 until steps.length()) {
+val t = steps.optJSONObject(i) ?: continue
+val a = t.optString("action")
+val mark = when (t.optString("status")) {
+"ok" -> "✓"
+"skipped" -> "跳过"
+else -> "✗"
+}
+var s = "$a$mark"
+val err = t.optString("error")
+if (err.isNotEmpty()) s += "（${err.take(20)}）"
+parts += s
+}
+if (parts.isNotEmpty()) sb.append("：").append(parts.joinToString("，"))
+}
+return sb.toString()
 }
 
 /** 0–1000 相对坐标 → 全屏瞄准网格的 cell 标签（8 列 A–H × 12 行），zoom 用。 */
@@ -792,6 +868,7 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待（每次等待要比上一次久，比如 1500→3000→5000→10000，绝不要连续发相同的等待时长，否则会被重复守卫拦停）；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
 "若要按放大图点，动作里加 \"on\":\"zoom\"，坐标和格号都按放大图自身的 0-1000 与小写格号读。" +
+"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有三种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手，{\"action\":\"observe\"} 重新读一遍界面。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：编号只对当前这一屏有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
 "{\"action\":\"fail\",\"reason\":\"卡在哪一步、什么原因\"} 做不下去时用，禁止假装完成。\n" +
 "一步只做一个动作。" +
