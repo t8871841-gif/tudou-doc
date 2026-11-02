@@ -74,7 +74,7 @@ function tick() {
     $('#net').textContent = (4 + Math.random() * 4).toFixed(1) + 'MB/s';
   }
 }
-tick(); setInterval(tick, 5000); setInterval(renderSched, 60000);
+tick(); setInterval(tick, 5000);
 
 /* small canvases */
 function fit(cv) { const r = cv.getBoundingClientRect(); const w = Math.max(1, Math.round(r.width * DPR)), h = Math.max(1, Math.round(r.height * DPR)); if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } return cv.getContext('2d'); }

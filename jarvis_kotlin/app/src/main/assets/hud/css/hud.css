@@ -399,16 +399,6 @@ body[data-live] .demo-tag{display:none}
 #demoQuick .dq-btn svg{width:32px;height:32px;display:block}
 #demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
 @media (orientation:landscape){#demoQuick{display:none}}
-/* <<landscape-panels-hide: landscape also hides the HUD's four panels (.hud >
-   .body: Agent 调度 / 工作汇报 / 天气 / 日程) and the HUD talk bar (.hud >
-   .bottom). Rotating must not bring them back; landscape is kept only for
-   watching films (e.g. Wandering Earth) full-screen. The nodes stay in the DOM
-   so the JS that updates them keeps working; only the display is hidden. */
-@media (orientation:landscape){
-  .hud > .body{display:none}
-  .hud > .bottom{display:none}
-}
-/* landscape-panels-hide>> */
 /* demo-quick>> */
 
 /* <<portrait-top-hide: portrait hides the whole HUD top bar (cube logo / J.A.R.V.I.S
@@ -422,31 +412,4 @@ body[data-live] .demo-tag{display:none}
 }
 /* portrait-top-hide>> */
 
-/* <<portrait-bottom-hide: portrait hides the whole HUD bottom bar (subtitle
-   "Hey Jarvis…" / suggestion chips / talk bar) — the user set the rule that
-   the top 3/5 holds only the core animation and the four demo buttons, all
-   other interaction lives in the native bottom 2/5. Landscape full-screen HUD
-   keeps its bottom bar. #demoQuick is a direct child of <body> (not inside
-   .hud > .bottom), so the four quick buttons are unaffected. The nodes stay in
-   the DOM so the JS that reads them keeps working; only the display is hidden.
-   In portrait the .hud grid rows are auto (max-width:900px), so the hidden row
-   collapses to zero height and leaves no gap. */
-@media (orientation:portrait){
-  .hud > .bottom{display:none}
-}
-/* portrait-bottom-hide>> */
 
-/* <<portrait-body-hide: portrait hides the HUD's own four panels (.hud > .body:
-   Agent 调度 / 工作汇报 / 天气 / 日程) — after the top bar and bottom bar were
-   hidden, a tap still woke the HUD and its panels spread over the top area,
-   covering the four demo buttons (jk-v48 device shot). The portrait rule is
-   that the top holds only the core animation and the four demo buttons; the
-   panels live only in the native bottom panel. Landscape full-screen HUD keeps
-   its panels. #stage and #demoQuick are direct children of <body> (not inside
-   .hud), so the core animation and the four quick buttons are unaffected. The
-   nodes stay in the DOM so the JS that updates them keeps working; only the
-   display is hidden. */
-@media (orientation:portrait){
-  .hud > .body{display:none}
-}
-/* portrait-body-hide>> */
