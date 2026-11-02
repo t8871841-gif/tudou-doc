@@ -157,6 +157,8 @@ object TaskLoop {
         var askFails = 0
         // 上一步的成败与界面变化：决定下一步要不要带图核对（截图策略）。
         var prevStepFailed = false
+        // 上一步是不是 outcomeUnknown：是就下一轮先核对、不要直接重做。
+        var prevOutcomeUnknown = false
         var prevScreenChanged: Boolean? = null
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
@@ -262,6 +264,7 @@ object TaskLoop {
                         append("已执行步骤（旧→新）：\n").append(hist)
                     }
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
+                    if (prevOutcomeUnknown) append("上一步结果未知：不知道那个动作成没成，先看一眼界面（紧凑表和截图）确认成没成，再决定下一步，不要直接重做同样的动作。\n")
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
                 // 任务大脑（Agnes / 自定义）都带图问；紧凑表空白且最终不带图时，
@@ -399,11 +402,16 @@ object TaskLoop {
                     settle.settled -> "（界面已稳定）"
                     else -> "（界面仍在变，超时未稳）"
                 }
-                history += "第 $step 步：${describeAction(action)} → ${r.summary.take(STEP_RESULT_CHARS)}$settleNote"
+                val unknownNote = if (r.outcomeUnknown) "（结果未知：不知道成没成）" else ""
+                history += "第 $step 步：${describeAction(action)} → ${r.summary.take(STEP_RESULT_CHARS)}$unknownNote$settleNote"
                 AuditLog.append(ctx, "任务循环", "$kind（第 $step 步）", r.summary)
-                lastError = if (r.ok) "" else r.summary
+                lastError = if (r.ok) "" else if (r.code.isNotEmpty()) "[${r.code}] ${r.summary}" else r.summary
                 prevStepFailed = !r.ok
+                prevOutcomeUnknown = r.outcomeUnknown
                 prevScreenChanged = r.screenChanged
+                // 结果未知的一步不计入重复：不知道它到底跑没跑成，模型换招或
+                // 重试都不该被当成原地打转拦下；普通失败的重复照旧累计。
+                if (r.outcomeUnknown) repeats = (repeats - 1).coerceAtLeast(0)
             }
             finalReply = "任务跑满了 $MAX_STEPS 步还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}"
             AuditLog.append(ctx, "任务循环", "步数用完", history.lastOrNull() ?: "")
@@ -654,12 +662,16 @@ return true
 }
 
 /** 一步执行的结果（摘要、是否成功、界面是否变了、zoom 放大图）。
+ * Phase 5：加错误码 code（回喂模型按码换招）与 outcomeUnknown（变异动作超时
+ * 后“不知道成没成”，绝不当成功）；成功时 code 为空、outcomeUnknown 为假。
  * internal：FlowRuntime 的变异步复用这里的执行映射。 */
 internal data class StepResult(
 val summary: String,
 val ok: Boolean,
 val screenChanged: Boolean?,
-val zoomImage: String?
+val zoomImage: String?,
+val code: String = "",
+val outcomeUnknown: Boolean = false
 )
 
 /**
@@ -691,7 +703,7 @@ if (kind == "tap") controller.tapByEid(eid)
 else controller.longPressByEid(eid, ms)
 action.has("sel") -> {
 val sel = action.optJSONObject("sel")
-?: return StepResult("$kind 的 sel 不是对象", false, null, null)
+?: return StepResult("$kind 的 sel 不是对象", false, null, null, "PARSE_ERROR")
 val index = action.optInt("index", 0)
 if (kind == "tap") controller.tapBySelector(sel, index)
 else controller.longPressBySelector(sel, index, ms)
@@ -705,7 +717,7 @@ val y = action.optInt("y", -1)
 if (kind == "tap") controller.tapAim(on, x, y, null, part)
 else controller.longPressAim(on, x, y, null, null, ms)
 }
-else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null, null)
+else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null, null, "PARSE_ERROR")
 }
 } catch (e: IllegalStateException) {
 // 批三十：树盲应用上 tap 因 zoom 过期被拒时，自动对同一目标重拍一张 zoom 图
@@ -732,9 +744,9 @@ null
 null
 }
 if (jpeg == null) throw e
-return StepResult("点按被拒：${e.message}。已自动对同一目标重拍 zoom 图（见附图），请直接从这张图上用 on=\"zoom\" 点目标，不要再做 zoom、导航等中间动作。", false, null, jpeg)
+return StepResult("点按被拒：${e.message}。已自动对同一目标重拍 zoom 图（见附图），请直接从这张图上用 on=\"zoom\" 点目标，不要再做 zoom、导航等中间动作。", false, null, jpeg, "TAP_REFUSED")
 }
-summarize(result)
+markTimeoutUnknown(kind, result, summarize(kind, result))
 }
 "swipe" -> {
 val screens = if (action.has("screens")) {
@@ -747,20 +759,20 @@ action.optInt("x1", 500), action.optInt("y1", 700),
 action.optInt("x2", 500), action.optInt("y2", 300),
 durationMs = 350, fling = false, screens = screens
 )
-summarize(result)
+markTimeoutUnknown(kind, result, summarize(kind, result))
 }
 "type" -> {
 val text = action.optString("text")
-if (text.isEmpty()) return StepResult("type 动作没有文字", false, null, null)
-summarize(controller.typeText(text, null))
+if (text.isEmpty()) return StepResult("type 动作没有文字", false, null, null, "PARSE_ERROR")
+summarize(kind, controller.typeText(text, null))
 }
-"submit" -> summarize(controller.submitInput(null))
+"submit" -> summarize(kind, controller.submitInput(null))
 "zoom" -> {
 val cell = action.optString("cell").ifEmpty {
 cellFromNorm(action.optInt("x", 500), action.optInt("y", 500))
 }
 val result = controller.zoomAim(cell, action.optString("part").ifEmpty { null})
-val r = summarize(result)
+val r = summarize(kind, result)
 val full = "已放大 ${result.optString("aimed_at")}。${result.optString("aim_check")}".trim()
 // zoom 图是 PNG，转成 JPEG 与全屏截图同一格式再喂回模型
 val png = result.optString("png_base64")
@@ -777,18 +789,20 @@ null
 } else {
 null
 }
-StepResult(
+markTimeoutUnknown(
+kind, result, StepResult(
 if (full.length > 12) full else r.summary,
-r.ok || jpeg!= null, r.screenChanged, jpeg
+r.ok || jpeg!= null, r.screenChanged, jpeg, r.code
+)
 )
 }
-"back" -> summarize(controller.globalAction("back"))
-"home" -> summarize(controller.globalAction("home"))
+"back" -> summarize(kind, controller.globalAction("back"))
+"home" -> summarize(kind, controller.globalAction("home"))
 "openApp" -> {
 val app = action.optString("app")
-if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, null)
+if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, null, "PARSE_ERROR")
 val r = LocalCommands.launchApp(ctx, app)
-StepResult(r, r.startsWith("正在打开"), null, null)
+StepResult(r, r.startsWith("正在打开"), null, null, if (r.startsWith("正在打开")) "" else "UNKNOWN")
 }
 "wait" -> {
 val ms = action.optLong("ms", 1200).coerceIn(300, 20000)
@@ -828,7 +842,7 @@ StepResult(summary, true, null, null)
 val text = action.optString("text").ifEmpty { null }
 val eid = action.optString("eid").ifEmpty { null }
 if (text == null && eid == null) {
-return StepResult("scroll_to 缺少 text 或 eid", false, null, null)
+return StepResult("scroll_to 缺少 text 或 eid", false, null, null, "PARSE_ERROR")
 }
 val direction = action.optString("direction").ifEmpty { "down" }
 val maxSwipes = action.optInt("maxSwipes", ScreenWait.SCROLL_DEFAULT_MAX)
@@ -839,24 +853,25 @@ s.found -> "已找到「$target」"
 s.endReached -> "滑到底了，没找到「$target」"
 else -> "滑了 ${s.swipes} 次，没找到「$target」"
 }
-StepResult(summary, s.found, null, null)
+StepResult(summary, s.found, null, null, if (s.found) "" else "ELEMENT_NOT_FOUND")
 }
 "tap_sel" -> {
 // 按选择器点第 N 个匹配（流里的 tap_sel 步；单步更常用 tap 加 sel）。
 // 找不到或 index 超出，tapBySelector 直接抛错，外层 catch 收成一句。
 val sel = action.optJSONObject("sel")
-?: return StepResult("tap_sel 缺少 sel", false, null, null)
+?: return StepResult("tap_sel 缺少 sel", false, null, null, "PARSE_ERROR")
 val index = action.optInt("index", 0)
-summarize(controller.tapBySelector(sel, index))
+val raw = controller.tapBySelector(sel, index)
+markTimeoutUnknown(kind, raw, summarize(kind, raw))
 }
 "find" -> {
 // 按多条件选择器找元素：回前 10 个的稳定编号、类型、文字和中心坐标，
 // 外加总数，模型拿到编号就能接着点；一个都找不到直说，不假装有。
 val sel = action.optJSONObject("sel")
-?: return StepResult("find 缺少 sel", false, null, null)
+?: return StepResult("find 缺少 sel", false, null, null, "PARSE_ERROR")
 val r = controller.findBySelector(sel)
 val total = r.optInt("total", 0)
-if (total == 0) return StepResult("没找到符合条件的元素", false, null, null)
+if (total == 0) return StepResult("没找到符合条件的元素", false, null, null, "ELEMENT_NOT_FOUND")
 val matches = r.optJSONArray("matches") ?: JSONArray()
 val lines = (0 until minOf(matches.length(), 10)).mapNotNull { i ->
 val m = matches.optJSONObject(i) ?: return@mapNotNull null
@@ -868,15 +883,27 @@ StepResult("找到 $total 个：\n" + lines.joinToString("\n"), true, null, null
 // 本地流：一段有界脚本由手机在本地一口气跑完，中间不再问模型；
 // 跑完把每步 trace 压成一句摘要回喂历史，模型据此决定下一步。
 // 流本身算一步（不额外占 25 步额度），成败按流的整体 ok 判定。
+// 流的 outcomeUnknown 原样透传：流里变异步超时，单步一样标未知。
 val result = FlowRuntime.run(ctx, controller, action)
-StepResult(summarizeFlow(result), result.optBoolean("ok", false), null, null)
+val flowOk = result.optBoolean("ok", false)
+val flowUnknown = result.optBoolean("outcomeUnknown", false)
+val flowCode = when {
+flowUnknown && result.optBoolean("timedOut", false) -> "TIMEOUT"
+flowUnknown -> "UNKNOWN"
+flowOk -> ""
+else -> "UNKNOWN"
 }
-else -> StepResult("未知动作：$kind", false, null, null)
+StepResult(summarizeFlow(result), flowOk, null, null, flowCode, flowUnknown)
+}
+else -> StepResult("未知动作：$kind", false, null, null, "PARSE_ERROR")
 }
 } catch (e: InterruptedException) {
 throw e
 } catch (e: Exception) {
-StepResult("执行 $kind 出错：${e.message}", false, null, null)
+val msg = e.message.orEmpty()
+val code = errorCodeFor(msg)
+val unknown = code == "TIMEOUT" && kind in MUTATING_KINDS
+StepResult("执行 $kind 出错：$msg", false, null, null, code, unknown)
 }
 }
 
@@ -924,11 +951,60 @@ return "${'A' + col}$row"
 }
 
 /**
+ * 单步失败的错误码（回喂模型按码换招用）。分类只认控制层实际抛出的文案，
+ * 认不出的统一 UNKNOWN，不硬编：
+ * - refused: 开头的守卫拒绝（树被扣留的应用上盲点）→ TAP_REFUSED
+ * - no input focus → NO_INPUT_FOCUS；no active window → NO_ACTIVE_WINDOW
+ * - 只找到 N 个 / no node with id / bad element id → ELEMENT_NOT_FOUND
+ * - 含 timeout（如 screenshot timeout、手势超时）→ TIMEOUT
+ */
+private fun errorCodeFor(message: String): String {
+return when {
+message.startsWith("refused:") -> "TAP_REFUSED"
+message.contains("no input focus") -> "NO_INPUT_FOCUS"
+message.contains("no active window") -> "NO_ACTIVE_WINDOW"
+message.contains("只找到") || message.contains("no node with id") ||
+message.contains("bad element id") -> "ELEMENT_NOT_FOUND"
+message.contains("timeout", ignoreCase = true) -> "TIMEOUT"
+else -> "UNKNOWN"
+}
+}
+
+/** 超时后“不知道成没成”的动作种类：只有变异动作才标 outcomeUnknown。 */
+private val MUTATING_KINDS = setOf("tap", "longPress", "type", "swipe", "zoom", "tap_sel", "scroll_to")
+
+/**
+ * 手势超时判未知：控制层的手势结果带 completed=false，意思是手势发出去了、
+ * 但超时没收到完成回执；错误文案本身含 timeout 也一样。变异动作这时绝不能
+ * 当成功，也不能当没做过——标 TIMEOUT + outcomeUnknown，让模型先观察核对
+ * 再决定，不要直接重做。raw 里没有 completed 字段、文案也不含 timeout 时
+ * 原样返回（performAction 类动作没有这个信号）。
+ */
+private fun markTimeoutUnknown(kind: String, raw: JSONObject, base: StepResult): StepResult {
+if (kind !in MUTATING_KINDS) return base
+if (base.outcomeUnknown) return base
+val noReceipt = raw.has("completed") && !raw.optBoolean("completed", true)
+if (!noReceipt && base.code != "TIMEOUT") return base
+val summary = if (base.summary.startsWith("未执行")) {
+"手势已发出，但超时没收到完成回执"
+} else {
+base.summary
+}
+return base.copy(
+ok = false,
+code = "TIMEOUT",
+outcomeUnknown = true,
+summary = "$summary（结果未知：不知道成没成）"
+)
+}
+
+/**
 * 把 ScreenController 的结果 JSON 收成给模型看的摘要：尽量透传它自己的
 * 判定（performed / screen_changed / now_pkg / elements_hint / snapped /
 * 输入读回），让模型从结果本身就知道界面变成了什么样，而不是再猜。
+* 失败时按错误文案附一个错误码（见 errorCodeFor），成功时 code 为空。
 */
-private fun summarize(result: JSONObject): StepResult {
+private fun summarize(kind: String, result: JSONObject): StepResult {
 val performed = result.optBoolean("performed", false)
 val error = result.optString("error")
 val changed: Boolean? = if (result.has("screen_changed")) {
@@ -936,7 +1012,7 @@ result.optBoolean("screen_changed")
 } else {
 null
 }
-if (error.isNotEmpty()) return StepResult(error, false, changed, null)
+if (error.isNotEmpty()) return StepResult(error, false, changed, null, errorCodeFor(error))
 val parts = mutableListOf<String>()
 parts += if (performed) "已执行" else "未执行（无说明）"
 if (result.has("now_pkg")) parts += "现在在 ${result.optString("now_pkg")}"
@@ -982,6 +1058,9 @@ private const val SYSTEM_PROMPT =
 "输入文字：先用编号点输入框，下一个动作必须紧接着就是 type，不许在点框和输入之间插别的动作，也不许重复点同一个输入框；如果上一步的点击已经把回复框/评论框带起来并聚焦（结果会说明），直接 type，不要再点一次输入条（树被扣留的应用里输入条很薄，点它容易误点到下面的内容）。" +
 "开屏广告、会员弹窗、更新提示、权限请求这类挡路的弹窗，先处理掉再继续任务。" +
 "上一步结果说「界面没变化」就是大概率没点中：不要把同一个动作原样再发一遍（连着重复同一个动作会被判定为原地打转、任务直接中止），换瞄准方式（先 zoom 核对、改用编号、或先滑动把目标挪到清楚的位置）。" +
+"上一步的问题会带一个错误码：ELEMENT_NOT_FOUND（要找的元素不存在）、TAP_REFUSED（系统拒绝了这次点按，先 zoom 再点）、TIMEOUT（动作超时，不知道成没成）、NO_INPUT_FOCUS（没有输入框获得焦点，先点输入框）、NO_ACTIVE_WINDOW（当前没有可操作的窗口）、PARSE_ERROR（你发的动作缺字段或格式不对）、UNKNOWN（其他原因）。按码换招，别对着同一个码重复同一个动作。" +
+"上一步标「结果未知」时，那个动作可能动了也可能没动——不要直接重做同样的动作，先看紧凑表和截图确认成没成，再决定下一步。" +
+"屏幕下方有个「停止」按钮，用户随时可以点它停下任务；任务可能因此提前结束，不用你处理。" +
 "wait 只在页面真的在加载时用；需要连着等时，每次必须比上一次等得更久（如 1500→3000→6000），发相同毫秒数的 wait 同样会被判打转；等到了上限界面还是一动不动，那不是在加载，是卡住了或被弹窗/登录挡住了，换路线或 fail 说明。" +
 "有些应用不给元素大纲（只有截图或干脆是空的）：节点总数为 0 说明这一屏是自绘的（小程序、网页、游戏画布），优先用 back/home 退出换路线，不要盲点坐标；节点有数但带名的为 0 时，大纲的分组和中心还在，拿截图和大纲的缩进、坐标对位，用编号点，别降级成坐标点。" +
 "树被扣留的应用（如微信）先 zoom 再点是硬规矩：没经过新放大的盲点会被系统拒绝，一个界面一次放大。" +
