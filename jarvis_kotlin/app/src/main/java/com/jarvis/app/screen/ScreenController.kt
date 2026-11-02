@@ -1060,6 +1060,9 @@ class ScreenController(
 
     private val eidLock = Any()
     private val eidIndex = HashMap<Int, EidEntry>()
+    // 稳定编号索引：紧凑表的 s<hex> 编号 → 同一个 EidEntry。tapByEid/longPressByEid
+    // 同时认 e 数字和 s 编号，所以模型用稳定编号点、流里用稳定编号，都走同一条路。
+    private val sidIndex = HashMap<String, EidEntry>()
 
     /** Fresh dump in progress — see [tapByEid] for why taps must wait. */
     private val dumpLock = Object()
@@ -1102,8 +1105,18 @@ class ScreenController(
     }
 
     private fun lookupEid(eid: String): EidEntry {
+        // 稳定编号（紧凑表的 s<hex>）：同一元素跨轮不变，查 sidIndex。
+        if (eid.startsWith("s")) {
+            synchronized(eidLock) {
+                return sidIndex[eid]
+                    ?: throw IllegalArgumentException(
+                        "unknown element '$eid' — the stable id is not on the current screen. " +
+                            "Use a stable id from the latest compact list, do not guess coordinates"
+                    )
+            }
+        }
         val key = eid.removePrefix("e").toIntOrNull()
-            ?: throw IllegalArgumentException("bad element id '$eid' — expected e<number> from the element list")
+            ?: throw IllegalArgumentException("bad element id '$eid' — expected e<number> or a stable s<hex> id from the element list")
         synchronized(eidLock) {
             return eidIndex[key]
                 ?: throw IllegalArgumentException(
@@ -2885,7 +2898,7 @@ class ScreenController(
      * the model's context happens to clip.
      */
     private fun rebuildIndexAndList(out: JSONObject) {
-        synchronized(eidLock) { eidIndex.clear() }
+        synchronized(eidLock) { eidIndex.clear(); sidIndex.clear() }
         val w = screenW
         val h = screenH
         if (w <= 0 || h <= 0) return
@@ -2957,6 +2970,117 @@ class ScreenController(
         for (k in rootKeys) if (k !in keep) out.remove(k)
         if (lines.isNotEmpty()) out.put("elements", lines.joinToString("\n"))
         if (dropped > 0) out.put("elements_dropped", dropped)
+
+        // 紧凑表（Phase 2）：只列可操作元素，一行一个，稳定编号 + 语义类型 +
+        // 文字 + 中心坐标。同一批 rows、同一遍走，不另扫树。elements 的格式和
+        // 编号原样不动，FlowRuntime 的 find/守卫继续按 elements 匹配。
+        val compact = buildCompactList(rows, pkg, w, h)
+        if (compact.lines.isNotEmpty()) out.put("compact", compact.lines.joinToString("\n"))
+        if (compact.dropped > 0) out.put("compact_dropped", compact.dropped)
+    }
+
+    /** 紧凑表的一行 + 被截掉的个数。 */
+    private class CompactResult(val lines: List<String>, val dropped: Int)
+
+    /**
+     * 从同一批 [rows] 里筛出可操作元素，生成紧凑表。稳定编号取自元素的
+     * 识别特征（resourceId + 类名 + 文字 + 取整后的 bounds），同一元素在
+     * 同一屏态下每轮同一个编号；编号冲突时加 -2、-3 区分。
+     */
+    private fun buildCompactList(rows: List<Row>, pkg: String, w: Int, h: Int): CompactResult {
+        val lines = ArrayList<String>()
+        var dropped = 0
+        val usedSids = HashSet<String>()
+        for (row in rows) {
+            if (!isCompactActionable(row)) continue
+            if (lines.size >= MAX_COMPACT_LINES) {
+                dropped++
+                continue
+            }
+            val cls = row.node.optString("class", "View")
+            val type = compactType(
+                cls,
+                row.clickable,
+                row.node.optBoolean("scrollable", false),
+                row.node.optBoolean("checked", false),
+                row.node.optBoolean("focused", false),
+            )
+            var sid = stableId(row.node.optString("id").ifEmpty { null }, cls, row.label, row.bounds)
+            if (sid in usedSids) {
+                var n = 2
+                while ("$sid-$n" in usedSids) n++
+                sid = "$sid-$n"
+            }
+            usedSids.add(sid)
+            val normCx = row.px[0] * NORM_MAX / w
+            val normCy = row.px[1] * NORM_MAX / h
+            synchronized(eidLock) {
+                sidIndex[sid] = EidEntry(
+                    px = row.px,
+                    pkg = pkg,
+                    viewId = row.node.optString("id").ifEmpty { null },
+                    bounds = row.bounds,
+                )
+            }
+            lines.add("$sid|$type|${row.label}|[$normCx,$normCy]")
+        }
+        return CompactResult(lines, dropped)
+    }
+
+    /** 紧凑表只收能动手的元素：可点、可滑、可勾、已聚焦，或本身就是输入/开关类控件。 */
+    private fun isCompactActionable(row: Row): Boolean {
+        if (row.clickable) return true
+        val n = row.node
+        if (n.optBoolean("scrollable", false)) return true
+        if (n.optBoolean("checked", false)) return true
+        if (n.optBoolean("focused", false)) return true
+        val cls = n.optString("class", "")
+        return cls.contains("EditText") || cls.contains("CheckBox") || cls.contains("RadioButton") ||
+            cls.contains("Switch") || cls.contains("SeekBar") || cls.contains("Spinner") ||
+            cls.contains("RatingBar")
+    }
+
+    /** 类名 → 紧凑表的语义类型；认不出的可点物按 Button、可滑物按 Scroll，其余按 View。 */
+    private fun compactType(
+        cls: String,
+        clickable: Boolean,
+        scrollable: Boolean,
+        checked: Boolean,
+        focused: Boolean,
+    ): String = when {
+        cls.contains("EditText") -> "Input"
+        cls.contains("CheckBox") || cls.contains("RadioButton") || cls.contains("Switch") ||
+            cls.contains("ToggleButton") -> "Checkbox"
+        cls.contains("ImageButton") -> "Button"
+        cls.contains("Button") -> "Button"
+        cls.contains("ImageView") -> "Image"
+        cls.contains("TextView") -> "Text"
+        cls.contains("ListView") || cls.contains("RecyclerView") || cls.contains("GridView") -> "List"
+        cls.contains("ScrollView") || cls.contains("NestedScrollView") || cls.contains("ViewPager") -> "Scroll"
+        cls.contains("SeekBar") || cls.contains("RatingBar") || cls.contains("Spinner") -> "Input"
+        cls.contains("WebView") -> "Text"
+        scrollable -> "Scroll"
+        clickable -> "Button"
+        focused -> "Input"
+        checked -> "Checkbox"
+        else -> "View"
+    }
+
+    /**
+     * 稳定编号：MD5(资源 id | 类名 | 文字 | 取整 bounds）的前 6 位 hex，
+     * 前缀 s 与 e 数字编号区分。bounds 每边取整到 20px，容忍布局小抖动；
+     * 元素滚动移位后 bounds 变了、编号跟着变——编号稳的是同一屏态，不是跨滚动。
+     */
+    private fun stableId(viewId: String?, cls: String, label: String, bounds: String): String {
+        val parts = bounds.split(",")
+        val rounded = if (parts.size == 4) {
+            parts.map { (it.toIntOrNull() ?: 0).let { v -> (v + 10) / 20 * 20 } }.joinToString(",")
+        } else bounds
+        val raw = listOf(viewId.orEmpty(), cls, label, rounded).joinToString("|")
+        val digest = java.security.MessageDigest.getInstance("MD5")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+        val hex = digest.take(3).joinToString("") { "%02x".format(it) }
+        return "s$hex"
     }
 
     /** One candidate line, before numbering. */
@@ -3687,6 +3811,8 @@ class ScreenController(
          * control" from "we did not print it".
          */
         private const val MAX_ELEMENT_LINES = 300
+        // 紧凑表上限：只列可操作元素，40 行够一屏用，超了记 compact_dropped。
+        private const val MAX_COMPACT_LINES = 40
         private const val ICON_MIN_DP = 16f
         private const val ICON_MAX_DP = 120f
         private const val ICON_MAX_ASPECT = 2f

@@ -66,7 +66,7 @@ object TaskLoop {
     private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow")
 
     private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
-    private const val ELEMENTS_CHARS = 5000
+    private const val COMPACT_CHARS = 2500
 
     /** 历史段字符预算（单条提示词内，含任务与大纲之外的余量）。 */
     private const val HISTORY_CHARS = 6000
@@ -196,6 +196,11 @@ object TaskLoop {
                 // 类名、文字、0-1000 相对中心坐标，带 * 的可点，缩进表示从属层级
                 // （ScreenController 格式）。
                 val elements = dump.optString("elements")
+                // 紧凑表（Phase 2）：只列可操作元素，稳定编号 + 语义类型 + 文字 +
+                // 中心坐标，是给模型看的主列表；elements 原样保留（屏变检测、
+                // FlowRuntime 的 find/守卫仍按它匹配），不放进提示词。
+                val compact = dump.optString("compact")
+                val compactDropped = dump.optInt("compact_dropped", 0)
                 val nodesTotal = dump.optInt("nodes_total", -1)
                 val nodesUseful = dump.optInt("nodes_useful", -1)
                 val withheld = dump.optBoolean("withheld", false)
@@ -203,13 +208,12 @@ object TaskLoop {
                 val screenSameAsPrev = prevScreenSig.isNotEmpty() && screenSig == prevScreenSig
                 prevScreenSig = screenSig
 
-                // ---------- 截图策略（ToolSchemas 纪律 + 批十二路由 + 批十九放宽） ----------
-                // 默认只看树；带图的情形：树为空（自绘/被扣留）、上一步失败或
-                // 界面没变化需要核对、zoom 留了放大图。录屏通道只作无障碍截图
-                // 拿不到图时的兜底。隐私黑名单包两条通道都不拍。
-                // 2026-10-24 跨应用修复第 3 件：微信这类屏经常是树“有但没用”——
-                // 有节点、但可用节点极少，模型对着没目标的树只能 wait。加两条：
-                // 可用节点 < 3 时强制带图；连续 2 轮无真交互时强制带图，打破 wait 循环。
+                // ---------- 截图策略（Phase 2：每轮默认带图） ----------
+                // 紧凑表 + 截图一起给模型（get_screen_context 模式），让它点真实
+                // 存在的元素，不再只靠文字猜。needImage 仍是“图是必需的”信号
+                // （树空、上一步失败、界面没变、树太薄、无进展≥2），只用于下面
+                // “需要图但没拿到”的提示；截图本身每轮都尽量拍（黑名单包除外），
+                // 拍不到就只给树、不卡住这一步。录屏通道仍是无障碍截图的兜底。
                 var image: String? = pendingImage
                 var imageFromProjection = false
                 pendingImage = null
@@ -218,7 +222,7 @@ object TaskLoop {
                     !JarvisAccessibilityService.isShotBlocked(pkg) &&
                     (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false ||
                         treeTooThin || noProgressSteps >= 2)
-                if (needImage && image == null && pkg.isNotEmpty()) {
+                if (image == null && pkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(pkg)) {
                     image = accessibilityShot(controller, ctx)
                     if (image == null) {
                         image = projectionShot(ctx)
@@ -235,11 +239,17 @@ object TaskLoop {
                         if (withheld) append("（界面树被这个应用扣留，元素可能不全）")
                         append('\n')
                     }
-                    append("界面元素（每行：编号|控件|文字|[中心x,中心y]，坐标是 0-1000 相对值，带 * 号的可点，缩进表示从属层级）：\n")
+                    append("界面元素（紧凑表，每行：稳定编号|类型|文字|[中心x,中心y]，坐标是 0-1000 相对值；稳定编号跨轮不变，同一元素每轮同一个编号，点它就用这个编号；类型 Button/Input/Text/Image/List/Scroll/Checkbox）：\n")
                     append(
-                        elements.take(ELEMENTS_CHARS)
-                            .ifEmpty { "（无元素：这个应用可能不向无障碍暴露内容，只能看截图操作）" }
+                        compact.take(COMPACT_CHARS)
+                            .ifEmpty { "（无可操作元素：这个应用可能不向无障碍暴露可点内容，只能看截图操作）" }
                     ).append('\n')
+                    if (compactDropped > 0) {
+                        append("（紧凑表只列了前 40 个可操作元素，另有 $compactDropped 个没列出；要找没列出的，滑一滑或缩小范围再看）\n")
+                    }
+                    if (needImage && image == null) {
+                        append("（本轮需要截图但没能拿到，只能按界面树操作）\n")
+                    }
                     if (imageFromProjection) {
                         append("本轮附图来自录屏通道：原始屏幕像素，没有网格标定，不能按图报格号或坐标瞄准；只能看内容，操作仍按元素编号和界面树进行。\n")
                     }
@@ -253,11 +263,11 @@ object TaskLoop {
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
-                // 任务大脑（Agnes / 自定义）都带图问；界面树空白且最终不带图时，
-                // 明确告知模型它看不到元素，别让它空转。
+                // 任务大脑（Agnes / 自定义）都带图问；紧凑表空白且最终不带图时，
+                // 明确告知模型它看不到可操作元素，别让它空转。
                 val sendImage = image
-                val askBase = if (elements.isBlank() && sendImage == null) {
-                    userText + "\n（注意：本屏界面树不可见，你看不到界面元素，只能根据历史步骤判断；若无法推进请输出 done 并说明卡点）"
+                val askBase = if (compact.isBlank() && sendImage == null) {
+                    userText + "\n（注意：本屏没有可操作元素、也看不到截图，只能根据历史步骤判断；若无法推进请输出 done 并说明卡点）"
                 } else {
                     userText
                 }
@@ -849,26 +859,24 @@ return StepResult(parts.joinToString("，"), performed, changed, null)
 
 private const val SYSTEM_PROMPT =
 "你是 Jarvis 的跨应用任务执行器，在用户的安卓手机上一步一步完成任务。" +
-"每一轮你会看到：任务原文、当前前台应用、界面元素大纲（带编号的文本列表）、已执行步骤和上一步的结果。" +
-"带图时还会有一张截图（全屏图带 A1–H12 网格标定；若提示词说明来自录屏通道，则那张图没有网格、只能看不能按图瞄准）。\n" +
-"元素大纲是默认且最准的观察：每行格式「编号|控件|文字|[中心x,中心y]」，坐标是系统算好的 0-1000 相对值，带 * 号的可点，行首缩进表示从属层级——" +
-"列表型界面（聊天列表、动态流、搜索结果）里同一形状会重复出现，要认准目标文字所在的那一行，只用它自己缩进组内的控件（头像、名字、正文、按钮属于同一组），绝不把一行的名字配上另一行的按钮。" +
+"每一轮你会看到：任务原文、当前前台应用、界面元素紧凑表（只列可操作元素，带稳定编号）、已执行步骤和上一步的结果。每轮还会附一张截图（全屏图带 A1–H12 网格标定；若提示词说明来自录屏通道，则那张图没有网格、只能看不能按图瞄准）。\n" +
+"紧凑表是默认且最准的观察：每行格式「稳定编号|类型|文字|[中心x,中心y]」，坐标是系统算好的 0-1000 相对值；稳定编号（s 开头，如 s3f9a2）跨轮不变，同一元素每轮同一个编号，点它就用这个编号；列表型界面（聊天列表、动态流、搜索结果）里同一形状会重复出现，要认准目标文字所在的那一行，只点那一行的编号，绝不把一行的名字配上另一行的按钮。" +
 "文字为 # 开头的是控件的内部 id，不是屏幕上印的字，只能用来区分控件，不许当可见文字。" +
-"有编号就用编号点（tap 的 eid），绝不拿 [x,y] 或截图位置重算坐标去点一个有编号的元素。" +
-"没文字没说明的图标按钮靠它所在缩进组的位置认领（比如某条动态下方的评论图标就是那条动态的）。" +
-"编号只对当前这一屏有效，每轮给你的都是最新一屏的编号，只用最新大纲里的编号。\n" +
+"有编号就用编号点（tap 的 eid，优先用紧凑表的稳定编号），绝不拿 [x,y] 或截图位置重算坐标去点一个有编号的元素。" +
+"没文字没说明的图标按钮靠类型和中心坐标认领（比如某条动态下方的评论图标就是那条动态的），也可以先 zoom 看清再点。" +
+"稳定编号只对当前这一屏态有效：元素还在同一位置时每轮同一个编号；滚动或跳页面后编号会变，每轮只用最新紧凑表里的编号。e 数字编号（e3）只对当前这一轮的大纲有效，下一轮就作废了，优先用稳定编号。\n" +
 "你只能输出一个 JSON 对象表示下一步动作，不要输出任何其他文字、不要用代码块包裹。" +
-"{\"action\":\"tap\",\"eid\":\"e3\"} 点元素大纲里的编号（最优先、最稳）；" +
+"{\"action\":\"tap\",\"eid\":\"s3f9a2\"} 点紧凑表里的稳定编号（最优先、最稳；e 数字编号也认，但只对当轮有效）；" +
 "或 {\"action\":\"tap\",\"x\":540,\"y\":1200} 按 0-1000 相对坐标点你刚看到的全屏截图；" +
 "或 {\"action\":\"tap\",\"cell\":\"D7\",\"part\":\"tr\"} 按截图上的网格格号点（part 是格内九宫格部位，可省略）。" +
-"{\"action\":\"longPress\",\"eid\":\"e3\"} 长按，可加 \"ms\":800。" +
+"{\"action\":\"longPress\",\"eid\":\"s3f9a2\"} 长按稳定编号，可加 \"ms\":800。" +
 "{\"action\":\"swipe\",\"x1\":500,\"y1\":800,\"x2\":500,\"y2\":300} 滑动，坐标都是 0-1000 相对值，手指移动多远列表就走多远；要连滑多屏加 \"screens\":3（系统会回报实际滑了几屏），不要用一串相同的小滑动去凑。" +
 "{\"action\":\"type\",\"text\":\"要输入的文字\"} 往当前已聚焦的输入框输入。" +
 "{\"action\":\"submit\"} 提交当前输入框（如搜索、发送）。" +
 "{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待（每次等待要比上一次久，比如 1500→3000→5000→10000，绝不要连续发相同的等待时长，否则会被重复守卫拦停）；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
 "若要按放大图点，动作里加 \"on\":\"zoom\"，坐标和格号都按放大图自身的 0-1000 与小写格号读。" +
-"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有三种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手，{\"action\":\"observe\"} 重新读一遍界面。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：编号只对当前这一屏有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
+"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有三种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手，{\"action\":\"observe\"} 重新读一遍界面。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
 "{\"action\":\"fail\",\"reason\":\"卡在哪一步、什么原因\"} 做不下去时用，禁止假装完成。\n" +
 "一步只做一个动作。" +
