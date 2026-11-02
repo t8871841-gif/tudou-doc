@@ -63,7 +63,7 @@ function frame() {
   if (OP) OP.frame(dt, w, h);
   demoFrame();
   if (SK.core) SK.core.frame(dt);   /* skins: a skin's own centrepiece */
-  composer.render();
+  if (!window.EM_ON) composer.render(); /* 流浪地球放映时停画 HUD：两路 WebGL 同画会卡 */
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

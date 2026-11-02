@@ -33,6 +33,21 @@
     }});
   }
   var map = { dqShip: toggleShip, dqRoadster: toggleRoadster, dqOptimus: toggleOptimus, dqRaptor: toggleRaptor };
+  /* 3D 拆解库新增的六台机器：点一下投影，再点收起（同猛禽）。labels 不传，machine.js 用每台图里自带的中文字段名。 */
+  function toggleMachine(src, title) {
+    return function() {
+      if (typeof MACH !== 'undefined' && MACH && MACH.on) { if (typeof machineHide === 'function') machineHide(); }
+      else if (typeof machineCommand === 'function') machineCommand({ action: 'show', src: src, title: title });
+    };
+  }
+  map.dqCarEngine = toggleMachine('holo/car-engine.html', '汽车发动机 · 直列四缸涡轮增压');
+  map.dqGearbox = toggleMachine('holo/gearbox.html', '变速箱 · 六速手动');
+  map.dqMotor = toggleMachine('holo/electric-motor.html', '电动机 · 永磁同步');
+  map.dqPump = toggleMachine('holo/centrifugal-pump.html', '离心泵');
+  map.dqGasTurbine = toggleMachine('holo/gas-turbine.html', '燃气轮机 · 重型发电');
+  map.dqTurbofan = toggleMachine('holo/aircraft-turbofan.html', '航空发动机 · 大涵道比涡扇');
+  map.dqHoloLib = function() { if (typeof holoLibOpen === 'function') holoLibOpen(); };
+  map.dqEarth = function() { if (typeof emOpen === 'function') emOpen(1); };
   Object.keys(map).forEach(function(id){
     var b = document.getElementById(id);
     if (b) b.addEventListener('click', function(e){ e.stopPropagation(); try { map[id](); } catch (err) { console.warn('demo quick:', err); } });

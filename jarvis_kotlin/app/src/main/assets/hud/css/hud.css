@@ -393,8 +393,9 @@ body[data-live] .demo-tag{display:none}
    Fixed to the HUD page viewport (the WebView is the top 3/5 in portrait), so they can
    never overlap the native dialogue below. Always visible (not tied to dormant) so a
    tap works reliably: the capture-phase wake listener must not hide them mid-tap. */
-#demoQuick{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:14px;width:min(92vw,520px);justify-content:space-between;z-index:8}
-#demoQuick .dq-btn{width:60px;height:60px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.55);color:rgb(var(--sk-ink));cursor:pointer;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 0 14px rgba(var(--sk-pri),.18);padding:0}
+#demoQuick{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:14px;width:min(94vw,560px);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;justify-content:flex-start;z-index:8}
+#demoQuick::-webkit-scrollbar{display:none}
+#demoQuick .dq-btn{flex:0 0 auto;width:60px;height:60px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.55);color:rgb(var(--sk-ink));cursor:pointer;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 0 14px rgba(var(--sk-pri),.18);padding:0}
 #demoQuick .dq-btn svg{width:32px;height:32px;display:block}
 #demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
 @media (orientation:landscape){#demoQuick{display:none}}
