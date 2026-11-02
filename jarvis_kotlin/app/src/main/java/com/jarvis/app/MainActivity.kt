@@ -877,8 +877,8 @@ class MainActivity : Activity() {
     /** Agent 调度：只映射原生真实能读到的状态，读不到的不编。
      * 大脑=对话状态；后台任务=TaskLoop 是否在跑（没跑时报已安排的提醒数）；
      * 学习=长期记忆已记条数（没有“正在提取”的实时信号，所以用条数这个真值；
-     * 还没取到时显示“记忆就绪”）；复盘=无原生对应物，固定 off“暂无”，
-     * 但行要点上去能要复盘建议（见 agentRowView 的点击）。 */
+     * 还没取到时显示“记忆就绪”）；复盘=今日待办提醒数（有待办时“今日 N 项待复盘”，
+     * 没有时“今日暂无安排”）；行要点上去能要复盘建议（见 agentRowView 的点击）。 */
     private fun computeAgentRows(pendingCount: Int = ReminderScheduler.list(this).size): List<AgentRow> {
         val state = JarvisAgent.currentState()
         val brainDesc = when (state) {
@@ -896,7 +896,7 @@ class MainActivity : Activity() {
             AgentRow("brain", if (state == "idle") "off" else "run", brainDesc, 0.5),
             AgentRow("jobs", if (jobsRunning) "run" else "off", jobsDesc, 0.5),
             AgentRow("learn", "off", learnDesc, 0.0),
-            AgentRow("review", "off", "暂无", 0.0)
+            AgentRow("review", "off", if (pendingCount > 0) "今日 $pendingCount 项待复盘" else "今日暂无安排", 0.0)
         )
     }
 
@@ -1457,7 +1457,7 @@ class MainActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(6), 0, dp(6))
-            // 行要点上去有真行为（复用 HUD 的 agentClick），不是纯展示。
+            // 行要点上去有真行为（点 BRAIN/LEARNING 回主对话，点 JOBS/REVIEW 直接问真模型），不是纯展示。
             setOnClickListener { onAgentRowClick(row.id) }
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -1522,24 +1522,18 @@ class MainActivity : Activity() {
     }
 
     /** 原生面板 Agent 调度行点击：BRAIN/LEARNING 没有单独窗口了（大脑窗口已删），
-     * 点它们就关掉面板、回到主对话——大脑就是对话本身。JOBS/REVIEW 发问句走对话：
-     * WebView 可用（已初始化、页面已加载、竖屏非静态模式）时走 HUD；不可用时
-     * 退回走原生 submitText 发同样那句话。 */
+     * 点它们就关掉面板、回到主对话——大脑就是对话本身。JOBS/REVIEW 直接走原生
+     * submitText 发问句问真模型，不再绕 HUD 的 agentClick（HUD 的 handle() 是
+     * 演示用的假回答）。 */
     private fun onAgentRowClick(id: String) {
         if (id == "brain" || id == "learn") {
             setNativePanel(false)
             chatInput.requestFocus()
             return
         }
-        val webOk = ::hudWebView.isInitialized && hudPageLoaded && !JarvisPrefs.isPortraitUseStatic(this)
-        if (webOk) {
-            hudWebView.evaluateJavascript("if(typeof agentClick==='function')agentClick('$id')", null)
-            return
-        }
         when (id) {
             "jobs" -> submitText("后台任务进行得怎么样了？")
             "review" -> submitText("昨天的复盘有什么建议？")
-            else -> toast("HUD 还没加载好，稍后再点")
         }
     }
 

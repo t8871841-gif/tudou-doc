@@ -280,6 +280,8 @@ object TaskLoop {
                 var badReply: String? = null
                 while (action == null && attempt < 2) {
                     attempt++
+                    // 每步问模型前固定停 1 秒，降速、别一分钟内连着发多次请求撞限流。
+                    try { Thread.sleep(1000) } catch (_: InterruptedException) { /* 继续 */ }
                     val (reply, err) = askModel(ctx, askText, sendImage)
                     if (!alive()) return
                     if (err != null) {
@@ -297,6 +299,12 @@ object TaskLoop {
                         lastError = "问模型失败：$err，已重试"
                         prevStepFailed = true
                         prevScreenChanged = null
+                        // 429 是每分钟限流：等 30 秒再进下一轮，别立刻重问又撞上限。
+                        // 连着失败计数照旧（2 次照样停）。
+                        if (err.contains("429")) {
+                            AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", "HTTP 429 限流，等 30 秒再重试")
+                            try { Thread.sleep(30_000) } catch (_: InterruptedException) { /* 被打断就直接进下一轮 */ }
+                        }
                         // 直接进下一轮（重新观察、重新问），不能掉进下面“输出无法解析”
                         // 的分支——那是解析失败的账，网络失败不该计入无进展计数。
                         continue@stepLoop
