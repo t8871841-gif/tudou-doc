@@ -10,7 +10,7 @@ function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   renderer.setSize(w, h, false); composer.setSize(w, h);
   camera.aspect = w / h;
-  camera.position.z = w / h < 1 ? 9.5 : 7.2;
+  camera.position.z = 7.2; /* portrait was 9.5: core too small, black gap above the demo buttons; 7.2 fills the stage */
   camera.updateProjectionMatrix();
   skyU.uRes.value.set(w, h);
 }
