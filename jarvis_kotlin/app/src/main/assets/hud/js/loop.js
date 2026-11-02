@@ -48,12 +48,6 @@ function frame() {
     const s = labels[i];
     s.style.left = ((tmp.x + 1) / 2 * w) + 'px'; s.style.top = ((1 - tmp.y) / 2 * h) + 'px';
     s.style.opacity = tmp.z < 1 ? '.9' : '0';
-    if (i === 1) {
-      const rr = routeCv.getBoundingClientRect(); const ex = rr.left + routePts[0][0] * rr.width, ey = rr.top + routePts[0][1] * rr.height;
-      const sx = (tmp.x + 1) / 2 * w, sy = (1 - tmp.y) / 2 * h;
-      if (rr.width > 0 && innerWidth > 900 && tmp.z < 1 && sx < ex) { linkDash = (linkDash + dt * 40) % 400; linkPath.setAttribute('d', `M${sx},${sy} C${(sx + ex) / 2},${sy} ${(sx + ex) / 2},${ey} ${ex},${ey}`); linkPath.setAttribute('stroke-dasharray', '2 6'); linkPath.setAttribute('stroke-dashoffset', String(-linkDash)); linkPath.style.opacity = '1'; }
-      else linkPath.style.opacity = '0';
-    }
   });
   orbits.rotation.z += dt * 0.01;
   holoFrame(dt, w, h);

@@ -3,9 +3,6 @@ const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const small = innerWidth < 900;
 const $ = (s) => document.querySelector(s);
 function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-const routeCv = $('#route');
-// route polyline (0..1 of the canvas): defined here because loop.js reads it before creator.js has loaded
-const routePts = [[0.05, 0.5], [0.16, 0.5], [0.24, 0.38], [0.36, 0.42], [0.44, 0.62], [0.56, 0.58], [0.64, 0.74], [0.75, 0.66], [0.85, 0.7], [0.92, 0.46], [0.95, 0.24]];
 window.SKC = {pri: '127,219,255', line: '140,200,225', soft: '159,221,245', hi: '228,248,255', deep: '60,140,200', ink: '220,239,247', acc: '255,174,107', accl: '255,194,122', acch: '255,140,60', accp: '255,227,200', bg: '2,5,9', pnl: '4,12,18', wbg: '22,12,4'};   /* skins: the live colour triplets for canvas drawing (skin block keeps them current) */
 
 /* ---------------- WebGL core ---------------- */
