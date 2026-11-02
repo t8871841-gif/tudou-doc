@@ -2,6 +2,9 @@ package com.jarvis.app.screen
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -18,6 +21,7 @@ import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.jarvis.app.JarvisAccessibilityService
+import com.jarvis.app.task.UiSelector
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -1104,6 +1108,128 @@ class ScreenController(
             .put("relocated", live != null)
     }
 
+    /**
+     * 按多条件选择器找元素（TaskLoop 的 find 动作与流的 find 步用）：选择器里
+     * 给的条件全 AND 起来，在当前活树里逐个比对。返回总命中数与前
+     * [SELECTOR_MAX_MATCHES] 个匹配（稳定编号 | 类型 | 文字 | 中心坐标），
+     * 编号算法与紧凑表同一套，模型拿到就能用 eid 点；命中 0 个也如实回
+     * total=0，不抛异常。找到的编号会登记进 sidIndex（与紧凑表同一条
+     * 纪律：下次 dump 就清掉），所以 find 回来的编号下一轮能直接点。
+     */
+    fun findBySelector(sel: JSONObject): JSONObject {
+        val nodes = selectNodes(sel)
+        val matches = JSONArray()
+        val usedSids = HashSet<String>()
+        try {
+            for (n in nodes) {
+                if (matches.length() >= SELECTOR_MAX_MATCHES) break
+                val r = Rect()
+                runCatching { n.getBoundsInScreen(r) }
+                if (r.isEmpty) continue
+                val cls = n.className?.toString().orEmpty()
+                val label = UiSelector.label(n)
+                val bounds = "${r.left},${r.top},${r.right},${r.bottom}"
+                var sid = stableId(n.viewIdResourceName?.ifEmpty { null }, cls, label, bounds)
+                if (sid in usedSids) {
+                    var i = 2
+                    while ("$sid-$i" in usedSids) i++
+                    sid = "$sid-$i"
+                }
+                usedSids.add(sid)
+                val cxPx = (r.left + r.right) / 2
+                val cyPx = (r.top + r.bottom) / 2
+                synchronized(eidLock) {
+                    sidIndex[sid] = EidEntry(
+                        px = intArrayOf(cxPx, cyPx),
+                        pkg = lastPkg().orEmpty(),
+                        viewId = n.viewIdResourceName?.ifEmpty { null },
+                        bounds = bounds,
+                    )
+                }
+                matches.put(JSONObject().apply {
+                    put("sid", sid)
+                    put("type", compactType(cls, n.isClickable, n.isScrollable, n.isChecked, n.isFocused))
+                    put("text", label)
+                    put("cx", cxPx * NORM_MAX / screenW)
+                    put("cy", cyPx * NORM_MAX / screenH)
+                })
+            }
+        } finally {
+            nodes.forEach { it.recycle() }
+        }
+        return JSONObject().put("total", nodes.size).put("matches", matches)
+    }
+
+    /**
+     * 按选择器点第 [index] 个匹配（TaskLoop 的 tap 加 sel 时用，流里是
+     * tap_sel 步）。匹配的节点本身不可点时，沿父链爬到最近的可点祖先再点；
+     * 没有可点祖先就直说。index 超出会直说（“只找到 N 个，第 M 个不存在”），
+     * 不点别的元素。
+     */
+    fun tapBySelector(sel: JSONObject, index: Int): JSONObject =
+        tapSelector(sel, index, hold = false, durationMs = 0)
+
+    fun longPressBySelector(sel: JSONObject, index: Int, durationMs: Long): JSONObject =
+        tapSelector(sel, index, hold = true, durationMs = durationMs)
+
+    private fun tapSelector(sel: JSONObject, index: Int, hold: Boolean, durationMs: Long): JSONObject {
+        val nodes = selectNodes(sel)
+        if (index < 0 || index >= nodes.size) {
+            val total = nodes.size
+            nodes.forEach { it.recycle() }
+            throw IllegalArgumentException("只找到 $total 个，第 ${index + 1} 个不存在")
+        }
+        val target = nodes[index]
+        var cur: AccessibilityNodeInfo? = target
+        var climbed = false
+        while (cur != null && !cur.isClickable) {
+            val p = cur.parent
+            if (cur !== target) cur.recycle()
+            cur = p
+            climbed = true
+        }
+        try {
+            if (cur == null) {
+                throw IllegalStateException("找到的元素不可点，也没有可点的父节点")
+            }
+            val r = Rect()
+            cur.getBoundsInScreen(r)
+            val cx = (r.left + r.right) / 2
+            val cy = (r.top + r.bottom) / 2
+            val label = UiSelector.label(cur)
+            val sid = stableId(
+                cur.viewIdResourceName?.ifEmpty { null },
+                cur.className?.toString().orEmpty(),
+                label,
+                "${r.left},${r.top},${r.right},${r.bottom}",
+            )
+            GroundingLog.noteTapEid(sid, cx, cy, screenW, screenH, hold = hold, relocated = false, pkg = lastPkg())
+            val result = if (hold) longPress(cx, cy, durationMs) else tap(cx, cy)
+            return result.put("sid", sid).put("via", "selector").put("climbed", climbed)
+        } finally {
+            nodes.forEach { it.recycle() }
+            if (cur != null && cur !== target) cur.recycle()
+        }
+    }
+
+    /** 按选择器在活树里找节点：命中条件全 AND；返回命中的节点（调用方负责 recycle）。 */
+    private fun selectNodes(sel: JSONObject): List<AccessibilityNodeInfo> {
+        val root = activeRoot() ?: return emptyList()
+        val kept = ArrayList<AccessibilityNodeInfo>()
+        val budget = WalkBudget(SEARCH_BUDGET_MS)
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        while (stack.isNotEmpty() && !budget.spent() && kept.size < SELECTOR_MAX_MATCHES) {
+            val n = stack.removeFirst()
+            for (i in 0 until n.childCount) childOf(n, i)?.let { stack.add(it) }
+            val r = Rect()
+            runCatching { n.getBoundsInScreen(r) }
+            if (!r.isEmpty && UiSelector.matches(n, sel)) kept.add(n) else n.recycle()
+        }
+        while (stack.isNotEmpty()) stack.removeFirst().recycle()
+        return kept
+    }
+
     private fun lookupEid(eid: String): EidEntry {
         // 稳定编号（紧凑表的 s<hex>）：同一元素跨轮不变，查 sidIndex。
         if (eid.startsWith("s")) {
@@ -1809,7 +1935,8 @@ class ScreenController(
      * [typeViaSetText].
      */
     fun typeText(text: String, id: String?, secret: Boolean): JSONObject {
-        // ── 输入通道(批九接线):无障碍输入法 [A11yIme] 优先,ACTION_SET_TEXT 兜底 ──
+        // ── 输入通道(批九接线 + 第四批):无障碍输入法 [A11yIme] 优先,
+        // ACTION_SET_TEXT 兜底,剪贴板粘贴最后兜底 ──
         //
         // 首选 [A11yIme]:API 33 起,声明了 flagInputMethodEditor 的无障碍
         // 服务自己就能 commitText 到焦点编辑器 —— 和键盘同一条 InputConnection,
@@ -1823,6 +1950,11 @@ class ScreenController(
         // JarvisAccessibilityService 的 Agent 输入动作同款机制;少数自绘
         // 编辑器可能不响应 SET_TEXT,那时读回不一致会如实报错并提示以截图
         // 为准,不假装成功。
+        //
+        // 第三档 [typeViaClipboardPaste]:上面两档都打不进去时,先选中全部
+        // 再 ACTION_PASTE,读回验证同款。SET_TEXT 平台调用返回过 true、但
+        // 读回不对时,粘贴前先把框清空,免得新旧文字叠在一起。无论成功失败,
+        // 粘贴完都清剪贴板。
         val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
         val focused = try {
             root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
@@ -1838,7 +1970,16 @@ class ScreenController(
             throw IllegalStateException("no input focus (tap into an input field first)")
         }
         runCatching { if (focused !== root) focused.recycle() }
-        return markBlindTyping(typeViaA11yIme(text, secret) ?: typeViaSetText(text, secret))
+        // 三档输入，只有一档能真正落字：A11yIme 返回非 null 就是定论（绝不叠加）；
+        // SET_TEXT 打进去（performed）但读回不对时，粘贴前先把框清空，免得新旧
+        // 文字叠在一起；三档都失败就如实报错，模型别原样重发 type。
+        val viaIme = typeViaA11yIme(text, secret)
+        if (viaIme != null) return markBlindTyping(viaIme)
+        val viaSet = typeViaSetText(text, secret)
+        if (viaSet.optBoolean("performed", false)) return markBlindTyping(viaSet)
+        return markBlindTyping(
+            typeViaClipboardPaste(text, secret, viaSet.optBoolean("set_performed", false))
+        )
     }
 
     private fun markBlindTyping(r: JSONObject): JSONObject {
@@ -1943,6 +2084,7 @@ class ScreenController(
                 return if (ok) {
                     JSONObject()
                         .put("performed", true)
+                        .put("set_performed", true)
                         .put("via", "set_text")
                         .put("len", text.length)
                         .apply {
@@ -1951,6 +2093,7 @@ class ScreenController(
                 } else if (secret) {
                     JSONObject()
                         .put("performed", false)
+                        .put("set_performed", performed)
                         .put("via", "set_text")
                         .put("len", text.length)
                         .put(
@@ -1963,6 +2106,7 @@ class ScreenController(
                 } else {
                     JSONObject()
                         .put("performed", false)
+                        .put("set_performed", performed)
                         .put("via", "set_text")
                         .put("len", text.length)
                         .put(
@@ -1970,6 +2114,105 @@ class ScreenController(
                             "set-text sent but field text != expected (focused: '${afterFocused.take(30)}', tree: '${afterTree.take(30)}') — " +
                                 "the editor may ignore ACTION_SET_TEXT or hide its text; verify with a screenshot",
                         )
+                }
+            } finally {
+                if (focused !== root) focused.recycle()
+            }
+        } finally {
+            root.recycle()
+        }
+    }
+
+    /**
+     * 第三档输入：剪贴板粘贴。少数自绘编辑器既不响应无障碍输入法、也不响应
+     * ACTION_SET_TEXT，粘贴是最后一条路：先选中全部、再 ACTION_PASTE，
+     * 读回验证与 SET_TEXT 同款双路（焦点框优先，全树兜底）。
+     *
+     * [clearFirst]：SET_TEXT 平台调用返回过 true、但读回不对时，框里可能已
+     * 经有字，先选中全部 + SET_TEXT("") 清空再粘，免得新旧文字叠在一起。
+     * [secret] 为真时结果里不出现文本；无论成功失败，粘贴完都清剪贴板，
+     * 别让刚输的文字（尤其是密码）留在剪贴板里。清不掉只记一句，不因此
+     * 判失败。密码框不填（与 SET_TEXT 同款安全线）。
+     */
+    private fun typeViaClipboardPaste(text: String, secret: Boolean, clearFirst: Boolean): JSONObject {
+        val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
+        try {
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: throw IllegalStateException("no input focus (tap into an input field first)")
+            try {
+                if (focused.isPassword) {
+                    return JSONObject()
+                        .put("performed", false)
+                        .put("via", "clipboard_paste")
+                        .put("len", text.length)
+                        .put("error", "focused field is a password field — Jarvis does not type into password fields")
+                }
+                focused.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                if (clearFirst) {
+                    focused.performAction(AccessibilityNodeInfo.ACTION_SELECT_ALL)
+                    val clearArgs = Bundle().apply {
+                        putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            "",
+                        )
+                    }
+                    focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+                }
+                val clip = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clip.setPrimaryClip(ClipData.newPlainText("jarvis-type", text))
+                focused.performAction(AccessibilityNodeInfo.ACTION_SELECT_ALL)
+                val pasted = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                // 轮询读回而不是睡一个固定值：粘贴之后 WebView 还要把新值回抛给
+                // 无障碍树，读早了会报「没输进去」这种会诱发重发的假错误。
+                var afterFocused = ""
+                var afterTree = ""
+                val deadline = SystemClock.uptimeMillis() + READBACK_BUDGET_MS
+                do {
+                    Thread.sleep(READBACK_POLL_MS)
+                    afterFocused = readFocusedText()
+                    afterTree = if (afterFocused == text) "" else readTextFromTree(text)
+                    if (afterFocused == text || afterTree == text) break
+                } while (SystemClock.uptimeMillis() < deadline)
+                val ok = pasted && (afterFocused == text || afterTree == text)
+                // 粘贴完就清剪贴板：刚输的文字不留在剪贴板里。清不掉只记一句。
+                val cleared = runCatching {
+                    clip.setPrimaryClip(ClipData.newPlainText("", ""))
+                    true
+                }.getOrDefault(false)
+                val note = if (!cleared) "clipboard could not be cleared after paste" else ""
+                return if (ok) {
+                    JSONObject()
+                        .put("performed", true)
+                        .put("via", "clipboard_paste")
+                        .put("len", text.length)
+                        .apply {
+                            if (!secret) put("text", if (afterFocused == text) afterFocused else afterTree)
+                            if (note.isNotEmpty()) put("clipboard_note", note)
+                        }
+                } else if (secret) {
+                    JSONObject()
+                        .put("performed", false)
+                        .put("via", "clipboard_paste")
+                        .put("len", text.length)
+                        .put(
+                            "error",
+                            "paste sent but the field does not hold the expected value " +
+                                "(read back ${afterFocused.length} chars from the focused node, " +
+                                "${afterTree.length} from the tree) — the editor may ignore " +
+                                "ACTION_PASTE or hide its text; verify with a screenshot",
+                        )
+                        .apply { if (note.isNotEmpty()) put("clipboard_note", note) }
+                } else {
+                    JSONObject()
+                        .put("performed", false)
+                        .put("via", "clipboard_paste")
+                        .put("len", text.length)
+                        .put(
+                            "error",
+                            "paste sent but field text != expected (focused: '${afterFocused.take(30)}', tree: '${afterTree.take(30)}') — " +
+                                "the editor may ignore ACTION_PASTE or hide its text; verify with a screenshot",
+                        )
+                        .apply { if (note.isNotEmpty()) put("clipboard_note", note) }
                 }
             } finally {
                 if (focused !== root) focused.recycle()
@@ -3669,6 +3912,9 @@ class ScreenController(
         private const val ATTACHED_TREE_MS = 4_000L
         private const val FINGERPRINT_BUDGET_MS = 1_500L
         private const val SEARCH_BUDGET_MS = 1_500L
+
+        /** 选择器一次最多返回多少个匹配：够模型挑第 N 个，又不至于把整棵树都搬回来。 */
+        private const val SELECTOR_MAX_MATCHES = 50
 
         /** A withheld root is 1 node; a bare canvas a handful. */
         private const val BLIND_TREE_NODES = 3

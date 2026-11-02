@@ -36,16 +36,16 @@ object FlowRuntime {
     const val MAX_FLOW_TIMEOUT_MS = 20_000L
     const val DEFAULT_FLOW_TIMEOUT_MS = 20_000L
 
-    /** 流内可用的动作（tap/longPress/type/swipe/back/home/zoom 走 TaskLoop.execute 的
+    /** 流内可用的动作（tap/longPress/tap_sel/type/swipe/back/home/zoom 走 TaskLoop.execute 的
      * 既有映射；wait/wait_idle/wait_change/find/observe/scroll_to 是流内专用步，
      * 等待与滑动走共用的 ScreenWait，不在本文件另造一套）。 */
     private val FLOW_ACTIONS = setOf(
-        "tap", "longPress", "type", "swipe", "back", "home", "zoom",
+        "tap", "longPress", "tap_sel", "type", "swipe", "back", "home", "zoom",
         "wait", "wait_idle", "wait_change", "find", "observe", "scroll_to"
     )
 
     /** 动作开始后才可能“不知道成没成”的几种：超时要标 outcomeUnknown。 */
-    private val MUTATING_ACTIONS = setOf("tap", "longPress", "type", "swipe", "zoom", "scroll_to")
+    private val MUTATING_ACTIONS = setOf("tap", "longPress", "tap_sel", "type", "swipe", "zoom", "scroll_to")
 
     /** observe 步附在 trace 里的元素摘要上限（只给一小段，不塞整棵树）。 */
     private const val OBSERVE_EXCERPT_CHARS = 300
@@ -169,6 +169,18 @@ object FlowRuntime {
                 }
             }
             "find" -> {
+                if (step.has("sel")) {
+                    val sel = step.optJSONObject("sel")
+                        ?: return done("error", "find 的 sel 不是对象")
+                    val r = controller.findBySelector(sel)
+                    val total = r.optInt("total", 0)
+                    if (total == 0) return done("error", "找不到符合条件的元素")
+                    val first = r.optJSONArray("matches")?.optJSONObject(0)
+                    val note = if (first != null) {
+                        "找到 $total 个，第一个是 ${first.optString("sid")}|${first.optString("type")}|${first.optString("text")}"
+                    } else "找到 $total 个"
+                    return done("ok", note = note)
+                }
                 val elements = ScreenWait.currentElements(controller)
                     ?: return done("error", "读界面失败")
                 val sel = JSONObject().apply {

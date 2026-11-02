@@ -15,6 +15,7 @@ import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
 import com.jarvis.app.TakeoverBorder
 import com.jarvis.app.vision.GridOverlay
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -459,7 +460,8 @@ object TaskLoop {
             val v = action.optString(k)
             if (v.isNotEmpty()) sb.append('|').append(k).append('=').append(v)
         }
-        for (k in listOf("x", "y", "x1", "y1", "x2", "y2", "ms", "screens", "maxSwipes")) {
+        action.optJSONObject("sel")?.let { sb.append("|sel=").append(it.toString()) }
+        for (k in listOf("x", "y", "x1", "y1", "x2", "y2", "ms", "screens", "maxSwipes", "index")) {
             if (action.has(k)) sb.append('|').append(k).append('=').append(action.optInt(k))
         }
         return sb.toString()
@@ -470,10 +472,12 @@ object TaskLoop {
         val kind = action.optString("action")
         val detail = when (kind) {
             "tap", "longPress" -> action.optString("eid").ifEmpty {
-                action.optString("cell").ifEmpty {
+                action.optJSONObject("sel")?.let { "选「${UiSelector.shortSummary(it)}」" } ?: action.optString("cell").ifEmpty {
                     if (action.has("x")) "${action.optInt("x")},${action.optInt("y")}" else ""
                 }
             }
+            "tap_sel" -> action.optJSONObject("sel")?.let { "选「${UiSelector.shortSummary(it)}」" }.orEmpty()
+            "find" -> action.optJSONObject("sel")?.let { "找「${UiSelector.shortSummary(it)}」" }.orEmpty()
             "type" -> "「${action.optString("text").take(20)}」"
             "openApp" -> action.optString("app")
             "swipe" -> "(${action.optInt("x1")},${action.optInt("y1")})→(${action.optInt("x2")},${action.optInt("y2")})"
@@ -661,10 +665,11 @@ val zoomImage: String?
 /**
 * 执行一个动作。动作到 ScreenController 的映射（全部用它自己的瞄准体系，
 * 不另造坐标换算）：有 eid 走 tapByEid/longPressByEid（按上一步元素大纲的
-* 编号，最稳）；有 cell 或 x/y 走 tapAim/longPressAim（x/y 是所看图片的
-* 0–1000 相对坐标，on 指明读自全屏图 "screen" 还是放大图 "zoom"）；swipe
-* 走 swipeNorm（0–1000 相对坐标直通，可带 screens 连滑多屏）；zoom 走
-* zoomAim（只吃 cell，x/y 先换算成 cell）。
+* 编号，最稳）；有 sel 走 tapBySelector/longPressBySelector（按多条件选择器
+* 找第 N 个匹配，点之前先爬到最近的可点父节点）；有 cell 或 x/y 走
+* tapAim/longPressAim（x/y 是所看图片的 0–1000 相对坐标，on 指明读自全屏图
+* "screen" 还是放大图 "zoom"）；swipe 走 swipeNorm（0–1000 相对坐标直通，
+* 可带 screens 连滑多屏）；zoom 走 zoomAim（只吃 cell，x/y 先换算成 cell）。
 * internal：FlowRuntime 的变异步复用这里的映射，单步行为不变。
 */
 internal fun execute(
@@ -684,6 +689,13 @@ when {
 eid.isNotEmpty() ->
 if (kind == "tap") controller.tapByEid(eid)
 else controller.longPressByEid(eid, ms)
+action.has("sel") -> {
+val sel = action.optJSONObject("sel")
+?: return StepResult("$kind 的 sel 不是对象", false, null, null)
+val index = action.optInt("index", 0)
+if (kind == "tap") controller.tapBySelector(sel, index)
+else controller.longPressBySelector(sel, index, ms)
+}
 cell!= null ->
 if (kind == "tap") controller.tapAim(on, null, null, cell, part)
 else controller.longPressAim(on, null, null, cell, part, ms)
@@ -693,7 +705,7 @@ val y = action.optInt("y", -1)
 if (kind == "tap") controller.tapAim(on, x, y, null, part)
 else controller.longPressAim(on, x, y, null, null, ms)
 }
-else -> return StepResult("$kind 缺少 eid、cell 或坐标", false, null, null)
+else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null, null)
 }
 } catch (e: IllegalStateException) {
 // 批三十：树盲应用上 tap 因 zoom 过期被拒时，自动对同一目标重拍一张 zoom 图
@@ -829,6 +841,29 @@ else -> "滑了 ${s.swipes} 次，没找到「$target」"
 }
 StepResult(summary, s.found, null, null)
 }
+"tap_sel" -> {
+// 按选择器点第 N 个匹配（流里的 tap_sel 步；单步更常用 tap 加 sel）。
+// 找不到或 index 超出，tapBySelector 直接抛错，外层 catch 收成一句。
+val sel = action.optJSONObject("sel")
+?: return StepResult("tap_sel 缺少 sel", false, null, null)
+val index = action.optInt("index", 0)
+summarize(controller.tapBySelector(sel, index))
+}
+"find" -> {
+// 按多条件选择器找元素：回前 10 个的稳定编号、类型、文字和中心坐标，
+// 外加总数，模型拿到编号就能接着点；一个都找不到直说，不假装有。
+val sel = action.optJSONObject("sel")
+?: return StepResult("find 缺少 sel", false, null, null)
+val r = controller.findBySelector(sel)
+val total = r.optInt("total", 0)
+if (total == 0) return StepResult("没找到符合条件的元素", false, null, null)
+val matches = r.optJSONArray("matches") ?: JSONArray()
+val lines = (0 until minOf(matches.length(), 10)).mapNotNull { i ->
+val m = matches.optJSONObject(i) ?: return@mapNotNull null
+"${m.optString("sid")}|${m.optString("type")}|${m.optString("text")}|[${m.optInt("cx")},${m.optInt("cy")}]"
+}
+StepResult("找到 $total 个：\n" + lines.joinToString("\n"), true, null, null)
+}
 "flow" -> {
 // 本地流：一段有界脚本由手机在本地一口气跑完，中间不再问模型；
 // 跑完把每步 trace 压成一句摘要回喂历史，模型据此决定下一步。
@@ -930,15 +965,17 @@ private const val SYSTEM_PROMPT =
 "或 {\"action\":\"tap\",\"x\":540,\"y\":1200} 按 0-1000 相对坐标点你刚看到的全屏截图；" +
 "或 {\"action\":\"tap\",\"cell\":\"D7\",\"part\":\"tr\"} 按截图上的网格格号点（part 是格内九宫格部位，可省略）。" +
 "{\"action\":\"longPress\",\"eid\":\"s3f9a2\"} 长按稳定编号，可加 \"ms\":800。" +
+"{\"action\":\"find\",\"sel\":{\"textContains\":\"发送\"}} 按条件找元素（text/textContains/description/descriptionContains/viewId/className/packageName/clickable/editable/enabled/visible 可组合，都满足才算中；默认不区分大小写），回前 10 个的稳定编号、类型、文字和中心坐标，外加总数；一个都找不到会直说。" +
+"{\"action\":\"tap\",\"sel\":{\"textContains\":\"发送\"},\"index\":0} 按选择器点第 N 个匹配（index 缺省 0；只找到 N 个、要第 M 个不存在会直说）；点之前会先爬到最近的可点父节点。选择器是兜底：有稳定编号的元素优先用 eid 点，编号没有或要在一堆同名元素里挑时才用 sel。" +
 "{\"action\":\"swipe\",\"x1\":500,\"y1\":800,\"x2\":500,\"y2\":300} 滑动，坐标都是 0-1000 相对值，手指移动多远列表就走多远；要连滑多屏加 \"screens\":3（系统会回报实际滑了几屏），不要用一串相同的小滑动去凑。" +
-"{\"action\":\"type\",\"text\":\"要输入的文字\"} 往当前已聚焦的输入框输入。" +
+"{\"action\":\"type\",\"text\":\"要输入的文字\"} 往当前已聚焦的输入框输入（系统依次试输入法、直接填字、剪贴板粘贴三档，不用你换方式；输完读回不对会如实报，别原样重发 type，先 zoom 核对或换路线）。" +
 "{\"action\":\"submit\"} 提交当前输入框（如搜索、发送）。" +
 "{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待（每次等待要比上一次久，比如 1500→3000→5000→10000，绝不要连续发相同的等待时长，否则会被重复守卫拦停）；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
 "{\"action\":\"wait_idle\",\"ms\":5000} 等界面稳定下来（连续两次读到的界面一模一样才算稳），稳了就回；等满 ms 还没稳也回，告诉你没稳。{\"action\":\"wait_change\",\"ms\":5000} 等界面发生变化（跟现在比不一样了才算变），变了就回；等满 ms 没变也回，告诉你没变。这两个是按变化等的，不用固定等几秒；连着等时 ms 换个数字，不然会被判重复。" +
 "{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在当前列表里向下滑动找目标，找到就停；滑到底（连着两次滑完界面都不动）就停下来告诉你没找到；也可以加 \"direction\":\"up\" 往上滑，或 \"maxSwipes\":8 限制最多滑几次；也可以用 \"eid\":\"s3f9a2\" 按稳定编号找。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
 "若要按放大图点，动作里加 \"on\":\"zoom\"，坐标和格号都按放大图自身的 0-1000 与小写格号读。" +
-"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有六种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"wait_idle\",\"ms\":5000} 等到界面稳定，{\"action\":\"wait_change\",\"ms\":5000} 等到界面变化，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手，{\"action\":\"observe\"} 重新读一遍界面，{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在列表里滑动找目标（可加 \"direction\":\"up\"、\"maxSwipes\":8，滑到底没找到就停）。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
+"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有七种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"wait_idle\",\"ms\":5000} 等到界面稳定，{\"action\":\"wait_change\",\"ms\":5000} 等到界面变化，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手（也可以给 \"sel\":{...} 按选择器查），{\"action\":\"observe\"} 重新读一遍界面，{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在列表里滑动找目标（可加 \"direction\":\"up\"、\"maxSwipes\":8，滑到底没找到就停），{\"action\":\"tap_sel\",\"sel\":{\"textContains\":\"发送\"}} 按选择器点第 N 个匹配（可加 \"index\":1）。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
 "{\"action\":\"fail\",\"reason\":\"卡在哪一步、什么原因\"} 做不下去时用，禁止假装完成。\n" +
 "一步只做一个动作。" +
