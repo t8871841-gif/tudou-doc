@@ -2134,6 +2134,20 @@ class ScreenController(
      * 别让刚输的文字（尤其是密码）留在剪贴板里。清不掉只记一句，不因此
      * 判失败。密码框不填（与 SET_TEXT 同款安全线）。
      */
+    /**
+     * 全选输入框里的文字。无障碍 API 里没有 ACTION_SELECT_ALL，全选要走
+     * ACTION_SET_SELECTION（起点 0，终点文字长度）。读不到文字时长度按 0，
+     * 选区为空，不报错。
+     */
+    private fun selectAllText(node: AccessibilityNodeInfo) {
+        val len = node.text?.length ?: 0
+        val args = Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, len)
+        }
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+    }
+
     private fun typeViaClipboardPaste(text: String, secret: Boolean, clearFirst: Boolean): JSONObject {
         val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
         try {
@@ -2149,7 +2163,7 @@ class ScreenController(
                 }
                 focused.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 if (clearFirst) {
-                    focused.performAction(AccessibilityNodeInfo.ACTION_SELECT_ALL)
+                    selectAllText(focused)
                     val clearArgs = Bundle().apply {
                         putCharSequence(
                             AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -2160,7 +2174,7 @@ class ScreenController(
                 }
                 val clip = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clip.setPrimaryClip(ClipData.newPlainText("jarvis-type", text))
-                focused.performAction(AccessibilityNodeInfo.ACTION_SELECT_ALL)
+                selectAllText(focused)
                 val pasted = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
                 // 轮询读回而不是睡一个固定值：粘贴之后 WebView 还要把新值回抛给
                 // 无障碍树，读早了会报「没输进去」这种会诱发重发的假错误。
