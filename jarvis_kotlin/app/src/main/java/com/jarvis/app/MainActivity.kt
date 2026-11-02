@@ -1722,11 +1722,12 @@ class MainActivity : Activity() {
                 return@launch
             }
             // 批八：打字路径与语音同路过本地指令层（打电话/打开应用），命中直接办、回执进气泡不朗读。
-            if (com.jarvis.app.command.LocalCommands.tryHandle(this@MainActivity, q, runJs = { js ->
-                    runOnUiThread { hudWebView.evaluateJavascript(js, null) }
-                }) { reply ->
-                    runOnUiThread { addBubble(reply, mine = false) }
-                }
+            // 注意：speak 必须显式传参，不能写尾随 lambda——尾随 lambda 会被当成最后一个参数 runJs。
+            if (com.jarvis.app.command.LocalCommands.tryHandle(
+                    this@MainActivity, q,
+                    speak = { reply -> runOnUiThread { addBubble(reply, mine = false) } },
+                    runJs = { js -> runOnUiThread { hudWebView.evaluateJavascript(js, null) } }
+                )
             ) {
                 chatInFlight = false
                 return@launch
