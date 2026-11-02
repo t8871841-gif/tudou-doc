@@ -48,8 +48,9 @@ object OrbController {
     // 才吸边，否则就停在用户实际松手的位置，真正支持摆在屏幕任意地方（包括正中间）。
     private const val EDGE_SNAP_THRESHOLD_DP = 48f
     // 贴边收起后还留多少比例的球体露在外面（剩下这一截用来给用户看见"球还在"、
-    // 也用来当下一次点击的热区，不是整个球都滑出屏幕消失不见）。
-    private const val COLLAPSED_VISIBLE_FRACTION = 0.38f
+    // 也用来当下一次点击的热区）。真正的贴边隐藏只留一小截（15%），不是原来露 38%
+    // 那种半个球还在外面。
+    private const val COLLAPSED_VISIBLE_FRACTION = 0.15f
     private const val COLLAPSED_ALPHA = 0.55f
     private const val COLLAPSE_IDLE_MS = 1600L
     private const val COLLAPSE_ANIM_MS = 220L
@@ -74,6 +75,9 @@ object OrbController {
     private var dockedX = 0
     private var dockedY = 0
     private var collapseRunnable: Runnable? = null
+    // 收起/展开共用的一段位移动画。拖球时手指接管位置，必须能立刻停掉它——
+    // 否则 220ms 的展开动画和手指同时写 lp.x，球会跟手指抢位置、跳来跳去。
+    private var edgeAnimator: ValueAnimator? = null
     // 球处于收起状态时的这一次触摸，第一下只负责把球展开，不触发点击/长按的正常动作——
     // 不然用户好不容易找到那一小截露出来的球，一点就被当成"点一下开始听"，体验很突兀。
     private var revealOnlyThisGesture = false
@@ -258,12 +262,17 @@ object OrbController {
         val lp = orbLp ?: return false
         val w = wm ?: return false
         val s = svc ?: return false
+        if (collapsed) return false // 收起态不让位：球本来就只剩一小截在屏外，让位会把
+        // 收起时的屏外坐标记成 dodgeX/dockedX，恢复和再收起全乱
         val m = (8 * density()).toInt()
         if (x < lp.x - m || x > lp.x + lp.width + m || y < lp.y - m || y > lp.y + lp.height + m) return false
         val dm = s.resources.displayMetrics
         dodgeX = lp.x
         dodgeY = lp.y
         dodged = true
+        // 让位期间不排收起：1.6 秒的定时器若在让位中途触发，doCollapse 会把
+        // 让位后的临时位置记成 dockedX，恢复后球就回不到原来那条边。
+        cancelCollapseSchedule()
         val move = {
             lp.x = if (lp.x + lp.width / 2 < dm.widthPixels / 2) (dm.widthPixels - lp.width).coerceAtLeast(0) else 0
             try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
@@ -288,6 +297,9 @@ object OrbController {
             lp.x = dodgeX
             lp.y = dodgeY
             try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+            // 让位恢复后重新排收起：球回到了原来那条边，闲置够了就该照常收起，
+            // 不然让位一次之后贴边隐藏就再也不触发了。
+            scheduleCollapseIfDocked()
         }
     }
 
@@ -325,6 +337,7 @@ object OrbController {
     private fun doCollapse() {
         collapseRunnable = null
         if (collapsed) return
+        if (dodged) return // 让位期间不收起：这时 lp.x 是让位后的临时位置，记成 dockedX 就错了
         val w = wm ?: return
         val o = orb ?: return
         val lp = orbLp ?: return
@@ -334,7 +347,8 @@ object OrbController {
         val hiddenAmount = (lp.width * (1f - COLLAPSED_VISIBLE_FRACTION)).toInt()
         val target = if (onLeft) -hiddenAmount else lp.x + hiddenAmount
         collapsed = true
-        ValueAnimator.ofInt(lp.x, target).apply {
+        edgeAnimator?.cancel()
+        edgeAnimator = ValueAnimator.ofInt(lp.x, target).apply {
             duration = COLLAPSE_ANIM_MS
             addUpdateListener {
                 lp.x = it.animatedValue as Int
@@ -346,27 +360,23 @@ object OrbController {
     }
 
     /**
-     * 从收起状态展开回完整可见。[rescheduleCollapse] 是因为两种触发场景的后续不一样：
-     * 用户手指碰到球时要展开+等它再次空闲才重新收起；而一旦球要真正响应点击/拖动/
-     * 系统让位（dodge）这些场景，外层调用自己会决定后续要不要收起，这里不重复排。
+     * 瞬时展开（拖球专用）：不停动画、直接把球放回 dockedX。dragStart 里如果还走
+     * 220ms 的展开动画，动画和手指会同时写 lp.x，球跟手指抢位置；而且 startX
+     * 读到的是收起时的屏外坐标，拖起来整段都偏。瞬时展开后手指从正确位置接管。
      */
-    private fun expandFromCollapse(rescheduleCollapse: Boolean) {
+    private fun expandInstantly() {
         cancelCollapseSchedule()
-        if (!collapsed) { if (rescheduleCollapse) scheduleCollapseIfDocked(); return }
+        if (!collapsed) return
         collapsed = false
-        val w = wm ?: return
+        edgeAnimator?.cancel()
+        edgeAnimator = null
         val o = orb ?: return
         val lp = orbLp ?: return
-        ValueAnimator.ofInt(lp.x, dockedX).apply {
-            duration = COLLAPSE_ANIM_MS
-            addUpdateListener {
-                lp.x = it.animatedValue as Int
-                try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
-            }
-            start()
-        }
-        o.animate().alpha(1f).setDuration(COLLAPSE_ANIM_MS).start()
-        if (rescheduleCollapse) scheduleCollapseIfDocked()
+        o.animate().cancel()
+        o.alpha = 1f
+        lp.x = dockedX
+        lp.y = dockedY
+        try { wm?.updateViewLayout(o, lp) } catch (_: Exception) {}
     }
 
     // 急停后的 1.8 秒内球显示“已停止”（红色），不被 Dart 的状态更新盖掉。
@@ -420,8 +430,10 @@ object OrbController {
             override fun dragStart() {
                 // 第二梯队批八：球收起时，这一下触摸先只负责展开，不当成"点一下"的正常手势——
                 // 用户摸到那一小截露出来的球，期待的是"球回来了"，不是立刻开始听/打开App。
+                // 真正的贴边隐藏：收起态下拖球必须瞬时展开，不能走 220ms 动画——
+                // 动画和手指同时写 lp.x 会抢位置，而且 startX 会读到屏外坐标、拖起来整段都偏。
                 revealOnlyThisGesture = collapsed
-                if (collapsed) expandFromCollapse(rescheduleCollapse = false)
+                if (collapsed) expandInstantly()
                 else cancelCollapseSchedule()
                 startX = lp.x
                 startY = lp.y
@@ -591,6 +603,8 @@ object OrbController {
     private fun removeAll() {
         removeBubble()
         cancelCollapseSchedule()
+        edgeAnimator?.cancel()
+        edgeAnimator = null
         collapsed = false // 球都没了，收起状态没意义；下次 show() 重新按当前持久化坐标判定
         orb?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
         orb = null
