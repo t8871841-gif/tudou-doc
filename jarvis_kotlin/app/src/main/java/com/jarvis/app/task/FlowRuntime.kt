@@ -36,22 +36,19 @@ object FlowRuntime {
     const val MAX_FLOW_TIMEOUT_MS = 20_000L
     const val DEFAULT_FLOW_TIMEOUT_MS = 20_000L
 
-    /** wait 步缺省等多久、轮询间隔。 */
-    private const val WAIT_DEFAULT_MS = 5_000L
-    private const val WAIT_POLL_MS = 300L
-
-    /** observe 步附在 trace 里的元素摘要上限（只给一小段，不塞整棵树）。 */
-    private const val OBSERVE_EXCERPT_CHARS = 300
-
     /** 流内可用的动作（tap/longPress/type/swipe/back/home/zoom 走 TaskLoop.execute 的
-     * 既有映射；wait/find/observe 是流内专用步，本文件自己实现）。 */
+     * 既有映射；wait/wait_idle/wait_change/find/observe/scroll_to 是流内专用步，
+     * 等待与滑动走共用的 ScreenWait，不在本文件另造一套）。 */
     private val FLOW_ACTIONS = setOf(
         "tap", "longPress", "type", "swipe", "back", "home", "zoom",
-        "wait", "find", "observe"
+        "wait", "wait_idle", "wait_change", "find", "observe", "scroll_to"
     )
 
     /** 动作开始后才可能“不知道成没成”的几种：超时要标 outcomeUnknown。 */
-    private val MUTATING_ACTIONS = setOf("tap", "longPress", "type", "swipe", "zoom")
+    private val MUTATING_ACTIONS = setOf("tap", "longPress", "type", "swipe", "zoom", "scroll_to")
+
+    /** observe 步附在 trace 里的元素摘要上限（只给一小段，不塞整棵树）。 */
+    private const val OBSERVE_EXCERPT_CHARS = 300
 
     /**
      * 跑一段流。返回结果 JSON：
@@ -140,23 +137,39 @@ object FlowRuntime {
         // ---------- 守卫：ifPresent / ifAbsent ----------
         // 有守卫才读一次树；读不到树就按“看不见”处理——宁可跳过，也不盲动。
         if (step.has("ifPresent") || step.has("ifAbsent")) {
-            val elements = currentElements(controller)
+            val elements = ScreenWait.currentElements(controller)
             if (elements == null) return done("skipped", note = "读界面失败，已跳过")
             val presentSel = step.optJSONObject("ifPresent")
             val absentSel = step.optJSONObject("ifAbsent")
-            if (presentSel != null && !matchesSelector(elements, presentSel)) {
+            if (presentSel != null && !ScreenWait.matchesSelector(elements, presentSel)) {
                 return done("skipped", note = "ifPresent 未命中，已跳过")
             }
-            if (absentSel != null && matchesSelector(elements, absentSel)) {
+            if (absentSel != null && ScreenWait.matchesSelector(elements, absentSel)) {
                 return done("skipped", note = "ifAbsent 已命中，已跳过")
             }
         }
 
         // ---------- 流内专用步 ----------
         when (action) {
-            "wait" -> return runWaitStep(controller, step, index, stepStarted, deadline)
+            "wait", "wait_idle", "wait_change" -> return runWaitStep(controller, step, index, stepStarted, deadline)
+            "scroll_to" -> {
+                val text = step.optString("text").ifEmpty { null }
+                val eid = step.optString("eid").ifEmpty { null }
+                if (text == null && eid == null) {
+                    return done("error", "scroll_to 缺少 text 或 eid")
+                }
+                val direction = step.optString("direction").ifEmpty { "down" }
+                val maxSwipes = step.optInt("maxSwipes", ScreenWait.SCROLL_DEFAULT_MAX)
+                val target = text ?: eid!!
+                val s = ScreenWait.scrollTo(controller, text, eid, direction, maxSwipes)
+                return when {
+                    s.found -> done("ok", note = "已找到「$target」")
+                    s.endReached -> done("error", "滑到底了，没找到「$target」")
+                    else -> done("error", "滑了 ${s.swipes} 次，没找到「$target」")
+                }
+            }
             "find" -> {
-                val elements = currentElements(controller)
+                val elements = ScreenWait.currentElements(controller)
                     ?: return done("error", "读界面失败")
                 val sel = JSONObject().apply {
                     if (step.has("eid")) put("eid", step.optString("eid"))
@@ -165,14 +178,14 @@ object FlowRuntime {
                 if (!step.has("eid") && !step.has("text")) {
                     return done("error", "find 缺少 text 或 eid")
                 }
-                return if (matchesSelector(elements, sel)) {
+                return if (ScreenWait.matchesSelector(elements, sel)) {
                     done("ok", note = "元素在")
                 } else {
                     done("error", "找不到元素：${step.optString("text").ifEmpty { step.optString("eid") }}")
                 }
             }
             "observe" -> {
-                val elements = currentElements(controller)
+                val elements = ScreenWait.currentElements(controller)
                     ?: return done("error", "读界面失败")
                 return done("ok", excerpt = elements.take(OBSERVE_EXCERPT_CHARS))
             }
@@ -191,72 +204,38 @@ object FlowRuntime {
     }
 
     /**
-     * wait 步：等界面变化或等满时长。先拍一张树当基线，每 300ms 重读一次，
-     * 树一变就回（界面已变化）；等满 ms 还没变也算完成（界面已稳定），不算失败。
-     * 读树失败的那一轮按“没变”算、继续等；基线都读不到就按固定时长等。
+     * wait / wait_idle / wait_change 步：走共用的 ScreenWait.waitForSettle，
+     * 不在本文件另造轮询。wait 与 wait_change 都是等界面变化（没变也算完成，
+     * 界面已稳定）；wait_idle 是等界面稳定（连续两次哈希相同）。
+     * 等满没等到也算完成（ok），成败看 note 里那句，不谎报。
+     * 读树失败的那一程按“读界面失败”记，不算变化也不算稳定。
      */
     private fun runWaitStep(
         controller: ScreenController, step: JSONObject,
         index: Int, stepStarted: Long, deadline: Long
     ): JSONObject {
-        val requested = step.optLong("ms", WAIT_DEFAULT_MS).coerceIn(300, MAX_FLOW_TIMEOUT_MS)
+        val action = step.optString("action")
+        val mode = if (action == "wait_idle") "idle" else "change"
+        val requested = step.optLong("ms", ScreenWait.WAIT_DEFAULT_MS)
+            .coerceIn(300, MAX_FLOW_TIMEOUT_MS)
         val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(0)
         val budget = minOf(requested, remaining)
-        val baseline = currentElements(controller)?.hashCode()
-        val waitStarted = System.currentTimeMillis()
-        var changed = false
-        while (System.currentTimeMillis() - waitStarted < budget) {
-            // 中断不吞：直接往上抛，让循环停下（Kotlin 不强制声明受检异常）。
-            Thread.sleep(WAIT_POLL_MS)
-            if (System.currentTimeMillis() >= deadline) break
-            val now = currentElements(controller)?.hashCode()
-            if (baseline != null && now != null && now != baseline) {
-                changed = true
-                break
-            }
-        }
-        val waited = System.currentTimeMillis() - waitStarted
+        val result = ScreenWait.waitForSettle(controller, budget, mode)
         val trace = stepTrace(
-            index, "wait", "ok", "",
+            index, action, "ok", "",
             System.currentTimeMillis() - stepStarted, false
         )
-        trace.put(
-            "note",
-            if (baseline == null) "读界面失败，按固定时长等了 ${waited}ms"
-            else if (changed) "等了 ${waited}ms，界面有变化"
-            else "等了 ${waited}ms，界面没有变化（已稳定）"
-        )
+        val note = if (result.readFailed) {
+            "读界面失败，按固定时长等了 ${result.elapsedMs}ms"
+        } else if (mode == "idle") {
+            if (result.settled) "等了 ${result.elapsedMs}ms，界面已稳定"
+            else "等了 ${result.elapsedMs}ms，界面还没稳定"
+        } else {
+            if (result.changed) "等了 ${result.elapsedMs}ms，界面有变化"
+            else "等了 ${result.elapsedMs}ms，界面没有变化（已稳定）"
+        }
+        trace.put("note", note)
         return trace
-    }
-
-    /** 读当前界面树的 elements 大纲；读失败返回 null（调用方按“看不见”处理）。 */
-    private fun currentElements(controller: ScreenController): String? {
-        return try {
-            controller.dumpUiTree().optString("elements")
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    /**
-     * 选择器匹配：{"eid":"e3"} 按编号（大纲里编号后可能带 * 号可点标记，两边都去掉再比），
-     * {"text":"发送"} 按该行文字字段包含。两个键都给了要同时命中。
-     */
-    private fun matchesSelector(elements: String, selector: JSONObject): Boolean {
-        val wantEid = selector.optString("eid").trim().removeSuffix("*")
-        val wantText = selector.optString("text")
-        if (wantEid.isEmpty() && wantText.isEmpty()) return false
-        for (rawLine in elements.lines()) {
-            val line = rawLine.trim()
-            if (line.isEmpty()) continue
-            val fields = line.split("|")
-            val lineEid = fields.getOrNull(0).orEmpty().trim().removeSuffix("*")
-            val lineText = fields.getOrNull(2).orEmpty()
-            val eidOk = wantEid.isEmpty() || lineEid == wantEid
-            val textOk = wantText.isEmpty() || lineText.contains(wantText)
-            if (eidOk && textOk) return true
-        }
-        return false
     }
 
     private fun stepTrace(

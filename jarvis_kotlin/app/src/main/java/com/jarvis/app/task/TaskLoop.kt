@@ -382,16 +382,27 @@ object TaskLoop {
                 // ---------- 执行 ----------
                 val r = execute(ctx, controller, action)
                 if (r.zoomImage != null) pendingImage = r.zoomImage
-                history += "第 $step 步：${describeAction(action)} → ${r.summary.take(STEP_RESULT_CHARS)}"
+                // 固定等 600ms 改成等界面静止：连续两次读到的界面哈希相同才算稳，
+                // 下一步的大纲在界面真稳了之后再读，不盲等。超时没稳住也继续，
+                // 只是如实记一笔（历史里的“界面已稳定 / 仍在变”就是这句的来处）。
+                val settle = try {
+                    ScreenWait.waitForSettle(controller, ScreenWait.SETTLE_DEFAULT_MS, "idle")
+                } catch (e: InterruptedException) {
+                    return
+                } catch (_: Exception) {
+                    null
+                }
+                val settleNote = when {
+                    settle == null -> "（等界面稳定时出错，未确认）"
+                    settle.readFailed -> "（读界面失败，未确认是否稳定）"
+                    settle.settled -> "（界面已稳定）"
+                    else -> "（界面仍在变，超时未稳）"
+                }
+                history += "第 $step 步：${describeAction(action)} → ${r.summary.take(STEP_RESULT_CHARS)}$settleNote"
                 AuditLog.append(ctx, "任务循环", "$kind（第 $step 步）", r.summary)
                 lastError = if (r.ok) "" else r.summary
                 prevStepFailed = !r.ok
                 prevScreenChanged = r.screenChanged
-                try {
-                    Thread.sleep(600)
-                } catch (_: InterruptedException) {
-                    return
-                }
             }
             finalReply = "任务跑满了 $MAX_STEPS 步还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}"
             AuditLog.append(ctx, "任务循环", "步数用完", history.lastOrNull() ?: "")
@@ -444,11 +455,11 @@ object TaskLoop {
             }
             return sb.toString()
         }
-        for (k in listOf("eid", "cell", "part", "on", "text", "app")) {
+        for (k in listOf("eid", "cell", "part", "on", "text", "app", "direction")) {
             val v = action.optString(k)
             if (v.isNotEmpty()) sb.append('|').append(k).append('=').append(v)
         }
-        for (k in listOf("x", "y", "x1", "y1", "x2", "y2", "ms", "screens")) {
+        for (k in listOf("x", "y", "x1", "y1", "x2", "y2", "ms", "screens", "maxSwipes")) {
             if (action.has(k)) sb.append('|').append(k).append('=').append(action.optInt(k))
         }
         return sb.toString()
@@ -468,6 +479,9 @@ object TaskLoop {
             "swipe" -> "(${action.optInt("x1")},${action.optInt("y1")})→(${action.optInt("x2")},${action.optInt("y2")})"
             "zoom" -> action.optString("cell")
             "wait" -> "${action.optLong("ms", 1200)}ms"
+            "wait_idle" -> "等稳 ${action.optLong("ms", 5000)}ms"
+            "wait_change" -> "等变 ${action.optLong("ms", 5000)}ms"
+            "scroll_to" -> "滑找「${action.optString("text").ifEmpty { action.optString("eid") }}」"
             "flow" -> {
                 val steps = action.optJSONArray("steps")
                 if (steps == null) "" else (0 until steps.length())
@@ -769,6 +783,52 @@ val ms = action.optLong("ms", 1200).coerceIn(300, 20000)
 Thread.sleep(ms)
 StepResult("已等待 ${ms}ms", true, null, null)
 }
+"wait_idle" -> {
+// 等界面稳定：连续两次读到的哈希相同才算稳。等到了、等满没稳、读不到树，
+// 都如实回报——等待本身没失败，成败看摘要里那句。
+val ms = action.optLong("ms", ScreenWait.WAIT_DEFAULT_MS).coerceIn(300, ScreenWait.WAIT_MAX_MS)
+val s = ScreenWait.waitForSettle(controller, ms, "idle")
+val summary = if (s.readFailed) {
+"等界面稳定：读界面失败（等了 ${s.elapsedMs}ms）"
+} else if (s.settled) {
+"界面已稳定（等了 ${s.elapsedMs}ms）"
+} else {
+"等了 ${s.elapsedMs}ms，界面还没稳"
+}
+StepResult(summary, true, null, null)
+}
+"wait_change" -> {
+// 等界面变化：哈希跟现在比不一样了才算变。变了、等满没变、读不到树，都如实回报。
+val ms = action.optLong("ms", ScreenWait.WAIT_DEFAULT_MS).coerceIn(300, ScreenWait.WAIT_MAX_MS)
+val s = ScreenWait.waitForSettle(controller, ms, "change")
+val summary = if (s.readFailed) {
+"等界面变化：读界面失败（等了 ${s.elapsedMs}ms）"
+} else if (s.changed) {
+"界面已变化（等了 ${s.elapsedMs}ms）"
+} else {
+"等了 ${s.elapsedMs}ms，界面没变"
+}
+StepResult(summary, true, null, null)
+}
+"scroll_to" -> {
+// 在当前列表里滑动找目标：找到就停；滑到底（连着两次滑完界面都不动）
+// 就停下来报没找到；滑满次数还没找到也报没找到。不盲滑过头。
+val text = action.optString("text").ifEmpty { null }
+val eid = action.optString("eid").ifEmpty { null }
+if (text == null && eid == null) {
+return StepResult("scroll_to 缺少 text 或 eid", false, null, null)
+}
+val direction = action.optString("direction").ifEmpty { "down" }
+val maxSwipes = action.optInt("maxSwipes", ScreenWait.SCROLL_DEFAULT_MAX)
+val target = text ?: eid!!
+val s = ScreenWait.scrollTo(controller, text, eid, direction, maxSwipes)
+val summary = when {
+s.found -> "已找到「$target」"
+s.endReached -> "滑到底了，没找到「$target」"
+else -> "滑了 ${s.swipes} 次，没找到「$target」"
+}
+StepResult(summary, s.found, null, null)
+}
 "flow" -> {
 // 本地流：一段有界脚本由手机在本地一口气跑完，中间不再问模型；
 // 跑完把每步 trace 压成一句摘要回喂历史，模型据此决定下一步。
@@ -874,9 +934,11 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"type\",\"text\":\"要输入的文字\"} 往当前已聚焦的输入框输入。" +
 "{\"action\":\"submit\"} 提交当前输入框（如搜索、发送）。" +
 "{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待（每次等待要比上一次久，比如 1500→3000→5000→10000，绝不要连续发相同的等待时长，否则会被重复守卫拦停）；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
+"{\"action\":\"wait_idle\",\"ms\":5000} 等界面稳定下来（连续两次读到的界面一模一样才算稳），稳了就回；等满 ms 还没稳也回，告诉你没稳。{\"action\":\"wait_change\",\"ms\":5000} 等界面发生变化（跟现在比不一样了才算变），变了就回；等满 ms 没变也回，告诉你没变。这两个是按变化等的，不用固定等几秒；连着等时 ms 换个数字，不然会被判重复。" +
+"{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在当前列表里向下滑动找目标，找到就停；滑到底（连着两次滑完界面都不动）就停下来告诉你没找到；也可以加 \"direction\":\"up\" 往上滑，或 \"maxSwipes\":8 限制最多滑几次；也可以用 \"eid\":\"s3f9a2\" 按稳定编号找。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
 "若要按放大图点，动作里加 \"on\":\"zoom\"，坐标和格号都按放大图自身的 0-1000 与小写格号读。" +
-"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有三种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手，{\"action\":\"observe\"} 重新读一遍界面。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
+"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有六种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"wait_idle\",\"ms\":5000} 等到界面稳定，{\"action\":\"wait_change\",\"ms\":5000} 等到界面变化，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手，{\"action\":\"observe\"} 重新读一遍界面，{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在列表里滑动找目标（可加 \"direction\":\"up\"、\"maxSwipes\":8，滑到底没找到就停）。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
 "{\"action\":\"fail\",\"reason\":\"卡在哪一步、什么原因\"} 做不下去时用，禁止假装完成。\n" +
 "一步只做一个动作。" +
