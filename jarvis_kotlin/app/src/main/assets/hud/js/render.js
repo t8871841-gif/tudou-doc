@@ -16,7 +16,7 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 
-/* drag to rotate, click to talk */
+/* drag to rotate. A tap on the core no longer toggles the mic: the HUD follows the mic state, it never drives it (the native mic button owns listening). Tap-to-wake from dormant is the window pointerdown listener in interaction.js. */
 let drag = null, rotV = { x: 0, y: 0 }, target = { x: 0, y: 0 }, mouse = { x: 0, y: 0 };
 canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, moved: 0 }; canvas.setPointerCapture(e.pointerId); canvas.classList.add('dragging'); });
 canvas.addEventListener('pointermove', e => {
@@ -27,9 +27,5 @@ canvas.addEventListener('pointermove', e => {
 });
 canvas.addEventListener('pointerup', e => {
   canvas.classList.remove('dragging');
-  if (drag && drag.moved < 6) {
-    const r = canvas.getBoundingClientRect(); const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    if (Math.hypot(e.clientX - cx, e.clientY - cy) < Math.min(r.width, r.height) * 0.32) toggleListen();
-  }
   drag = null;
 });

@@ -513,6 +513,9 @@ class MainActivity : Activity() {
             moveHudWebViewToStage()
             hudWebView.visibility = View.VISIBLE
             hudWebView.onResume()
+            // 切回动画时状态可能在静态暂停期间变过（去重会吞掉同步），先清掉再推一次，跟横屏分支一致。
+            hudLastPushedState = null
+            pushHudState(JarvisAgent.currentState())
         }
     }
 
@@ -805,12 +808,11 @@ class MainActivity : Activity() {
         )
     }
 
-    /** 状态变化时推给 HUD（setState），只在横屏且页面加载完时推；替代已删的 500ms 轮询。 */
+    /** 状态变化时推给 HUD（setState），页面加载完且设置页没开时推；横竖屏都推（竖屏舞台的 WebView 也要跟麦克风状态变）。替代已删的 500ms 轮询。 */
     private fun pushHudState(s: String) {
         if (s == hudLastPushedState) return
         hudLastPushedState = s
         if (!::hudWebView.isInitialized || !hudPageLoaded) return
-        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
         if (showingSettings) return
         hudWebView.evaluateJavascript(
             "try{if(typeof setState==='function')setState(" + JSONObject.quote(s) + ")}catch(e){}",
