@@ -144,7 +144,9 @@ enum class ModelFormat(val label: String, val extensions: Set<String>) {
     /** A folder (taobao-mnn layout: config.json + llm.mnn + llm.mnn.weight + tokenizer.txt …). */
     MNN("MNN", emptySet()),
     /** 2.2.0: a Qualcomm AI Hub (QAIRT / Genie) bundle folder: genie_config.json + *.bin + tokenizer.json. Run by GenieX, NPU only. */
-    QAIRT("GenieX · QAIRT", emptySet());
+    QAIRT("GenieX · QAIRT", emptySet()),
+    /** AZJ: a cloud model (Agnes, OpenAI-compatible API). No local file; listed by ModelRepository when enabled. */
+    CLOUD("云端 · Agnes", emptySet());
 
     companion object {
         fun fromFileName(name: String): ModelFormat? {
@@ -168,6 +170,15 @@ data class LocalModel(
     }
     val quantization: String? get() = if (isFolder) null else ModelNames.quantization(fileName)
     val isFolder: Boolean get() = format == ModelFormat.MNN || format == ModelFormat.QAIRT
+}
+
+/** AZJ: the synthetic cloud-model entry. Not a file on disk; [ModelRepository] lists it when the cloud model is enabled. */
+object CloudModel {
+    /** Stable path so the engine manager can key the in-flight load on it. */
+    const val PATH = "cloud://agnes"
+
+    fun entry(settings: AppSettings): LocalModel =
+        LocalModel(fileName = settings.cloudModel.ifBlank { "agnes-3.0-flash" }, path = PATH, sizeBytes = 0, format = ModelFormat.CLOUD)
 }
 
 @Serializable
@@ -220,6 +231,16 @@ data class AppSettings(
     /** false = 127.0.0.1 only; true = listen on all interfaces (requires an API key). */
     val apiAllowLan: Boolean = false,
     val apiKey: String = "",
+
+    // ---- Cloud model (AZJ: Agnes, OpenAI-compatible) ----
+    /** Show the cloud model in the model list so it can be selected like a local model. */
+    val cloudEnabled: Boolean = false,
+    /** Base URL of the cloud API (no trailing /chat/completions). */
+    val cloudBaseUrl: String = "https://apihub.agnes-ai.com/v1",
+    /** Model id sent to the cloud API. */
+    val cloudModel: String = "agnes-3.0-flash",
+    /** API key for the cloud model; entered by the user in settings, never bundled. */
+    val cloudApiKey: String = "",
 
     // ---- Voice ----
     val asrLanguage: String = "auto",

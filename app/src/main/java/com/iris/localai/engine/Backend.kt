@@ -144,6 +144,11 @@ object BackendCapabilities {
                 )
             }
             ModelFormat.QAIRT -> com.iris.localai.engine.geniex.GenieXRules.qairtOptions(env)
+            // AZJ: a cloud model has no local backend; the single option is a placeholder so the
+            // load chain has one step (the CloudEngine does the work over HTTP).
+            ModelFormat.CLOUD -> listOf(
+                BackendOption(Backend.CPU, true, detail = "云端 · Agnes"),
+            )
         }
     }
 
@@ -159,11 +164,15 @@ object BackendCapabilities {
         )
         ModelFormat.MNN -> EngineFeatures(mmap = true)
         ModelFormat.QAIRT -> com.iris.localai.engine.geniex.GenieXRules.QAIRT_FEATURES
+        // AZJ: cloud model — sampling knobs are honoured by the API; nothing local to tune.
+        ModelFormat.CLOUD -> EngineFeatures()
     }
 
     /** Reason context shift is unavailable for this engine, or null when it is supported. */
     fun contextShiftUnsupported(format: ModelFormat?): String? = when (format) {
         ModelFormat.GGUF, null -> null
+        // AZJ: the cloud model re-sends the full history on every request; no local KV to shift.
+        ModelFormat.CLOUD -> null
         ModelFormat.LITERT -> "LiteRT-LM 的会话 KV 由运行时管理，不支持上下文平移；将按 token 预算截断"
         ModelFormat.MNN -> "MNN 的 prompt cache 不支持位置平移；将按 token 预算截断"
         ModelFormat.QAIRT -> "QAIRT 包的 KV 缓存在编译时固定，不支持上下文平移；将按 token 预算截断"

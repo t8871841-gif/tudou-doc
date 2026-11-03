@@ -88,6 +88,8 @@ object TierReloadPolicy {
             }
             // 2.2.0: GenieX QAIRT bundles take no thread / core setting; only a backend change matters.
             ModelFormat.QAIRT -> if (backendChanged) changed += "后端"
+            // AZJ: the cloud model has no local resources; a tier change never reloads it.
+            ModelFormat.CLOUD -> {}
         }
         return TierReloadDecision(changed.isNotEmpty(), changed)
     }

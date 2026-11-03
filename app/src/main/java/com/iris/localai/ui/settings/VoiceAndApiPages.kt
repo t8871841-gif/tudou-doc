@@ -404,6 +404,90 @@ fun ApiPage(vm: SettingsViewModel, onBack: () -> Unit) {
                 else "调用时带上请求头 Authorization: Bearer <Key>（或 x-api-key: <Key>），否则返回 401。",
             )
 
+            // AZJ: cloud model (Agnes) — appears in the model list when enabled; chats go to the cloud API.
+            SectionTitle("云端模型")
+            var baseUrlText by rememberSaveable(s.cloudBaseUrl) { mutableStateOf(s.cloudBaseUrl) }
+            var modelText by rememberSaveable(s.cloudModel) { mutableStateOf(s.cloudModel) }
+            var cloudKeyText by rememberSaveable(s.cloudApiKey) { mutableStateOf(s.cloudApiKey) }
+            var cloudKeyVisible by rememberSaveable { mutableStateOf(false) }
+            SettingsGroup {
+                SwitchRow(
+                    "启用云端模型", s.cloudEnabled,
+                    subtitle = "开启后模型列表里会出现云端模型，选它聊天就走云端，不用下载模型文件",
+                ) { on -> vm.update { it.copy(cloudEnabled = on) } }
+                Divider()
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = IrisDimens.rowMinHeight).padding(start = IrisDimens.rowPadding, end = IrisDimens.space8, top = IrisDimens.space8, bottom = IrisDimens.space8),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("接口地址", style = IrisType.row, color = c.text, modifier = Modifier.weight(1f))
+                    OutlinedTextField(
+                        baseUrlText, { v -> baseUrlText = v.trim() },
+                        singleLine = true,
+                        placeholder = { Text("https://apihub.agnes-ai.com/v1", style = IrisType.secondary, color = c.textTertiary) },
+                        textStyle = IrisType.mono.copy(color = c.text),
+                        shape = IrisRadius.mediumShape,
+                        colors = irisTextFieldColors(),
+                        modifier = Modifier.weight(2f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done, autoCorrectEnabled = false),
+                        keyboardActions = KeyboardActions(onDone = { vm.update { it.copy(cloudBaseUrl = baseUrlText) }; focus.clearFocus() }),
+                    )
+                    IrisButton(
+                        "保存", { vm.update { it.copy(cloudBaseUrl = baseUrlText) }; focus.clearFocus() }, style = IrisButtonStyle.Text, compact = true,
+                        enabled = baseUrlText != s.cloudBaseUrl,
+                    )
+                }
+                Divider()
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = IrisDimens.rowMinHeight).padding(start = IrisDimens.rowPadding, end = IrisDimens.space8, top = IrisDimens.space8, bottom = IrisDimens.space8),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("模型", style = IrisType.row, color = c.text, modifier = Modifier.weight(1f))
+                    OutlinedTextField(
+                        modelText, { v -> modelText = v.trim() },
+                        singleLine = true,
+                        placeholder = { Text("agnes-3.0-flash", style = IrisType.secondary, color = c.textTertiary) },
+                        textStyle = IrisType.mono.copy(color = c.text),
+                        shape = IrisRadius.mediumShape,
+                        colors = irisTextFieldColors(),
+                        modifier = Modifier.weight(2f),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false),
+                        keyboardActions = KeyboardActions(onDone = { vm.update { it.copy(cloudModel = modelText) }; focus.clearFocus() }),
+                    )
+                    IrisButton(
+                        "保存", { vm.update { it.copy(cloudModel = modelText) }; focus.clearFocus() }, style = IrisButtonStyle.Text, compact = true,
+                        enabled = modelText != s.cloudModel,
+                    )
+                }
+                Divider()
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = IrisDimens.rowMinHeight).padding(start = IrisDimens.rowPadding, end = IrisDimens.space4, top = IrisDimens.space8, bottom = IrisDimens.space8),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        cloudKeyText, { v -> cloudKeyText = v.trim() },
+                        singleLine = true,
+                        placeholder = { Text("API Key（必填）", style = IrisType.secondary, color = c.textTertiary) },
+                        textStyle = IrisType.mono.copy(color = c.text),
+                        visualTransformation = if (cloudKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        shape = IrisRadius.mediumShape,
+                        colors = irisTextFieldColors(),
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done, autoCorrectEnabled = false),
+                        keyboardActions = KeyboardActions(onDone = { vm.update { it.copy(cloudApiKey = cloudKeyText) }; focus.clearFocus() }),
+                    )
+                    PressableIcon(
+                        if (cloudKeyVisible) IrisIcons.EyeOff else IrisIcons.Eye, if (cloudKeyVisible) "隐藏" else "显示",
+                        iconSize = 18.dp, tint = c.textSecondary,
+                    ) { cloudKeyVisible = !cloudKeyVisible }
+                    IrisButton(
+                        "保存", { vm.update { it.copy(cloudApiKey = cloudKeyText) }; focus.clearFocus() }, style = IrisButtonStyle.Text, compact = true,
+                        enabled = cloudKeyText != s.cloudApiKey,
+                    )
+                }
+            }
+            GroupFootnote("云端模型的 Key 只存在本机，不会上传；不启用云端模型时不会联网调用它。")
+
             AnimatedVisibility(
                 visible = status.running && status.addresses.isNotEmpty(),
                 enter = fadeIn(IrisMotion.enter()) + expandVertically(IrisMotion.enter()),

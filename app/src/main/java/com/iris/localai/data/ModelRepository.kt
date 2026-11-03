@@ -60,8 +60,11 @@ class ModelRepository(private val context: Context) {
                 .filterNot { isProjectorFile(it.fileName) }
         }
         val list = ModelOrder.apply(ModelDirs.merge(listings) { it.fileName }.sortedBy { it.displayName.lowercase() }, savedOrder())
-        _models.value = list
-        list
+        // AZJ: the cloud model is not a file; list it first when enabled so it can be picked like a local model.
+        val cloud = runCatching { SettingsRepository(context).current }.getOrNull()
+        val withCloud = if (cloud?.cloudEnabled == true) listOf(CloudModel.entry(cloud)) + list else list
+        _models.value = withCloud
+        withCloud
     }
 
     /** 2.2.2: the user's own order (模型管理 › 拖动排序); the home menu lists models in this order. */

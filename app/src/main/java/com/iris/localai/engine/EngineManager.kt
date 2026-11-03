@@ -152,6 +152,8 @@ class EngineManager(
         options: List<BackendOption>? = null,
     ): String = when (model.format) {
         ModelFormat.QAIRT -> com.iris.localai.engine.geniex.GenieX.ENGINE_GENIEX
+        // AZJ: the cloud model runs over HTTP; there is no local backend to pick.
+        ModelFormat.CLOUD -> CloudEngine.ENGINE_ID
         ModelFormat.GGUF -> {
             val opts = options ?: backendOptions(model)
             val b = backend ?: BackendCapabilities.preferred(cfg.backend, model.format, model.fileName, opts)

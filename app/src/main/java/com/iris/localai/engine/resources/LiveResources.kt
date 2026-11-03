@@ -56,6 +56,8 @@ object LiveResourcePolicy {
         ModelFormat.MNN -> if (backend == Backend.CPU) LiveApply.LIVE_POLICY else LiveApply.RELOAD
         ModelFormat.LITERT -> LiveApply.RELOAD
         ModelFormat.QAIRT -> LiveApply.NEXT_REPLY
+        // AZJ: a cloud model has no local threads; a tier change never needs a reload.
+        ModelFormat.CLOUD -> LiveApply.NEXT_REPLY
         null -> LiveApply.NEXT_REPLY
     }
 

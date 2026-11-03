@@ -27,5 +27,7 @@ object EngineFactory {
         ModelFormat.LITERT -> LiteRtEngine(context)
         ModelFormat.MNN -> MnnEngine(context)
         ModelFormat.QAIRT -> GenieXEngine(context)
+        // AZJ: cloud model (Agnes) — no local weights, HTTP only.
+        ModelFormat.CLOUD -> CloudEngine(context)
     }
 }

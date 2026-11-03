@@ -778,6 +778,7 @@ private fun engineTag(m: LocalModel): String = when (m.format) {
     ModelFormat.MNN -> "MNN"
     ModelFormat.QAIRT -> "GenieX"
     ModelFormat.LITERT -> "LiteRT"
+    ModelFormat.CLOUD -> "云端"
 }
 
 @Composable

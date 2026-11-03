@@ -477,6 +477,8 @@ private fun MnnDownloadDialog(onDismiss: () -> Unit, onDownload: (String) -> Uni
 
 /** Picker line with the backend: the real one once loaded, otherwise the one a load would start with. */
 internal fun LocalModel.pickerMeta(loadedBackend: String?, preferredBackend: String, engineTag: String? = null): String = when {
+    // AZJ: the cloud model has no file size.
+    format == ModelFormat.CLOUD -> listOfNotNull(loadedBackend ?: engineTag ?: format.label, quantization).joinToString(" · ")
     loadedBackend != null -> listOfNotNull(loadedBackend, quantization, Format.bytes(sizeBytes)).joinToString(" · ")
     // 2.2.0: models run by GenieX show 「GenieX · NPU」 instead of the format label + backend.
     engineTag != null -> listOfNotNull(engineTag, quantization, Format.bytes(sizeBytes)).joinToString(" · ")
@@ -484,7 +486,9 @@ internal fun LocalModel.pickerMeta(loadedBackend: String?, preferredBackend: Str
 }
 
 /** "GGUF · Q4_K_M · 2.3 GB"; 2.2.0: 「GenieX · NPU · Q4_0 · 2.3 GB」 when GenieX runs it ([engineTag]). */
-internal fun LocalModel.metaLine(engineTag: String? = null): String = listOfNotNull(engineTag ?: format.label, quantization, Format.bytes(sizeBytes)).joinToString(" · ")
+internal fun LocalModel.metaLine(engineTag: String? = null): String =
+    // AZJ: the cloud model has no file size.
+    listOfNotNull(engineTag ?: format.label, quantization, if (format == ModelFormat.CLOUD) null else Format.bytes(sizeBytes)).joinToString(" · ")
 
 @Composable
 private fun ModelRow(m: LocalModel, tag: String? = null, state: EngineState, busy: Boolean, onLoad: () -> Unit, onDelete: () -> Unit, onSettings: () -> Unit, onCancelLoad: () -> Unit = {}, dragHandle: Modifier = Modifier) {
@@ -513,8 +517,12 @@ private fun ModelRow(m: LocalModel, tag: String? = null, state: EngineState, bus
             loading -> Text("加载中…", style = IrisType.labelSmall, color = c.textSecondary, modifier = Modifier.padding(end = IrisDimens.space8).pulse())
             else -> IrisButton("加载", onLoad, style = IrisButtonStyle.Outline, compact = true, enabled = !busy && state !is EngineState.Loading)
         }
-        PressableIcon(Icons.Outlined.Tune, "后端与参数", iconSize = IrisDimens.iconMedium, tint = c.textSecondary, onClick = onSettings)
-        PressableIcon(Icons.Outlined.DeleteOutline, "删除", iconSize = IrisDimens.iconMedium, tint = c.textSecondary, enabled = !loading, onClick = onDelete)
+        // AZJ: the cloud model is not a file — no per-model backend settings and nothing to delete.
+        // It is configured in 设置 › API 服务 › 云端模型.
+        if (m.format != com.iris.localai.data.ModelFormat.CLOUD) {
+            PressableIcon(Icons.Outlined.Tune, "后端与参数", iconSize = IrisDimens.iconMedium, tint = c.textSecondary, onClick = onSettings)
+            PressableIcon(Icons.Outlined.DeleteOutline, "删除", iconSize = IrisDimens.iconMedium, tint = c.textSecondary, enabled = !loading, onClick = onDelete)
+        }
     }
 }
 
