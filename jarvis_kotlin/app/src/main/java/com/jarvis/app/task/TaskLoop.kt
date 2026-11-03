@@ -65,7 +65,7 @@ object TaskLoop {
      * （截图策略），让模型有图可破局；真正的兜底是 MAX_STEPS 与重复守卫。
      * 没有把 swipe 算进“真操作”——滑动本身更像是在找东西，不一定代表任务在往前推进。
      */
-    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow")
+    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow", "browse", "browserTap")
 
     private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
     private const val COMPACT_CHARS = 2500
@@ -265,6 +265,20 @@ object TaskLoop {
                     val appKnowledge = AppKnowledge.forPackage(pkg)
                     if (appKnowledge != null) {
                         append("这个应用的用法知识：\n").append(appKnowledge).append('\n')
+                    }
+                    // 内置浏览器开着时，把当前页快照（地址/标题/正文/链接）也给模型，
+                    // 它才能按链接编号点（browserTap）或决定下一步。
+                    val browserSnap = BrowserController.lastSnapshot()
+                    if (BrowserController.isOpen() && browserSnap != null) {
+                        append("内置浏览器当前页：").append(browserSnap.url).append('\n')
+                        if (browserSnap.title.isNotEmpty()) append("标题：").append(browserSnap.title).append('\n')
+                        if (browserSnap.text.isNotEmpty()) {
+                            append("页面正文（前 2000 字）：\n").append(browserSnap.text).append('\n')
+                        }
+                        if (browserSnap.links.isNotEmpty()) {
+                            append("页面链接（编号|文字）：\n")
+                            for (l in browserSnap.links) append(l.index).append("|").append(l.text).append('\n')
+                        }
                     }
                     if (hint.isNotEmpty()) append("界面提示：").append(hint).append('\n')
                     if (nodesTotal >= 0) {
@@ -845,6 +859,25 @@ if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, nul
 val r = LocalCommands.launchApp(ctx, app)
 StepResult(r, r.startsWith("正在打开"), null, null, if (r.startsWith("正在打开")) "" else "UNKNOWN")
 }
+"browse" -> {
+// 内置浏览器开网页：不用切 Chrome。URL 缺 http(s) 前缀时补 https。
+val url = action.optString("url")
+if (url.isEmpty()) return StepResult("browse 没有网址", false, null, null, "PARSE_ERROR")
+val msg = BrowserController.open(ctx, url)
+Thread.sleep(1500) // 等浏览器起来、页面开始加载
+BrowserController.refreshSnapshot(3000)
+StepResult(msg, true, null, null)
+}
+"browserBack" -> {
+val ok = BrowserController.goBack()
+StepResult(if (ok) "浏览器已后退" else "浏览器没得退（已在第一页或没开着）", ok, null, null, if (ok) "" else "UNKNOWN")
+}
+"browserTap" -> {
+val index = action.optInt("index", -1)
+if (index < 0) return StepResult("browserTap 没有链接编号", false, null, null, "PARSE_ERROR")
+val msg = BrowserController.clickLink(index)
+StepResult(msg, !msg.startsWith("没有") && !msg.startsWith("内置浏览器没开"), null, null, if (msg.startsWith("已点链接")) "" else "UNKNOWN")
+}
 "wait" -> {
 val ms = action.optLong("ms", 1200).coerceIn(300, 20000)
 Thread.sleep(ms)
@@ -1088,6 +1121,7 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"type\",\"text\":\"要输入的文字\"} 往当前已聚焦的输入框输入（系统依次试输入法、直接填字、剪贴板粘贴三档，不用你换方式；输完读回不对会如实报，别原样重发 type，先 zoom 核对或换路线）。" +
 "{\"action\":\"submit\"} 提交当前输入框（如搜索、发送）。" +
 "{\"action\":\"back\"} 返回；{\"action\":\"home\"} 回桌面；{\"action\":\"wait\",\"ms\":1500} 等待（每次等待要比上一次久，比如 1500→3000→5000→10000，绝不要连续发相同的等待时长，否则会被重复守卫拦停）；{\"action\":\"openApp\",\"app\":\"微信\"} 打开应用。" +
+"内置浏览器（不用切 Chrome，登录态由 WebView 自己存）：{\"action\":\"browse\",\"url\":\"https://example.com\"} 在内置浏览器打开网址；打开后每轮你会看到当前页的地址、标题、正文和链接列表（编号|文字）。{\"action\":\"browserTap\",\"index\":2} 点页面里第 index 个链接。{\"action\":\"browserBack\"} 浏览器里后退一步。网页任务优先用内置浏览器，不要去开 Chrome；登录、验证码挡住了就 fail 说明、不要硬闯。" +
 "{\"action\":\"wait_idle\",\"ms\":5000} 等界面稳定下来（连续两次读到的界面一模一样才算稳），稳了就回；等满 ms 还没稳也回，告诉你没稳。{\"action\":\"wait_change\",\"ms\":5000} 等界面发生变化（跟现在比不一样了才算变），变了就回；等满 ms 没变也回，告诉你没变。这两个是按变化等的，不用固定等几秒；连着等时 ms 换个数字，不然会被判重复。" +
 "{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在当前列表里向下滑动找目标，找到就停；滑到底（连着两次滑完界面都不动）就停下来告诉你没找到；也可以加 \"direction\":\"up\" 往上滑，或 \"maxSwipes\":8 限制最多滑几次；也可以用 \"eid\":\"s3f9a2\" 按稳定编号找。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
