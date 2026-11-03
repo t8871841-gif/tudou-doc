@@ -27,7 +27,15 @@ class BrowserActivity : Activity() {
     }
 
     private lateinit var webView: WebView
-    private lateinit var urlText: TextView
+    private lateinit var urlText: android.widget.EditText
+
+    /** 用户在地址栏输的内容转成网址：带点无空格当网址（缺协议补 https），否则当搜索词走 Bing。 */
+    private fun toUrl(q: String): String {
+        val t = q.trim()
+        if (t.startsWith("http://") || t.startsWith("https://")) return t
+        if (!t.contains(' ') && t.contains('.')) return "https://$t"
+        return "https://www.bing.com/search?q=" + java.net.URLEncoder.encode(t, "UTF-8")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,14 +61,26 @@ class BrowserActivity : Activity() {
             text = "‹ 返回"
             setOnClickListener { if (webView.canGoBack()) webView.goBack() else finish() }
         }
-        urlText = TextView(this).apply {
-            text = "内置浏览器"
+        urlText = android.widget.EditText(this).apply {
+            hint = "输入网址或搜索"
             setTextColor(Color.parseColor("#333333"))
             textSize = 13f
             maxLines = 1
+            setSingleLine(true)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 leftMargin = 12
                 rightMargin = 12
+            }
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                    val q = text.toString().trim()
+                    if (q.isNotEmpty()) webView.loadUrl(toUrl(q))
+                    // 收起键盘
+                    val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                    imm.hideSoftInputFromWindow(windowToken, 0)
+                    true
+                } else false
             }
         }
         val closeBtn = Button(this).apply {
@@ -88,14 +108,15 @@ class BrowserActivity : Activity() {
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    urlText.text = url ?: ""
+                    // 地址栏只在没聚焦时才同步当前网址，不打断用户正在输入。
+                    if (!urlText.hasFocus()) urlText.setText(url ?: "")
                     // 页面加载完刷新快照，模型下一轮就能看到新页面。
                     Thread { BrowserController.refreshSnapshot(2000) }.start()
                 }
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onReceivedTitle(view: WebView?, title: String?) {
-                    if (!title.isNullOrBlank()) urlText.text = title
+                    // 标题只更新 Activity 标题，不动地址栏（地址栏留给网址/搜索）。
                 }
             }
         }
@@ -104,7 +125,8 @@ class BrowserActivity : Activity() {
         setContentView(root)
         BrowserController.attach(webView)
         val url = intent?.getStringExtra(EXTRA_URL).orEmpty()
-        if (url.isNotEmpty()) webView.loadUrl(url)
+        // 手动从演示按钮打开时没带网址，给个 Bing 首页，不留白页。
+        webView.loadUrl(if (url.isNotEmpty()) url else "https://www.bing.com")
     }
 
     override fun onNewIntent(intent: android.content.Intent?) {

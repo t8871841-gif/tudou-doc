@@ -3,15 +3,26 @@ package com.jarvis.app.command
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.location.Geocoder
+import android.location.LocationManager
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
+import java.util.Locale
 
 /**
  * 批十三新增：系统功能指令层——手电筒、截屏、锁屏这类是手机的系统功能，不是带图标的
@@ -50,10 +61,25 @@ object DeviceCommands {
     private val SYS_DND_ON = setOf("打开勿扰模式", "开勿扰模式", "开启勿扰", "打开免打扰")
     private val SYS_DND_OFF = setOf("关闭勿扰模式", "关勿扰模式", "关闭免打扰", "取消勿扰")
 
+    // 状态查询（只读数、不改系统）：电量、网络、位置、存储。
+    private val BATTERY = setOf("还剩多少电", "电量多少", "电池还剩多少", "电量还剩多少", "现在多少电", "电池电量", "电量还剩多少")
+    private val NETWORK = setOf("现在连的什么网", "网络状态", "连的是WiFi还是流量", "当前网络", "网络怎么样", "联网了吗", "有没有网")
+    private val LOCATION = setOf("我在哪", "当前位置", "我现在在哪", "我的位置", "现在在哪")
+    private val STORAGE = setOf("还剩多少存储", "存储空间还剩多少", "存储还剩多少", "存储空间", "还剩多少空间")
+
+    // 开关：亮度（WRITE_SETTINGS 特殊权限）、静音（响铃模式）。
+    private val BRIGHT_UP = setOf("亮度调亮", "屏幕亮一点", "屏幕调亮", "亮度调高", "亮度大一点", "屏幕亮一些")
+    private val BRIGHT_DOWN = setOf("亮度调暗", "屏幕暗一点", "屏幕调暗", "亮度调低", "亮度小一点", "屏幕暗一些")
+    private val BRIGHT_SET = Regex("亮度.*?(\\d+)\\s*%|亮度调到\\s*(\\d+)|屏幕亮度\\s*(\\d+)\\s*%")
+    private val MUTE_ON = setOf("静音", "手机静音", "静音模式", "把手机静音", "开静音", "开启静音")
+    private val MUTE_OFF = setOf("取消静音", "解除静音", "静音取消", "关静音", "退出静音", "关闭静音")
+
     fun tryHandle(ctx: Context, raw: String, speak: (String) -> Unit): Boolean {
         val t = raw.trim().trimEnd('。', '！', '!', '？', '?', ' ', '吧', '啊', '啦', '呀', '呢', '嘛')
             .removePrefix("帮我").removePrefix("请").trim()
         val bare = t.removePrefix("手机").removePrefix("打开手机").trim()
+        // 「亮度调到50%」「亮度50%」这类带数字的：三个捕获组只有一个会命中，取非空的那个。
+        val brightPct = BRIGHT_SET.find(t)?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toIntOrNull()
 
         when {
             t in TORCH_ON || bare in TORCH_ON -> { setTorch(ctx, true, speak); return true }
@@ -72,6 +98,17 @@ object DeviceCommands {
             t in AIRPLANE_PANEL -> { openAirplaneModeSettings(ctx, speak); return true }
             t in SYS_DND_ON -> { setSystemDnd(ctx, true, speak); return true }
             t in SYS_DND_OFF -> { setSystemDnd(ctx, false, speak); return true }
+            // 状态查询（只读数）
+            t in BATTERY || bare in BATTERY -> { reportBattery(ctx, speak); return true }
+            t in NETWORK || bare in NETWORK -> { reportNetwork(ctx, speak); return true }
+            t in LOCATION || bare in LOCATION -> { reportLocation(ctx, speak); return true }
+            t in STORAGE || bare in STORAGE -> { reportStorage(ctx, speak); return true }
+            // 开关：亮度、静音
+            t in BRIGHT_UP || bare in BRIGHT_UP -> { adjustBrightness(ctx, +30, speak); return true }
+            t in BRIGHT_DOWN || bare in BRIGHT_DOWN -> { adjustBrightness(ctx, -30, speak); return true }
+            brightPct != null -> { setBrightnessPct(ctx, brightPct, speak); return true }
+            t in MUTE_ON || bare in MUTE_ON -> { setMute(ctx, true, speak); return true }
+            t in MUTE_OFF || bare in MUTE_OFF -> { setMute(ctx, false, speak); return true }
         }
         return false
     }
@@ -228,7 +265,9 @@ object DeviceCommands {
     // 两边刻意分开：触发词要照顾"人话怎么说"，技能脚本里的 action 要照顾"好不好手写不出错"。
     private val SCENE_ACTIONS = setOf(
         "dnd_on", "dnd_off", "torch_on", "torch_off",
-        "volume_up", "volume_down", "wifi_panel", "bt_panel", "airplane_settings"
+        "volume_up", "volume_down", "wifi_panel", "bt_panel", "airplane_settings",
+        "brightness_up", "brightness_down", "mute_on", "mute_off",
+        "battery", "network", "location", "storage"
     )
 
     /** 返回 true 表示 [action] 是认识的场景动作、已经执行过了（成功与否、详情都经 [speak] 报告）。 */
@@ -243,6 +282,14 @@ object DeviceCommands {
             "wifi_panel" -> openWifiPanel(ctx, speak)
             "bt_panel" -> openBluetoothPanel(ctx, speak)
             "airplane_settings" -> openAirplaneModeSettings(ctx, speak)
+            "brightness_up" -> adjustBrightness(ctx, +30, speak)
+            "brightness_down" -> adjustBrightness(ctx, -30, speak)
+            "mute_on" -> setMute(ctx, true, speak)
+            "mute_off" -> setMute(ctx, false, speak)
+            "battery" -> reportBattery(ctx, speak)
+            "network" -> reportNetwork(ctx, speak)
+            "location" -> reportLocation(ctx, speak)
+            "storage" -> reportStorage(ctx, speak)
             else -> return false
         }
         return true
@@ -277,6 +324,168 @@ object DeviceCommands {
             speak(okText)
         } catch (e: Exception) {
             speak("音量没调成：${e.message}")
+        }
+    }
+
+    // ---------- 状态查询：只读数，不改系统 ----------
+
+    /** 电量：粘性广播 ACTION_BATTERY_CHANGED，不用注册接收器、不用权限。 */
+    private fun reportBattery(ctx: Context, speak: (String) -> Unit) {
+        try {
+            val intent = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            if (level < 0 || scale <= 0) {
+                speak("电量没读出来，系统没给数")
+                return
+            }
+            val pct = level * 100 / scale
+            val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+            val text = "电量 $pct%" + if (charging) "，正在充电" else "，没在充电"
+            AuditLog.append(ctx, "系统功能", "电量", text)
+            speak(text)
+        } catch (e: Exception) {
+            speak("电量没读出来：${e.message}")
+        }
+    }
+
+    /** 网络：看当前活动网络的传输类型（WiFi / 移动数据 / 都没有）。 */
+    private fun reportNetwork(ctx: Context, speak: (String) -> Unit) {
+        try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            val text = when {
+                caps == null -> "没联网，WiFi 和移动数据都没连上"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "连着 WiFi"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "用的是移动数据，没连 WiFi"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "连着有线网络"
+                else -> "联网了，但不是 WiFi 也不是移动数据"
+            }
+            AuditLog.append(ctx, "系统功能", "网络", text)
+            speak(text)
+        } catch (e: Exception) {
+            speak("网络状态没读出来：${e.message}")
+        }
+    }
+
+    /** 位置：取最后一次定位（不主动开 GPS 等新定位，秒回但可能是旧位置，如实说明）。
+     *  没定位权限或系统里一条定位都没有时，如实回报，不编一个。 */
+    private fun reportLocation(ctx: Context, speak: (String) -> Unit) {
+        if (ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_COARSE_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            speak("定位权限还没给：去设置里给 Jarvis 定位权限，再问我")
+            return
+        }
+        try {
+            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val gps = try { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) } catch (_: Exception) { null }
+            val net = try { lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) } catch (_: Exception) { null }
+            val loc = listOfNotNull(gps, net).maxByOrNull { it.time }
+            if (loc == null) {
+                speak("定位还没拿到：系统里一条旧定位都没有，先打开地图定位一下")
+                return
+            }
+            val lat = String.format(Locale.US, "%.4f", loc.latitude)
+            val lng = String.format(Locale.US, "%.4f", loc.longitude)
+            val place = try {
+                Geocoder(ctx, Locale.getDefault()).getFromLocation(loc.latitude, loc.longitude, 1)
+                    ?.firstOrNull()?.getAddressLine(0)
+            } catch (_: Exception) { null }
+            val text = if (!place.isNullOrBlank()) "你在$place 附近" else "最后定位在北纬 $lat，东经 $lng"
+            AuditLog.append(ctx, "系统功能", "位置", text)
+            speak(text)
+        } catch (e: Exception) {
+            speak("位置没读出来：${e.message}")
+        }
+    }
+
+    /** 存储：内部存储可用/总量（StatFs，不用权限）。 */
+    private fun reportStorage(ctx: Context, speak: (String) -> Unit) {
+        try {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val avail = stat.availableBytes.toDouble() / 1024 / 1024 / 1024
+            val total = stat.totalBytes.toDouble() / 1024 / 1024 / 1024
+            val text = "内部存储还剩 ${String.format(Locale.US, "%.1f", avail)} GB，总共 ${String.format(Locale.US, "%.1f", total)} GB"
+            AuditLog.append(ctx, "系统功能", "存储", text)
+            speak(text)
+        } catch (e: Exception) {
+            speak("存储空间没读出来：${e.message}")
+        }
+    }
+
+    // ---------- 开关：亮度、静音 ----------
+
+    /** 亮度：先切到手动模式再改值。WRITE_SETTINGS 是特殊权限，没给就带用户去授权页，
+     *  不装成功。步进 30（0-255 刻度，约 12%），下限留 5，免得一暗到底黑屏。 */
+    private fun adjustBrightness(ctx: Context, delta: Int, speak: (String) -> Unit) {
+        if (!Settings.System.canWrite(ctx)) {
+            openWriteSettings(ctx)
+            speak("调亮度要先给 Jarvis 写系统设置的权限，设置页帮你打开了，开一下再说一遍")
+            return
+        }
+        try {
+            val cr = ctx.contentResolver
+            Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+            val cur = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, 128)
+            val next = (cur + delta).coerceIn(5, 255)
+            Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, next)
+            val pct = next * 100 / 255
+            AuditLog.append(ctx, "系统功能", "亮度", "调到 $pct%")
+            speak("亮度调到 $pct% 了")
+        } catch (e: Exception) {
+            speak("亮度没调成：${e.message}")
+        }
+    }
+
+    private fun setBrightnessPct(ctx: Context, pct: Int, speak: (String) -> Unit) {
+        if (pct !in 0..100) {
+            speak("亮度百分比要在 0 到 100 之间")
+            return
+        }
+        if (!Settings.System.canWrite(ctx)) {
+            openWriteSettings(ctx)
+            speak("调亮度要先给 Jarvis 写系统设置的权限，设置页帮你打开了，开一下再说一遍")
+            return
+        }
+        try {
+            val cr = ctx.contentResolver
+            Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+            val v = (pct * 255 / 100).coerceIn(5, 255)
+            Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, v)
+            AuditLog.append(ctx, "系统功能", "亮度", "调到 $pct%")
+            speak("亮度调到 $pct% 了")
+        } catch (e: Exception) {
+            speak("亮度没调成：${e.message}")
+        }
+    }
+
+    private fun openWriteSettings(ctx: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                data = android.net.Uri.parse("package:${ctx.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(intent)
+        } catch (_: Exception) {
+        }
+        AuditLog.append(ctx, "系统功能", "亮度", "未授权，已跳转授权页")
+    }
+
+    /** 静音：改响铃模式（RINGER_MODE_SILENT），来电和通知都不响；和系统勿扰是两回事
+     *  （勿扰是按规则放行重要通知，静音是全都不响）。 */
+    private fun setMute(ctx: Context, on: Boolean, speak: (String) -> Unit) {
+        try {
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.ringerMode = if (on) AudioManager.RINGER_MODE_SILENT else AudioManager.RINGER_MODE_NORMAL
+            AuditLog.append(ctx, "系统功能", "静音", if (on) "已静音" else "已取消静音")
+            speak(if (on) "静音了，来电和通知都不响了" else "静音取消了")
+        } catch (e: Exception) {
+            speak("静音没切成：${e.message}")
         }
     }
 }
