@@ -81,11 +81,14 @@ object LocalCommands {
             return true
         }
 
+        // 批十三：系统功能（手电筒/截屏/锁屏等）不是应用，先于「打开应用」拦截。
+        // 放到 QUESTION_HINTS 之前：DeviceCommands 全是整句精确匹配，命中了就一定是
+        // 指令不是聊天问句（比如「网络怎么样」「联网了吗」带问词但就是查网络的指令，
+        // 放后面会被 QUESTION_HINTS 的「怎么/吗」先拦掉、永远到不了这里）。
+        if (DeviceCommands.tryHandle(ctx, t, speak)) return true
+
         if (QUESTION_HINTS.any { t.contains(it) }) return false
         if (TASK_SHAPED.containsMatchIn(t)) return false
-
-        // 批十三：系统功能（手电筒/截屏/锁屏等）不是应用，先于「打开应用」拦截
-        if (DeviceCommands.tryHandle(ctx, t, speak)) return true
 
         // 第二梯队批五：定时提醒句式（"10分钟后提醒我…""晚上10点提醒我…"）优先于
         // 「打开应用」「打电话」判定——这类句子里常常带"我"这种不像应用名/人名的词，

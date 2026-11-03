@@ -10,7 +10,7 @@ import android.content.SharedPreferences
 object JarvisPrefs {
     private const val FILE = "jarvis_settings"
     private const val KEY_AGNES_KEY = "agnes_api_key"
-    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：agnes（默认）/ custom
+    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：agnes（默认）/ custom / autoglm
     private const val KEY_CUSTOM_BASE_URL = "custom_base_url"
     private const val KEY_CUSTOM_MODEL = "custom_model"
     private const val KEY_CUSTOM_API_KEY = "custom_api_key"

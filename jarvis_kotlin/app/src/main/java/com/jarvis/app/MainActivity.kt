@@ -778,22 +778,33 @@ class MainActivity : Activity() {
 
         /**
          * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
-         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：agnes 默认 / custom）。
+         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：agnes 默认 / custom / autoglm）。
          */
         @JavascriptInterface
         fun getModelInfo(): String {
             return try {
                 val o = JSONObject()
-                if (JarvisPrefs.getTaskBrain(this@MainActivity) == "custom") {
-                    o.put("provider", "custom")
-                    o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
-                    o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
-                    o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
-                } else {
-                    o.put("provider", "agnes")
-                    o.put("base_url", AgnesClient.BASE_URL)
-                    o.put("model", AgnesClient.MODEL)
-                    o.put("has_key", JarvisPrefs.getAgnesKey(this@MainActivity).isNotBlank())
+                when (JarvisPrefs.getTaskBrain(this@MainActivity)) {
+                    "custom" -> {
+                        o.put("provider", "custom")
+                        o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
+                        o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
+                        o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
+                    }
+                    "autoglm" -> {
+                        // 手机专用模型：地址/模型/Key 复用“自定义大模型”三项（填智谱地址与 autoglm-phone）。
+                        // 不能掉进下面的 else（Agnes）分支，否则 HUD 型号面板会错显示 Agnes。
+                        o.put("provider", "autoglm")
+                        o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
+                        o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
+                        o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
+                    }
+                    else -> {
+                        o.put("provider", "agnes")
+                        o.put("base_url", AgnesClient.BASE_URL)
+                        o.put("model", AgnesClient.MODEL)
+                        o.put("has_key", JarvisPrefs.getAgnesKey(this@MainActivity).isNotBlank())
+                    }
                 }
                 o.put("local_enabled", JarvisPrefs.isLocalLlmEnabled(this@MainActivity))
                 o.put("name", "")
@@ -1154,6 +1165,8 @@ class MainActivity : Activity() {
                       var presets = [];
                       if (info.provider === 'custom') {
                         presets.push({id:'custom', name:'自定义', base_url: info.base_url, model: info.model, key: true, key_url: ''});
+                      } else if (info.provider === 'autoglm') {
+                        presets.push({id:'autoglm', name:'AutoGLM', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       } else {
                         presets.push({id:'agnes', name:'Agnes', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       }

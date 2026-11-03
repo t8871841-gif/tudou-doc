@@ -65,7 +65,7 @@ object TaskLoop {
      * （截图策略），让模型有图可破局；真正的兜底是 MAX_STEPS 与重复守卫。
      * 没有把 swipe 算进“真操作”——滑动本身更像是在找东西，不一定代表任务在往前推进。
      */
-    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow", "browse", "browserTap")
+    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow", "browse", "browserTap", "browserBack")
 
     private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
     private const val COMPACT_CHARS = 2500
