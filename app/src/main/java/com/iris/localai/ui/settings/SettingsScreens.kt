@@ -267,7 +267,8 @@ fun ModelBackendPage(vm: SettingsViewModel, onBack: () -> Unit, onModels: () -> 
             SectionTitle("默认后端")
             SettingsGroup {
                 // 2.2.0: QAIRT bundles only run on the NPU — nothing to choose.
-                val formats = com.iris.localai.engine.EngineFactory.supportedFormats.filter { it != com.iris.localai.data.ModelFormat.QAIRT }
+                // AZJ: the cloud model has no local backend — nothing to choose either.
+                val formats = com.iris.localai.engine.EngineFactory.supportedFormats.filter { it != com.iris.localai.data.ModelFormat.QAIRT && it != com.iris.localai.data.ModelFormat.CLOUD }
                 // 2.1.3: GGUF on the NPU runs on GenieX; the NPU choice is offered once its runtime is installed.
                 val gxReady = vm.geniex?.state?.collectAsState()?.value is com.iris.localai.engine.NpuState.Installed
                 formats.forEachIndexed { i, f ->
