@@ -47,8 +47,14 @@ fi
 MNN_COMMIT="9f097c5fdd48e0cac4468d4cc53a828794d96888"
 MNN_TAR_SHA256="b275016e22db724cdac033749a384e3a729540a4a722cf4e6be640cd9a0360c2"
 MNN_URL="https://github.com/WWRJ3321/IRIDIS/releases/download/v2.0.0-beta/mnn-prebuilt-arm64.tar.gz"
+# AZJ: the MNN prebuilt asset is gone upstream (v2.0.0-beta release no longer exists, 404).
+# The lite flavour does not need MNN at all; skip its download with --skip-mnn.
+SKIP_MNN=0
+for a in "$@"; do [ "$a" = "--skip-mnn" ] && SKIP_MNN=1; done
 if [ "${1:-}" = "--build-mnn" ]; then
   NDK="${NDK:?set NDK=/path/to/android-ndk-r30}" sh scripts/build-mnn-android.sh
+elif [ "$SKIP_MNN" = "1" ]; then
+  echo "MNN: skipped (--skip-mnn, lite flavour does not need it)"
 else
   if [ -f third_party/mnn/lib/arm64-v8a/libMNN.a ] && grep -q "$MNN_COMMIT" third_party/mnn/VERSION 2>/dev/null; then
     echo "MNN: present"
