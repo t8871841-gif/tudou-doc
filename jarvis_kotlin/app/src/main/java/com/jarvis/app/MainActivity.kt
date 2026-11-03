@@ -906,14 +906,15 @@ class MainActivity : Activity() {
     }
 
     /** Agent 调度的一行：id / 状态（run=在跑，off=待命）/ 中文描述 / 进度。
-     * HUD 推送与原生竖屏面板共用 computeAgentRows()。 */
+     * 现在只有 HUD 推送用 computeAgentRows()（pushHudAgents），原生竖屏面板已改成
+     * 音乐/天气/设备状态/日程，不再显示 Agent 调度。 */
     private data class AgentRow(val id: String, val state: String, val desc: String, val progress: Double)
 
     /** Agent 调度：只映射原生真实能读到的状态，读不到的不编。
      * 大脑=对话状态；后台任务=TaskLoop 是否在跑（没跑时报已安排的提醒数）；
      * 学习=长期记忆已记条数（没有“正在提取”的实时信号，所以用条数这个真值；
      * 还没取到时显示“记忆就绪”）；复盘=今日待办提醒数（有待办时“今日 N 项待复盘”，
-     * 没有时“今日暂无安排”）；行要点上去能要复盘建议（见 agentRowView 的点击）。 */
+     * 没有时“今日暂无安排”）。 */
     private fun computeAgentRows(pendingCount: Int = ReminderScheduler.list(this).size): List<AgentRow> {
         val state = JarvisAgent.currentState()
         val brainDesc = when (state) {
@@ -1318,32 +1319,18 @@ class MainActivity : Activity() {
         refreshSettingsGear()
     }
 
-    /** 原生面板四块内容重渲染：每次都现算（Agent 调度读当前状态、日程读当天提醒、
-     * 天气读缓存），所以状态变了、提醒改了、天气到货了，面板都能跟上。
-     * 竖屏精修：四块做成像 HUD 面板那样的完整呈现（圆环图标+状态点+进度条、
-     * 天气图标+预报行、时间线行），不再是纯文字行；数据仍用原生已有的那几份，不编假数据。 */
+    /** 原生面板四块内容重渲染：每次都现算（音乐读媒体会话与曲库、天气读缓存、
+     * 设备状态现读现算、日程读当天提醒），所以状态变了、提醒改了、天气到货了，面板都能跟上。
+     * 顺序是用户定的：音乐、天气、设备实时状态、日程。Agent 调度（BRAIN/JOBS/LEARNING/
+     * REVIEW）与工作汇报已删（用户不用）；HUD 那边仍用 computeAgentRows 推送，不受影响。 */
     private fun renderNativePanel() {
         if (!::panelList.isInitialized) return
         lastScheduleRows = todayScheduleRows(ReminderScheduler.list(this))
         panelList.removeAllViews()
-        // Agent 调度
-        panelList.addView(panelSectionTitle("Agent 调度"))
-        computeAgentRows().forEach { row ->
-            panelList.addView(agentRowView(row))
-        }
-        // 工作汇报：原生提醒不记完成态，done 恒为 0，如实写。
-        panelList.addView(panelSectionTitle("工作汇报"))
-        val total = lastScheduleRows.size
-        panelList.addView(panelLine("今日 $total 项 · 已完成 0 项"))
-        panelList.addView(progressBar(0f, HudPalette.AQUA).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
-                topMargin = dp(6); bottomMargin = dp(4)
-            }
-        })
-        reportTaskRows(lastScheduleRows).take(4).forEach { (title, word) ->
-            panelList.addView(taskRowView(title, word))
-        }
-        // 天气
+        // 1. 音乐（MediaStore 真曲库 + Salt Player 媒体会话，不是空架子）
+        panelList.addView(panelSectionTitle("音乐"))
+        renderMusicSection()
+        // 2. 天气
         panelList.addView(panelSectionTitle("天气"))
         val info = lastWeatherInfo
         if (info == null) {
@@ -1359,7 +1346,10 @@ class MainActivity : Activity() {
                 panelList.addView(forecastRowView(label, d.day, d.low, d.high))
             }
         }
-        // 日程
+        // 3. 设备实时状态（打开面板时现读现算）
+        panelList.addView(panelSectionTitle("设备实时状态"))
+        renderDeviceStatusSection()
+        // 4. 日程
         panelList.addView(panelSectionTitle("日程"))
         if (lastScheduleRows.isEmpty()) {
             panelList.addView(panelLine("今天还没有安排"))
@@ -1368,20 +1358,206 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 工作汇报的任务行：标题 + 状态词。状态词按 panels.js 里 applySchedule 的 word()
-     * 办法：进行中 / 待确认 / 未来显示开始时间；原生提醒不记完成态，没有“完成”。 */
-    private fun reportTaskRows(rows: List<Triple<Long, String, String>>): List<Pair<String, String>> {
-        val nowMs = System.currentTimeMillis()
-        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-        return rows.map { (at, title, _) ->
-            val word = when {
-                nowMs >= at + 30L * 60 * 1000 -> "待确认"
-                nowMs >= at -> "进行中"
-                else -> fmt.format(Date(at))
+    /** 音乐区：上排是播放条（当前曲目 + 上一曲/播放暂停/下一曲），下排是本地曲库。
+     * 当前曲目读媒体会话（快，同步读）；曲库扫 MediaStore（慢，后台扫，扫完再补进列表）。 */
+    private fun renderMusicSection() {
+        val now = try {
+            com.jarvis.app.music.MusicPanel.nowPlaying(this)
+        } catch (_: Exception) {
+            null
+        }
+        // 播放条：左曲名（歌名+歌手），右三个控制键。
+        panelList.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                addView(TextView(this@MainActivity).apply {
+                    text = now?.title ?: "未在播放"
+                    textSize = 14f
+                    setTextColor(HudPalette.ICE)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = now?.artist ?: "打开 Salt Player 放一首"
+                    textSize = 12f
+                    setTextColor(0x99FFFFFF.toInt())
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(0, dp(2), 0, 0)
+                })
+            })
+            // 控制键：上一曲 / 播放暂停 / 下一曲（发系统媒体键，Salt Player 接着干活）。
+            val isPlaying = now?.isPlaying == true
+            addView(musicBtn("上曲") { com.jarvis.app.music.MusicPanel.previous(this@MainActivity) })
+            addView(musicBtn(if (isPlaying) "暂停" else "播放") {
+                com.jarvis.app.music.MusicPanel.togglePlayPause(this@MainActivity, isPlaying)
+                // 按完立即重渲染一次，播放状态马上跟上。
+                renderNativePanel()
+            })
+            addView(musicBtn("下曲") { com.jarvis.app.music.MusicPanel.next(this@MainActivity) })
+        })
+        // 进度条（有总时长才画）。
+        if (now != null && now.durationMs > 0) {
+            val frac = (now.positionMs.toFloat() / now.durationMs.toFloat()).coerceIn(0f, 1f)
+            panelList.addView(progressBar(frac, HudPalette.AQUA).apply {
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
+                    topMargin = dp(4); bottomMargin = dp(6)
+                }
+            })
+        }
+        // 曲库：后台扫，扫完补进下面这个容器（面板还开着才补）。
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(panelLine("正在加载曲库…"))
+        }
+        panelList.addView(listBox)
+        uiScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val songs = com.jarvis.app.music.MusicPanel.scanSongs(this@MainActivity)
+            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                if (!hudPanelOpen || !::panelList.isInitialized) return@withContext
+                listBox.removeAllViews()
+                if (songs.isEmpty()) {
+                    listBox.addView(panelLine("本地没有音乐，或没有给音乐权限"))
+                    return@withContext
+                }
+                listBox.addView(panelLine("本地 ${songs.size} 首"))
+                songs.take(8).forEach { song ->
+                    listBox.addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(0, dp(5), 0, dp(5))
+                        setOnClickListener {
+                            if (!com.jarvis.app.music.MusicPanel.playSong(this@MainActivity, song)) {
+                                toast("这首歌没打开成")
+                            }
+                        }
+                        addView(TextView(this@MainActivity).apply {
+                            text = song.title
+                            textSize = 14f
+                            setTextColor(HudPalette.ICE)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        })
+                        addView(TextView(this@MainActivity).apply {
+                            text = song.artist
+                            textSize = 12f
+                            setTextColor(0x99FFFFFF.toInt())
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                                marginStart = dp(8)
+                            }
+                        })
+                    })
+                }
             }
-            Pair(title, word)
         }
     }
+
+    /** 音乐控制小按钮：描边圆角，按了有真行为（发媒体键）。 */
+    private fun musicBtn(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 13f
+        setTextColor(HudPalette.ICE)
+        gravity = Gravity.CENTER
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(16).toFloat()
+            setStroke(dp(1), 0x66FFFFFF)
+            setColor(Color.TRANSPARENT)
+        }
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(6)
+        }
+        setOnClickListener { onClick() }
+    }
+
+    /** 设备实时状态区：三个并排格子（电量 / 网络 / 存储），打开面板时现读现算。
+     * 读数逻辑与语音版（DeviceCommands）共用同一份，不各写一套。 */
+    private fun renderDeviceStatusSection() {
+        val battery = com.jarvis.app.command.DeviceCommands.batteryInfo(this)
+        val network = com.jarvis.app.command.DeviceCommands.networkType(this)
+        val storage = com.jarvis.app.command.DeviceCommands.storageInfo(this)
+        panelList.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(4), 0, dp(4))
+            // 电量格
+            addView(deviceStatCell(
+                label = "电量",
+                value = battery?.let { "${it.first}%" } ?: "—",
+                sub = battery?.let { if (it.second) "充电中" else "未充电" } ?: "读不到",
+                frac = battery?.let { it.first / 100f },
+                color = HudPalette.AQUA
+            ))
+            // 网络格
+            addView(deviceStatCell(
+                label = "网络",
+                value = network,
+                sub = when (network) {
+                    "WiFi" -> "已连接"
+                    "移动数据" -> "使用流量"
+                    "未联网" -> "没有连接"
+                    else -> ""
+                },
+                frac = null,
+                color = HudPalette.AQUA
+            ))
+            // 存储格
+            addView(deviceStatCell(
+                label = "存储",
+                value = storage?.let {
+                    "${String.format(java.util.Locale.US, "%.1f", it.first)} GB 可用"
+                } ?: "—",
+                sub = storage?.let {
+                    "共 ${String.format(java.util.Locale.US, "%.0f", it.second)} GB"
+                } ?: "读不到",
+                frac = storage?.let { (1.0 - it.first / it.second).toFloat() },
+                color = 0xFFFFAE6B.toInt()
+            ))
+        })
+    }
+
+    /** 设备状态格子：标签 + 大数字 + 副说明 +（可选）一条用量条。三个格子等宽并排。 */
+    private fun deviceStatCell(
+        label: String, value: String, sub: String, frac: Float?, color: Int
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = dp(8)
+        }
+        addView(TextView(this@MainActivity).apply {
+            text = label
+            textSize = 12f
+            setTextColor(0xB3FFFFFF.toInt())
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = value
+            textSize = 16f
+            setTextColor(HudPalette.ICE)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, dp(2), 0, dp(2))
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = sub
+            textSize = 12f
+            setTextColor(0x99FFFFFF.toInt())
+        })
+        if (frac != null) {
+            addView(progressBar(frac, color).apply {
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
+                    topMargin = dp(6)
+                }
+            })
+        }
+    }
+
 
     /** 日程行：时间段（固定宽）+ 内容列（标题，备注另起灰字行）；按 panels.js 里 schedInfo 的
      * 办法标出当前进行中与下一项（每项 30 分钟，pushHudSchedule 里 end = start + 30 分钟）。
@@ -1456,123 +1632,8 @@ class MainActivity : Activity() {
         setPadding(0, dp(3), 0, dp(3))
     }
 
-    private fun agentRowName(id: String): String = when (id) {
-        "brain" -> "大脑"
-        "jobs" -> "后台任务"
-        "learn" -> "学习"
-        else -> "复盘"
-    }
 
-    // Agent 圆环颜色与 HUD 默认皮肤一致（skins.js jarvis：pri 青 / acc 橙 / soft 柔色 / ink 墨色）。
-    private fun agentColor(id: String): Int = when (id) {
-        "brain" -> 0xFF7FDBFF.toInt()
-        "jobs" -> 0xFFFFAE6B.toInt()
-        "learn" -> 0xFF9FDDF5.toInt()
-        else -> 0xFFDCEFF7.toInt()
-    }
 
-    private fun agentEnName(id: String): String = when (id) {
-        "brain" -> "BRAIN"
-        "jobs" -> "JOBS"
-        "learn" -> "LEARNING"
-        else -> "REVIEW"
-    }
-
-    private fun agentLetter(id: String): String = when (id) {
-        "brain" -> "B"
-        "jobs" -> "J"
-        "learn" -> "L"
-        else -> "R"
-    }
-
-    /** Agent 调度的一行：圆环图标（agent 色描边 + 居中字母）+ 英文名与中文名 + 状态描述，
-     * 右边一个状态点（在跑亮 agent 色，否则暗灰）；在跑的那行下面一条细进度条。
-     * HUD 那种实时波形 canvas 原生复刻太复杂，用状态点+进度条代替。 */
-    private fun agentRowView(row: AgentRow): View {
-        val color = agentColor(row.id)
-        val running = row.state == "run"
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, dp(6))
-            // 行要点上去有真行为（点 BRAIN/LEARNING 回主对话，点 JOBS/REVIEW 直接问真模型），不是纯展示。
-            setOnClickListener { onAgentRowClick(row.id) }
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(FrameLayout(this@MainActivity).apply {
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setStroke(dp(2), color)
-                        setColor(Color.TRANSPARENT)
-                    }
-                    addView(TextView(this@MainActivity).apply {
-                        text = agentLetter(row.id)
-                        textSize = 16f
-                        setTextColor(color)
-                        gravity = Gravity.CENTER
-                    }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-                }, LinearLayout.LayoutParams(dp(44), dp(44)))
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                        marginStart = dp(12)
-                    }
-                    addView(LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        addView(TextView(this@MainActivity).apply {
-                            text = agentEnName(row.id)
-                            textSize = 14f
-                            setTextColor(HudPalette.ICE)
-                        })
-                        addView(TextView(this@MainActivity).apply {
-                            text = agentRowName(row.id)
-                            textSize = 12f
-                            setTextColor(0x99FFFFFF.toInt())
-                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                                marginStart = dp(6)
-                            }
-                        })
-                    })
-                    addView(TextView(this@MainActivity).apply {
-                        text = row.desc
-                        textSize = 12f
-                        setTextColor(0x99FFFFFF.toInt())
-                        setPadding(0, dp(2), 0, 0)
-                    })
-                })
-                addView(View(this@MainActivity).apply {
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(if (running) color else 0x44FFFFFF.toInt())
-                    }
-                }, LinearLayout.LayoutParams(dp(10), dp(10)))
-            })
-            if (running) {
-                addView(progressBar(row.progress.toFloat(), color).apply {
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
-                        topMargin = dp(6)
-                        marginStart = dp(56)
-                    }
-                })
-            }
-        }
-    }
-
-    /** 原生面板 Agent 调度行点击：BRAIN/LEARNING 没有单独窗口了（大脑窗口已删），
-     * 点它们就关掉面板、回到主对话——大脑就是对话本身。JOBS/REVIEW 直接走原生
-     * submitText 发问句问真模型，不再绕 HUD 的 agentClick（HUD 的 handle() 是
-     * 演示用的假回答）。 */
-    private fun onAgentRowClick(id: String) {
-        if (id == "brain" || id == "learn") {
-            setNativePanel(false)
-            chatInput.requestFocus()
-            return
-        }
-        when (id) {
-            "jobs" -> submitText("后台任务进行得怎么样了？")
-            "review" -> submitText("昨天的复盘有什么建议？")
-        }
-    }
 
     /** 横向细进度条：底轨半透白，填充按 fraction 占宽；fraction=0 时只剩底轨。 */
     private fun progressBar(fraction: Float, color: Int): View {
@@ -1592,35 +1653,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 工作汇报的任务行：标题在左、状态词在右；进行中青色、待确认橙色、未来时间灰色。 */
-    private fun taskRowView(title: String, word: String): View {
-        val wordColor = when (word) {
-            "进行中" -> HudPalette.AQUA
-            "待确认" -> 0xFFFFAE6B.toInt()
-            else -> 0x99FFFFFF.toInt()
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(4))
-            addView(TextView(this@MainActivity).apply {
-                text = title
-                textSize = 14f
-                setTextColor(HudPalette.ICE)
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = word
-                textSize = 12f
-                setTextColor(wordColor)
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    marginStart = dp(8)
-                }
-            })
-        }
-    }
 
     /** 天气字 → 文字符号（与 panels.js 的 wxKind 同一套映射）：晴 ☀、多云/阴 ☁、雨 ☂、雪 ❄、雾/霾 ☁。 */
     private fun wxGlyph(word: String): String = when {

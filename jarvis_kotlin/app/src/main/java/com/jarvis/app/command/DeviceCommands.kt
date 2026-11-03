@@ -331,46 +331,79 @@ object DeviceCommands {
     }
 
     // ---------- 状态查询：只读数，不改系统 ----------
+    // 读数逻辑拆成返回数据的公开函数（batteryInfo / networkType / storageInfo），
+    // 语音回报（report*）和原生面板「设备实时状态」区共用同一份，不各写一套。
 
-    /** 电量：粘性广播 ACTION_BATTERY_CHANGED，不用注册接收器、不用权限。 */
-    private fun reportBattery(ctx: Context, speak: (String) -> Unit) {
-        try {
+    /** 电量：（百分比，是否在充电）。读不出来返回 null。 */
+    fun batteryInfo(ctx: Context): Pair<Int, Boolean>? {
+        return try {
             val intent = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
             val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
             val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-            if (level < 0 || scale <= 0) {
-                speak("电量没读出来，系统没给数")
-                return
-            }
+            if (level < 0 || scale <= 0) return null
             val pct = level * 100 / scale
             val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
-            val text = "电量 $pct%" + if (charging) "，正在充电" else "，没在充电"
-            AuditLog.append(ctx, "系统功能", "电量", text)
-            speak(text)
-        } catch (e: Exception) {
-            speak("电量没读出来：${e.message}")
+            pct to charging
+        } catch (_: Exception) {
+            null
         }
+    }
+
+    /** 网络：当前活动网络的传输类型。返回 "WiFi" / "移动数据" / "有线网络" / "未联网"。 */
+    fun networkType(ctx: Context): String {
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            when {
+                caps == null -> "未联网"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "移动数据"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "有线网络"
+                else -> "已联网"
+            }
+        } catch (_: Exception) {
+            "未知"
+        }
+    }
+
+    /** 存储：（可用 GB，总共 GB）。读不出来返回 null。 */
+    fun storageInfo(ctx: Context): Pair<Double, Double>? {
+        return try {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val avail = stat.availableBytes.toDouble() / 1024 / 1024 / 1024
+            val total = stat.totalBytes.toDouble() / 1024 / 1024 / 1024
+            avail to total
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 电量：粘性广播 ACTION_BATTERY_CHANGED，不用注册接收器、不用权限。 */
+    private fun reportBattery(ctx: Context, speak: (String) -> Unit) {
+        val info = batteryInfo(ctx)
+        if (info == null) {
+            speak("电量没读出来，系统没给数")
+            return
+        }
+        val (pct, charging) = info
+        val text = "电量 $pct%" + if (charging) "，正在充电" else "，没在充电"
+        AuditLog.append(ctx, "系统功能", "电量", text)
+        speak(text)
     }
 
     /** 网络：看当前活动网络的传输类型（WiFi / 移动数据 / 都没有）。 */
     private fun reportNetwork(ctx: Context, speak: (String) -> Unit) {
-        try {
-            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-            val text = when {
-                caps == null -> "没联网，WiFi 和移动数据都没连上"
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "连着 WiFi"
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "用的是移动数据，没连 WiFi"
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "连着有线网络"
-                else -> "联网了，但不是 WiFi 也不是移动数据"
-            }
-            AuditLog.append(ctx, "系统功能", "网络", text)
-            speak(text)
-        } catch (e: Exception) {
-            speak("网络状态没读出来：${e.message}")
+        val text = when (val t = networkType(ctx)) {
+            "未联网" -> "没联网，WiFi 和移动数据都没连上"
+            "WiFi" -> "连着 WiFi"
+            "移动数据" -> "用的是移动数据，没连 WiFi"
+            "有线网络" -> "连着有线网络"
+            else -> "联网了，但不是 WiFi 也不是移动数据"
         }
+        AuditLog.append(ctx, "系统功能", "网络", text)
+        speak(text)
     }
 
     /** 位置：取最后一次定位（不主动开 GPS 等新定位，秒回但可能是旧位置，如实说明）。
@@ -409,16 +442,15 @@ object DeviceCommands {
 
     /** 存储：内部存储可用/总量（StatFs，不用权限）。 */
     private fun reportStorage(ctx: Context, speak: (String) -> Unit) {
-        try {
-            val stat = StatFs(Environment.getDataDirectory().path)
-            val avail = stat.availableBytes.toDouble() / 1024 / 1024 / 1024
-            val total = stat.totalBytes.toDouble() / 1024 / 1024 / 1024
-            val text = "内部存储还剩 ${String.format(Locale.US, "%.1f", avail)} GB，总共 ${String.format(Locale.US, "%.1f", total)} GB"
-            AuditLog.append(ctx, "系统功能", "存储", text)
-            speak(text)
-        } catch (e: Exception) {
-            speak("存储空间没读出来：${e.message}")
+        val info = storageInfo(ctx)
+        if (info == null) {
+            speak("存储空间没读出来")
+            return
         }
+        val (avail, total) = info
+        val text = "内部存储还剩 ${String.format(Locale.US, "%.1f", avail)} GB，总共 ${String.format(Locale.US, "%.1f", total)} GB"
+        AuditLog.append(ctx, "系统功能", "存储", text)
+        speak(text)
     }
 
     // ---------- 开关：亮度、静音 ----------
