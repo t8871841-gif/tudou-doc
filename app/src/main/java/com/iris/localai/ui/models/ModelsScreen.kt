@@ -478,7 +478,7 @@ private fun MnnDownloadDialog(onDismiss: () -> Unit, onDownload: (String) -> Uni
 /** Picker line with the backend: the real one once loaded, otherwise the one a load would start with. */
 internal fun LocalModel.pickerMeta(loadedBackend: String?, preferredBackend: String, engineTag: String? = null): String = when {
     // AZJ: the cloud model has no file size.
-    format == ModelFormat.CLOUD -> listOfNotNull(loadedBackend ?: engineTag ?: format.label, quantization).joinToString(" · ")
+    format == com.iris.localai.data.ModelFormat.CLOUD -> listOfNotNull(loadedBackend ?: engineTag ?: format.label, quantization).joinToString(" · ")
     loadedBackend != null -> listOfNotNull(loadedBackend, quantization, Format.bytes(sizeBytes)).joinToString(" · ")
     // 2.2.0: models run by GenieX show 「GenieX · NPU」 instead of the format label + backend.
     engineTag != null -> listOfNotNull(engineTag, quantization, Format.bytes(sizeBytes)).joinToString(" · ")
@@ -488,7 +488,7 @@ internal fun LocalModel.pickerMeta(loadedBackend: String?, preferredBackend: Str
 /** "GGUF · Q4_K_M · 2.3 GB"; 2.2.0: 「GenieX · NPU · Q4_0 · 2.3 GB」 when GenieX runs it ([engineTag]). */
 internal fun LocalModel.metaLine(engineTag: String? = null): String =
     // AZJ: the cloud model has no file size.
-    listOfNotNull(engineTag ?: format.label, quantization, if (format == ModelFormat.CLOUD) null else Format.bytes(sizeBytes)).joinToString(" · ")
+    listOfNotNull(engineTag ?: format.label, quantization, if (format == com.iris.localai.data.ModelFormat.CLOUD) null else Format.bytes(sizeBytes)).joinToString(" · ")
 
 @Composable
 private fun ModelRow(m: LocalModel, tag: String? = null, state: EngineState, busy: Boolean, onLoad: () -> Unit, onDelete: () -> Unit, onSettings: () -> Unit, onCancelLoad: () -> Unit = {}, dragHandle: Modifier = Modifier) {
