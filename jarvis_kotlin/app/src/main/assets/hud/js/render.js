@@ -27,5 +27,14 @@ canvas.addEventListener('pointermove', e => {
 });
 canvas.addEventListener('pointerup', e => {
   canvas.classList.remove('dragging');
+  const wasTap = drag && drag.moved < 6;
   drag = null;
+  if (!wasTap) { window.__hudJustWoke = false; return; }
+  /* wake tap only wakes (see interaction.js); a tap on the awake HUD toggles the
+     demo buttons row. If the skin picker is open this tap is for closing it (the
+     document click handler does that), so don't toggle the row. */
+  if (window.__hudJustWoke) { window.__hudJustWoke = false; return; }
+  const sp = document.getElementById('skinPick');
+  if (sp && !sp.hidden) return;
+  if (typeof window.dqToggle === 'function') window.dqToggle();
 });

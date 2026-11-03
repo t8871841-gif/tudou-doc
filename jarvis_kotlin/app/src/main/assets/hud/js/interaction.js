@@ -16,6 +16,6 @@ function sleepUI(ms = 15000) {                 /* back to the starfield once the
   }, ms);
 }
 addEventListener('keydown', e => { if (!e.metaKey && !e.ctrlKey && document.body.classList.contains('dormant')) { dormHold = false; wakeUI(); sleepUI(30000); } }, true);
-addEventListener('pointerdown', () => { if (document.body.classList.contains('dormant')) { dormHold = false; wakeUI(); sleepUI(30000); } }, true);
-function setState(s) { if (dormAsked && s !== 'speaking' && s !== 'thinking') dormNow(); if (s === 'listening' || s === 'thinking' || s === 'speaking') wakeUI(); else if (s === 'idle' && !document.body.classList.contains('dormant')) sleepUI(); state = s; document.body.dataset.state = s; stateText.textContent = STATE_LABEL[s]; badge.textContent = s === 'listening' ? 'LISTENING' : 'THINKING'; if (s === 'listening' || s === 'thinking' || s === 'speaking') openTalk(); else if (s === 'idle') scheduleClose(); }
+addEventListener('pointerdown', () => { if (document.body.classList.contains('dormant')) { dormHold = false; wakeUI(); sleepUI(30000); window.__hudJustWoke = true; } }, true);
+function setState(s) { if (s !== 'idle' && typeof window.dqHide === 'function') window.dqHide(); if (dormAsked && s !== 'speaking' && s !== 'thinking') dormNow(); if (s === 'listening' || s === 'thinking' || s === 'speaking') wakeUI(); else if (s === 'idle' && !document.body.classList.contains('dormant')) sleepUI(); state = s; document.body.dataset.state = s; stateText.textContent = STATE_LABEL[s]; badge.textContent = s === 'listening' ? 'LISTENING' : 'THINKING'; if (s === 'listening' || s === 'thinking' || s === 'speaking') openTalk(); else if (s === 'idle') scheduleClose(); }
 let typeTimer = null;

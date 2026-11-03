@@ -391,14 +391,15 @@ body[data-live] .demo-tag{display:none}
 /* <<demo-quick: portrait quick demo buttons (batch 2) — four icon-only buttons in a row
    at the bottom edge of the HUD animation area, just above the native dialogue box.
    Fixed to the HUD page viewport (the WebView is the top 3/5 in portrait), so they can
-   never overlap the native dialogue below. Always visible (not tied to dormant) so a
-   tap works reliably: the capture-phase wake listener must not hide them mid-tap. */
-#demoQuick{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:14px;width:min(94vw,560px);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;justify-content:flex-start;z-index:8}
+   never overlap the native dialogue below. Hidden by default; a tap on the HUD shows
+   them (.on), a tap on a button / 8 s idle / any mic state change hides them again. */
+#demoQuick{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:none;gap:14px;width:min(94vw,560px);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;justify-content:flex-start;z-index:8}
+#demoQuick.on{display:flex}
 #demoQuick::-webkit-scrollbar{display:none}
 #demoQuick .dq-btn{flex:0 0 auto;width:60px;height:60px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.55);color:rgb(var(--sk-ink));cursor:pointer;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 0 14px rgba(var(--sk-pri),.18);padding:0}
 #demoQuick .dq-btn svg{width:32px;height:32px;display:block}
 #demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
-@media (orientation:landscape){#demoQuick{display:none}}
+@media (orientation:landscape){#demoQuick,#demoQuick.on{display:none}}
 /* demo-quick>> */
 
 /* <<portrait-top-hide: portrait hides the whole HUD top bar (cube logo / J.A.R.V.I.S
