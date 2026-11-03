@@ -750,6 +750,15 @@ class MainActivity : Activity() {
             main.post { if (!showingSettings) toggleSettings() }
         }
 
+        /** 打开内置浏览器（演示按钮用；任务循环走 BrowserController.open，不走这里）。 */
+        @JavascriptInterface
+        fun openBrowser() {
+            main.post {
+                val intent = android.content.Intent(this@MainActivity, BrowserActivity::class.java)
+                startActivity(intent)
+            }
+        }
+
         /** 翻转原生朗读开关，返回翻转后“语音播报是否开着”（开 = 没静音）。 */
         @JavascriptInterface
         fun toggleVoice(): Boolean {

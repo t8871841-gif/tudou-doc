@@ -62,6 +62,7 @@
   map.dqHoloLib = function() { if (typeof holoLibOpen === 'function') holoLibOpen(); };
   map.dqEarth = function() { if (typeof emOpen === 'function') emOpen(1); };
   map.dqSkin = function() { var sp = document.getElementById('skinPick'); if (sp) sp.hidden = false; };
+  map.dqBrowser = function() { if (typeof JarvisBridge !== 'undefined' && JarvisBridge.openBrowser) JarvisBridge.openBrowser(); };
   Object.keys(map).forEach(function(id){
     var b = document.getElementById(id);
     if (b) b.addEventListener('click', function(e){
