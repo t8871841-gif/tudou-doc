@@ -336,8 +336,8 @@ body[data-state="listening"] .state-badge,body[data-state="thinking"] .state-bad
   .chip{flex:none}
   .subtitle{font-size:15px}
   .kbd{display:none}
-  #stage{height:70vh}
-  .vignette{height:70vh}
+  #stage{height:100%}
+  .vignette{height:100%}
 }
 @media (prefers-reduced-motion:reduce){
   .panel{animation:none}
