@@ -9,6 +9,7 @@ import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.AutoGLMClient
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.screen.ScreenCapture
 import com.jarvis.app.screen.ScreenController
@@ -611,9 +612,16 @@ private fun askModel(ctx: Context, userText: String, image: String?): Pair<Strin
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-// 按设置路由任务大脑：自定义模型与 Agnes 一样走 OpenAI 兼容接口、带图问。
+// 按设置路由任务大脑：自定义模型与 Agnes 一样走 OpenAI 兼容接口、带图问；
+// AutoGLM 走手机专用模型（do(...) 格式由 AutoGLMClient 转成 JSON 动作串）。
 if (JarvisPrefs.getTaskBrain(ctx) == "custom") {
 CustomClient.askOnce(
+ctx, SYSTEM_PROMPT, userText, image,
+onResult = { reply = it; latch.countDown()},
+onError = { error = it; latch.countDown()}
+)
+} else if (JarvisPrefs.getTaskBrain(ctx) == "autoglm") {
+AutoGLMClient.askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
 onResult = { reply = it; latch.countDown()},
 onError = { error = it; latch.countDown()}

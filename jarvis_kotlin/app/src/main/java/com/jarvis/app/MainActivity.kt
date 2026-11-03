@@ -2231,15 +2231,20 @@ class MainActivity : Activity() {
         })
 
         // ---- 跨应用任务模型切换 + 自定义大模型 ----
-        // 任务循环（task/TaskLoop）的大脑二选一：Agnes 带图问；自定义走用户自己填的
-        // OpenAI 兼容接口，同样带图问。
-        root.addView(segmentedRow("跨应用任务模型", listOf("Agnes", "自定义"),
-            if (JarvisPrefs.getTaskBrain(this) == "custom") 1 else 0) { i ->
-            val next = if (i == 1) "custom" else "agnes"
+        // 任务循环（task/TaskLoop）的大脑三选一：Agnes 带图问；自定义走用户自己填的
+        // OpenAI 兼容接口，同样带图问；AutoGLM 走手机专用模型 autoglm-phone
+        //（do(...) 格式由 AutoGLMClient 转成 JSON 动作），接口地址/模型名/Key
+        // 复用下面“自定义大模型”三项（填智谱地址与 autoglm-phone）。
+        root.addView(segmentedRow("跨应用任务模型", listOf("Agnes", "自定义", "AutoGLM"),
+            when (JarvisPrefs.getTaskBrain(this)) { "custom" -> 1; "autoglm" -> 2; else -> 0 }) { i ->
+            val next = when (i) { 1 -> "custom"; 2 -> "autoglm"; else -> "agnes" }
             JarvisPrefs.setTaskBrain(this, next)
             toast(
-                if (next == "custom") "跨应用任务改用自定义大模型（带截图问）"
-                else "跨应用任务改用 Agnes（带截图问）"
+                when (next) {
+                    "custom" -> "跨应用任务改用自定义大模型（带截图问）"
+                    "autoglm" -> "跨应用任务改用 AutoGLM 手机专用模型（带截图问）"
+                    else -> "跨应用任务改用 Agnes（带截图问）"
+                }
             )
         })
 
