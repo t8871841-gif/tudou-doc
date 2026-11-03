@@ -10,12 +10,14 @@ jobs:
       - name: Install SDK components
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "ndk;30.0.16248370"
+            "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
       - name: Install Ninja (MNN build)
         run: sudo apt-get install -y ninja-build
       # AZJ: full flavour (NPU) needs the MNN static lib. Its upstream prebuilt asset is gone
-      # (v2.0.0-beta release no longer exists, 404), so compile MNN from source (NDK r30, ~15-30 min).
-      - run: NDK="$ANDROID_HOME/ndk/30.0.16248370" sh scripts/fetch-deps.sh --build-mnn
+      # (v2.0.0-beta release no longer exists, 404), so compile MNN from source. It MUST use the
+      # same NDK as the app build (27.2): MNN built with NDK r30 links libc++ symbols the 27.2
+      # link step cannot resolve (undefined std::__ndk1::__hash_memory).
+      - run: NDK="$ANDROID_HOME/ndk/27.2.12479018" sh scripts/fetch-deps.sh --build-mnn
       # AZJ: host native tests skipped (needs a model download + host native build); unit tests + lint + APK build run below.
       - run: ./gradlew --no-daemon testFullDebugUnitTest lintFullDebug assembleFullDebug
       - uses: actions/upload-artifact@v4
