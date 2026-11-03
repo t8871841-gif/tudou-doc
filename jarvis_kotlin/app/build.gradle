@@ -16,7 +16,26 @@ android {
         versionName "0.1.0"
     }
 
+    // 签名统一（jk-v39/jk-v58 教训）：Gradle 默认 debug 签名没用上 CI 恢复的
+    // 共享 keystore（每台构建机现生成一把新钥匙，jk-v39 指纹 AC:1F:31:E9…、
+    // jk-v58 指纹 5D:DC:6B…、共享钥匙 58:28:7C… 三者全不同，导致每次都要
+    // 卸载重装）。这里显式指向恢复后的文件；文件不存在时保持 Gradle 默认行为。
+    signingConfigs {
+        sharedDebug {
+            storeFile file("${System.getProperty('user.home')}/.android/debug.keystore")
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
+        debug {
+            def ksFile = file("${System.getProperty('user.home')}/.android/debug.keystore")
+            if (ksFile.exists()) {
+                signingConfig signingConfigs.sharedDebug
+            }
+        }
         release {
             minifyEnabled false
         }

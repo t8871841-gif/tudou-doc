@@ -44,6 +44,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Verify restored keystore fingerprint
+        # 共享 keystore 的 SHA-256 指纹以 58:28:7C:0C:45:F6:F1:48 开头（本地备份
+        # ~/workspace/signing/debug.keystore 实测）。指纹不对说明 Secret 里
+        # 的值不是共享钥匙，直接失败，不让错签的包流到发布。
+        run: |
+          FP=$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android 2>/dev/null | grep -i "SHA256" | head -1 | tr -d ':' | tr 'a-f' 'A-F')
+          echo "Restored keystore fingerprint: $FP"
+          case "$FP" in
+            *58287C0C45F6F148*) echo "Keystore fingerprint OK (shared key)";;
+            *) echo "::error::Restored keystore fingerprint does NOT match the shared key (expected 58:28:7C...). Check the ANDROID_DEBUG_KEYSTORE_BASE64 secret."; exit 1;;
+          esac
+
       - name: Install Android SDK platform 34
         working-directory: ${{ github.workspace }}
         run: |
@@ -91,6 +103,19 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           find app/build/outputs/apk -name '*.apk' -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
           ls -la "$GITHUB_WORKSPACE/out"
+
+      - name: Verify APK signature fingerprint
+        # 构建出的 APK 必须由共享 keystore（58:28:7C…）签名，否则装机时仍要
+        # 卸载重装。指纹不对直接失败，不发布错签的包。
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          "$SDK/build-tools/34.0.0/apksigner" verify --print-certs --verbose out/*.apk 2>&1 | tee /tmp/apkcerts.txt
+          if grep -qi "58287c0c45f6f148" /tmp/apkcerts.txt; then
+            echo "APK signature fingerprint OK (shared key)"
+          else
+            echo "::error::APK was NOT signed with the shared key (expected 58:28:7C...). Check the signingConfig and the ANDROID_DEBUG_KEYSTORE_BASE64 secret."
+            exit 1
+          fi
 
       - name: Release
         uses: softprops/action-gh-release@v2
