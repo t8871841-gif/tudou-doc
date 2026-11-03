@@ -107,9 +107,13 @@ jobs:
       - name: Verify APK signature fingerprint
         # 构建出的 APK 必须由共享 keystore（58:28:7C…）签名，否则装机时仍要
         # 卸载重装。指纹不对直接失败，不发布错签的包。
+        # 注意：本工作流默认 working-directory 是 jarvis_kotlin，而 Collect 步骤
+        # 把 APK 拷到了 $GITHUB_WORKSPACE/out（仓库根目录），所以这里必须用
+        # 绝对路径；写相对路径 out/*.apk 会在 jarvis_kotlin/out 下找不到文件
+        # （jk-v59 两次构建就是这么失败的：apksigner 报 FileNotFoundException）。
         run: |
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          "$SDK/build-tools/34.0.0/apksigner" verify --print-certs --verbose out/*.apk 2>&1 | tee /tmp/apkcerts.txt
+          "$SDK/build-tools/34.0.0/apksigner" verify --print-certs --verbose "$GITHUB_WORKSPACE/out"/*.apk 2>&1 | tee /tmp/apkcerts.txt
           if grep -qi "58287c0c45f6f148" /tmp/apkcerts.txt; then
             echo "APK signature fingerprint OK (shared key)"
           else
