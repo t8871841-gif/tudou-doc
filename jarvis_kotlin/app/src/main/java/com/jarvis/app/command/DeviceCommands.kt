@@ -79,7 +79,10 @@ object DeviceCommands {
             .removePrefix("帮我").removePrefix("请").trim()
         val bare = t.removePrefix("手机").removePrefix("打开手机").trim()
         // 「亮度调到50%」「亮度50%」这类带数字的：三个捕获组只有一个会命中，取非空的那个。
-        val brightPct = BRIGHT_SET.find(t)?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toIntOrNull()
+        // 必须用 matchEntire（整句匹配）不用 find：find 是子串搜索，聊天句里夹一句
+        // 「亮度调到50%会不会太亮」也会误触发改亮度；整句匹配只认纯指令。
+        val brightPct = (BRIGHT_SET.matchEntire(t) ?: BRIGHT_SET.matchEntire(bare))
+            ?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toIntOrNull()
 
         when {
             t in TORCH_ON || bare in TORCH_ON -> { setTorch(ctx, true, speak); return true }
