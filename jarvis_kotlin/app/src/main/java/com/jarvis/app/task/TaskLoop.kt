@@ -237,6 +237,12 @@ object TaskLoop {
                 val userText = buildString {
                     append("任务：").append(taskText).append('\n')
                     append("当前前台应用包名：").append(pkg.ifEmpty { "未知" }).append('\n')
+                    // 分应用用法知识（Mika APP.md 思路）：前台应用有知识就追加，
+                    // 让模型在微信这类难啃的应用里不用每步现猜。所有大脑通用。
+                    val appKnowledge = AppKnowledge.forPackage(pkg)
+                    if (appKnowledge != null) {
+                        append("这个应用的用法知识：\n").append(appKnowledge).append('\n')
+                    }
                     if (hint.isNotEmpty()) append("界面提示：").append(hint).append('\n')
                     if (nodesTotal >= 0) {
                         append("界面节点：共 $nodesTotal 个，其中带名可用的 $nodesUseful 个")
