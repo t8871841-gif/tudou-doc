@@ -208,6 +208,23 @@ object JarvisAgent {
                 return
             }
         }
+        // 跨应用任务断点续跑（同 SkillResumeState 的薄状态机）：任务被 STOP 停下
+        // 或跑满步数后，用户说“继续”就从断点接着做，不是从头来。没命中就清掉
+        // 待处理状态，交还下面继续处理。
+        if (com.jarvis.app.task.TaskResumeState.hasPending()) {
+            val resume = com.jarvis.app.task.TaskResumeState.tryResolve(text)
+            if (resume != null) {
+                onUserText?.invoke(text)
+                setState(ctx, "thinking")
+                AuditLog.append(ctx, "任务续跑", resume.taskText, "从第 ${resume.stepsDone + 1} 步接着做")
+                com.jarvis.app.task.TaskLoop.run(
+                    ctx, resume.taskText, isAlive = { mySeq == genSeq },
+                    onReply = { reply -> speakReply(ctx, mySeq, reply) },
+                    resumeFrom = resume
+                )
+                return
+            }
+        }
         // 批三：先拦截显式记忆指令；未命中再取长期记忆，随问答一起注入。
         scope.launch {
             if (mySeq != genSeq) return@launch

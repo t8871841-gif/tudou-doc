@@ -113,18 +113,29 @@ object TaskLoop {
     /**
      * 执行一个多步任务。[isAlive] 由调用方给（Agent 的代次检查）；[onReply] 只会被
      * 调用一次，内容是给用户的一句结果（完成说明或卡在哪一步的如实说明）。
+     * [resumeFrom] 非空时是从断点续跑：历史与步数接着上次的来（见 TaskResumeState）。
+     * 注意：onReply 必须放最后——调用方用尾随 lambda 传它，后面再加参数会
+     * 让尾随 lambda 绑错（jk-v55 的教训）。
      */
-    fun run(ctx: Context, taskText: String, isAlive: () -> Boolean, onReply: (String) -> Unit) {
+    fun run(
+        ctx: Context, taskText: String, isAlive: () -> Boolean,
+        resumeFrom: TaskResumeState.ResumeInfo? = null,
+        onReply: (String) -> Unit
+    ) {
         val mySeq = runSeq.incrementAndGet()
         val appCtx = ctx.applicationContext
+        // 新任务开始清掉旧的断点（续跑的那次不调这里，resumeFrom 非空）；否则
+        // 上次停下的任务会一直挂着等“继续”，用户说了新任务还会被误续。
+        if (resumeFrom == null) TaskResumeState.clear()
         executor.execute {
-            runBlocking(appCtx, taskText, mySeq, isAlive, onReply)
+            runBlocking(appCtx, taskText, mySeq, isAlive, onReply, resumeFrom)
         }
     }
 
     private fun runBlocking(
         ctx: Context, taskText: String, mySeq: Int,
-        isAlive: () -> Boolean, onReply: (String) -> Unit
+        isAlive: () -> Boolean, onReply: (String) -> Unit,
+        resumeFrom: TaskResumeState.ResumeInfo? = null
     ) {
         fun alive() = mySeq == runSeq.get() && isAlive()
         val svc = JarvisAccessibilityService.instance
@@ -140,7 +151,12 @@ object TaskLoop {
         // 用户定：跨应用任务期球彻底隐藏，减少屏幕干扰、有利于定位；任务结束
         // 在 finally 里恢复。截图空白是另一层标志，互不顶掉（见 OrbController）。
         com.jarvis.app.OrbController.setTaskHidden(true)
-        val history = mutableListOf<String>()
+        // 断点续跑：历史与步数接着上次的来；新任务从空开始。
+        val history = resumeFrom?.history?.toMutableList() ?: mutableListOf<String>()
+        // 停下时要播报“说继续可以接着做”：onReply 平时只在 alive() 时才发，
+        // 急停分支会把 finalReply 置 null 抢掉播报；用这个旗子让 finally
+        // 在急停时也把断点播报发出去。
+        var stoppedWithResume = false
         var lastError = ""
         var pendingImage: String? = null // zoom 放大图：作为下一轮的观察图喂回模型
         var finalReply: String? = null
@@ -166,11 +182,18 @@ object TaskLoop {
         var prevScreenSig = ""
         running = true
         try {
-            var step = 0
-            stepLoop@ while (step < MAX_STEPS) {
+            // 续跑时步数接着上次的编号（历史里的“第 N 步”才连贯），但新跑的
+            // 步数预算照样是 MAX_STEPS 步（上限 = 已做步数 + MAX_STEPS）。
+            var step = resumeFrom?.stepsDone ?: 0
+            val stepLimit = step + MAX_STEPS
+            stepLoop@ while (step < stepLimit) {
                 if (!alive()) {
-                    finalReply = null // 急停：调用方（新指令/停止）会接管播报，这里不抢话
-                    AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "已中止")
+                    // 急停：把断点记下来，让用户说“继续”接着做；播报不抢调用方的话，
+                    // 只报一句断点（finally 里靠 stoppedWithResume 发出去）。
+                    TaskResumeState.offer(taskText, history.toList(), step)
+                    stoppedWithResume = true
+                    finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
+                    AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "断点已记，说继续可续跑")
                     return
                 }
                 step++
@@ -420,7 +443,9 @@ object TaskLoop {
                 // 重试都不该被当成原地打转拦下；普通失败的重复照旧累计。
                 if (r.outcomeUnknown) repeats = (repeats - 1).coerceAtLeast(0)
             }
-            finalReply = "任务跑满了 $MAX_STEPS 步还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}"
+            // 跑满步数也没完成：把断点记下来，用户说“继续”可以再给 MAX_STEPS 步接着做。
+            TaskResumeState.offer(taskText, history.toList(), step)
+            finalReply = "任务跑满了 $MAX_STEPS 步还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"
             AuditLog.append(ctx, "任务循环", "步数用完", history.lastOrNull() ?: "")
         } catch (e: Exception) {
             finalReply = "任务执行中出错：${e.message}"
@@ -433,7 +458,9 @@ object TaskLoop {
                 JarvisAccessibilityService.screenController = null
             }
             val reply = finalReply
-            if (reply != null && alive()) onReply(reply)
+            // 平时只在 alive() 时发（用户发了新指令就别抢话）；急停断点那句例外，
+            // 靠 stoppedWithResume 发出去，不然用户不知道可以说“继续”接着做。
+            if (reply != null && (alive() || stoppedWithResume)) onReply(reply)
         }
     }
 
