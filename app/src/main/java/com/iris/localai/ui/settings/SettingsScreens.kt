@@ -286,6 +286,8 @@ fun ModelBackendPage(vm: SettingsViewModel, onBack: () -> Unit, onModels: () -> 
                             com.iris.localai.data.ModelFormat.LITERT -> "自动 = GPU（Qwen3.5、Agents-A1 用 CPU）。GPU ${com.iris.localai.engine.BackendCapabilities.LITERT_GPU_WARNING}，之后会用缓存。文件名带 _sm8750 的 NPU 编译模型始终用 NPU"
                             com.iris.localai.data.ModelFormat.MNN -> "自动 = CPU。GPU 走 OpenCL"
                             com.iris.localai.data.ModelFormat.QAIRT -> "只能用 NPU"
+                            // AZJ: never shown (CLOUD is filtered out of `formats` above); the compiler needs the branch.
+                            com.iris.localai.data.ModelFormat.CLOUD -> "云端模型没有本地后端"
                         },
                     )
                 }
