@@ -89,7 +89,7 @@ object AgentPrompt {
     ): String = buildString {
         // 2.3: fixed tool order whatever the caller passes (byte-identical prefix for the KV cache).
         val tools = tools.distinct().sortedBy { t -> TOOL_ORDER.indexOf(t.name).let { if (it < 0) Int.MAX_VALUE else it } }
-        append("You are IRIS, an AI agent on the user's Android phone.\n\n")
+        append("You are hero, an AI agent on the user's Android phone.\n\n")
 
         append("# Rules\n")
         append("- Reply in Chinese, concise. Never claim actions you didn't take.\n")

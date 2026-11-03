@@ -111,7 +111,7 @@ class GuiAgentRunner(private val context: Context, private val engine: EngineMan
     /** The settings page's text for [blockerKind]. */
     fun blockerText(): String? = when (blockerKind()) {
         null -> null
-        GuiBlocker.A11Y_OFF -> "先在 系统设置 › 无障碍 里开启「IRIDIS GUI 智能体」"
+        GuiBlocker.A11Y_OFF -> "先在 系统设置 › 无障碍 里开启「hero GUI 智能体」"
         GuiBlocker.NO_MODEL -> "先加载一个能识图的模型"
         GuiBlocker.NO_VISION -> "当前模型不能识图：GUI 智能体需要视觉模型（如 Qwen3-VL、MAI-UI、AutoGLM-Phone）"
         GuiBlocker.BUSY -> "正在运行"

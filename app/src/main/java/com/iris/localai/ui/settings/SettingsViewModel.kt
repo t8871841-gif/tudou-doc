@@ -189,7 +189,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 player = out
                 val s = c.settings.current
                 val text = if (c.synthesizer.usingSystem || c.synthesizer.speakingWithClone || c.synthesizer.activePack()?.singleSpeaker != false || s.ttsSpeakerId >= 3)
-                    "你好，我是 IRIDIS，一个完全运行在你手机上的智能助手。" else "Hi, I'm IRIDIS, an assistant that runs entirely on your phone."
+                    "你好，我是 hero，一个完全运行在你手机上的智能助手。" else "Hi, I'm hero, an assistant that runs entirely on your phone."
                 val job = kotlin.coroutines.coroutineContext[Job]
                 c.synthesizer.speak(text, s.ttsSpeakerId, s.ttsSpeed) { chunk ->
                     if (_preview.value != Preview.Playing) _preview.value = Preview.Playing

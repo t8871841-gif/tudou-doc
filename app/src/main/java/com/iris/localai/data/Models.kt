@@ -187,7 +187,8 @@ enum class ThemeMode { SYSTEM, LIGHT, DARK }
 @Serializable
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val systemPrompt: String = "",
+    /** AZJ: the assistant's persona is hero; the user can change this in settings. */
+    val systemPrompt: String = "你是 hero，一个运行在用户手机上的 AI 助手。用中文简洁回答。",
     val temperature: Float = 0.7f,
     val topP: Float = 0.95f,
     val topK: Int = 40,
