@@ -68,7 +68,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 
 /** Top-level destinations. A tiny back stack is enough for this app's shallow navigation. */
-private enum class Route { APPEARANCE, CHAT, MODELS, SETTINGS, GENERATION, VOICE, API, ABOUT, DIAGNOSTICS, MODEL_BACKEND, CONTEXT, PERFORMANCE, TIER_PROFILES, AGENT, MEMORY, BROWSER, FILES, STORAGE, DEVELOPER, IMAGEGEN, APP_FILES, DEV_CONTEXT }
+private enum class Route { HOME, APPEARANCE, CHAT, MODELS, SETTINGS, GENERATION, VOICE, API, ABOUT, DIAGNOSTICS, MODEL_BACKEND, CONTEXT, PERFORMANCE, TIER_PROFILES, AGENT, MEMORY, BROWSER, FILES, STORAGE, DEVELOPER, IMAGEGEN, APP_FILES, DEV_CONTEXT }
 
 class MainActivity : ComponentActivity() {
 
@@ -167,7 +167,7 @@ private fun CrashDialog(report: String, onClose: () -> Unit) {
 
 @Composable
 private fun AppNavigation(chat: ChatViewModel) {
-    var stack by rememberSaveable { mutableStateOf(listOf(Route.CHAT.name)) }
+    var stack by rememberSaveable { mutableStateOf(listOf(Route.HOME.name)) }
     fun push(r: Route) { if (stack.last() != r.name) stack = stack + r.name }
     fun pop() { if (stack.size > 1) stack = stack.dropLast(1) }
     val settingsVm: SettingsViewModel = viewModel()
@@ -234,6 +234,12 @@ private fun AppNavigation(chat: ChatViewModel) {
 @Composable
 private fun Screen(r: Route, chat: ChatViewModel, settingsVm: SettingsViewModel, push: (Route) -> Unit, pop: () -> Unit) {
     when (r) {
+        // Orilo 式主页：水滴 + 标题 + 日期，点水滴/底部按钮进聊天。
+        Route.HOME -> com.iris.localai.ui.home.HomeScreen(
+            onOpenChat = { push(Route.CHAT) },
+            onOpenSettings = { push(Route.SETTINGS) },
+            onOpenModels = { push(Route.MODELS) },
+        )
         Route.CHAT -> ChatScreen(
             vm = chat,
             onOpenModels = { push(Route.MODELS) },
