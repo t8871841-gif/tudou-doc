@@ -258,4 +258,99 @@ object AgnesClient {
             }
         })
     }
+
+    /**
+     * 流式对话（Orilo 式“边想边说”的第一步）：与 ask 相同的请求体与历史，
+     * 但 stream=true，逐个 SSE 分片回吐，供 JarvisAgent 按句播报，不用等整段回完。
+     * onToken 每收到一段增量就回调；onDone 在流结束时回完整全文；
+     * onError 只在请求/解析失败时回调。取消守卫与 ask 同款（cancelSeq）。
+     * 注意：onToken/onDone 都跑在 OkHttp 的 dispatcher 线程上，调用方自己切回主线程。
+     */
+    fun askStream(
+        ctx: Context, userText: String, memoryContext: String = "",
+        onToken: (String) -> Unit, onDone: (String) -> Unit, onError: (String) -> Unit
+    ) {
+        val key = JarvisPrefs.getAgnesKey(ctx)
+        if (key.isBlank()) {
+            onError("未配置 Agnes API Key，请先去设置里填写")
+            return
+        }
+        val mySeq = ++cancelSeq
+        synchronized(this) {
+            history.add("user" to userText)
+            while (history.size > MAX_TURNS * 2) history.removeAt(0)
+        }
+        val fullSystemPrompt = if (memoryContext.isNotBlank()) SYSTEM_PROMPT + memoryContext else SYSTEM_PROMPT
+        val messages = JSONArray()
+        messages.put(JSONObject().put("role", "system").put("content", fullSystemPrompt))
+        synchronized(this) {
+            for ((role, content) in history) {
+                messages.put(JSONObject().put("role", role).put("content", content))
+            }
+        }
+        val body = JSONObject()
+            .put("model", MODEL)
+            .put("messages", messages)
+            .put("stream", true)
+            .put("temperature", 0.6)
+        val req = Request.Builder()
+            .url("$BASE_URL/chat/completions")
+            .addHeader("Authorization", "Bearer $key")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃
+                onError("网络请求失败：${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (mySeq != cancelSeq) return
+                    if (!resp.isSuccessful) {
+                        onError("Agnes 接口返回错误：HTTP ${resp.code}")
+                        return
+                    }
+                    val full = StringBuilder()
+                    try {
+                        val source = resp.body?.source() ?: run {
+                            onError("Agnes 流式返回为空")
+                            return
+                        }
+                        while (true) {
+                            if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃
+                            val line = source.readUtf8Line() ?: break
+                            val data = line.trim()
+                            if (data.isEmpty()) continue
+                            if (!data.startsWith("data:")) continue
+                            val payload = data.removePrefix("data:").trim()
+                            if (payload == "[DONE]") break
+                            try {
+                                val json = JSONObject(payload)
+                                val delta = json.optJSONArray("choices")
+                                    ?.optJSONObject(0)
+                                    ?.optJSONObject("delta")
+                                    ?.optString("content").orEmpty()
+                                if (delta.isNotEmpty()) {
+                                    full.append(delta)
+                                    onToken(delta)
+                                }
+                            } catch (_: Exception) {
+                                // 单个分片解析失败就跳过，不中断整条流
+                            }
+                        }
+                        val reply = full.toString().trim()
+                        synchronized(this@AgnesClient) {
+                            history.add("assistant" to reply)
+                        }
+                        onDone(reply)
+                    } catch (e: Exception) {
+                        if (mySeq != cancelSeq) return
+                        onError("解析 Agnes 流式返回失败：${e.message}")
+                    }
+                }
+            }
+        })
+    }
 }

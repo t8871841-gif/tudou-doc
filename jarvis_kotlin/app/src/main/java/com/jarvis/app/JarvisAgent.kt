@@ -376,12 +376,32 @@ object JarvisAgent {
     }
 
     private fun askAgnes(ctx: Context, mySeq: Int, text: String, memoryContext: String, localTried: Boolean) {
-        AgnesClient.ask(
+        // 流式对话：Agnes 边吐字边念，第一句完整出来立刻开念，不用等整段回完。
+        // onToken/onDone 跑在 OkHttp 线程上，进会话的方法里自己不碰主线程的东西
+        // （气泡/TTS/状态都在 TtsRouter 回调里回主线程）；onFinish 在主线程收尾。
+        val session = StreamSpeakSession(ctx, mySeq) { fullText ->
+            main.post {
+                if (mySeq != genSeq) return@post
+                if (fullText.isBlank()) {
+                    OrbController.showBubble("没听清，你再说一遍")
+                    setState(ctx, "idle")
+                    maybeStartWakeLoop()
+                    return@post
+                }
+                triggerMemoryExtraction(ctx, text, fullText)
+                // 批二「连续对话」：开着的话说完答案直接继续听，不用再喊一次唤醒词。
+                if (JarvisPrefs.isContinuousChat(ctx)) {
+                    beginListening(ctx, fromWake = false, prefilledText = null)
+                } else {
+                    setState(ctx, "idle")
+                    maybeStartWakeLoop()
+                }
+            }
+        }
+        AgnesClient.askStream(
             ctx, text, memoryContext = memoryContext,
-            onResult = { reply ->
-                main.post { if (mySeq == genSeq) speakReply(ctx, mySeq, reply) }
-                triggerMemoryExtraction(ctx, text, reply)
-            },
+            onToken = { token -> session.onToken(token) },
+            onDone = { session.onStreamDone() },
             onError = { msg ->
                 main.post {
                     if (mySeq != genSeq) return@post
@@ -412,6 +432,114 @@ object JarvisAgent {
         )
     }
 
+    /**
+     * 流式播报：大模型边吐字边念。句子到了就排队，一句接一句念，不用等整段回完——
+     * 第一句完整出来立刻开念，体感上“几乎没有延迟”。
+     * 用法：askAgnes 里建一个，onToken 喂增量，onStreamDone 标记流结束；
+     * 队列念空且流已结束时调 onFinish（全文），由调用方做记忆提取与状态收尾。
+     * 打断监听只在第一句开念时启动一次（startBargeInWatch 自带 1200ms 延迟），
+     * 回声比对取的是实时全文（取数器），流式增长的文本也能过滤。
+     */
+    private inner class StreamSpeakSession(
+        private val ctx: Context,
+        private val mySeq: Int,
+        private val onFinish: (fullText: String) -> Unit
+    ) {
+        private val queue = ArrayDeque<String>()
+        private val pending = StringBuilder()
+        private val fullText = StringBuilder()
+        private var speaking = false
+        private var streamDone = false
+        private var finished = false
+        private var bargeInStarted = false
+
+        /** 流里来了一段增量：拼进全文，按句切分，完整句子进队列。 */
+        fun onToken(token: String) {
+            if (finished) return
+            fullText.append(token)
+            pending.append(token)
+            drainSentences()
+            pump()
+        }
+
+        /** 流结束了：把 pending 里剩下的半句也推进队列，等念完收尾。 */
+        fun onStreamDone() {
+            if (finished) return
+            streamDone = true
+            val rest = pending.toString().trim()
+            if (rest.isNotEmpty()) {
+                queue.addLast(rest)
+                pending.clear()
+            }
+            pump()
+        }
+
+        /** 从 pending 里切出完整句子（以 。！？\n 结尾；超长半句在 ，处断开，免得等太久）。 */
+        private fun drainSentences() {
+            while (true) {
+                val text = pending.toString()
+                val endIdx = text.indexOfFirst { it == '。' || it == '！' || it == '？' || it == '\n' }
+                if (endIdx >= 0) {
+                    val sentence = text.substring(0, endIdx + 1).trim()
+                    if (sentence.isNotEmpty()) queue.addLast(sentence)
+                    pending.delete(0, endIdx + 1)
+                    continue
+                }
+                // 没有句末标点：半句太长（>60 字）就在最后一个 ，处断开
+                if (text.length > 60) {
+                    val commaIdx = text.lastIndexOf('，')
+                    if (commaIdx > 20) {
+                        val sentence = text.substring(0, commaIdx + 1).trim()
+                        if (sentence.isNotEmpty()) queue.addLast(sentence)
+                        pending.delete(0, commaIdx + 1)
+                        continue
+                    }
+                }
+                break
+            }
+        }
+
+        /** 泵：没在念、队列有句子，就念下一句；队列空了且流已结束，就收尾。 */
+        private fun pump() {
+            if (finished || speaking) return
+            val sentence = queue.pollFirst()
+            if (sentence == null) {
+                if (streamDone) finish()
+                return
+            }
+            speaking = true
+            // 气泡跟上：显示到当前为止的全文（截 80 字）
+            OrbController.showBubble(fullText.toString().take(80))
+            TtsRouter.speak(
+                ctx, sentence,
+                onStart = {
+                    main.post {
+                        if (mySeq != genSeq) return@post
+                        setState(ctx, "speaking")
+                        if (JarvisPrefs.isBargeInEnabled(ctx) && !bargeInStarted) {
+                            bargeInStarted = true
+                            startBargeInWatch(ctx, mySeq) { fullText.toString() }
+                        }
+                    }
+                },
+                onDone = { ok ->
+                    if (!ok) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", sentence.take(40))
+                    main.post {
+                        speaking = false
+                        if (mySeq != genSeq) return@post
+                        pump()
+                    }
+                }
+            )
+        }
+
+        private fun finish() {
+            if (finished) return
+            finished = true
+            onFinish(fullText.toString().trim())
+        }
+    }
+
     private fun speakReply(ctx: Context, mySeq: Int, reply: String) {
         if (mySeq != genSeq) return
         OrbController.showBubble(reply.take(80))
@@ -430,7 +558,7 @@ object JarvisAgent {
                 main.post {
                     if (mySeq != genSeq) return@post
                     setState(ctx, "speaking")
-                    if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq, reply)
+                    if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq) { reply }
                 }
             },
             onDone = { ok ->
@@ -462,9 +590,9 @@ object JarvisAgent {
      * 回复文本开头（回声后拖了尾巴），都当回声直接忽略，既不计数也不清零；
      * 只有回复里没有的话才计入打断。真插话仍能打断，只是要连续两次非回声结果。
      */
-    private fun startBargeInWatch(ctx: Context, mySeq: Int, reply: String) {
+    private fun startBargeInWatch(ctx: Context, mySeq: Int, replyText: () -> String) {
         // 回声比对只看字本身：回复里的标点、空白都去掉，识别结果同样处理。
-        val replyNorm = reply.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
+        // replyText 是个取数器（流式播报时全文还在长，每次比对都现取最新全文）。
         main.postDelayed({
             if (mySeq != genSeq || state != "speaking") return@postDelayed
             var strongHits = 0
@@ -473,6 +601,7 @@ object JarvisAgent {
                 onPartial = { txt ->
                     if (mySeq != genSeq || state != "speaking") return@listenOnce
                     val norm = txt.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
+                    val replyNorm = replyText().replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
                     // 回声：识别结果是正在播的回复里的一段，或以回复开头——忽略，
                     // 并且清零打断计数（刚听到的是扬声器自己，不是用户插话）。
                     // replyNorm 为空（回复全是标点，不可能出现在正常回复里）时不过滤。
