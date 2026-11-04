@@ -219,6 +219,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), VoiceChatBridge {
         open(id)
     }
 
+    /** Bumped when the home screen asks to open a voice conversation: the chat opens its voice overlay. */
+    private val _openVoice = MutableStateFlow(0)
+    val openVoice: StateFlow<Int> = _openVoice.asStateFlow()
+    fun openVoiceConversation() {
+        _openVoice.value++
+    }
+
     // 1.10.13: did the system pause the reply while IRIS was in the background?
     private var awayAt = 0L
     private var awayPieces = 0L

@@ -56,11 +56,13 @@ import java.util.Locale
  * 晨报内容（第 2 层：新闻源 + Agnes 现写摘要）还没做，这里的日期行下面只放一句提示，
  * 不编假新闻。
  *
- * 导航：点水滴 / 左下对话气泡 / 右下麦克风都进聊天；左上菜单进设置，右上灯泡进模型列表。
+ * 导航：点水滴 / 右下麦克风直接进语音对话（VoiceOverlay，麦克风一开就开始听）；
+ * 左下对话气泡进文字聊天；左上菜单进设置，右上灯泡进模型列表。
  */
 @Composable
 fun HomeScreen(
     onOpenChat: () -> Unit,
+    onOpenVoice: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenModels: () -> Unit,
 ) {
@@ -103,7 +105,7 @@ fun HomeScreen(
                 ) { onOpenModels() }
             }
             Spacer(Modifier.height(IrisDimens.space32))
-            // 水滴：点一下进聊天
+            // 水滴：点一下直接进语音对话
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -114,7 +116,7 @@ fun HomeScreen(
                     tilt = tilt.value,
                     modifier = Modifier
                         .size(280.dp)
-                        .clickable { onOpenChat() },
+                        .clickable { onOpenVoice() },
                 )
             }
             // 日期行 + 提示（不编假新闻）
@@ -134,7 +136,7 @@ fun HomeScreen(
                 textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(IrisDimens.space32))
-            // 底部：对话气泡（左）| 麦克风（右，大一号，主操作）
+            // 底部：对话气泡（左，文字聊天）| 麦克风（右，大一号，直接进语音对话）
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -149,7 +151,7 @@ fun HomeScreen(
                 FloatingIconButton(
                     Icons.Outlined.Mic, "语音",
                     size = 72.dp,
-                ) { onOpenChat() }
+                ) { onOpenVoice() }
             }
         }
     }

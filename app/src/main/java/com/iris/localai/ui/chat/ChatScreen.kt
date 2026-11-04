@@ -260,6 +260,15 @@ fun ChatScreen(
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) action()
         else { pendingVoiceAction = action; micPermission.launch(Manifest.permission.RECORD_AUDIO) }
     }
+    // Home screen asked for a voice conversation (droplet / mic): open the voice overlay.
+    // Follows the showChat pattern; LaunchedEffect only re-runs when the counter changes.
+    val openVoice by vm.openVoice.collectAsStateWithLifecycle()
+    LaunchedEffect(openVoice) {
+        if (openVoice > 0) {
+            hideKeyboard()
+            withMic { voiceMode = true }
+        }
+    }
 
     androidx.compose.runtime.CompositionLocalProvider(com.iris.localai.ui.components.LocalGlassHaze provides haze) {
     val trash by vm.trash.collectAsStateWithLifecycle()

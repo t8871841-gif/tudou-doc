@@ -234,9 +234,10 @@ private fun AppNavigation(chat: ChatViewModel) {
 @Composable
 private fun Screen(r: Route, chat: ChatViewModel, settingsVm: SettingsViewModel, push: (Route) -> Unit, pop: () -> Unit) {
     when (r) {
-        // Orilo 式主页：水滴 + 标题 + 日期，点水滴/底部按钮进聊天。
+        // Orilo 式主页：水滴 + 标题 + 日期；点水滴/麦克风直接进语音对话，气泡进文字聊天。
         Route.HOME -> com.iris.localai.ui.home.HomeScreen(
             onOpenChat = { push(Route.CHAT) },
+            onOpenVoice = { chat.openVoiceConversation(); push(Route.CHAT) },
             onOpenSettings = { push(Route.SETTINGS) },
             onOpenModels = { push(Route.MODELS) },
         )
