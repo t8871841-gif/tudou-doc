@@ -292,7 +292,10 @@ object LocalCommands {
     }
 
     /** 批九：任务循环的 openApp 动作复用同一套按名找应用+拉起逻辑，返回结果描述（不播报）。 */
-    fun launchApp(ctx: Context, name: String): String = launchAppInternal(ctx, name.trim())
+    /** 打开应用。fullscreen=true 时全屏启动（跨应用任务循环用：截图干净、看图模型干扰少）；
+     * fullscreen=false 时普通启动（日常“打开应用”用：Flyme 默认给小窗，用户日常就用小窗）。 */
+    fun launchApp(ctx: Context, name: String, fullscreen: Boolean = false): String =
+        launchAppInternal(ctx, name.trim(), fullscreen)
 
     /** 全屏启动：跨应用打开应用时显式要全屏窗口模式，Flyme 就不会把它开成小窗。
      * 原因：TaskLoop 在后台线程拿应用上下文启动，系统当成后台启动、Flyme 给小窗；
@@ -357,7 +360,7 @@ object LocalCommands {
     }
 
     /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。 */
-    private fun launchAppInternal(ctx: Context, name: String): String {
+    private fun launchAppInternal(ctx: Context, name: String, fullscreen: Boolean = false): String {
         val pm = ctx.packageManager
         // 2026-10-24 跨应用修复第 1 件：按名字枚举应用时好时坏（21:56 任务循环里
         // “微信/WeChat”两次没找到，21:58 同一函数直接说“打开微信”却成功了）——
@@ -369,7 +372,7 @@ object LocalCommands {
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 try {
-                    startActivityFullscreen(ctx, intent)
+                    if (fullscreen) startActivityFullscreen(ctx, intent) else ctx.startActivity(intent)
                     AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
                     return "正在打开${name.trim()}"
                 } catch (_: Exception) {
@@ -407,7 +410,7 @@ object LocalCommands {
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            startActivityFullscreen(ctx, intent)
+            if (fullscreen) startActivityFullscreen(ctx, intent) else ctx.startActivity(intent)
         } catch (_: Exception) {
             return "打开${found.first}失败了"
         }

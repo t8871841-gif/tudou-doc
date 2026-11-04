@@ -856,7 +856,8 @@ r.ok || jpeg!= null, r.screenChanged, jpeg, r.code
 "openApp" -> {
 val app = action.optString("app")
 if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, null, "PARSE_ERROR")
-val r = LocalCommands.launchApp(ctx, app)
+// 跨应用任务循环：全屏启动，截图干净、看图模型干扰少；日常“打开应用”走小窗（LocalCommands 默认）。
+val r = LocalCommands.launchApp(ctx, app, fullscreen = true)
 StepResult(r, r.startsWith("正在打开"), null, null, if (r.startsWith("正在打开")) "" else "UNKNOWN")
 }
 "browse" -> {
