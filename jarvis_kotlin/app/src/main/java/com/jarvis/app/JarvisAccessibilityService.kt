@@ -572,6 +572,48 @@ class JarvisAccessibilityService : AccessibilityService() {
         return findTextNodeRect(root, label) != null
     }
 
+    /**
+     * 小窗关闭：目标应用正以前台小窗开着时用（最近任务里没有它的卡片，划卡片那条路
+     * 走不通）。小窗的关闭钮在小窗标题栏里——也就是当前窗口顶部一小条；
+     * 只在窗口顶部 15% 高度内找“关闭”节点，且有且仅有一个候选才点，零个或多个
+     * 都算没找到，不猜（点错应用里的关闭钮比关不成严重）。找到后按坐标点一下
+     * （只取坐标框、不留节点引用，避免节点被回收后点不到）。点完由调用方复查。
+     */
+    fun tryCloseSmallWindow(done: (Boolean, String) -> Unit) {
+        val root = rootInActiveWindow ?: run { done(false, "no_window"); return }
+        val winRect = Rect()
+        root.getBoundsInScreen(winRect)
+        if (winRect.isEmpty) { done(false, "no_window"); return }
+        val topLimit = winRect.top + (winRect.height() * 0.15f).toInt()
+        val hits = LinkedHashSet<Rect>()
+        fun walk(n: AccessibilityNodeInfo) {
+            val t = n.text?.toString()?.trim().orEmpty()
+            val d = n.contentDescription?.toString()?.trim().orEmpty()
+            if (t == "关闭" || d == "关闭") {
+                val r = Rect()
+                n.getBoundsInScreen(r)
+                if (!r.isEmpty && r.centerY() <= topLimit) hits.add(r)
+            }
+            for (i in 0 until n.childCount) {
+                val child = n.getChild(i) ?: continue
+                walk(child)
+                child.recycle()
+            }
+        }
+        walk(root)
+        if (hits.size != 1) { done(false, "not_found"); return }
+        val rect = hits.first()
+        val cx = rect.centerX().toFloat()
+        val cy = rect.centerY().toFloat()
+        val path = Path().apply { moveTo(cx, cy) }
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build()
+        val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) { done(true, "") }
+            override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
+        }, null)
+        if (!ok) done(false, "dispatch_failed")
+    }
+
     /** 最近任务界面里所有带文本的节点去重后的标题（关卡片失败时记审计日志用，帮定位该 ROM 的卡片标题格式）。 */
     fun recentCardLabels(limit: Int = 20): List<String> {
         val root = rootInActiveWindow ?: return emptyList()

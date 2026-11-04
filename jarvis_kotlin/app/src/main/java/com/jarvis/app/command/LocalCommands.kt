@@ -573,6 +573,32 @@ object LocalCommands {
             if (attempt == 0) Thread.sleep(800)
         }
         if (!dispatched) {
+            // 卡片没找到：先看目标是不是正以前台小窗开着——小窗应用在 Flyme 最近任务里
+            // 没有卡片，划卡片那条路走不通，但应用本身在运行，“可能没在后台运行”是错话。
+            // 是小窗就直接点小窗的关闭钮；不是前台应用才如实说没找到。
+            if (dispatchReason == "not_found") {
+                val fg = try { svc.foregroundPackage() } catch (_: Exception) { "" }
+                if (fg == targetPkg) {
+                    AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "最近任务无卡片，目标正以前台小窗开着，改点小窗关闭钮")
+                    val latch2 = java.util.concurrent.CountDownLatch(1)
+                    var closed = false
+                    var closeReason = ""
+                    svc.tryCloseSmallWindow { ok, reason ->
+                        closed = ok; closeReason = reason; latch2.countDown()
+                    }
+                    latch2.await(3, java.util.concurrent.TimeUnit.SECONDS)
+                    Thread.sleep(600)
+                    val goneNow = try { svc.foregroundPackage() } catch (_: Exception) { "" } != targetPkg
+                    if (closed && goneNow) {
+                        AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "小窗关闭钮已点，应用已不在前台")
+                        main.post { speak("${targetLabel}关了") }
+                        return
+                    }
+                    AuditLog.append(ctx, "本地指令", "关闭$targetLabel", "小窗关闭失败：$closeReason")
+                    main.post { speak("${targetLabel}正以前台小窗开着，最近任务里没有它的卡片，关不掉；Shizuku 授权后强停能关") }
+                    return
+                }
+            }
             val why = when (dispatchReason) {
                 "not_found" -> "最近任务里没找到${targetLabel}，可能它没在后台运行"
                 "no_window" -> "最近任务界面没拿到，系统正忙"
