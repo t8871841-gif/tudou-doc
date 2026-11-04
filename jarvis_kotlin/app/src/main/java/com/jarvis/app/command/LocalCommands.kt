@@ -300,23 +300,26 @@ object LocalCommands {
     /** 全屏启动：跨应用打开应用时显式要全屏窗口模式，Flyme 就不会把它开成小窗。
      * 原因：TaskLoop 在后台线程拿应用上下文启动，系统当成后台启动、Flyme 给小窗；
      * 全屏后截图里只有目标应用、没有背后的 Jarvis 界面，看图模型干扰少、任务量小。
-     * ActivityOptions.setLaunchWindowingMode 是 API 28+ 的，低版本直接普通启动；
-     * 全屏启动失败就回落到普通启动，不让一次启动失败整个任务。 */
+     * setLaunchWindowingMode 是 @hide 接口（公开 SDK 里没有，直接调编译不过，
+     * jk-v61 首版就因此构建失败），只能反射调；WINDOWING_MODE_FULLSCREEN 的值是 1。
+     * 反射在部分系统上也被拦，失败就回落到普通启动，不让一次启动失败整个任务。 */
     fun startActivityFullscreen(ctx: Context, intent: Intent) {
         try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                 val opts = android.app.ActivityOptions.makeBasic()
-                    .setLaunchWindowingMode(android.app.ActivityOptions.WINDOWING_MODE_FULLSCREEN)
-                    .toBundle()
-                ctx.startActivity(intent, opts)
-            } else {
-                ctx.startActivity(intent)
+                val m = android.app.ActivityOptions::class.java.getMethod(
+                    "setLaunchWindowingMode", Int::class.javaPrimitiveType
+                )
+                m.invoke(opts, 1) // WindowConfiguration.WINDOWING_MODE_FULLSCREEN
+                ctx.startActivity(intent, opts.toBundle())
+                return
             }
         } catch (_: Exception) {
-            try {
-                ctx.startActivity(intent)
-            } catch (_: Exception) {
-            }
+            // 反射失败，回落到普通启动
+        }
+        try {
+            ctx.startActivity(intent)
+        } catch (_: Exception) {
         }
     }
 
