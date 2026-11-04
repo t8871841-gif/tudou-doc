@@ -1319,18 +1319,16 @@ class MainActivity : Activity() {
         refreshSettingsGear()
     }
 
-    /** 原生面板四块内容重渲染：每次都现算（音乐读媒体会话与曲库、天气读缓存、
-     * 设备状态现读现算、日程读当天提醒），所以状态变了、提醒改了、天气到货了，面板都能跟上。
-     * 顺序是用户定的：音乐、天气、设备实时状态、日程。Agent 调度（BRAIN/JOBS/LEARNING/
-     * REVIEW）与工作汇报已删（用户不用）；HUD 那边仍用 computeAgentRows 推送，不受影响。 */
+    /** 原生面板三块内容重渲染：每次都现算（天气读缓存、设备状态现读现算、
+     * 日程读当天提醒），所以状态变了、提醒改了、天气到货了，面板都能跟上。
+     * 顺序是用户定的：天气、设备实时状态、日程。音乐区已删（用户用系统播放器）；
+     * Agent 调度（BRAIN/JOBS/LEARNING/REVIEW）与工作汇报也已删（用户不用）；
+     * HUD 那边仍用 computeAgentRows 推送，不受影响。 */
     private fun renderNativePanel() {
         if (!::panelList.isInitialized) return
         lastScheduleRows = todayScheduleRows(ReminderScheduler.list(this))
         panelList.removeAllViews()
-        // 1. 音乐（MediaStore 真曲库 + Salt Player 媒体会话，不是空架子）
-        panelList.addView(panelSectionTitle("音乐"))
-        renderMusicSection()
-        // 2. 天气
+        // 1. 天气
         panelList.addView(panelSectionTitle("天气"))
         val info = lastWeatherInfo
         if (info == null) {
@@ -1346,10 +1344,10 @@ class MainActivity : Activity() {
                 panelList.addView(forecastRowView(label, d.day, d.low, d.high))
             }
         }
-        // 3. 设备实时状态（打开面板时现读现算）
+        // 2. 设备实时状态（打开面板时现读现算）
         panelList.addView(panelSectionTitle("设备实时状态"))
         renderDeviceStatusSection()
-        // 4. 日程
+        // 3. 日程
         panelList.addView(panelSectionTitle("日程"))
         if (lastScheduleRows.isEmpty()) {
             panelList.addView(panelLine("今天还没有安排"))
@@ -1358,125 +1356,7 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 音乐区：上排是播放条（当前曲目 + 上一曲/播放暂停/下一曲），下排是本地曲库。
-     * 当前曲目读媒体会话（快，同步读）；曲库扫 MediaStore（慢，后台扫，扫完再补进列表）。 */
-    private fun renderMusicSection() {
-        val now = try {
-            com.jarvis.app.music.MusicPanel.nowPlaying(this)
-        } catch (_: Exception) {
-            null
-        }
-        // 播放条：左曲名（歌名+歌手），右三个控制键。
-        panelList.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(4))
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                addView(TextView(this@MainActivity).apply {
-                    text = now?.title ?: "未在播放"
-                    textSize = 14f
-                    setTextColor(HudPalette.ICE)
-                    maxLines = 1
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                })
-                addView(TextView(this@MainActivity).apply {
-                    text = now?.artist ?: "打开 Salt Player 放一首"
-                    textSize = 12f
-                    setTextColor(0x99FFFFFF.toInt())
-                    maxLines = 1
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(0, dp(2), 0, 0)
-                })
-            })
-            // 控制键：上一曲 / 播放暂停 / 下一曲（发系统媒体键，Salt Player 接着干活）。
-            val isPlaying = now?.isPlaying == true
-            addView(musicBtn("上曲") { com.jarvis.app.music.MusicPanel.previous(this@MainActivity) })
-            addView(musicBtn(if (isPlaying) "暂停" else "播放") {
-                com.jarvis.app.music.MusicPanel.togglePlayPause(this@MainActivity, isPlaying)
-                // 按完立即重渲染一次，播放状态马上跟上。
-                renderNativePanel()
-            })
-            addView(musicBtn("下曲") { com.jarvis.app.music.MusicPanel.next(this@MainActivity) })
-        })
-        // 进度条（有总时长才画）。
-        if (now != null && now.durationMs > 0) {
-            val frac = (now.positionMs.toFloat() / now.durationMs.toFloat()).coerceIn(0f, 1f)
-            panelList.addView(progressBar(frac, HudPalette.AQUA).apply {
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply {
-                    topMargin = dp(4); bottomMargin = dp(6)
-                }
-            })
-        }
-        // 曲库：后台扫，扫完补进下面这个容器（面板还开着才补）。
-        val listBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(panelLine("正在加载曲库…"))
-        }
-        panelList.addView(listBox)
-        uiScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val songs = com.jarvis.app.music.MusicPanel.scanSongs(this@MainActivity)
-            withContext(kotlinx.coroutines.Dispatchers.Main) {
-                if (!hudPanelOpen || !::panelList.isInitialized) return@withContext
-                listBox.removeAllViews()
-                if (songs.isEmpty()) {
-                    listBox.addView(panelLine("本地没有音乐，或没有给音乐权限"))
-                    return@withContext
-                }
-                listBox.addView(panelLine("本地 ${songs.size} 首"))
-                songs.take(8).forEach { song ->
-                    listBox.addView(LinearLayout(this@MainActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(0, dp(5), 0, dp(5))
-                        setOnClickListener {
-                            if (!com.jarvis.app.music.MusicPanel.playSong(this@MainActivity, song)) {
-                                toast("这首歌没打开成")
-                            }
-                        }
-                        addView(TextView(this@MainActivity).apply {
-                            text = song.title
-                            textSize = 14f
-                            setTextColor(HudPalette.ICE)
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.END
-                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                        })
-                        addView(TextView(this@MainActivity).apply {
-                            text = song.artist
-                            textSize = 12f
-                            setTextColor(0x99FFFFFF.toInt())
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.END
-                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                                marginStart = dp(8)
-                            }
-                        })
-                    })
-                }
-            }
-        }
-    }
 
-    /** 音乐控制小按钮：描边圆角，按了有真行为（发媒体键）。 */
-    private fun musicBtn(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
-        text = label
-        textSize = 13f
-        setTextColor(HudPalette.ICE)
-        gravity = Gravity.CENTER
-        setPadding(dp(10), dp(6), dp(10), dp(6))
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(16).toFloat()
-            setStroke(dp(1), 0x66FFFFFF)
-            setColor(Color.TRANSPARENT)
-        }
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            marginStart = dp(6)
-        }
-        setOnClickListener { onClick() }
-    }
 
     /** 设备实时状态区：三个并排格子（电量 / 网络 / 存储），打开面板时现读现算。
      * 读数逻辑与语音版（DeviceCommands）共用同一份，不各写一套。 */
