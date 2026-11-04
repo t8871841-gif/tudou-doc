@@ -310,6 +310,29 @@ object LocalCommands {
     /** 批九：任务循环的 openApp 动作复用同一套按名找应用+拉起逻辑，返回结果描述（不播报）。 */
     fun launchApp(ctx: Context, name: String): String = launchAppInternal(ctx, name.trim())
 
+    /** 全屏启动：跨应用打开应用时显式要全屏窗口模式，Flyme 就不会把它开成小窗。
+     * 原因：TaskLoop 在后台线程拿应用上下文启动，系统当成后台启动、Flyme 给小窗；
+     * 全屏后截图里只有目标应用、没有背后的 Jarvis 界面，看图模型干扰少、任务量小。
+     * ActivityOptions.setLaunchWindowingMode 是 API 28+ 的，低版本直接普通启动；
+     * 全屏启动失败就回落到普通启动，不让一次启动失败整个任务。 */
+    fun startActivityFullscreen(ctx: Context, intent: Intent) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                val opts = android.app.ActivityOptions.makeBasic()
+                    .setLaunchWindowingMode(android.app.ActivityOptions.WINDOWING_MODE_FULLSCREEN)
+                    .toBundle()
+                ctx.startActivity(intent, opts)
+            } else {
+                ctx.startActivity(intent)
+            }
+        } catch (_: Exception) {
+            try {
+                ctx.startActivity(intent)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     /**
      * 常用应用包名直查表（键已小写；查前把名字 trim + lowercase）。
      * 直查失败（包不存在、无启动界面、拉起抛异常）时一律回落到枚举，
@@ -364,7 +387,7 @@ object LocalCommands {
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 try {
-                    ctx.startActivity(intent)
+                    startActivityFullscreen(ctx, intent)
                     AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
                     return "正在打开${name.trim()}"
                 } catch (_: Exception) {
@@ -402,7 +425,7 @@ object LocalCommands {
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            ctx.startActivity(intent)
+            startActivityFullscreen(ctx, intent)
         } catch (_: Exception) {
             return "打开${found.first}失败了"
         }
@@ -425,7 +448,7 @@ object LocalCommands {
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            ctx.startActivity(intent)
+            startActivityFullscreen(ctx, intent)
         } catch (e: Exception) {
             AuditLog.append(ctx, "本地指令", "播放音乐", "拉起失败：${e.message ?: e.javaClass.simpleName}")
             main.post { speak("Salt Player 没打开：${e.message ?: e.javaClass.simpleName}") }

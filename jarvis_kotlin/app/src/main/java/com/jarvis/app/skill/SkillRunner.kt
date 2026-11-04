@@ -7,6 +7,7 @@ import android.os.Looper
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.command.DeviceCommands
+import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
 import com.jarvis.app.vision.ScreenVisionAgent
@@ -105,7 +106,8 @@ object SkillRunner {
                 } else {
                     try {
                         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        ctx.startActivity(intent)
+                        // 全屏启动：技能打开应用也一样，Flyme 不给小窗，截图干净、看图模型干扰少。
+                        LocalCommands.startActivityFullscreen(ctx, intent)
                         next(OPEN_SETTLE_MS)
                     } catch (e: Exception) {
                         fail("打开 $pkg 出错：${e.message}")
