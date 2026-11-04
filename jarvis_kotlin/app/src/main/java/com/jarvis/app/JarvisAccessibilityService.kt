@@ -63,7 +63,6 @@ class JarvisAccessibilityService : AccessibilityService() {
             "com.ss.android.ugc.aweme.lite", // 抖音极速版
             "com.meizu.weather", // 魅族自带天气
             "com.meizu.flyme.weather", // 魅族天气（候选包名，未装则不命中）
-            "com.salt.music", // Salt Player（音乐）
             "com.meizu.flyme.dialer", // 电话（魅族）
             "com.android.dialer", // 电话（AOSP）
             "com.meizu.flyme.mms", // 短信（魅族；另有动态默认短信 App 补充）

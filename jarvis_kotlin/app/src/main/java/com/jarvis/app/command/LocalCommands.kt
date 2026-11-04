@@ -4,13 +4,10 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.provider.ContactsContract
-import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import com.jarvis.app.AuditLog
 import com.jarvis.app.task.ShizukuHelper
@@ -55,8 +52,6 @@ object LocalCommands {
     private val OPEN_APP = Regex("^(?:打开|开启|启动|进入)\\s*(.+)$")
     private val CLOSE_APP = Regex("^(?:关闭|关掉|退出)\\s*(.+)$")
     private val CLOSE_APP_BA = Regex("^把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
-    private val PLAY_MUSIC = Regex("^(?:播放音乐|放音乐|放歌|放首歌|来首歌)$")
-    private val PAUSE_MUSIC = Regex("^(?:暂停音乐|音乐暂停|停止音乐)$")
 
     // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
     // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
@@ -150,17 +145,6 @@ object LocalCommands {
             val name = cleanName(callName)
             if (!looksLikeLiteralName(name)) return false // 不像人名，交还给聊天流程，不当指令处理
             io.execute { callContactBg(ctx, name, speak) }
-            return true
-        }
-
-        // 播放/暂停音乐（Salt Player）：放在「打开应用」前面，别让“播放音乐”
-        // 被当成打开一个叫“播放音乐”的应用。整句精确匹配，不会误吞普通聊天。
-        if (PLAY_MUSIC.matches(t)) {
-            io.execute { playMusicBg(ctx, speak) }
-            return true
-        }
-        if (PAUSE_MUSIC.matches(t)) {
-            io.execute { pauseMusicBg(ctx, speak) }
             return true
         }
 
@@ -358,9 +342,7 @@ object LocalCommands {
         "电话" to "com.android.dialer",
         "短信" to "com.android.messaging",
         "相机" to "com.android.camera",
-        "相册" to "com.android.gallery3d",
-        "salt player" to "com.salt.music",
-        "salt" to "com.salt.music"
+        "相册" to "com.android.gallery3d"
     )
 
     // ---------- 打开应用：tryHandle 在 io 线程调进来，枚举/拉起在本线程，回报回主线程 ----------
@@ -434,49 +416,7 @@ object LocalCommands {
 
     }
 
-    // ---------- 播放音乐：Salt Player（com.salt.music）----------
-    // 先拉起播放器，等一拍让它注册媒体会话，再发媒体播放键恢复/开始播放；
-    // 暂停直接发媒体暂停键。dispatchMediaKeyEvent 不需要特殊权限。
 
-    private fun playMusicBg(ctx: Context, speak: (String) -> Unit) {
-        val pm = ctx.packageManager
-        val intent = pm.getLaunchIntentForPackage("com.salt.music")
-        if (intent == null) {
-            AuditLog.append(ctx, "本地指令", "播放音乐", "未装 Salt Player")
-            main.post { speak("没找到 Salt Player，先装上再试") }
-            return
-        }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        try {
-            startActivityFullscreen(ctx, intent)
-        } catch (e: Exception) {
-            AuditLog.append(ctx, "本地指令", "播放音乐", "拉起失败：${e.message ?: e.javaClass.simpleName}")
-            main.post { speak("Salt Player 没打开：${e.message ?: e.javaClass.simpleName}") }
-            return
-        }
-        Thread.sleep(800)
-        dispatchMediaKey(ctx, KeyEvent.KEYCODE_MEDIA_PLAY)
-        AuditLog.append(ctx, "本地指令", "播放音乐", "已拉起 Salt Player 并发播放键")
-        main.post { speak("正在播放") }
-    }
-
-    private fun pauseMusicBg(ctx: Context, speak: (String) -> Unit) {
-        dispatchMediaKey(ctx, KeyEvent.KEYCODE_MEDIA_PAUSE)
-        AuditLog.append(ctx, "本地指令", "暂停音乐", "已发暂停键")
-        main.post { speak("已暂停") }
-    }
-
-    /** 发一对媒体键（按下 + 抬起），走 AudioManager.dispatchMediaKeyEvent。 */
-    private fun dispatchMediaKey(ctx: Context, keyCode: Int) {
-        try {
-            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val now = SystemClock.uptimeMillis()
-            am.dispatchMediaKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
-            am.dispatchMediaKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0))
-        } catch (_: Exception) {
-            // 发键失败不单独回报，调用方已按“已执行”播报；真机上基本不会走到
-        }
-    }
 
     // ---------- 关闭应用：批二十四新增——去最近任务划掉目标卡片 ----------
 
