@@ -13,7 +13,7 @@ renderer.setPixelRatio(DPR);
 renderer.setClearColor(0x000000, 1);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
-camera.position.set(0, 0, 7.2);
+camera.position.set(0, 0, 8.5); /* 与 render.js 的 resize 保持一致：少裁一点 */
 const world = new THREE.Group();
 scene.add(world);
 
