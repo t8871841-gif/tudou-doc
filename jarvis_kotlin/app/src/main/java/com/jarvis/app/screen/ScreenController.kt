@@ -298,11 +298,11 @@ class ScreenController(
             out.put("detail", "已是全屏，不用展开")
             return out
         }
-        // 横条在窗口最下方：从底部横条中心拖到屏幕顶沿，自由窗口会吸附成全屏。
-        // （用户纠正：顶栏拖了没用，横条才是把手。）
+        // 横条在窗口最下方：往下拖横条展开成全屏（用户纠正：往下走是全屏，
+        // 往上走是小窗缩小比例——之前往上拖的方向反了）。
         val startX = before.centerX()
         val startY = before.bottom - 12
-        swipe(startX, startY, screenW / 2, 0, 400, fling = false)
+        swipe(startX, startY, screenW / 2, screenH - 5, 400, fling = false)
         try { Thread.sleep(900) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
         val after = appWindow(targetPkg)
         if (after != null && isFullscreen(after)) {
