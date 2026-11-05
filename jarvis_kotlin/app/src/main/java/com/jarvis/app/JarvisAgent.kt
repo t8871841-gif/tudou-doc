@@ -389,7 +389,7 @@ object JarvisAgent {
                     // M22：续跑时前台已不是断点时的应用，现场可能变了，先提醒用户。
                     // 只进面板气泡，不语音，避免与任务播报重叠。
                     val pkgName = resume.foregroundPkg ?: "原来那个应用"
-                    onReplyText?.invoke("提醒：你现在不在$pkgName里，现场可能变了，我先按断点接着做，不对你就喊停。")
+                    onReplyText?.invoke("提醒：你现在不在${pkgName}里，现场可能变了，我先按断点接着做，不对你就喊停。")
                     AuditLog.append(ctx, "任务续跑", resume.taskText, "前台包名与断点时不符（断点：$pkgName），已提醒用户")
                 }
                 com.jarvis.app.task.TaskLoop.run(

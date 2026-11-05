@@ -229,7 +229,7 @@ object OfflineAsrSession {
         recordThread = null
         val eng = currentEngine
         currentEngine = null
-        main.removeCallbacks(loadTimeoutRunnable)
+        loadTimeoutRunnable?.let { main.removeCallbacks(it) }
         loadTimeoutRunnable = null
         val focus = currentFocus
         currentFocus = null
@@ -264,7 +264,7 @@ object OfflineAsrSession {
      * 回调出去，seq 仍属于本轮），只停采集、走 C3 收尾、放焦点、撤超时看门狗。
      */
     private fun teardownTurn(engine: OfflineAsr?) {
-        main.removeCallbacks(loadTimeoutRunnable)
+        loadTimeoutRunnable?.let { main.removeCallbacks(it) }
         loadTimeoutRunnable = null
         recordThread?.interrupt()
         recordThread = null

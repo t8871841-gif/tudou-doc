@@ -191,7 +191,7 @@ object ReminderCommands {
         }
         val desc = describeRow(row)
         Scheduler.cancelReminder(ctx, id)
-        AuditLog.append(ctx, "本地指令", "$doneWord提醒：$desc", "编号 $id 已删")
+        AuditLog.append(ctx, "本地指令", "${doneWord}提醒：$desc", "编号 $id 已删")
         speak("好，${doneWord}了：$desc")
     }
 

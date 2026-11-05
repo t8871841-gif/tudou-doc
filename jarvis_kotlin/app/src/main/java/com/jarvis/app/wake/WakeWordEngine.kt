@@ -137,7 +137,10 @@ object WakeWordEngine {
     }
 
     /** True once the user has enrolled a wake phrase (templates on disk). */
-    fun enrolled(): Boolean = WakeTemplates.enrolled(appContext ?: return false)
+    fun enrolled(): Boolean {
+        val ctx = appContext ?: return false
+        return WakeTemplates.enrolled(ctx)
+    }
 
     /**
      * Re-read the templates from disk — call after enrollment changed them

@@ -348,7 +348,7 @@ object TripLoop {
                 val destChanged = origDest != null && newDest != null && newDest != origDest &&
                     !newItinerary.contains(origDest)
                 if (destChanged) {
-                    val newName = saveItinerary(ctx, newDest, newItinerary)
+                    val newName = saveItinerary(ctx, newDest ?: "", newItinerary)
                     AuditLog.append(ctx, "行程规划", "改行程完成（另存）", newName)
                     finalReply = if (changeSummary.isNotBlank()) {
                         "$changeSummary\n目的地改成 $newDest，已另存为新文件（$newName），原文件（${file.name}）没动。改的部分这次没拿高德核实，要核实再说一声。"

@@ -10,6 +10,7 @@ import android.os.Looper
 import android.provider.ContactsContract
 import androidx.core.content.ContextCompat
 import com.jarvis.app.AuditLog
+import com.jarvis.app.device.CallState
 import com.jarvis.app.task.ShizukuHelper
 import java.util.concurrent.Executors
 
@@ -79,11 +80,11 @@ object LocalCommands {
     // tryHandle 入口还会先整句剥一层 stripPolitePrefixes，这里是第二道保险。
     private const val POLITE_PREFIX_GROUP = "(?:请帮我|麻烦帮我|麻烦请帮我|请麻烦帮我|麻烦|请|帮我)*"
     private val CALL_WITH_NAME = Regex("^$POLITE_PREFIX_GROUP(?:打电话给|打个电话给|拨电话给|拨打|呼叫)\\s*(.+)$")
-    private val CALL_GIVE = Regex("^$POLITE_PREFIX_GROUP给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
+    private val CALL_GIVE = Regex("^${POLITE_PREFIX_GROUP}给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
     private val CALL_BARE = Regex("^(?:打电话|拨电话|拨号)$")
     private val OPEN_APP = Regex("^$POLITE_PREFIX_GROUP(?:打开|开启|启动|进入)\\s*(.+)$")
     private val CLOSE_APP = Regex("^$POLITE_PREFIX_GROUP(?:关闭|关掉|退出)\\s*(.+)$")
-    private val CLOSE_APP_BA = Regex("^$POLITE_PREFIX_GROUP把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
+    private val CLOSE_APP_BA = Regex("^${POLITE_PREFIX_GROUP}把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
 
     // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
     // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
@@ -809,7 +810,7 @@ object LocalCommands {
      * L17：通话中不新起拨号。返回实际结果，由调用方按结果播报。
      */
     private fun dial(ctx: Context, number: String?): DialOutcome {
-        if (DeviceCommands.isInCall(ctx)) {
+        if (CallState.isInCall()) {
             return DialOutcome(DialKind.FAILED, number, "正在通话中，先挂断再打")
         }
         val hasCallPermission = ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) ==

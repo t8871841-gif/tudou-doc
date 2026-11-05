@@ -1809,7 +1809,7 @@ class MainActivity : Activity() {
             }
         }
         bubble.addView(TextView(this).apply {
-            text = headText
+            this.text = headText
             textSize = 11f
             setTextColor(0xB3FFFFFF.toInt())
         })
