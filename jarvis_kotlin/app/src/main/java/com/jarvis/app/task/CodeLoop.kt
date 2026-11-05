@@ -24,6 +24,8 @@ import java.util.concurrent.atomic.AtomicInteger
 object CodeLoop {
     private const val MAX_STEPS = 25
     private const val MAX_REPEATS = 3
+    /** 阶段 2：共享反思预算（Aider 数）——编辑/lint/测试错共用 3 次，不是每类各 3 次。 */
+    private const val MAX_REFLECTIONS = 3
     private const val READ_LINES = 100
     private const val ASK_TIMEOUT_MS = 60_000L
     private const val WORKSPACE_DIR = "code-workspace"
@@ -81,6 +83,11 @@ object CodeLoop {
         var lastError = ""
         var lastSignature = ""
         var repeats = 0
+        // 阶段 2：共享反思预算——编辑错、lint 错、测试错（执行返回“错误”）共用 3 次，
+        // 不是每类各 3 次；同一错误连着出现 3 次也停（卡住检测）。
+        var consecutiveFailures = 0
+        var lastFailure = ""
+        var sameErrorCount = 0
         var finalReply: String? = null
         running = true
         try {
@@ -136,7 +143,10 @@ object CodeLoop {
                     }
                     history += "第 $step 步：$kind — $msg"
                     AuditLog.append(ctx, "编码循环", kind, msg)
-                    finalReply = if (kind == "done") msg else "写代码没完成，卡在第 $step 步：$msg"
+                    // 失败收尾抄 mini-swe-agent：先把当前工作区状态交出来再退出，
+                    // 绝不空手而归（成功时不用附，done 消息本身就是结果）。
+                    finalReply = if (kind == "done") msg else
+                        "写代码没完成，卡在第 $step 步：$msg\n${workspaceSummary(ctx)}"
                     return
                 }
                 // ---------- 重复守卫：同一动作连着来 3 次即停 ----------
@@ -148,7 +158,7 @@ object CodeLoop {
                     repeats = 0
                 }
                 if (repeats >= MAX_REPEATS) {
-                    finalReply = "写代码卡在第 $step 步：同一个动作连着重复多次，已停下。"
+                    finalReply = "写代码卡在第 $step 步：同一个动作连着重复多次，已停下。\n${workspaceSummary(ctx)}"
                     AuditLog.append(ctx, "编码循环", "重复守卫触发", "$kind 连续重复")
                     return
                 }
@@ -157,8 +167,30 @@ object CodeLoop {
                 history += "第 $step 步：${describeAction(action)} → ${result.take(500)}"
                 AuditLog.append(ctx, "编码循环", "$kind（第 $step 步）", result.take(500))
                 lastError = if (result.startsWith("OK")) "" else result
+                // ---------- 阶段 2：共享反思预算 + 卡住检测 ----------
+                // 执行返回“错误”才计入预算（问模型失败、输出解析失败不算，
+                // 那些是另外的路数，不占用反思次数）。
+                if (result.startsWith("错误")) {
+                    consecutiveFailures++
+                    if (result == lastFailure) sameErrorCount++ else sameErrorCount = 1
+                    lastFailure = result
+                    if (consecutiveFailures >= MAX_REFLECTIONS) {
+                        finalReply = "写代码连续 $MAX_REFLECTIONS 次出错，已停下，留给人处理。\n${workspaceSummary(ctx)}"
+                        AuditLog.append(ctx, "编码循环", "反思预算用完", "连续 $MAX_REFLECTIONS 次出错")
+                        return
+                    }
+                    if (sameErrorCount >= MAX_REFLECTIONS) {
+                        finalReply = "写代码同一个错误连着出现 $MAX_REFLECTIONS 次，已停下，留给人处理。\n${workspaceSummary(ctx)}"
+                        AuditLog.append(ctx, "编码循环", "卡住检测", "同一错误 $MAX_REFLECTIONS 次")
+                        return
+                    }
+                } else {
+                    consecutiveFailures = 0
+                    sameErrorCount = 0
+                    lastFailure = ""
+                }
             }
-            finalReply = "写代码到第 $MAX_STEPS 步还没做完，已停下。"
+            finalReply = "写代码到第 $MAX_STEPS 步还没做完，已停下。\n${workspaceSummary(ctx)}"
             AuditLog.append(ctx, "编码循环", "步数上限", "到 $MAX_STEPS 步未完成")
         } finally {
             running = false
@@ -168,18 +200,38 @@ object CodeLoop {
 
     // ---------- 问模型（阻塞式，等 CustomClient 回调） ----------
 
+    /**
+     * 问模型一次。429 限流时指数退避重试（2 秒起、翻倍、30 秒封顶，最多 3 次），
+     * 与任务的反思预算分层——429 不占用反思次数；非 429 错误直接抛。
+     */
     private fun askModel(ctx: Context, systemPrompt: String, userText: String): String? {
-        val latch = CountDownLatch(1)
-        var result: String? = null
-        var error: String? = null
-        CustomClient.askOnce(
-            ctx, systemPrompt, userText, null,
-            onResult = { result = it; latch.countDown() },
-            onError = { error = it; latch.countDown() },
-        )
-        latch.await(ASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        if (error != null) throw IllegalStateException(error)
-        return result
+        var backoffMs = 0L
+        var lastError: String? = null
+        repeat(3) { attempt ->
+            if (backoffMs > 0) {
+                AuditLog.append(ctx, "编码循环", "问模型 429 限流", "第 ${attempt + 1} 次，等 ${backoffMs / 1000} 秒再试")
+                try {
+                    Thread.sleep(backoffMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IllegalStateException("问模型被打断")
+                }
+            }
+            val latch = CountDownLatch(1)
+            var result: String? = null
+            var error: String? = null
+            CustomClient.askOnce(
+                ctx, systemPrompt, userText, null,
+                onResult = { result = it; latch.countDown() },
+                onError = { error = it; latch.countDown() },
+            )
+            latch.await(ASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            if (error == null) return result
+            lastError = error
+            if (!error.contains("429")) throw IllegalStateException(error)
+            backoffMs = if (backoffMs == 0L) 2000 else minOf(backoffMs * 2, 30000)
+        }
+        throw IllegalStateException(lastError ?: "问模型失败")
     }
 
     private fun parseAction(reply: String): JSONObject? {
@@ -229,6 +281,77 @@ object CodeLoop {
         return files.joinToString("\n")
     }
 
+    /** 失败收尾用的工作区快照：让用户看到停下时写了哪些文件（抄 mini-swe-agent 交半成品）。 */
+    private fun workspaceSummary(ctx: Context): String {
+        val files = listWorkspace(workspaceDir(ctx))
+        return if (files.isEmpty()) "工作区还是空的，没写出文件。" else "工作区现有文件：\n$files"
+    }
+
+    /**
+     * 阶段 2 改前校验（轻量版，抄 SWE-agent lint 守门）：写盘前检查括号/引号配对，
+     * 有问题不落盘、把原因返回给模型再试。跳过 # 注释与单/双引号字符串里的内容，
+     * 避免误判；三引号字符串、缩进错误这类查不到的，靠执行时报错再修。
+     * 返回错误说明，没问题返回 null。
+     */
+    private fun validateCode(content: String): String? {
+        val stack = ArrayDeque<Char>()
+        val pairs = mapOf(')' to '(', ']' to '[', '}' to '{')
+        var inSingle = false
+        var inDouble = false
+        var escaped = false
+        var line = 1
+        var i = 0
+        while (i < content.length) {
+            val ch = content[i]
+            if (ch == '\n') {
+                line++
+                i++
+                continue
+            }
+            if (escaped) {
+                escaped = false
+                i++
+                continue
+            }
+            if (ch == '\\') {
+                escaped = true
+                i++
+                continue
+            }
+            if (inSingle) {
+                if (ch == '\'') inSingle = false
+                i++
+                continue
+            }
+            if (inDouble) {
+                if (ch == '"') inDouble = false
+                i++
+                continue
+            }
+            // 行注释：# 到行尾的内容不参与校验。
+            if (ch == '#') {
+                while (i < content.length && content[i] != '\n') i++
+                continue
+            }
+            when (ch) {
+                '\'' -> inSingle = true
+                '"' -> inDouble = true
+                '(', '[', '{' -> stack.addLast(ch)
+                ')', ']', '}' -> {
+                    val open = pairs[ch]!!
+                    if (stack.isEmpty() || stack.removeLast() != open) {
+                        return "括号不匹配：第 $line 行 '$ch' 没有对应的 '$open'，没写盘"
+                    }
+                }
+            }
+            i++
+        }
+        if (inSingle) return "单引号未闭合，没写盘"
+        if (inDouble) return "双引号未闭合，没写盘"
+        if (stack.isNotEmpty()) return "括号未闭合：多了 '${stack.last()}'，没写盘"
+        return null
+    }
+
     /**
      * 执行一个动作，返回给模型看的结果（"OK..." 或错误说明）。
      * 文件动作：write_file / read_file / list_dir / edit_file。
@@ -271,6 +394,8 @@ object CodeLoop {
                     val path = action.optString("path")
                     val content = action.optString("content")
                     if (path.isBlank()) return "错误：write_file 缺 path"
+                    // 阶段 2 改前校验：括号/引号不对不落盘，原因喂回模型再试。
+                    validateCode(content)?.let { return "错误：$it" }
                     val file = resolvePath(ctx, path) ?: return "错误：路径 $path 不在工作区内，拒绝写入"
                     file.parentFile?.mkdirs()
                     file.writeText(content)
@@ -321,7 +446,10 @@ object CodeLoop {
                         return "错误：SEARCH 在 $path 里出现了 $count 次，无法确定改哪一处。" +
                             "请把 SEARCH 写长一点（多带几行上下文），让它只匹配一处。"
                     }
-                    file.writeText(text.replace(search, replace))
+                    val newText = text.replace(search, replace)
+                    // 阶段 2 改前校验：改完的全文括号/引号不对不落盘。
+                    validateCode(newText)?.let { return "错误：$it" }
+                    file.writeText(newText)
                     "OK：已修改 $path（一处）"
                 }
                 else -> "错误：不认识的动作 $kind（可用：write_file / read_file / list_dir / edit_file / run_shell / run_python / run_termux / done / fail）"
