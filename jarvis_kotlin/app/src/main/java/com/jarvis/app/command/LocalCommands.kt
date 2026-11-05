@@ -327,6 +327,67 @@ object LocalCommands {
         }
     }
 
+    /** 前台拉起（jk-v66）：不要小窗、要应用直接全屏。
+     * 反射 setLaunchWindowingMode 在这台 Flyme 上根本不存在（NoSuchMethodException），
+     * 拖小窗展开也靠不住（jk-v65 审计：微信拖动后仍是小窗）。
+     * 改法：把要开的包名交给 MainActivity，由它在 onResume（已在前台）时去 startActivity，
+     * 系统当成前台启动，Flyme 就给全屏。等目标到前台最多 5 秒，超时也返回（任务循环下一步会再确认）。 */
+    fun launchAppFullscreenViaActivity(ctx: Context, pkg: String, appName: String): String {
+        val intent = android.content.Intent(ctx, com.jarvis.app.MainActivity::class.java).apply {
+            putExtra(com.jarvis.app.MainActivity.EXTRA_ACTION, "launch_app")
+            putExtra(com.jarvis.app.MainActivity.EXTRA_LAUNCH_PKG, pkg)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        try {
+            ctx.startActivity(intent)
+        } catch (e: Exception) {
+            AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 拉起失败：${e.javaClass.simpleName}，回落普通启动")
+            try {
+                val fallback = ctx.packageManager.getLaunchIntentForPackage(pkg)
+                if (fallback != null) {
+                    fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ctx.startActivity(fallback)
+                }
+            } catch (_: Exception) {
+            }
+            return "正在打开$appName"
+        }
+        // 等目标应用真正到前台（MainActivity 起来到 onResume 再拉目标，需要时间），最多等 5 秒
+        val svc = com.jarvis.app.JarvisAccessibilityService.instance
+        if (svc != null) {
+            for (i in 0 until 17) {
+                try {
+                    Thread.sleep(300)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+                val fg = try {
+                    svc.foregroundPackage()
+                } catch (_: Exception) {
+                    ""
+                }
+                if (fg == pkg) {
+                    AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 已全屏到前台")
+                    return "正在打开$appName"
+                }
+            }
+            val cur = try {
+                svc.foregroundPackage()
+            } catch (_: Exception) {
+                "?"
+            }
+            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 5 秒内没到前台（当前前台：$cur）")
+        } else {
+            try {
+                Thread.sleep(1200)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        return "正在打开$appName"
+    }
+
     /**
      * 常用应用包名直查表（键已小写；查前把名字 trim + lowercase）。
      * 直查失败（包不存在、无启动界面、拉起抛异常）时一律回落到枚举，
@@ -400,7 +461,12 @@ object LocalCommands {
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 try {
-                    if (fullscreen) startActivityFullscreen(ctx, intent) else ctx.startActivity(intent)
+                    if (fullscreen) {
+                        val r = launchAppFullscreenViaActivity(ctx, direct, name.trim())
+                        AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
+                        return r
+                    }
+                    ctx.startActivity(intent)
                     AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
                     return "正在打开${name.trim()}"
                 } catch (_: Exception) {
@@ -438,7 +504,12 @@ object LocalCommands {
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            if (fullscreen) startActivityFullscreen(ctx, intent) else ctx.startActivity(intent)
+            if (fullscreen) {
+                val r = launchAppFullscreenViaActivity(ctx, found.second, found.first)
+                AuditLog.append(ctx, "本地指令", "打开${found.first}", "已启动")
+                return r
+            }
+            ctx.startActivity(intent)
         } catch (_: Exception) {
             return "打开${found.first}失败了"
         }

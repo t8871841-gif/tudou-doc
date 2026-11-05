@@ -946,29 +946,10 @@ r.ok || jpeg!= null, r.screenChanged, jpeg, r.code
 "openApp" -> {
 val app = action.optString("app")
 if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, null, "PARSE_ERROR")
-// 跨应用任务循环：全屏启动，截图干净、看图模型干扰少；日常“打开应用”走小窗（LocalCommands 默认）。
+// 跨应用任务循环：前台拉起，直接全屏（jk-v66：不要小窗；反射已死、拖展开靠不住）。
+// launchApp 里已等目标到前台（最多 5 秒），这里不再睡、不再展开。
 val r = LocalCommands.launchApp(ctx, app, fullscreen = true)
-var expandNote = ""
-if (r.startsWith("正在打开")) {
-// A 方案（jk-v64）：反射死了就回落小窗；打开后检测小窗并展开成全屏。
-try { Thread.sleep(1200) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-val pkg = LocalCommands.packageForApp(ctx, app)
-if (pkg == null) {
-AuditLog.append(ctx, "任务循环", "小窗展开", "不知道包名，跳过展开")
-} else {
-try {
-val ex = controller.expandFloatingApp(pkg)
-val detail = ex.optString("detail")
-expandNote = "；$detail"
-AuditLog.append(ctx, "任务循环", "小窗展开", detail)
-} catch (e: Exception) {
-val msg = "展开时出错：${e.message ?: e.javaClass.simpleName}"
-expandNote = "；$msg"
-AuditLog.append(ctx, "任务循环", "小窗展开", msg)
-}
-}
-}
-StepResult(r + expandNote, r.startsWith("正在打开"), null, null, if (r.startsWith("正在打开")) "" else "UNKNOWN")
+StepResult(r, r.startsWith("正在打开"), null, null, if (r.startsWith("正在打开")) "" else "UNKNOWN")
 }
 "browse" -> {
 // 内置浏览器开网页：不用切 Chrome。URL 缺 http(s) 前缀时补 https。

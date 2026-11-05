@@ -85,6 +85,8 @@ class MainActivity : Activity() {
     companion object {
         const val EXTRA_ACTION = "jarvis_action"
         const val EXTRA_TEXT = "jarvis_text"
+        // jk-v66 前台拉起：任务循环要开应用时，把包名交给 MainActivity，由它在 onResume（已在前台）时代开，Flyme 给全屏。
+        const val EXTRA_LAUNCH_PKG = "launch_pkg"
         const val REQ_PICK_MODEL = 5151
         const val REQ_PROJECTION = 5152
         // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
@@ -98,6 +100,9 @@ class MainActivity : Activity() {
     private lateinit var detailView: TextView
     private var orbSwitch: android.widget.Switch? = null
     private var orbSwitchUpdating = false
+    // jk-v66 前台拉起：待代开的包名 + 是否已 resumed（onResume 里才代开，保证是前台身份）。
+    private var pendingLaunchPkg: String? = null
+    private var isResumed = false
     private lateinit var homePanel: LinearLayout
     private lateinit var contentView: LinearLayout
     // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 2/3）。
@@ -3041,6 +3046,8 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         OrbController.setAppForeground(true)
+        isResumed = true
+        maybeLaunchPendingApp()
         if (showingSettings) refresh()
         // 竖屏第 1 批：HUD WebView 竖屏也在舞台里渲染（上 2/3），回前台时恢复渲染并再推一次状态与面板；设置页开着时保持暂停。
         if (!showingSettings && ::hudWebView.isInitialized) {
@@ -3054,6 +3061,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        isResumed = false
         if (::hudWebView.isInitialized) {
             hudWebView.onPause()
         }
@@ -3077,6 +3085,14 @@ class MainActivity : Activity() {
 
     private fun handleAssistIntent(intent: Intent?) {
         JarvisAgent.start(this) // 幂等：App 自己打开时也顺带确保 eventSink 接上（不依赖常驻服务一定先启动）
+        // jk-v66 前台拉起：任务循环把要开的包名交过来；已在前台就直接开，否则等 onResume 再开。
+        if (intent?.getStringExtra(EXTRA_ACTION) == "launch_app") {
+            val pkg = intent.getStringExtra(EXTRA_LAUNCH_PKG).orEmpty()
+            if (pkg.isNotBlank()) {
+                pendingLaunchPkg = pkg
+                maybeLaunchPendingApp()
+            }
+        }
         if (intent?.getStringExtra(EXTRA_ACTION) == "assist") {
             if (::detailView.isInitialized) detailView.text = "已通过悬浮球/磁贴/数字助理唤起，已开始听。"
             JarvisAgent.triggerListenFromAssist(this)
@@ -3091,6 +3107,25 @@ class MainActivity : Activity() {
                     com.jarvis.app.tts.TtsRouter.speak(this, body, onStart = {}, onDone = {})
                 }
             }
+        }
+    }
+
+    /** jk-v66 前台拉起：MainActivity 已在前台时，代开待开的包（前台身份拉起，Flyme 给全屏）。 */
+    private fun maybeLaunchPendingApp() {
+        val pkg = pendingLaunchPkg ?: return
+        if (!isResumed) return
+        pendingLaunchPkg = null
+        try {
+            val launch = packageManager.getLaunchIntentForPackage(pkg)
+            if (launch == null) {
+                AuditLog.append(this, "本地指令", "前台拉起", "$pkg 没有能打开的界面")
+                return
+            }
+            launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(launch)
+            AuditLog.append(this, "本地指令", "前台拉起", "$pkg 已以前台身份拉起")
+        } catch (e: Exception) {
+            AuditLog.append(this, "本地指令", "前台拉起", "$pkg 拉起失败：${e.javaClass.simpleName}")
         }
     }
 

@@ -106,8 +106,8 @@ object SkillRunner {
                 } else {
                     try {
                         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        // 全屏启动：技能打开应用也一样，Flyme 不给小窗，截图干净、看图模型干扰少。
-                        LocalCommands.startActivityFullscreen(ctx, intent)
+                        // 全屏启动（jk-v66）：前台拉起，Flyme 给全屏；反射已死、拖展开靠不住。
+                        LocalCommands.launchAppFullscreenViaActivity(ctx, pkg, pkg)
                         next(OPEN_SETTLE_MS)
                     } catch (e: Exception) {
                         fail("打开 $pkg 出错：${e.message}")
