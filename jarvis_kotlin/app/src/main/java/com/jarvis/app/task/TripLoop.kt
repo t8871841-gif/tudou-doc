@@ -27,6 +27,8 @@ object TripLoop {
     private const val MAX_STEPS = 6
     private const val MAX_REPEATS = 3
     private const val ASK_TIMEOUT_MS = 60_000L
+    /** 阶段 1：一次高德核实（搜地点 / 查路线）最多等 5 分钟，超时就按没核实到处理。 */
+    private const val VERIFY_TIMEOUT_MS = 5 * 60 * 1000L
     private const val TRIP_DIR = "trips"
     private const val PENDING_FILE = "pending.txt"
 
@@ -192,11 +194,20 @@ object TripLoop {
                         val dest = action.optString("destination").ifBlank { "行程" }
                         val summary = action.optString("summary")
                         val itinerary = action.optString("itinerary").ifBlank { summary }
-                        val saved = saveItinerary(ctx, dest, itinerary)
+                        val places = extractStringList(action.optJSONArray("places"))
+                        val legs = extractStringList(action.optJSONArray("legs"))
+                        // 阶段 1：拿高德核实地点和路线，再按核实结果改行程；核实不到就原样存。
+                        val revised = verifyAndRevise(ctx, dest, summary, itinerary, places, legs) { alive() }
+                        val finalSummary = revised?.first ?: summary
+                        val finalItinerary = revised?.second ?: itinerary
+                        val saved = saveItinerary(ctx, dest, finalItinerary)
                         history += "第 $step 步：done — 已存 $saved"
                         AuditLog.append(ctx, "行程规划", "done", saved)
-                        finalReply = if (summary.isNotBlank()) {
-                            "$summary\n行程全文已存好（$saved），要看全文、改哪天，随时说。"
+                        val verifyNote = if (revised == null && (places.isNotEmpty() || legs.isNotEmpty())) {
+                            "（这次高德没核实到，行程是按模型知识排的）"
+                        } else ""
+                        finalReply = if (finalSummary.isNotBlank()) {
+                            "$finalSummary$verifyNote\n行程全文已存好（$saved），要看全文、改哪天，随时说。"
                         } else {
                             "行程排好了，全文已存好（$saved），要看全文、改哪天，随时说。"
                         }
@@ -289,6 +300,105 @@ object TripLoop {
         return "$kind:$key"
     }
 
+    // ---------- 阶段 1：高德核实 ----------
+
+    /**
+     * 拿高德核实地点和路线，再按核实结果改行程。返回改好的（summary，itinerary），
+     * 核实不到或改不下去返回 null——调用方原样存，不卡住行程。
+     * 全程 fail-soft：核实子任务超时、没开无障碍、改行程问模型失败，都只记
+     * 一笔审计，不拦着出结果。
+     */
+    private fun verifyAndRevise(
+        ctx: Context, dest: String, summary: String, itinerary: String,
+        places: List<String>, legs: List<String>, isAliveFn: () -> Boolean
+    ): Pair<String, String>? {
+        if (places.isEmpty() && legs.isEmpty()) {
+            AuditLog.append(ctx, "行程规划", "核实跳过", "模型没给地点和路线，没什么可核实的")
+            return null
+        }
+        // 核实子任务是内部任务：先把用户自己的断点取走（TaskLoop.run 开头会清断点），
+        // 核实完再还回来，免得用户一句“继续”被内部任务顶掉。
+        val savedBreakpoint = TaskResumeState.take()
+        try {
+            val placeResult = if (places.isNotEmpty()) {
+                val list = places.take(10)
+                AuditLog.append(ctx, "行程规划", "核实地点", list.joinToString("、"))
+                runVerifyTask(
+                    ctx,
+                    "打开高德地图，依次搜索以下地点，搜完告诉我每个地方存不存在、地址是什么（只报结果，不用导航）：${list.joinToString("、")}",
+                    isAliveFn
+                )
+            } else "（没有要核实的地点）"
+            val routeResult = if (legs.isNotEmpty()) {
+                val list = legs.take(8)
+                AuditLog.append(ctx, "行程规划", "核实路线", list.joinToString("、"))
+                runVerifyTask(
+                    ctx,
+                    "打开高德地图，依次查以下几段路的驾车路线，告诉我每段的距离和大概开车时间：${list.joinToString("、")}",
+                    isAliveFn
+                )
+            } else "（没有要核实的路线）"
+            // 按核实结果改行程。
+            val userText = "原行程（目的地：$dest）：\n$itinerary\n\n" +
+                "地点核实结果（高德）：\n$placeResult\n\n" +
+                "路线核实结果（高德）：\n$routeResult\n\n" +
+                "现在只输出下一步的一个 JSON 动作。"
+            val reply = try {
+                askModel(ctx, TRIP_REVISE_PROMPT, userText)
+            } catch (e: Exception) {
+                AuditLog.append(ctx, "行程规划", "改行程问模型失败", e.message ?: "")
+                return null
+            } ?: return null
+            val action = parseAction(reply) ?: return null
+            if (action.optString("action") != "done") return null
+            val newSummary = action.optString("summary").ifBlank { summary }
+            val newItinerary = action.optString("itinerary").ifBlank { itinerary }
+            AuditLog.append(ctx, "行程规划", "核实改行程", "已按高德结果改")
+            return newSummary to newItinerary
+        } finally {
+            // 清掉核实子任务可能留下的断点（那是内部任务，用户续它没意义），
+            // 再把用户原来的断点还回来。
+            TaskResumeState.clear()
+            if (savedBreakpoint != null) TaskResumeState.restore(savedBreakpoint)
+        }
+    }
+
+    /**
+     * 调一次 TaskLoop 去高德核实，阻塞等结果。TaskLoop 的 onReply 只在 alive 时
+     * 才调（不 alive 时不调），所以不能一次等满超时：每 10 秒看一眼是不是被
+     * 打断了，超时或被打断都返回说明，不卡住行程。
+     */
+    private fun runVerifyTask(ctx: Context, taskText: String, isAliveFn: () -> Boolean): String {
+        val latch = CountDownLatch(1)
+        var result: String? = null
+        TaskLoop.run(ctx, taskText, isAlive = isAliveFn) { reply ->
+            result = reply
+            latch.countDown()
+        }
+        val deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS
+        while (true) {
+            if (!isAliveFn()) return "核实被打断（用户发了新指令），没拿到结果"
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0) return "核实超时（${VERIFY_TIMEOUT_MS / 1000 / 60} 分钟没跑完），没拿到结果"
+            if (latch.await(minOf(remaining, 10_000), TimeUnit.MILLISECONDS)) break
+        }
+        // 注意：result 是被闭包改写的 var，判空前先存到 val 再用，
+        // 否则智能转换失效（jk-v63 编译错的教训）。
+        val r = result
+        if (r.isNullOrBlank()) return "核实没返回结果"
+        return r
+    }
+
+    private fun extractStringList(arr: org.json.JSONArray?): List<String> {
+        if (arr == null) return emptyList()
+        val out = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val s = arr.optString(i).trim()
+            if (s.isNotEmpty()) out += s
+        }
+        return out
+    }
+
     // ---------- 行程文件 ----------
 
     private fun todayString(): String =
@@ -321,13 +431,30 @@ object TripLoop {
             "1. {\"action\":\"ask\",\"question\":\"问题\"}：关键信息缺了才问，一次只问一个问题。" +
             "只问目的地或天数这两样关键的；人数、预算、想玩什么不用问，按默认来（2 个人、中等预算、经典景点），" +
             "在行程里把假设写清楚。\n" +
-            "2. {\"action\":\"done\",\"destination\":\"目的地\",\"summary\":\"简短口头版\",\"itinerary\":\"完整行程\"}：行程排好了。" +
+            "2. {\"action\":\"done\",\"destination\":\"目的地\",\"summary\":\"简短口头版\",\"itinerary\":\"完整行程\",\"places\":[\"地点1\",\"地点2\"],\"legs\":[\"A到B\",\"C到D\"]}：行程排好了。" +
             "summary 是念给用户听的短版（几天、每天一句话，不超过 100 字）；itinerary 是完整行程（Markdown，" +
             "按天排：每天上午/下午/晚上去哪、先后顺序、每个地方大概待多久、两地之间怎么走、大概吃什么）。\n" +
             "只写有名的地方，别编具体的饭馆名、酒店名；不确定的地方宁可不写；每天排 2 到 4 个景点，别赶；" +
             "最后一天要写返程。\n" +
+            "places 是行程里提到的所有地点名（按出现顺序，去重）；legs 是相邻两站之间的路（格式「A到B」），" +
+            "这两个字段是给高德核实用的，别漏。\n" +
             "3. {\"action\":\"fail\",\"reason\":\"做不下去的原因\"}：排不出来（比如没说去哪、用户又不肯说）。\n" +
             "规则：先看用户给了目的地和天数没有，缺关键的就 ask；齐了就 done；" +
             "用户的补充回答如果跟行程无关（问天气、闲聊），输出 fail，reason 说清这句不是在回答行程问题。"
+
+        /**
+         * 阶段 1 改行程的 system prompt：输入是原行程 + 高德核实结果，
+         * 输出改好的行程。高德给的距离和时间是实的，按它改；高德说不存在
+         * 的地方删掉；没核实到的保留原样并标注。
+         */
+        private const val TRIP_REVISE_PROMPT = "你是一个行程规划助手，正在按高德地图的核实结果修改一份行程。" +
+            "输入是原行程 + 高德核实结果（每个地方存不存在、地址；每段路的距离和时间）。" +
+            "你每次只输出一个 JSON 动作，不要任何其他文字。可用动作：\n" +
+            "1. {\"action\":\"done\",\"destination\":\"目的地\",\"summary\":\"简短口头版\",\"itinerary\":\"修改后的完整行程\"}：改好了。\n" +
+            "2. {\"action\":\"fail\",\"reason\":\"原因\"}：核实结果太乱、改不下去。\n" +
+            "规则：高德说不存在的地方，从行程里删掉（在 summary 里说删了哪个）；" +
+            "高德给的距离和时间是实的，按它改每天的顺序和每个地方待多久；" +
+            "没核实到的地方保留原样，但在行程里标注「没核实到」；" +
+            "其他内容不动；summary 不超过 100 字，要说清改了什么、删了什么。"
     }
 }

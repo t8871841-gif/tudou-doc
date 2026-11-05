@@ -39,6 +39,23 @@ object TaskResumeState {
 
     fun clear() { pending = null }
 
+    /**
+     * 暂时取走待处理的断点（调用方自己保管，用完再还回来）；没有返回 null。
+     * 给内部子任务用的：TripLoop 的高德核实是内部调 TaskLoop，TaskLoop.run
+     * 开头会清断点——先取走，核实完再还回来，免得用户一句“继续”被内部任务顶掉。
+     */
+    fun take(): ResumeInfo? {
+        val p = pending ?: return null
+        pending = null
+        if (System.currentTimeMillis() > p.expiresAt) return null
+        return p.info
+    }
+
+    /** 把取走的断点还回来（重新给 10 分钟有效期——核实那几分钟不算在用户头上）。 */
+    fun restore(info: ResumeInfo) {
+        pending = Pending(info, System.currentTimeMillis() + TTL_MS)
+    }
+
     /** 停在哪一步，仅用于停下时的播报；没有待处理项返回 null。 */
     fun pendingStepsDone(): Int? {
         val p = pending ?: return null
