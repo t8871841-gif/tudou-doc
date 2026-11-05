@@ -53,6 +53,51 @@ object TripLoop {
         return TRIP_KEYWORDS.any { t.contains(it) }
     }
 
+    /**
+     * 阶段 2：改行程的句式——必须带行程锚点（“行程”或“第X天”）+ 改/换动词，
+     * 才算改行程。光说“换成”不算（“把壁纸换成那张图”不是改行程）。
+     * 注意：“改行程”只有 3 个字，所以长度门槛是 3，不是规划句式的 4。
+     */
+    fun looksLikeTripRevision(text: String): Boolean {
+        val t = text.trim()
+        if (t.length < 3) return false
+        val hasTripAnchor = t.contains("行程") ||
+            Regex("第[一二三四五六七八九十0-9]+天").containsMatchIn(t)
+        val hasEditVerb = t.contains("改") || t.contains("换")
+        return hasTripAnchor && hasEditVerb
+    }
+
+    /** 阶段 2：看行程的句式（读最新存档，不进规划循环）。 */
+    private val TRIP_VIEW_KEYWORDS = listOf(
+        "看行程", "打开行程", "上次的行程", "我的行程", "行程呢", "看看行程",
+    )
+
+    fun looksLikeTripView(text: String): Boolean {
+        val t = text.trim()
+        if (t.length < 3) return false
+        return TRIP_VIEW_KEYWORDS.any { t.contains(it) }
+    }
+
+    /** 是否存过行程（trips/ 下有没有 .md 文件）。 */
+    fun hasSavedTrip(ctx: Context): Boolean {
+        return try {
+            tripDir(ctx).listFiles()?.any { it.isFile && it.name.endsWith(".md") } == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** 最新的行程文件（按修改时间），没有返回 null。 */
+    fun latestTripFile(ctx: Context): File? {
+        return try {
+            tripDir(ctx).listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".md") }
+                ?.maxByOrNull { it.lastModified() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** 急停：自增序号，正在跑的循环下一步检查时自行中止（与 CodeLoop 同款）。 */
     fun cancelInFlight() {
         runSeq.incrementAndGet()
@@ -120,9 +165,12 @@ object TripLoop {
     ) {
         fun alive() = mySeq == runSeq.get() && isAlive()
         // 新的行程句式 = 从头排，旧的待问问题作废；否则是回答上一轮的追问，
-        // 把原任务 + 这一句拼起来接着排。
+        // 把原任务 + 这一句拼起来接着排。改行程 / 看行程优先于待问回答：
+        // “第二天改去华山”不是在回答“去哪、玩几天”，而是改已存的行程。
         val fresh = looksLikeTripTask(taskText)
-        val pending = if (fresh) null else loadPending(ctx)
+        val isRevision = !fresh && looksLikeTripRevision(taskText)
+        val isView = !fresh && !isRevision && looksLikeTripView(taskText)
+        val pending = if (fresh || isRevision || isView) null else loadPending(ctx)
         val effectiveTask = if (pending != null) {
             val orig = pending.substringBefore("\n---\n").ifBlank { pending }
             "$orig\n用户补充回答：$taskText"
@@ -138,6 +186,77 @@ object TripLoop {
         var finalReply: String? = null
         running = true
         try {
+            // ---------- 阶段 2：改行程 / 看行程——单次处理，不进规划循环 ----------
+            if (isRevision) {
+                if (!alive()) {
+                    finalReply = null
+                    return
+                }
+                val file = latestTripFile(ctx)
+                if (file == null) {
+                    finalReply = "还没存过行程，先说一句「帮我规划去哪玩几天」，排好再改。"
+                    AuditLog.append(ctx, "行程规划", "改行程", "没有已存行程")
+                    return
+                }
+                val original = try { file.readText() } catch (_: Exception) { "" }
+                if (original.isBlank()) {
+                    finalReply = "行程文件是空的，改不了。你再说一遍想去哪、玩几天，我重新排。"
+                    return
+                }
+                AuditLog.append(ctx, "行程规划", "改行程", "${file.name}：$taskText")
+                val editText = "原行程：\n$original\n\n用户要求改：$taskText\n\n现在只输出下一步的一个 JSON 动作。"
+                val editReply = try {
+                    askModel(ctx, TRIP_EDIT_PROMPT, editText)
+                } catch (e: Exception) {
+                    finalReply = "改行程问模型失败：${e.message ?: ""}，原行程没动。"
+                    AuditLog.append(ctx, "行程规划", "改行程问模型失败", e.message ?: "")
+                    return
+                }
+                if (editReply == null) {
+                    finalReply = "改行程问模型超时，原行程没动。"
+                    return
+                }
+                val editAction = parseAction(editReply)
+                if (editAction == null || editAction.optString("action") != "done") {
+                    val reason = editAction?.optString("reason")?.ifEmpty { "改不了" } ?: "改不了"
+                    finalReply = "行程没改成：$reason。原行程没动。"
+                    return
+                }
+                val newItinerary = editAction.optString("itinerary")
+                val changeSummary = editAction.optString("summary")
+                if (newItinerary.isBlank()) {
+                    finalReply = "模型没给改好的行程，原行程没动。"
+                    return
+                }
+                try {
+                    file.writeText(newItinerary)
+                } catch (e: Exception) {
+                    finalReply = "改好的行程存文件失败：${e.message}，原行程没动。"
+                    return
+                }
+                AuditLog.append(ctx, "行程规划", "改行程完成", file.name)
+                finalReply = if (changeSummary.isNotBlank()) {
+                    "$changeSummary\n已改好，存在原文件（${file.name}）里。改的部分这次没拿高德核实，要核实再说一声。"
+                } else {
+                    "已改好，存在原文件（${file.name}）里。改的部分这次没拿高德核实，要核实再说一声。"
+                }
+                return
+            }
+            if (isView) {
+                val file = latestTripFile(ctx)
+                if (file == null) {
+                    finalReply = "还没存过行程，先说一句「帮我规划去哪玩几天」，排好再看。"
+                    return
+                }
+                val content = try { file.readText() } catch (_: Exception) { "" }
+                if (content.isBlank()) {
+                    finalReply = "行程文件是空的。"
+                    return
+                }
+                AuditLog.append(ctx, "行程规划", "看行程", file.name)
+                finalReply = "最近的行程是 ${file.name}：\n${tripHeadlines(content)}"
+                return
+            }
             var step = 0
             stepLoop@ while (step < MAX_STEPS) {
                 if (!alive()) {
@@ -401,6 +520,16 @@ object TripLoop {
 
     // ---------- 行程文件 ----------
 
+    /** 看行程用的摘要：取标题行和每天的标题行，最多 12 行；没有就取前 300 字。 */
+    private fun tripHeadlines(content: String): String {
+        val heads = content.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("#") || (it.contains("第") && it.contains("天") && it.length <= 40) }
+            .take(12)
+            .toList()
+        return if (heads.isNotEmpty()) heads.joinToString("\n") else content.take(300)
+    }
+
     private fun todayString(): String =
         SimpleDateFormat("yyyy-MM-dd EEEE", Locale.CHINA).format(Date())
 
@@ -456,5 +585,20 @@ object TripLoop {
             "高德给的距离和时间是实的，按它改每天的顺序和每个地方待多久；" +
             "没核实到的地方保留原样，但在行程里标注「没核实到」；" +
             "其他内容不动；summary 不超过 100 字，要说清改了什么、删了什么。"
+
+        /**
+         * 阶段 2 改行程的 system prompt：输入是原行程 + 用户的修改要求，
+         * 输出改好的完整行程。只动用户说的那部分，其他一字不动；用户说
+         * 的目的地跟原行程对不上时不硬改，输出 fail 说清。
+         */
+        private const val TRIP_EDIT_PROMPT = "你是一个行程规划助手，正在按用户的要求修改一份已有的行程。" +
+            "输入是原行程 + 用户的修改要求。" +
+            "你每次只输出一个 JSON 动作，不要任何其他文字。可用动作：\n" +
+            "1. {\"action\":\"done\",\"summary\":\"改了什么（短版，不超过 100 字）\",\"itinerary\":\"修改后的完整行程\"}：改好了。\n" +
+            "2. {\"action\":\"fail\",\"reason\":\"原因\"}：改不了（比如要求不清楚、跟原行程对不上）。\n" +
+            "规则：只改用户说的那部分，其他地方一字不动；用户说改第几天，就只动那一天；" +
+            "新加的地方只写有名的地方，别编饭馆名、酒店名；改完的行程每天还是 2 到 4 个景点，别赶；" +
+            "如果用户提到的目的地跟原行程对不上（比如原行程是北京、用户说改西安的），" +
+            "不要硬改，输出 fail，reason 说清对不上，让他重说。"
     }
 }
