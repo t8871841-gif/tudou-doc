@@ -8,7 +8,6 @@ import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.command.LocalCommands
-import com.jarvis.app.net.AgnesClient
 import com.jarvis.app.net.AutoGLMClient
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.screen.ScreenCapture
@@ -40,7 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   的 MAX_HISTORY_CHARS 截断思路；本工程是一次性提示词，预算按单条提示词定）。
  * - 截图策略（ToolSchemas 的纪律）：界面树大纲是默认观察，截图只在树为空
  *   （自绘界面/被扣留）、上一步失败或界面没变化需要核对、或 zoom 要求时才带；
- *   任务大脑（Agnes / 自定义）都带图问。无障碍截图拿不到图而录屏通道
+ *   任务大脑（AutoGLM / 自定义）都带图问。无障碍截图拿不到图而录屏通道
  *   （[ScreenCapture]，批十四移植）可用时用它兜底，图上无网格、只许看不许按
  *   图瞄准，提示词里会标明来源；隐私黑名单包（isShotBlocked）两条通道都不拍。
  *
@@ -311,7 +310,7 @@ object TaskLoop {
                     if (prevOutcomeUnknown) append("上一步结果未知：不知道那个动作成没成，先看一眼界面（紧凑表和截图）确认成没成，再决定下一步，不要直接重做同样的动作。\n")
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
-                // 任务大脑（Agnes / 自定义）都带图问；紧凑表空白且最终不带图时，
+                // 任务大脑（AutoGLM / 自定义）都带图问；紧凑表空白且最终不带图时，
                 // 明确告知模型它看不到可操作元素，别让它空转。
                 val sendImage = image
                 val askBase = if (compact.isBlank() && sendImage == null) {
@@ -659,22 +658,17 @@ private fun askModel(ctx: Context, userText: String, image: String?): Pair<Strin
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-// 按设置路由任务大脑：自定义模型与 Agnes 一样走 OpenAI 兼容接口、带图问；
+// 按设置路由任务大脑：自定义模型走 OpenAI 兼容接口、带图问；
 // AutoGLM 走手机专用模型（do(...) 格式由 AutoGLMClient 转成 JSON 动作串）。
+// 默认即 autoglm（Agnes 已移除，旧值已迁移）。
 if (JarvisPrefs.getTaskBrain(ctx) == "custom") {
 CustomClient.askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
 onResult = { reply = it; latch.countDown()},
 onError = { error = it; latch.countDown()}
 )
-} else if (JarvisPrefs.getTaskBrain(ctx) == "autoglm") {
-AutoGLMClient.askOnce(
-ctx, SYSTEM_PROMPT, userText, image,
-onResult = { reply = it; latch.countDown()},
-onError = { error = it; latch.countDown()}
-)
 } else {
-AgnesClient.askOnce(
+AutoGLMClient.askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
 onResult = { reply = it; latch.countDown()},
 onError = { error = it; latch.countDown()}

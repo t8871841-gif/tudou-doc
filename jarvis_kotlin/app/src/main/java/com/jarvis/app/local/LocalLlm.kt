@@ -60,7 +60,7 @@ object LocalLlm {
             val trimmed = memoryContext.trim().take(MEMORY_CONTEXT_MAX_CHARS)
             "\n\n$trimmed"
         }
-        // 批九硬约束（与 AgnesClient 同一条线）：本地模型同样不许编造实时信息。
+        // 批九硬约束（与 CustomClient 同一条线）：本地模型同样不许编造实时信息。
         return "<start_of_turn>user\n你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。天气、气温、时间、新闻、价格这类实时信息你没有数据来源，查不到就明说查不到，绝对不要编造具体数值。$memPart\n\n$userText<end_of_turn>\n<start_of_turn>model\n"
     }
 

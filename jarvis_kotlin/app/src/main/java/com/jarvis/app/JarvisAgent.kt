@@ -11,7 +11,7 @@ import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.data.WeatherTool
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
-import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.CustomClient
 import com.jarvis.app.net.ChatRouter
 import com.jarvis.app.skill.SkillItem
 import com.jarvis.app.skill.SkillRunner
@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
  * 二期新增：对话 + 语音的总调度。接管 OrbController 的 eventSink/dartAlive
  * （原来是 Flutter 侧接的，纯 Kotlin 重写后由这里直接接）。
  *
- * 状态机：idle → listening（听） → thinking（问 Agnes） → speaking（EdgeTts 播报） → idle
+ * 状态机：idle → listening（听） → thinking（问 GLM） → speaking（EdgeTts 播报） → idle
  * 任一状态都能被 estop 打断回到 idle；speaking 状态下如果检测到用户开口，按第 6 条做打断。
  */
 object JarvisAgent {
@@ -123,7 +123,7 @@ object JarvisAgent {
     /** 急停 / 打断：取消一切在飞的网络请求、停止 TTS、停止识别，回到 idle，球与气泡已由 OrbController 自己处理。 */
     private fun hardResetToIdle(ctx: Context) {
         genSeq++
-        AgnesClient.cancelInFlight()
+        CustomClient.cancelInFlight()
         TtsRouter.stop()
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
@@ -173,7 +173,7 @@ object JarvisAgent {
         )
     }
 
-    // 三期新增：两类问法在进 Agnes 聊天之前先分流到视觉看屏通道。
+    // 三期新增：两类问法在进 GLM 聊天之前先分流到视觉看屏通道。
     private val TAP_INTENT = Regex("^(帮我)?点(一下|击)?\\s*(.+)$")
     private val SCREEN_QUESTION = Regex("(屏幕上|这上面|这是什么|这是啥|这个(按钮|图标|东西)|这上边)")
     // 发信息缺收件人：以“发信息/发消息/发微信/发短信”开头、却没写给谁的句式。
@@ -332,12 +332,12 @@ object JarvisAgent {
                     speakReply(ctx, mySeq, local)
                     triggerMemoryExtraction(ctx, text, local)
                 } else {
-                    askAgnes(ctx, mySeq, text, memoryContext, localTried = true)
+                    askCustom(ctx, mySeq, text, memoryContext, localTried = true)
                 }
             }
             return
         }
-        askAgnes(ctx, mySeq, text, memoryContext, localTried = false)
+        askCustom(ctx, mySeq, text, memoryContext, localTried = false)
     }
 
     /**
@@ -375,8 +375,8 @@ object JarvisAgent {
         }
     }
 
-    private fun askAgnes(ctx: Context, mySeq: Int, text: String, memoryContext: String, localTried: Boolean) {
-        // 流式对话：Agnes 边吐字边念，第一句完整出来立刻开念，不用等整段回完。
+    private fun askCustom(ctx: Context, mySeq: Int, text: String, memoryContext: String, localTried: Boolean) {
+        // 流式对话：GLM 边吐字边念，第一句完整出来立刻开念，不用等整段回完。
         // onToken/onDone 跑在 OkHttp 线程上，进会话的方法里自己不碰主线程的东西
         // （气泡/TTS/状态都在 TtsRouter 回调里回主线程）；onFinish 在主线程收尾。
         val session = StreamSpeakSession(ctx, mySeq) { fullText ->
@@ -398,7 +398,7 @@ object JarvisAgent {
                 }
             }
         }
-        AgnesClient.askStream(
+        CustomClient.askStream(
             ctx, text, memoryContext = memoryContext,
             onToken = { token -> session.onToken(token) },
             onDone = { session.onStreamDone() },
@@ -435,7 +435,7 @@ object JarvisAgent {
     /**
      * 流式播报：大模型边吐字边念。句子到了就排队，一句接一句念，不用等整段回完——
      * 第一句完整出来立刻开念，体感上“几乎没有延迟”。
-     * 用法：askAgnes 里建一个，onToken 喂增量，onStreamDone 标记流结束；
+     * 用法：askCustom 里建一个，onToken 喂增量，onStreamDone 标记流结束；
      * 队列念空且流已结束时调 onFinish（全文），由调用方做记忆提取与状态收尾。
      * 打断监听只在第一句开念时启动一次（startBargeInWatch 自带 1200ms 延迟），
      * 回声比对取的是实时全文（取数器），流式增长的文本也能过滤。

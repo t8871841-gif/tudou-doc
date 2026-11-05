@@ -11,7 +11,7 @@ import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.TakeoverBorder
 import com.jarvis.app.local.LocalLlm
-import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.CustomClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -69,12 +69,12 @@ object ScreenVisionAgent {
                 if (local != null) {
                     onResult(local)
                 } else {
-                    AgnesClient.askVision(ctx, prompt, b64, onResult, onError)
+                    CustomClient.askVision(ctx, prompt, b64, onResult, onError)
                 }
             }
             return
         }
-        AgnesClient.askVision(ctx, prompt, b64, onResult, { msg ->
+        CustomClient.askVision(ctx, prompt, b64, onResult, { msg ->
             if (mySeq != genSeq || !localReady) {
                 onError(msg)
                 return@askVision

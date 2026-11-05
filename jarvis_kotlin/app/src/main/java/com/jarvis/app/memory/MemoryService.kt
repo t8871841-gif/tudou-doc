@@ -3,7 +3,7 @@ package com.jarvis.app.memory
 import android.content.Context
 import android.util.Log
 import com.jarvis.app.JarvisPrefs
-import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.CustomClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -14,7 +14,7 @@ import kotlin.coroutines.resume
 * 长期记忆服务。批三原版：显式前缀（记住：/记住 /请记住：/请记住 ）拦截写入 + 分域分类 +
 * 对话注入。第一梯队批一升级：
 *   1）新增自然语言隐式提取——对话有了回复之后，另起一次不进历史的单轮模型调用
-*      （AgnesClient.askOnce），让模型自己判断这轮对话里有没有值得长期记的信息，
+*      （CustomClient.askOnce），让模型自己判断这轮对话里有没有值得长期记的信息，
 *      没有就不插库，不是每句话都硬记。
 *   2）注入逻辑从「最近 15 条全量拼」改成按当前这句话做关键词相关性打分 + 重要度/
 *      新鲜度加权，取 Top-N，避免记忆条目一多就把提示词挤爆、或者答非所问。
@@ -146,10 +146,10 @@ object MemoryService {
         }
     }
 
-    /** 把 AgnesClient.askOnce 的回调接口包成挂起函数，失败时返回 null（由调用方决定要不要重试）。 */
+    /** 把 CustomClient.askOnce 的回调接口包成挂起函数，失败时返回 null（由调用方决定要不要重试）。 */
     private suspend fun askOnceSuspend(ctx: Context, systemPrompt: String, userText: String): String? =
         suspendCancellableCoroutine { cont ->
-            AgnesClient.askOnce(
+            CustomClient.askOnce(
                 ctx, systemPrompt, userText, jpegBase64 = null,
                 onResult = { if (cont.isActive) cont.resume(it) },
                 onError = { msg ->

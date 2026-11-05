@@ -57,7 +57,7 @@ import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
-import com.jarvis.app.net.AgnesClient
+import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
 import kotlinx.coroutines.Dispatchers
@@ -249,7 +249,7 @@ class MainActivity : Activity() {
 
         // 第 2 步：状态变化同时推给 HUD（setState）；问答文字走 addBubble 时一并推给 HUD 字幕
         // （addBubble 是打字与语音两条路的唯一汇合点——语音回复走 onReplyText、打字回复走
-        // sendChat/askChatAgnes，都落进 addBubble；只在回调里推会漏掉打字回复）。
+        // sendChat/askChatCustom，都落进 addBubble；只在回调里推会漏掉打字回复）。
         JarvisAgent.onStateChanged = { s -> main.post { onAgentStateChanged(s); pushHudState(s) } }
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
         JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
@@ -774,7 +774,7 @@ class MainActivity : Activity() {
 
         /**
          * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
-         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：agnes 默认 / custom / autoglm）。
+         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：autoglm 默认 / custom）。
          */
         @JavascriptInterface
         fun getModelInfo(): String {
@@ -789,24 +789,25 @@ class MainActivity : Activity() {
                     }
                     "autoglm" -> {
                         // 手机专用模型：地址/模型/Key 复用“自定义大模型”三项（填智谱地址与 autoglm-phone）。
-                        // 不能掉进下面的 else（Agnes）分支，否则 HUD 型号面板会错显示 Agnes。
+                        // 不能掉进下面的 else 分支，否则 HUD 型号面板会错显示。
                         o.put("provider", "autoglm")
                         o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
                         o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
                         o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
                     }
                     else -> {
-                        o.put("provider", "agnes")
-                        o.put("base_url", AgnesClient.BASE_URL)
-                        o.put("model", AgnesClient.MODEL)
-                        o.put("has_key", JarvisPrefs.getAgnesKey(this@MainActivity).isNotBlank())
+                        // 默认 autoglm（Agnes 已移除）。
+                        o.put("provider", "autoglm")
+                        o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
+                        o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
+                        o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
                     }
                 }
                 o.put("local_enabled", JarvisPrefs.isLocalLlmEnabled(this@MainActivity))
                 o.put("name", "")
                 o.toString()
             } catch (e: Exception) {
-                "{\"provider\":\"agnes\",\"base_url\":\"\",\"model\":\"\",\"has_key\":false,\"local_enabled\":false,\"name\":\"\"}"
+                "{\"provider\":\"autoglm\",\"base_url\":\"\",\"model\":\"\",\"has_key\":false,\"local_enabled\":false,\"name\":\"\"}"
             }
         }
     }
@@ -1165,7 +1166,7 @@ class MainActivity : Activity() {
                       } else if (info.provider === 'autoglm') {
                         presets.push({id:'autoglm', name:'AutoGLM', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       } else {
-                        presets.push({id:'agnes', name:'Agnes', base_url: info.base_url, model: info.model, key: true, key_url: ''});
+                        presets.push({id:'autoglm', name:'AutoGLM', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       }
                       ONBOARD.msg({kind:'status', presets: presets, configured: !!info.has_key, provider: info.provider, base_url: info.base_url, model: info.model, has_key: !!info.has_key, name: info.name || ''});
                     } catch(e){ console.warn('hud model:', e); }
@@ -1708,10 +1709,10 @@ class MainActivity : Activity() {
                     triggerMemoryExtraction(q, local)
                     return@launch
                 }
-                askChatAgnes(q, mem, localTried = true)
+                askChatCustom(q, mem, localTried = true)
                 return@launch
             }
-            askChatAgnes(q, mem, localTried = false)
+            askChatCustom(q, mem, localTried = false)
         }
     }
 
@@ -1724,7 +1725,7 @@ class MainActivity : Activity() {
 
     /**
      * 第一梯队批二：视觉链路自测——现画一张白底黑字写着一个随机数字的小图，发给
-     * AgnesClient.askVision 问"图里是什么数字"，回复里包含这个数字才算真正识图成功。
+     * CustomClient.askVision 问"图里是什么数字"，回复里包含这个数字才算真正识图成功。
      * 只是"接口没报 HTTP 错误"不算数——模型完全可能忽略图片、只按文字瞎编一个答案，
      * 那种情况下旧的"接口通不通"判断法会误报"能用"。
      */
@@ -1743,7 +1744,7 @@ class MainActivity : Activity() {
         val out = java.io.ByteArrayOutputStream()
         bmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
         val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-        AgnesClient.askVision(
+        CustomClient.askVision(
             this, "这张图片正中央写着一个阿拉伯数字，只回答这一个数字，不要任何其他文字。", b64,
             onResult = { reply ->
                 val got = Regex("\\d").find(reply)?.value
@@ -1763,8 +1764,8 @@ class MainActivity : Activity() {
         uiScope.launch { MemoryService.extractImplicit(this@MainActivity, userText, reply) }
     }
 
-    private fun askChatAgnes(text: String, mem: String, localTried: Boolean) {
-        AgnesClient.ask(this, text, memoryContext = mem,
+    private fun askChatCustom(text: String, mem: String, localTried: Boolean) {
+        CustomClient.ask(this, text, memoryContext = mem,
             onResult = { reply ->
                 runOnUiThread {
                     chatInFlight = false
@@ -2144,35 +2145,20 @@ class MainActivity : Activity() {
         }
         root.addView(section)
 
-        root.addView(sectionTitle("对话 Key"))
-        val keyLabel = TextView(this).apply {
-            text = "Agnes API Key（对话用，不会写死在代码里）"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt())
-        }
-        val keyInput = EditText(this).apply {
-            hint = "在此粘贴 Key"; setTextColor(Color.WHITE)
-            setText(JarvisPrefs.getAgnesKey(this@MainActivity))
-        }
-        root.addView(keyLabel)
-        root.addView(keyInput)
-        root.addView(primaryBtn("保存 Key") {
-            JarvisPrefs.setAgnesKey(this, keyInput.text.toString())
-            toast("已保存")
-        })
-
+        // 对话与跨应用任务共用下面“自定义大模型”三项（默认预填智谱 GLM）。
         // ---- 跨应用任务模型切换 + 自定义大模型 ----
-        // 任务循环（task/TaskLoop）的大脑三选一：Agnes 带图问；自定义走用户自己填的
-        // OpenAI 兼容接口，同样带图问；AutoGLM 走手机专用模型 autoglm-phone
+        // 任务循环（task/TaskLoop）的大脑二选一：自定义走用户自己填的
+        // OpenAI 兼容接口，带图问；AutoGLM 走手机专用模型 autoglm-phone
         //（do(...) 格式由 AutoGLMClient 转成 JSON 动作），接口地址/模型名/Key
         // 复用下面“自定义大模型”三项（填智谱地址与 autoglm-phone）。
-        root.addView(segmentedRow("跨应用任务模型", listOf("Agnes", "自定义", "AutoGLM"),
-            when (JarvisPrefs.getTaskBrain(this)) { "custom" -> 1; "autoglm" -> 2; else -> 0 }) { i ->
-            val next = when (i) { 1 -> "custom"; 2 -> "autoglm"; else -> "agnes" }
+        root.addView(segmentedRow("跨应用任务模型", listOf("自定义", "AutoGLM"),
+            when (JarvisPrefs.getTaskBrain(this)) { "custom" -> 0; else -> 1 }) { i ->
+            val next = when (i) { 0 -> "custom"; else -> "autoglm" }
             JarvisPrefs.setTaskBrain(this, next)
             toast(
                 when (next) {
                     "custom" -> "跨应用任务改用自定义大模型（带截图问）"
-                    "autoglm" -> "跨应用任务改用 AutoGLM 手机专用模型（带截图问）"
-                    else -> "跨应用任务改用 Agnes（带截图问）"
+                    else -> "跨应用任务改用 AutoGLM 手机专用模型（带截图问）"
                 }
             )
         })
@@ -2343,7 +2329,7 @@ class MainActivity : Activity() {
         })
     }
 
-    /** 批二新增：视觉看屏配置——开关、模型/接口/Key 覆盖（留空复用 Agnes）、看屏白名单。（坐标格式已按用户要求删除：网格标定法用不上。） */
+    /** 批二新增：视觉看屏配置——开关、模型/接口/Key 覆盖（留空复用自定义大模型）、看屏白名单。（坐标格式已按用户要求删除：网格标定法用不上。） */
     private fun buildVisionSection(root: LinearLayout) {
         root.addView(TextView(this).apply {
             text = "视觉看屏（截图 + 多模态模型）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
@@ -3157,8 +3143,8 @@ class MainActivity : Activity() {
             appendLine("电池优化豁免：${if (battery) "已豁免" else "未豁免"}")
             appendLine("常驻服务：${if (JarvisForegroundService.running) "运行中" else "未运行"}")
             appendLine("悬浮球：${if (OrbController.isEnabled()) "已开启" else "已关闭"}")
-            val keyOk = JarvisPrefs.getAgnesKey(this@MainActivity).isNotBlank()
-            appendLine("Agnes 对话 Key：${if (keyOk) "已配置" else "未配置（对话会报错）"}")
+            val keyOk = JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank()
+            appendLine("对话 Key（自定义大模型）：${if (keyOk) "已配置" else "未配置（对话会报错）"}")
             appendLine("离线语音识别(sherpa-onnx)：${if (OfflineAsrSession.isAvailable(this@MainActivity)) "模型文件已就位" else "缺模型文件(assets/asr 下没放齐 4 个文件)，听写/唤醒词都用不了"}")
             appendLine("语音合成：Edge TTS（云扬），需联网，无需 Key")
             if (a11y) append("无障碍详情：${JarvisAccessibilityService.status()}")

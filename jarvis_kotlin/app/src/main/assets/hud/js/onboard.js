@@ -67,7 +67,7 @@
     el.querySelectorAll('#llmChips button').forEach(b => b.onclick = () => pick(b.dataset.id));
     $('#llmName').value = m.name && m.name !== 'sir' ? m.name : '';
     if (m.configured) { pick(m.provider || 'custom', true); $('#llmBase').value = m.base_url; $('#llmModel').value = m.model; }
-    else pick('agnes');
+    else pick('autoglm');
     if (!m.configured && !S.asked) { S.asked = true; open(); }
   }
 

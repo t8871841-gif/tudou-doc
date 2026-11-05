@@ -4,13 +4,12 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * 二期新增：统一的设置读写（Agnes 对话 Key、唤醒词开关与灵敏度、打断说话开关）。
+ * 二期新增：统一的设置读写（自定义大模型 GLM、唤醒词开关与灵敏度、打断说话开关）。
  * Key 只存本机 SharedPreferences，不写死在代码里，不上传。
  */
 object JarvisPrefs {
     private const val FILE = "jarvis_settings"
-    private const val KEY_AGNES_KEY = "agnes_api_key"
-    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：agnes（默认）/ custom / autoglm
+    private const val KEY_TASK_BRAIN = "task_brain" // 跨应用任务循环用哪个模型：autoglm（默认）/ custom
     private const val KEY_CUSTOM_BASE_URL = "custom_base_url"
     private const val KEY_CUSTOM_MODEL = "custom_model"
     private const val KEY_CUSTOM_API_KEY = "custom_api_key"
@@ -20,19 +19,16 @@ object JarvisPrefs {
     private fun p(ctx: Context): SharedPreferences =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    fun getAgnesKey(ctx: Context): String = p(ctx).getString(KEY_AGNES_KEY, "") ?: ""
-    fun setAgnesKey(ctx: Context, key: String) {
-        p(ctx).edit().putString(KEY_AGNES_KEY, key.trim()).apply()
-    }
-
     // ---------- 自定义大模型（OpenAI 兼容接口） + 跨应用任务模型选择 ----------
 
-    fun getCustomBaseUrl(ctx: Context): String = p(ctx).getString(KEY_CUSTOM_BASE_URL, "") ?: ""
+    fun getCustomBaseUrl(ctx: Context): String =
+        p(ctx).getString(KEY_CUSTOM_BASE_URL, "https://open.bigmodel.cn/api/paas/v4") ?: "https://open.bigmodel.cn/api/paas/v4"
     fun setCustomBaseUrl(ctx: Context, v: String) {
         p(ctx).edit().putString(KEY_CUSTOM_BASE_URL, v.trim()).apply()
     }
 
-    fun getCustomModel(ctx: Context): String = p(ctx).getString(KEY_CUSTOM_MODEL, "") ?: ""
+    fun getCustomModel(ctx: Context): String =
+        p(ctx).getString(KEY_CUSTOM_MODEL, "autoglm-phone") ?: "autoglm-phone"
     fun setCustomModel(ctx: Context, v: String) {
         p(ctx).edit().putString(KEY_CUSTOM_MODEL, v.trim()).apply()
     }
@@ -42,7 +38,11 @@ object JarvisPrefs {
         p(ctx).edit().putString(KEY_CUSTOM_API_KEY, key.trim()).apply()
     }
 
-    fun getTaskBrain(ctx: Context): String = p(ctx).getString(KEY_TASK_BRAIN, "agnes") ?: "agnes"
+    // 默认 autoglm；旧存量 "agnes" 一律迁移到 autoglm（Agnes 已从 Jarvis 移除）。
+    fun getTaskBrain(ctx: Context): String {
+        val v = p(ctx).getString(KEY_TASK_BRAIN, "autoglm") ?: "autoglm"
+        return if (v == "agnes") "autoglm" else v
+    }
     fun setTaskBrain(ctx: Context, v: String) {
         p(ctx).edit().putString(KEY_TASK_BRAIN, v.trim()).apply()
     }
@@ -268,9 +268,9 @@ object JarvisPrefs {
     // ---------- 批二：视觉看屏配置 ----------
 
     private const val KEY_VISION_ENABLED = "vision_enabled"
-    private const val KEY_VISION_MODEL = "vision_model" // 留空 = 复用 Agnes 对话模型
-    private const val KEY_VISION_BASE = "vision_base_url" // 留空 = 复用 Agnes 接口地址
-    private const val KEY_VISION_KEY = "vision_api_key" // 留空 = 复用 Agnes Key
+    private const val KEY_VISION_MODEL = "vision_model" // 默认 glm-4v-plus（GLM 视觉模型）
+    private const val KEY_VISION_BASE = "vision_base_url" // 默认智谱地址
+    private const val KEY_VISION_KEY = "vision_api_key" // 留空 = 复用自定义大模型 Key
     private const val KEY_VISION_WHITELIST = "vision_whitelist" // 每行一个包名
 
     fun isVisionEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_VISION_ENABLED, true)
@@ -278,10 +278,12 @@ object JarvisPrefs {
         p(ctx).edit().putBoolean(KEY_VISION_ENABLED, on).apply()
     }
 
-    fun getVisionModel(ctx: Context): String = p(ctx).getString(KEY_VISION_MODEL, "") ?: ""
+    fun getVisionModel(ctx: Context): String =
+        p(ctx).getString(KEY_VISION_MODEL, "glm-4v-plus") ?: "glm-4v-plus"
     fun setVisionModel(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_MODEL, v.trim()).apply() }
 
-    fun getVisionBaseUrl(ctx: Context): String = p(ctx).getString(KEY_VISION_BASE, "") ?: ""
+    fun getVisionBaseUrl(ctx: Context): String =
+        p(ctx).getString(KEY_VISION_BASE, "https://open.bigmodel.cn/api/paas/v4") ?: "https://open.bigmodel.cn/api/paas/v4"
     fun setVisionBaseUrl(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_BASE, v.trim()).apply() }
 
     fun getVisionApiKey(ctx: Context): String = p(ctx).getString(KEY_VISION_KEY, "") ?: ""
