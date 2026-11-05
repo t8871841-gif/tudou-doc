@@ -94,6 +94,37 @@ object AutoGLMClient {
         inFlightCall?.cancel()
     }
 
+    /** 从服务端错误体里取 detail（Andee LlmHttpException.detail 同款）。 */
+    private fun errorDetail(body: String): String {
+        val detail = runCatching {
+            val err = JSONObject(body).opt("error")
+            when (err) {
+                is JSONObject -> err.optString("message")
+                is String -> err
+                else -> ""
+            }
+        }.getOrDefault("").ifBlank { body }.trim()
+        return detail
+    }
+
+    /** M27：按 Andee explainFailure 分码给可操作文案，调用方原样报给用户即可。 */
+    private fun httpError(prefix: String, code: Int, body: String): String = when (code) {
+        402 -> "大模型账户余额不足（HTTP 402），请先充值后再试"
+        401, 403 -> "大模型鉴权失败（HTTP $code），请检查 API Key 是否正确、是否过期"
+        400 -> "大模型请求被拒（HTTP 400）：${errorDetail(body).take(160).ifBlank { "HTTP 400" }}"
+        404 -> "大模型接口或模型不存在（HTTP 404），请检查接口地址和模型名是否填对"
+        408, 429 -> "大模型请求太频繁或超时（HTTP $code），请稍等一会儿再试"
+        in 500..599 -> "大模型服务暂时不可用（HTTP $code），请稍后再试"
+        else -> "$prefix：HTTP $code"
+    }
+
+    /** M27：超时 / 断网各一句（Andee explainFailure 同款）。 */
+    private fun networkError(e: IOException): String = when (e) {
+        is java.net.SocketTimeoutException -> "大模型请求超时，请检查网络后重试"
+        is java.net.UnknownHostException, is java.net.ConnectException -> "网络未连接或连不上大模型服务，请检查网络后再试"
+        else -> "网络请求失败：${e.message}"
+    }
+
     /**
      * 单轮调用，不进任何对话历史（任务循环 task/TaskLoop 用）。
      * onResult 收到的是转好的 Jarvis JSON 动作字符串（如 {"action":"tap","x":500,"y":800}），
@@ -109,8 +140,7 @@ object AutoGLMClient {
     ) {
         // M11：发请求前先检查急停。已取消时静默返回、不回调，TaskLoop 的短轮询
         // 凭 alive 检查提前返回 null（与 CustomClient.ask 丢弃已取消回调的做法一致）。
-        val mySeq = cancelSeq
-        if (isAlive?.invoke() == false || mySeq != cancelSeq) return
+        if (isAlive?.invoke() == false) return
         // GLM 模式专用：接口地址与模型名取内置 GLM 配置（智谱 + autoglm-phone），Key 用共用的 API Key 栏位。
         val base = JarvisPrefs.getTaskBaseUrl(ctx).trim().trimEnd('/')
         val model = JarvisPrefs.getTaskModel(ctx)
@@ -123,6 +153,10 @@ object AutoGLMClient {
             onError("未配置 API Key，请先去设置里填写")
             return
         }
+        // C7：新一轮自增序号，旧一轮的 mySeq 从此失效、回调不再生效；同时断开上一轮
+        // 还在飞的请求（之前 mySeq = cancelSeq 不自增，新一轮发出去旧一轮照样回调）。
+        val mySeq = ++cancelSeq
+        inFlightCall?.cancel()
         val userContent: Any = if (jpegBase64.isNullOrBlank()) {
             userText
         } else {
@@ -167,7 +201,7 @@ object AutoGLMClient {
                 if (call === inFlightCall) inFlightCall = null
                 // M11：等待回调时再检查一次急停，已取消就静默丢弃，不回调。
                 if (mySeq != cancelSeq || isAlive?.invoke() == false) return
-                onError("网络请求失败：${e.message}")
+                onError(networkError(e))
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
@@ -175,7 +209,8 @@ object AutoGLMClient {
                 if (mySeq != cancelSeq || isAlive?.invoke() == false) return
                 response.use { resp ->
                     if (!resp.isSuccessful) {
-                        onError("AutoGLM 接口返回错误：HTTP ${resp.code}")
+                        val errBody = resp.body?.string().orEmpty()
+                        onError(httpError("AutoGLM 接口返回错误", resp.code, errBody))
                         return
                     }
                     try {

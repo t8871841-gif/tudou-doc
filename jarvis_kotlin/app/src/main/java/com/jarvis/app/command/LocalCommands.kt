@@ -32,6 +32,8 @@ import java.util.concurrent.Executors
  */
 object LocalCommands {
 
+    // H11：问句词表只在 isQuestion() 里用，不再单独当黑名单前置拦截
+    // （前置拦截会误杀"帮我打开微信好吗"这类带礼貌尾词的真指令）。
     private val QUESTION_HINTS = listOf("吗", "？", "?", "是什么", "为什么", "怎么", "如何")
 
     /** 抓出来的"名字"里出现这些虚词/助词，基本可以断定不是一个人名/应用名，是误套壳的聊天句。 */
@@ -45,28 +47,43 @@ object LocalCommands {
     /** 判名前先剥掉的口语前缀（L7）：否则"我的微信"会因"我的"里含"的"被当成聊天句。 */
     private val NAME_PREFIXES = listOf("请帮我", "麻烦帮我", "我的", "帮我", "麻烦", "请")
 
+    /** H10：口语前缀可多层、复合（"麻烦请帮我"、"请麻烦帮我"），循环剥直到剥不动；
+     *  最长优先，避免"请帮我"被拆成"请"+"帮我"两轮才剥完。只剥句首。 */
+    private val POLITE_PREFIXES = listOf("请帮我", "麻烦帮我", "麻烦请帮我", "请麻烦帮我", "麻烦", "请", "帮我")
+
+    private fun stripPolitePrefixes(s: String): String {
+        var cur = s.trim()
+        while (true) {
+            val hit = POLITE_PREFIXES.firstOrNull { cur.startsWith(it) } ?: break
+            cur = cur.removePrefix(hit).trim()
+        }
+        return cur
+    }
+
     /** 捕获的内容是不是"像"一个真实的人名/应用名——不像就不拦截，交还给原来的聊天流程。 */
     private fun looksLikeLiteralName(s: String): Boolean {
         var name = s.trim()
         // L7：先剥前缀再判长度与虚词——"我的微信支付"剥掉"我的"后才是 4 字的真名；
+        // H10：前缀可复合多层，循环剥（原来只剥一层就 break，"麻烦请帮我微信"会漏）。
         // 剥完仍含"的/了/吧"等虚词或超长，才当成聊天句。
-        for (prefix in NAME_PREFIXES) {
-            if (name.startsWith(prefix)) {
-                name = name.removePrefix(prefix).trim()
-                break
-            }
+        var guard = 0
+        while (guard++ < 4) {
+            val hit = NAME_PREFIXES.firstOrNull { name.startsWith(it) } ?: break
+            name = name.removePrefix(hit).trim()
         }
         return name.isNotBlank() && name.length <= MAX_NAME_LEN && NON_NAME_MARKERS.none { name.contains(it) }
     }
 
-    // M12："帮我/麻烦/请"前缀在打电话/打开/关闭意图里也认（原来只在点按意图里认，
-    // "帮我打开微信"走不到本地指令）。另认常见的复合前缀"请帮我"。
-    private val CALL_WITH_NAME = Regex("^(?:请帮我|帮我|麻烦|请)?(?:打电话给|打个电话给|拨电话给|拨打|呼叫)\\s*(.+)$")
-    private val CALL_GIVE = Regex("^(?:请帮我|帮我|麻烦|请)?给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
+    // M12 + H10："帮我/麻烦/请"前缀在打电话/打开/关闭意图里也认，可多层、复合
+    // （"麻烦帮我"、"请帮我"、"麻烦请帮我"），正则里用 `*` 而不是单选一次。
+    // tryHandle 入口还会先整句剥一层 stripPolitePrefixes，这里是第二道保险。
+    private const val POLITE_PREFIX_GROUP = "(?:请帮我|麻烦帮我|麻烦请帮我|请麻烦帮我|麻烦|请|帮我)*"
+    private val CALL_WITH_NAME = Regex("^$POLITE_PREFIX_GROUP(?:打电话给|打个电话给|拨电话给|拨打|呼叫)\\s*(.+)$")
+    private val CALL_GIVE = Regex("^$POLITE_PREFIX_GROUP给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
     private val CALL_BARE = Regex("^(?:打电话|拨电话|拨号)$")
-    private val OPEN_APP = Regex("^(?:请帮我|帮我|麻烦|请)?(?:打开|开启|启动|进入)\\s*(.+)$")
-    private val CLOSE_APP = Regex("^(?:请帮我|帮我|麻烦|请)?(?:关闭|关掉|退出)\\s*(.+)$")
-    private val CLOSE_APP_BA = Regex("^(?:请帮我|帮我|麻烦|请)?把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
+    private val OPEN_APP = Regex("^$POLITE_PREFIX_GROUP(?:打开|开启|启动|进入)\\s*(.+)$")
+    private val CLOSE_APP = Regex("^$POLITE_PREFIX_GROUP(?:关闭|关掉|退出)\\s*(.+)$")
+    private val CLOSE_APP_BA = Regex("^$POLITE_PREFIX_GROUP把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
 
     // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
     // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
@@ -80,14 +97,16 @@ object LocalCommands {
      *  runJs 是可选的 HUD 桥（MainActivity 注入）：本地指令要动 HUD 时把 JS 串传进去执行；
      *  为空表示主界面没开着，动 HUD 的指令只能回绝，不能硬调。 */
     fun tryHandle(ctx: Context, text: String, speak: (String) -> Unit, runJs: ((String) -> Unit)? = null): Boolean {
-        val t = text.trim()
+        // H10：先整句剥掉口语前缀（可多层、复合），剥完再走打电话/打开应用/系统功能的匹配；
+        // "请帮我打开手电筒"剥完是"打开手电筒"，不再落到"找不到应用"。
+        val t = stripPolitePrefixes(text.trim())
         if (t.isEmpty()) return false
 
         // 第一梯队批二：先看有没有待澄清的选择（比如上一句问了"给哪个？"），这句话
-        // 优先当作回答来解析；命中就在这里直接执行完，不再往下走别的指令匹配。
-        // 没命中（文字既不是取消也配不上任何一项）会被 PendingClarification 自己
-        // 清掉状态并返回 false，交还给下面的正常流程继续处理这句话。
-        if (PendingClarification.hasPending() && PendingClarification.tryResolve(text)) {
+        // 优先当作回答来解析；命中（true）就在这里直接执行完，不再往下走别的指令匹配。
+        // 没命中分两种（M29）：明确取消（false）时状态已消费，这句话继续走正常流程；
+        // 与选项无关（null）时状态不消费，同样继续走正常流程，下一句还能回答澄清。
+        if (PendingClarification.hasPending() && PendingClarification.tryResolve(text) == true) {
             return true
         }
 
@@ -97,7 +116,9 @@ object LocalCommands {
         // 放后面会被 QUESTION_HINTS 的「怎么/吗」先拦掉、永远到不了这里）。
         if (DeviceCommands.tryHandle(ctx, t, speak)) return true
 
-        if (QUESTION_HINTS.any { t.contains(it) }) return false
+        // H11：问句检查不再放在打电话/打开应用匹配之前——"帮我打开微信好吗"
+        // "打电话给妈妈可以吗"先走指令匹配，匹配不上、走到最后才判是不是疑问句。
+        // 见文末 isQuestion：含祈使动词（打开/打电话…）的不是纯疑问句。
         if (TASK_SHAPED.containsMatchIn(t)) return false
 
         // 第二梯队批五：定时提醒句式（"10分钟后提醒我…""晚上10点提醒我…"）优先于
@@ -147,9 +168,11 @@ object LocalCommands {
 
         if (CALL_BARE.matches(t)) {
             io.execute {
-                openDialer(ctx, null)
-                AuditLog.append(ctx, "本地指令", "打电话（无名）", "已跳拨号盘")
-                main.post { speak("拨号盘打开了") }
+                // C11：拨号结果按实际回报——拨出去了就说拨打了，只开了拨号盘就说
+                // "拨号盘打开了，点一下拨出"，失败说原因，不再先开盘紧接着谎报"填好了"。
+                val outcome = dial(ctx, null)
+                AuditLog.append(ctx, "本地指令", "打电话（无名）", outcome.describe())
+                main.post { speak(outcome.speakText("")) }
             }
             return true
         }
@@ -170,7 +193,25 @@ object LocalCommands {
             io.execute { openAppBg(ctx, name, speak) }
             return true
         }
+        // H11：走到这里还没匹配上任何指令，才判是不是疑问句——是就交还聊天流程。
+        if (isQuestion(t)) return false
         return false
+    }
+
+    /** H11：只有确实是疑问句才当聊天——以疑问词开头或纯疑问语气，且不含祈使动词。
+     *  含"打开/打电话/关闭…"的句子是祈使句（哪怕尾巴带"好吗/可以吗"），先走指令匹配。 */
+    private val IMPERATIVE_MARKERS = listOf(
+        "打开", "开启", "启动", "进入", "关闭", "关掉", "退出",
+        "打电话", "打个电话", "拨电话", "拨打", "呼叫",
+        "发信息", "发消息", "发微信", "发短信", "提醒我", "设闹钟", "定闹钟"
+    )
+    private val QUESTION_OPENERS = listOf("为什么", "怎么", "如何", "是什么", "多少", "是不是", "能不能", "会不会", "哪里", "哪儿", "什么")
+
+    private fun isQuestion(t: String): Boolean {
+        if (IMPERATIVE_MARKERS.any { t.contains(it) }) return false
+        if (QUESTION_OPENERS.any { t.startsWith(it) }) return true
+        if (QUESTION_HINTS.any { t.contains(it) }) return true
+        return t.endsWith("呢")
     }
 
     // ---------- 全息拆解：7 台内置机器（名 -> 图 + 标题），列表顺序即匹配优先级 ----------
@@ -235,15 +276,18 @@ object LocalCommands {
         if (matches.size == 1) {
             val pick = matches.first()
             main.post {
-                openDialer(ctx, pick.number)
-                AuditLog.append(ctx, "本地指令", "打电话给${pick.display}", "已跳拨号盘（${pick.numberType}）")
-                speak(if (pick.display == name) "给${name}打，号码已经填好了，点一下就拨"
-                      else "找到${pick.display}，号码已经填好了，点一下就拨")
+                // C11：按实际结果播报——直接拨出去了就说拨打了，只开了拨号盘就说
+                // "拨号盘已打开，点一下拨出"，失败说原因；不再没核对就说"号码已经填好了"。
+                val outcome = dial(ctx, pick.number)
+                AuditLog.append(ctx, "本地指令", "打电话给${pick.display}", outcome.describe())
+                speak(outcome.speakText(if (pick.display == name) "给${name}打" else "给${pick.display}打"))
             }
             return
         }
-        val top = matches.take(5)
-        val options = top.map { hit ->
+        // M28：澄清覆盖全部同名联系人，不再只 take(5)——第 6 个以后的同名联系人
+        // 以前永远选不到。选项全量进 PendingClarification；语音播报列前 10 个，
+        // 超过 10 个时告诉用户总数、让用户说名字或报尾号选（匹配时每一项都能命中）。
+        val options = matches.map { hit ->
             PendingClarification.Option(
                 label = "${hit.display} 尾号${hit.number.takeLast(4)}（${hit.numberType}）",
                 payload = hit.number,
@@ -252,13 +296,15 @@ object LocalCommands {
         }
         main.post {
             PendingClarification.ask(options) { chosen ->
-                openDialer(ctx, chosen.payload)
-                AuditLog.append(ctx, "本地指令", "打电话（澄清后选定）", chosen.label)
-                speak("好，${chosen.label}，号码已经填好了，点一下就拨")
+                val outcome = dial(ctx, chosen.payload)
+                AuditLog.append(ctx, "本地指令", "打电话（澄清后选定）", "${chosen.label}：${outcome.describe()}")
+                speak(outcome.speakText("给${chosen.label}打"))
             }
-            val listText = top.mapIndexed { i, h -> "第${i + 1}个，${h.display} 尾号${h.number.takeLast(4)}" }.joinToString("；")
+            val shown = matches.take(10)
+            val listText = shown.mapIndexed { i, h -> "第${i + 1}个，${h.display} 尾号${h.number.takeLast(4)}" }.joinToString("；")
+            val more = if (matches.size > shown.size) "，还有${matches.size - shown.size}个" else ""
             AuditLog.append(ctx, "本地指令", "打电话给$name·需要澄清", "${matches.size}个匹配，已反问")
-            speak("通讯录里有${matches.size}个叫$name 的：$listText。你说第几个，或者报号码后几位")
+            speak("通讯录里有${matches.size}个叫$name 的：$listText$more。你说第几个，或者报号码后几位，也可以直接说名字")
         }
     }
 
@@ -441,32 +487,56 @@ object LocalCommands {
         "相册" to "com.android.gallery3d"
     )
 
-    /** 按应用名找包名（小窗展开用）：先查常用表，再枚举已装应用按 label 匹配；找不到返回 null。 */
+    /** 按应用名找包名（小窗展开用）：先查常用表，再枚举已装应用按 label 精确匹配
+     *  （C10：忽略大小写，只认精确相等，不做模糊包含）；找不到返回 null。
+     *  同名多包时返回第一个——任务循环里 launchApp 已先报过多候选错误，不会走到这里。 */
     fun packageForApp(ctx: Context, name: String): String? {
         val key = name.trim().lowercase()
         WELL_KNOWN_APPS[key]?.let { return it }
         val pm = ctx.packageManager
-        var best: String? = null
-        var bestLabel: String? = null
         try {
             for (app in pm.getInstalledApplications(0)) {
                 val label = pm.getApplicationLabel(app).toString()
-                // M13：精确匹配优先，全枚举扫完才定（精确命中在后面出现也能抢过前面的模糊候选）。
-                if (label == name.trim()) return app.packageName
-                if (label.length >= 2 &&
-                    (label.contains(name.trim()) || (name.trim().length >= 3 && name.trim().contains(label)))
-                ) {
-                    // M13：模糊匹配不再取枚举到的第一个，取 label 最短（最接近）的候选。
-                    val cur = bestLabel
-                    if (cur == null || label.length < cur.length) {
-                        best = app.packageName
-                        bestLabel = label
-                    }
-                }
+                if (label.equals(name.trim(), ignoreCase = true)) return app.packageName
             }
         } catch (_: Exception) {
         }
-        return best
+        return null
+    }
+
+    /** C10 + M28：按 label 精确匹配（忽略大小写）找全部候选，不做模糊匹配；
+     *  同名应用（如分身/双开）会返回多个，调用方走澄清问用户选哪个，绝不猜一个开。
+     *  枚举异常不上吞，由调用方接住并如实回报。 */
+    private fun findAppCandidates(ctx: Context, name: String): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        val pm = ctx.packageManager
+        for (app in pm.getInstalledApplications(0)) {
+            val label = pm.getApplicationLabel(app).toString()
+            if (label.equals(name.trim(), ignoreCase = true)) {
+                out.add(label to app.packageName)
+            }
+        }
+        return out
+    }
+
+    /** 按包名拉起一个应用，返回结果描述（不播报）；fullscreen 时走前台拉起。 */
+    private fun launchPackage(ctx: Context, pkg: String, label: String, fullscreen: Boolean = false): String {
+        val pm = ctx.packageManager
+        val intent = pm.getLaunchIntentForPackage(pkg)
+            ?: return "$label 没有能打开的界面"
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            if (fullscreen) {
+                val r = launchAppFullscreenViaActivity(ctx, pkg, label)
+                AuditLog.append(ctx, "本地指令", "打开$label", "前台拉起结果：$r")
+                return r
+            }
+            ctx.startActivity(intent)
+        } catch (_: Exception) {
+            return "打开$label 失败了"
+        }
+        AuditLog.append(ctx, "本地指令", "打开$label", "已启动")
+        return "正在打开$label"
     }
 
     // ---------- 打开应用：tryHandle 在 io 线程调进来，枚举/拉起在本线程，回报回主线程 ----------
@@ -476,17 +546,51 @@ object LocalCommands {
             main.post { speak("打开什么？说个应用名") }
             return
         }
+        // M28：同名应用（分身/双开）走澄清问用户选哪个，不静默开一个。
+        // 常用表直查的名字（微信/支付宝…）是唯一包名，不进澄清。
+        if (WELL_KNOWN_APPS[name.trim().lowercase()] == null) {
+            val candidates = try {
+                findAppCandidates(ctx, name)
+            } catch (e: Exception) {
+                main.post { speak("找应用时出错：${e.message ?: e.javaClass.simpleName}") }
+                return
+            }
+            if (candidates.size > 1) {
+                val options = candidates.map { (label, pkg) ->
+                    PendingClarification.Option(
+                        label = "$label（$pkg）",
+                        payload = pkg,
+                        matchNumberTail = ""
+                    )
+                }
+                main.post {
+                    PendingClarification.ask(options) { chosen ->
+                        val result = launchPackage(ctx, chosen.payload, name.trim())
+                        AuditLog.append(ctx, "本地指令", "打开应用（澄清后选定）", "${chosen.label}：$result")
+                        speak(result)
+                    }
+                    val listText = candidates.mapIndexed { i, (_, pkg) -> "第${i + 1}个，$pkg" }.joinToString("；")
+                    AuditLog.append(ctx, "本地指令", "打开$name·需要澄清", "${candidates.size}个同名应用，已反问")
+                    speak("找到${candidates.size}个叫$name 的应用：$listText。你说第几个")
+                }
+                return
+            }
+        }
         val result = launchAppInternal(ctx, name)
         main.post { speak(result) }
     }
 
-    /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。 */
+    /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。
+     *  C10：只认 label 精确匹配（忽略大小写，Andee DeviceActionsController.resolveLabel
+     *  同款）；匹配不上就返回明确错误（让模型看到错误再反问），绝不猜一个打开；
+     *  多个精确候选时不取最短/第一个，返回错误让调用方澄清。 */
     private fun launchAppInternal(ctx: Context, name: String, fullscreen: Boolean = false): String {
         val pm = ctx.packageManager
         // 2026-10-24 跨应用修复第 1 件：按名字枚举应用时好时坏（21:56 任务循环里
         // “微信/WeChat”两次没找到，21:58 同一函数直接说“打开微信”却成功了）——
         // 常用应用先按包名直查，绕过枚举整条路；直查失败（没装/没启动界面）
         // 再回落到枚举。包名都是公开的固定值，不是用户隐私。
+        // 直查表是按名字精确键控的（不是模糊匹配），保留。
         val direct = WELL_KNOWN_APPS[name.trim().lowercase()]
         if (direct != null) {
             val intent = pm.getLaunchIntentForPackage(direct)
@@ -506,52 +610,25 @@ object LocalCommands {
                 }
             }
         }
-        var best: Pair<String, String>? = null // (label, package)，模糊匹配取 label 最短者
         var enumError: String? = null
-        try {
-            for (app in pm.getInstalledApplications(0)) {
-                val label = pm.getApplicationLabel(app).toString()
-                // M13：精确匹配优先，命中即定（break）；模糊候选要扫完全部枚举再取最短。
-                if (label == name) {
-                    best = label to app.packageName
-                    break
-                }
-                if (label.length >= 2 &&
-                    (label.contains(name) || (name.length >= 3 && name.contains(label)))
-                ) {
-                    val cur = best
-                    if (cur == null || label.length < cur.first.length) {
-                        best = label to app.packageName
-                    }
-                }
-            }
+        val exact = try {
+            findAppCandidates(ctx, name)
         } catch (e: Exception) {
             // 旧代码把枚举异常静默吞成“没找到”，下次取证分不清是真没装还是
             // 枚举本身炸了；现在把异常原因带进失败文案。
             enumError = e.message ?: e.javaClass.simpleName
+            emptyList()
         }
-        val found = best
-        if (found == null) {
+        if (exact.isEmpty()) {
             return if (enumError != null) "找应用时出错：$enumError" else "没找到叫${name}的应用"
         }
-        val intent = pm.getLaunchIntentForPackage(found.second)
-        if (intent == null) {
-            return "${found.first}没有能打开的界面"
+        if (exact.size > 1) {
+            // C10：多个精确候选不猜。任务循环/模型侧看到这句错误会再反问；
+            // 语音侧 openAppBg 已先拦截走澄清，不会走到这里。
+            return "找到${exact.size}个叫${name}的应用，没法确定开哪一个，请说清开哪一个"
         }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        try {
-            if (fullscreen) {
-                val r = launchAppFullscreenViaActivity(ctx, found.second, found.first)
-                AuditLog.append(ctx, "本地指令", "打开${found.first}", "前台拉起结果：$r")
-                return r
-            }
-            ctx.startActivity(intent)
-        } catch (_: Exception) {
-            return "打开${found.first}失败了"
-        }
-        AuditLog.append(ctx, "本地指令", "打开${found.first}", "已启动")
-        return "正在打开${found.first}"
-
+        val found = exact.first()
+        return launchPackage(ctx, found.second, found.first, fullscreen)
     }
 
 
@@ -703,15 +780,57 @@ object LocalCommands {
         }
     }
 
-    private fun openDialer(ctx: Context, number: String?) {
-        val intent = Intent(Intent.ACTION_DIAL).apply {
-            if (!number.isNullOrBlank()) data = Uri.parse("tel:$number")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    // C11：拨号结果（Andee DeviceCommsController.dial 同款三分法：直接拨打 /
+    // 只开拨号盘 / 失败）。调用方必须按实际结果播报，不许没核对就说"填好了"。
+    private enum class DialKind { DIALED, DIALER_ONLY, FAILED }
+    private data class DialOutcome(val kind: DialKind, val number: String?, val reason: String?) {
+        fun describe(): String = when (kind) {
+            DialKind.DIALED -> "已直接拨打${number ?: ""}"
+            DialKind.DIALER_ONLY -> "只打开了拨号盘${number?.let { "（$it）" } ?: ""}"
+            DialKind.FAILED -> "失败：${reason ?: "未知原因"}"
         }
-        try {
+        /** who：主语，如"给妈妈打"；留空时按"拨号盘"这件事本身说。 */
+        fun speakText(who: String): String = when (kind) {
+            DialKind.DIALED -> if (who.isBlank()) "正在拨打" else "$who，正在拨打"
+            DialKind.DIALER_ONLY -> if (who.isBlank()) "拨号盘已打开，点一下拨出" else "$who，拨号盘已打开，点一下拨出"
+            DialKind.FAILED -> if (who.isBlank()) "没打成：${reason ?: "未知原因"}" else "$who，没打成：${reason ?: "未知原因"}"
+        }
+    }
+
+    /**
+     * C11：打电话。优先 ACTION_CALL 直接拨打（Andee dial(direct=true)）；
+     * 没号码、或没给 CALL_PHONE 权限时才回落 ACTION_DIAL 只开拨号盘；
+     * L17：通话中不新起拨号。返回实际结果，由调用方按结果播报。
+     */
+    private fun dial(ctx: Context, number: String?): DialOutcome {
+        if (DeviceCommands.isInCall(ctx)) {
+            return DialOutcome(DialKind.FAILED, number, "正在通话中，先挂断再打")
+        }
+        val hasCallPermission = ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!number.isNullOrBlank() && hasCallPermission) {
+            try {
+                val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(intent)
+                return DialOutcome(DialKind.DIALED, number, null)
+            } catch (e: SecurityException) {
+                // 权限在检查后被收回：回落到只开拨号盘，不谎报已拨打。
+            } catch (e: Exception) {
+                return DialOutcome(DialKind.FAILED, number, e.message ?: e.javaClass.simpleName)
+            }
+        }
+        // 没号码（只说"打电话"）、或没给 CALL_PHONE 权限：只开拨号盘，如实说只开了盘。
+        return try {
+            val intent = Intent(Intent.ACTION_DIAL).apply {
+                if (!number.isNullOrBlank()) data = Uri.parse("tel:$number")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ctx.startActivity(intent)
-        } catch (_: Exception) {
-            // 连拨号盘都拉不起来时静默（上层回报语已说明意图），真机基本不会走到
+            DialOutcome(DialKind.DIALER_ONLY, number, null)
+        } catch (e: Exception) {
+            DialOutcome(DialKind.FAILED, number, "拨号盘没打开：${e.message ?: e.javaClass.simpleName}")
         }
     }
 }

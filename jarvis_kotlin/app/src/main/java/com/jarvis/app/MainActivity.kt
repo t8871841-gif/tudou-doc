@@ -70,6 +70,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -97,12 +98,11 @@ class MainActivity : Activity() {
         // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
-        // S28：对话/面板状态进 onSaveInstanceState 的键。
-        const val KEY_CHAT_WHO = "chat_who"
-        const val KEY_CHAT_TEXT = "chat_text"
-        const val KEY_CHAT_TIME = "chat_time"
+        // S28：对话/面板状态进 onSaveInstanceState 的键（对话记录本身在 ChatHistory 单例里落盘，不走 Bundle）。
         const val KEY_PANEL_OPEN = "panel_open"
         const val KEY_SHOW_INPUT = "show_input"
+        // H13：键盘重试间隔（Andee TextInputActivity 同款 IME_RETRY_MS）。
+        const val IME_RETRY_MS = 250L
     }
 
     private lateinit var statusView: TextView
@@ -127,6 +127,8 @@ class MainActivity : Activity() {
     private lateinit var panelScroll: ScrollView
     private lateinit var chatInput: EditText
     private lateinit var inputRow: LinearLayout
+    // M34：发送按钮引用，发送中与输入框一起置灰/禁用。
+    private var sendButton: Button? = null
     private var stageImageView: ImageView? = null
     private lateinit var muteButton: ImageButton
     private lateinit var keyboardToggle: ImageButton
@@ -197,8 +199,8 @@ class MainActivity : Activity() {
     private var hudLastPushedState: String? = null
 
     // 彻底融合第 3 步：面板真数据。
-    // 对话记录（内存，addBubble 时追加，上限 20 条；页面加载完后推给 subsHistory）。
-    private val hudChatHistory = ArrayList<Triple<String, String, Long>>()
+    // C14/L12：对话记录在 ChatHistory 单例里（80 条 / 4000 字，每次 add 后落盘到
+    // filesDir/chat_history.json），不另存内存列表；MainActivity 只读它渲染气泡。
     // 上下行速率采样基线（TrafficStats 累计值 + 采样时刻；两次推送之间算平均速率，
     // 基线在 setupHudWebView 里先取一次，第一次推送就有约 1~2 秒的短窗口速率）。
     private var hudLastRxBytes = -1L
@@ -217,6 +219,10 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // C14：对话记录单例先初始化（init 即 load，读 filesDir/chat_history.json），
+        // 再建界面——buildChatPanel 与 renderHistoryBubbles 都从它读记录。
+        ChatHistory.init(this)
 
         // 批八：真全屏——隐藏系统状态栏（顶部下拉可临时唤出），此前主界面一直顶着状态栏不算全屏。
         @Suppress("DEPRECATION")
@@ -286,42 +292,34 @@ class MainActivity : Activity() {
         JarvisAgent.onRunHudJs = { js -> runOnUiThread { hudWebView.evaluateJavascript(js, null) } }
         onAgentStateChanged(JarvisAgent.currentState())
 
-        // S28：进程被杀/旋转后按保存的记录重建气泡与面板状态（再走 handleAssistIntent 追加新内容）。
-        restoreChatState(savedInstanceState)
+        // S28：进程被杀/旋转后按保存的状态重建面板（对话记录在 ChatHistory 单例里落盘，
+        // 不走 Bundle，直接从单例渲染）。
+        renderHistoryBubbles()
+        if (savedInstanceState?.getBoolean(KEY_PANEL_OPEN, false) == true) setNativePanel(true)
+        if (savedInstanceState?.getBoolean(KEY_SHOW_INPUT, false) == true) showInputRow()
         handleAssistIntent(intent)
         // 批二：常驻与否现在是"设置里记住的选择"，不再是每次开 App 都无条件偷偷启动。
         if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
     }
 
-    /** S28：保存最近 20 条对话 + 面板/输入行开关。只存内存里的 hudChatHistory，不另开存储。 */
+    /** S28：只保存面板/输入行开关。对话记录在 ChatHistory 单例里落盘，不走 Bundle、不另开存储。 */
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        val recent = hudChatHistory.takeLast(20)
-        outState.putStringArrayList(KEY_CHAT_WHO, ArrayList(recent.map { it.first }))
-        outState.putStringArrayList(KEY_CHAT_TEXT, ArrayList(recent.map { it.second }))
-        outState.putLongArray(KEY_CHAT_TIME, recent.map { it.third }.toLongArray())
         outState.putBoolean(KEY_PANEL_OPEN, hudPanelOpen)
         outState.putBoolean(KEY_SHOW_INPUT, showInput)
     }
 
-    /** S28：按保存的记录重建气泡（先清掉 buildChatPanel 加的那句问候语，避免重复）。 */
-    private fun restoreChatState(saved: Bundle?) {
-        if (saved == null) return
-        val whos = saved.getStringArrayList(KEY_CHAT_WHO) ?: return
-        val texts = saved.getStringArrayList(KEY_CHAT_TEXT) ?: return
-        if (whos.isEmpty() || whos.size != texts.size) return
-        val times = saved.getLongArray(KEY_CHAT_TIME)
+    /** C14：按 ChatHistory 单例重建气泡（旋转/回前台都从单例读，不另存内存列表）。
+     * 记录为空时才放一句问候语（addBubble 会把它记进单例，下次启动从落盘读回，不重复）。 */
+    private fun renderHistoryBubbles() {
+        if (!::chatList.isInitialized) return
         chatList.removeAllViews()
-        hudChatHistory.clear()
-        whos.forEachIndexed { i, who ->
-            addBubble(texts[i], mine = who == "you")
-            if (times != null && i < times.size && hudChatHistory.isNotEmpty()) {
-                val last = hudChatHistory.lastIndex
-                hudChatHistory[last] = Triple(who, texts[i], times[i])
-            }
+        val snap = ChatHistory.snapshot()
+        if (snap.isEmpty()) {
+            addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
+            return
         }
-        if (saved.getBoolean(KEY_PANEL_OPEN, false)) setNativePanel(true)
-        if (saved.getBoolean(KEY_SHOW_INPUT, false)) showInputRow()
+        snap.forEach { e -> addBubble(e.text, mine = e.role == ChatHistory.Role.USER, record = false) }
     }
 
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
@@ -616,6 +614,10 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applyOrientationLayout()
+        // L13：旋转后对话滑到底（Andee HistoryListView.onSizeChanged 同款兜底：尺寸变了就重取底部）。
+        if (!showingSettings && ::chatScroll.isInitialized) {
+            chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+        }
     }
 
     // 竖屏第 3 批修正：分区横滑检测。dispatchTouchEvent 是每个触摸事件进 Activity 的第一站，
@@ -691,9 +693,15 @@ class MainActivity : Activity() {
     }
 
     /** 返回键：先关 HUD 里的全屏浮层（拆解库 / 流浪地球），再退演示，最后才退出 App。
-     * 浮层是 WebView 里的 div，原生返回键默认不知道它，得先问 JS 有没有浮层开着。 */
+     * 浮层是 WebView 里的 div，原生返回键默认不知道它，得先问 JS 有没有浮层开着。
+     * M38：先同步查二级设置页是否开着，开着就先关二级页回目录，不要直接关掉整个设置；
+     * 返回路径不要先走异步 JS 查询（HUD 卡顿时返回键看起来像失灵），要同步判断。 */
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
+        if (showingSettings && isSettingsPageOpen()) {
+            closeSettingsPage()
+            return
+        }
         if (::hudWebView.isInitialized && hudPageLoaded) {
             hudWebView.evaluateJavascript(
                 "(function(){var h=document.getElementById('holoLib'); if(h && !h.hidden){ if(typeof holoLibClose==='function')holoLibClose(); return 'lib'; } if(window.EM_ON){ if(typeof emClose==='function')emClose(); return 'em'; } return ''; })()"
@@ -722,10 +730,11 @@ class MainActivity : Activity() {
         backAfterDemo()
     }
 
-    /** S26：返回优先级：设置页（关设置）→ 原生面板（回对话）→ 输入行/键盘（收起）→ 退出。 */
+    /** S26：返回优先级：设置页（二级页先回目录，再关设置）→ 原生面板（回对话）→ 输入行/键盘（收起）→ 退出。 */
     private fun backAfterDemo() {
         if (showingSettings) {
-            toggleSettings()
+            // M38：二级设置页开着先关二级页回目录，不要直接关掉整个设置。
+            if (isSettingsPageOpen()) closeSettingsPage() else toggleSettings()
             return
         }
         if (hudPanelOpen) {
@@ -738,6 +747,10 @@ class MainActivity : Activity() {
         }
         finishBackPress()
     }
+
+    /** M38：二级设置页是否开着（同步判断，不走异步 JS 查询）。 */
+    private fun isSettingsPageOpen(): Boolean =
+        ::settingsPageHost.isInitialized && settingsPageHost.visibility == View.VISIBLE
 
     /** onBackPressed 的默认行为抽出来：evaluateJavascript 的回调是非内联 lambda，
      * 里面不能直接写 super.xxx，改走这里。 */
@@ -902,17 +915,70 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 只在页面加载完时，把一句话推给 HUD 字幕（typeOut，js/subtitles.js:77）。
-     * 文本用 JSONObject.quote 转义，绝不直接拼进 JS。M42：竖屏舞台的 WebView 同样在渲染，
-     * 不再只限横屏推，竖屏字幕也同步。 */
-    private fun pushHudSubtitle(who: String, text: String) {
+    /** M37：字幕分两种（Andee HistoryListView.setLive 同款）：PARTIAL 是进行中（淡色，
+     * 走 typeOut 打字行）、FINAL 是定稿（走 subsHistory 定稿行，5 秒后自动清除可见字幕，
+     * 记录仍在 HUD 的 SUBS.log 里，可上下翻回看）。 */
+    private enum class SubtitleKind { PARTIAL, FINAL }
+
+    /** M37：FINAL 定稿字幕在 HUD 上停留的时间（Andee FINAL_LINGER_MS 同款）。 */
+    private val finalLingerMs = 5_000L
+
+    /** M37：设置页开着时暂存的字幕（who, text, kind），关设置后按序补推，不直接丢弃。 */
+    private val pendingSubtitles = ArrayDeque<Triple<String, String, SubtitleKind>>()
+
+    private val clearFinalSubtitleRunnable = Runnable {
+        if (!::hudWebView.isInitialized || !hudPageLoaded) return@Runnable
+        hudWebView.evaluateJavascript("try{sub.innerHTML=''}catch(e){}", null)
+    }
+
+    /** 把一句话推给 HUD 字幕。文本用 JSONObject.quote 转义，绝不直接拼进 JS。
+     * M42：竖屏舞台的 WebView 同样在渲染，不再只限横屏推，竖屏字幕也同步。
+     * M37：设置页开着时不丢弃，进队列、关设置后补推（最多留 20 条）。 */
+    private fun pushHudSubtitle(who: String, text: String, kind: SubtitleKind = SubtitleKind.FINAL) {
         if (!::hudWebView.isInitialized || !hudPageLoaded) return
-        if (showingSettings) return
-        val speed = if (who == "jarvis") 40 else 12
-        hudWebView.evaluateJavascript(
-            "try{if(typeof typeOut==='function')typeOut(" + JSONObject.quote(who) + "," + JSONObject.quote(text) + "," + speed + ")}catch(e){}",
-            null
-        )
+        if (showingSettings) {
+            if (pendingSubtitles.size >= 20) pendingSubtitles.removeFirst()
+            pendingSubtitles.addLast(Triple(who, text, kind))
+            return
+        }
+        pushHudSubtitleNow(who, text, kind)
+    }
+
+    /** M37：字幕的实际推送（调用方保证不在设置页内）。PARTIAL 与 FINAL 不走同一条 JS 入口。 */
+    private fun pushHudSubtitleNow(who: String, text: String, kind: SubtitleKind) {
+        when (kind) {
+            SubtitleKind.PARTIAL -> {
+                // 进行中：typeOut 打字行（js/subtitles.js:77），逐字打出、带光标。
+                hudWebView.evaluateJavascript(
+                    "try{if(typeof typeOut==='function')typeOut(" + JSONObject.quote(who) + "," + JSONObject.quote(text) + ",12)}catch(e){}",
+                    null
+                )
+            }
+            SubtitleKind.FINAL -> {
+                // 定稿：subsHistory 定稿行（不走 typeOut），立即渲染一次；
+                // 5 秒后自动清除可见字幕。
+                main.removeCallbacks(clearFinalSubtitleRunnable)
+                val items = JSONArray().put(JSONObject().apply {
+                    put("who", who)
+                    put("en", text)
+                    put("zh", "")
+                    put("t", System.currentTimeMillis() / 1000)
+                })
+                hudWebView.evaluateJavascript(
+                    "try{if(typeof subsHistory==='function')subsHistory(" + items.toString() + ");if(typeof subsRender==='function')subsRender();}catch(e){}",
+                    null
+                )
+                main.postDelayed(clearFinalSubtitleRunnable, finalLingerMs)
+            }
+        }
+    }
+
+    /** M37：关设置后把暂存的字幕按序补推。 */
+    private fun flushPendingSubtitles() {
+        if (pendingSubtitles.isEmpty()) return
+        val queued = pendingSubtitles.toList()
+        pendingSubtitles.clear()
+        queued.forEach { (who, text, kind) -> pushHudSubtitleNow(who, text, kind) }
     }
 
     /** 状态变化时推给 HUD（setState），页面加载完且设置页没开时推；横竖屏都推（竖屏舞台的 WebView 也要跟麦克风状态变）。替代已删的 500ms 轮询。
@@ -1193,17 +1259,18 @@ class MainActivity : Activity() {
         )
     }
 
-    /** 对话记录进 HUD：把内存里的最近 20 条（addBubble 时记的）推给 subsHistory；
-     * 只在页面加载完推一次。页面自己的 localStorage 会接着保存，之后的新消息走 typeOut。 */
+    /** 对话记录进 HUD：把 ChatHistory 单例里的记录（上限 80 条）推给 subsHistory；
+     * 只在页面加载完推一次。页面自己的 localStorage 会接着保存，之后的新消息走字幕推送。 */
     private fun pushHudHistory() {
-        if (hudChatHistory.isEmpty()) return
+        val snap = ChatHistory.snapshot()
+        if (snap.isEmpty()) return
         val items = JSONArray()
-        hudChatHistory.forEach { (who, text, t) ->
+        snap.forEach { e ->
             items.put(JSONObject().apply {
-                put("who", who)
-                put("en", text)
+                put("who", if (e.role == ChatHistory.Role.USER) "you" else "jarvis")
+                put("en", e.text)
                 put("zh", "")
-                put("t", t)
+                put("t", e.ts / 1000)
             })
         }
         hudWebView.evaluateJavascript(
@@ -1373,7 +1440,8 @@ class MainActivity : Activity() {
             setBackgroundColor(0xFF000000.toInt())
             addView(chatList)
         }
-        addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
+        // C14：问候语不在这里加——onCreate 末尾的 renderHistoryBubbles() 按 ChatHistory
+        // 单例渲染，记录为空时才放问候语（记进单例，下次从落盘读回，不重复）。
     }
 
     // ---------- 原生竖屏面板（下 1/3） ----------
@@ -1705,14 +1773,18 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun addBubble(text: String, mine: Boolean) {
+    /** M36：气泡带角色/时间头（Andee HistoryListView 同款：我 · 15:31 / 助手 · 15:31），
+     * 正文 maxLines = 6 + ellipsize = END（长回答只露前 6 行，不再是无界整段）。
+     * C14：record=true 时同时推 HUD 字幕并记进 ChatHistory 单例（落盘）；从单例重建
+     * 气泡时 record=false，只渲染不重复记、不重复推字幕。 */
+    private fun addBubble(text: String, mine: Boolean, record: Boolean = true) {
         val color = HudPalette.colorFor(JarvisAgent.currentState())
         val (sec, _) = HudPalette.secondaryTertiary(color)
-        val tv = TextView(this).apply {
-            this.text = text
-            textSize = 15.5f
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setTextColor(HudPalette.ICE)
+        val ts = System.currentTimeMillis()
+        val headText = (if (mine) "我" else "助手") + " · " +
+            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
+        val bubble = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(12))
             background = if (mine) {
                 GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f))).apply {
@@ -1732,8 +1804,23 @@ class MainActivity : Activity() {
                 marginEnd = if (mine) 0 else dp(48)
             }
         }
-        chatList.addView(tv)
-        // M40：气泡数上限 100 条，超了从顶部移除旧气泡（hudChatHistory 另行保留 20 条）。
+        bubble.addView(TextView(this).apply {
+            text = headText
+            textSize = 11f
+            setTextColor(0xB3FFFFFF.toInt())
+        })
+        bubble.addView(TextView(this).apply {
+            this.text = text
+            textSize = 15.5f
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setTextColor(HudPalette.ICE)
+            // M36：正文最多 6 行，超出截断（Andee HistoryListView 同款）。
+            maxLines = 6
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, dp(4), 0, 0)
+        })
+        chatList.addView(bubble)
+        // M40：气泡数上限 100 条，超了从顶部移除旧气泡（视图上限，与 ChatHistory 的 80 条记录上限是两套数，不混在一起）。
         if (chatList.childCount > 100) chatList.removeViewAt(0)
         // 彻底融合第 1 步：竖屏不要任何动效——新消息滑入动画已删，气泡直接出现。
         // M40：只有用户已在底部附近时才自动滑到底，否则只在底部提示“有新消息”，不抢滚动位置。
@@ -1746,11 +1833,11 @@ class MainActivity : Activity() {
                 detailView.text = "↓ 有新消息"
             }
         }
+        if (!record) return
         // 第 2 步：气泡同时推给 HUD 字幕（见 onCreate 注释——这是两条路的唯一汇合点）。
         pushHudSubtitle(if (mine) "you" else "jarvis", text)
-        // 第 3 步：对话记进内存列表（上限 20 条），页面加载完后推给 HUD 字幕记录。
-        hudChatHistory.add(Triple(if (mine) "you" else "jarvis", text, System.currentTimeMillis() / 1000))
-        if (hudChatHistory.size > 20) hudChatHistory.removeAt(0)
+        // 第 3 步：对话记进 ChatHistory 单例（每次 add 后落盘，上限 80 条 / 4000 字）。
+        if (mine) ChatHistory.addUser(text) else ChatHistory.addAssistant(text)
     }
 
     /** 设置里「清空对话」：只清对话框气泡，回到刚打开时的问候语；长期记忆库不受影响。 */
@@ -1759,7 +1846,7 @@ class MainActivity : Activity() {
         chatList.removeAllViews()
         // 第 3 步：对话记录也清掉（下面 addBubble 会把问候语重新记进去），
         // 否则下次页面加载还会把清掉之前的对话推回 HUD 字幕记录。
-        hudChatHistory.clear()
+        ChatHistory.clear()
         addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
     }
 
@@ -1768,6 +1855,25 @@ class MainActivity : Activity() {
         val text = chatInput.text.toString().trim()
         if (text.isEmpty()) return
         if (submitText(text)) chatInput.text.clear()
+    }
+
+    /** M34：发送中要禁用输入——输入框和“发送”按钮一起置灰/禁用（不只是 toast 一句就返回）。
+     * 所有 chatInFlight 赋值都走这里；回调可能在后台线程，UI 切换回主线程做。 */
+    private fun setChatInFlight(inFlight: Boolean) {
+        chatInFlight = inFlight
+        if (Looper.myLooper() == Looper.getMainLooper()) updateChatInputEnabled()
+        else main.post { updateChatInputEnabled() }
+    }
+
+    private fun updateChatInputEnabled() {
+        if (!::chatInput.isInitialized) return
+        val enabled = !chatInFlight
+        chatInput.isEnabled = enabled
+        chatInput.alpha = if (enabled) 1f else 0.5f
+        sendButton?.let {
+            it.isEnabled = enabled
+            it.alpha = if (enabled) 1f else 0.5f
+        }
     }
 
     /** 打字与 HUD 桥接共用的提交入口（第 2 步抽出来）：记忆拦截→本地指令→天气→记忆注入→本地/云端。
@@ -1780,7 +1886,7 @@ class MainActivity : Activity() {
             toast("上一条还在回，稍等")
             return false
         }
-        chatInFlight = true
+        setChatInFlight(true)
         chatFlightSeq++
         val mySeq = chatFlightSeq
         addBubble(q, mine = true)
@@ -1793,7 +1899,7 @@ class MainActivity : Activity() {
             try {
                 val ack = MemoryService.processExplicitMemory(this@MainActivity, q)
             if (ack != null) {
-                chatInFlight = false
+                setChatInFlight(false)
                 addBubble(ack, mine = false)
                 speakReplyIfEnabled(ack)
                 return@launch
@@ -1806,7 +1912,7 @@ class MainActivity : Activity() {
                     runJs = { js -> runOnUiThread { hudWebView.evaluateJavascript(js, null) } }
                 )
             ) {
-                chatInFlight = false
+                setChatInFlight(false)
                 return@launch
             }
             // 批十：打字路径同路——天气走真数据工具，不进模型。
@@ -1815,7 +1921,7 @@ class MainActivity : Activity() {
                 releaseInFinally = false
                 com.jarvis.app.data.WeatherTool.fetch(city, tomorrow = q.contains("明天")) { answer ->
                     runOnUiThread {
-                        chatInFlight = false
+                        setChatInFlight(false)
                         val a = answer ?: "天气没查到，可能是网络不通，你再试一次"
                         addBubble(a, mine = false)
                         speakReplyIfEnabled(a)
@@ -1833,7 +1939,7 @@ class MainActivity : Activity() {
                 val localMem = MemoryService.getInjectableMemories(this@MainActivity, q, topN = 2)
                 val local = LocalLlm.generate(this@MainActivity, q, localMem)
                 if (!local.isNullOrBlank()) {
-                    chatInFlight = false
+                    setChatInFlight(false)
                     addBubble(local, mine = false)
                     speakReplyIfEnabled(local)
                     triggerMemoryExtraction(q, local)
@@ -1846,17 +1952,17 @@ class MainActivity : Activity() {
             releaseInFinally = false
             askChatCustom(q, mem, localTried = false)
             } catch (e: Exception) {
-                chatInFlight = false
+                setChatInFlight(false)
                 addBubble("出错了：${e.message}", mine = false)
             } finally {
-                if (releaseInFinally) chatInFlight = false
+                if (releaseInFinally) setChatInFlight(false)
             }
         }
         // S24：回调永不回的兜底——180 秒后仍在途就放行并提示（模型侧最长约 3 分钟超时）。
         // 只认自己那一代，免得误清之后新发的那条。
         main.postDelayed({
             if (chatInFlight && chatFlightSeq == mySeq) {
-                chatInFlight = false
+                setChatInFlight(false)
                 toast("上一条一直没回，已重置，你再发一次")
             }
         }, 180_000)
@@ -1915,7 +2021,7 @@ class MainActivity : Activity() {
         CustomClient.ask(this, text, memoryContext = mem,
             onResult = { reply ->
                 runOnUiThread {
-                    chatInFlight = false
+                    setChatInFlight(false)
                     addBubble(reply, mine = false)
                     speakReplyIfEnabled(reply)
                 }
@@ -1925,7 +2031,7 @@ class MainActivity : Activity() {
                 val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(this) && LocalLlm.isReady(this)
                 if (!canFallback) {
                     runOnUiThread {
-                        chatInFlight = false
+                        setChatInFlight(false)
                         addBubble("出错了：$e（Key 在设置里填）", mine = false)
                     }
                     return@ask
@@ -1934,7 +2040,7 @@ class MainActivity : Activity() {
                 uiScope.launch {
                     val localMem = MemoryService.getInjectableMemories(this@MainActivity, text, topN = 2)
                     val local = LocalLlm.generate(this@MainActivity, text, localMem)
-                    chatInFlight = false
+                    setChatInFlight(false)
                     if (!local.isNullOrBlank()) {
                         addBubble("（云端连不上，本地模型答）$local", mine = false)
                         speakReplyIfEnabled(local)
@@ -1965,6 +2071,9 @@ class MainActivity : Activity() {
                 setTextColor(Color.WHITE)
                 setHintTextColor(0x61FFFFFF.toInt())
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                // H13/Andee TextInputActivity 同款：单行锁定，回车即发送、不换行。
+                maxLines = 1
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
                 // M52：回车键变发送键，按下即发送。
                 imeOptions = EditorInfo.IME_ACTION_SEND
                 setOnEditorActionListener { _, actionId, _ ->
@@ -1975,10 +2084,12 @@ class MainActivity : Activity() {
                 }
             }
             addView(chatInput)
-            addView(Button(this@MainActivity).apply {
+            // M34：发送按钮记下来，发送中与输入框一起置灰/禁用。
+            sendButton = Button(this@MainActivity).apply {
                 text = "发送"
                 setOnClickListener { sendChat() }
-            })
+            }
+            addView(sendButton)
         }
         addView(inputRow)
 
@@ -2141,8 +2252,15 @@ class MainActivity : Activity() {
         showInput = true
         inputRow.visibility = View.VISIBLE
         chatInput.requestFocus()
-        (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
-            ?.showSoftInput(chatInput, InputMethodManager.SHOW_IMPLICIT)
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(chatInput, InputMethodManager.SHOW_IMPLICIT)
+        // H13/Andee TextInputActivity 同款：没有焦点的窗口发出的 IME 请求会被悄悄丢掉，
+        // 250ms 后再补一次。
+        chatInput.postDelayed({
+            if (showInput && !isFinishing) {
+                imm?.showSoftInput(chatInput, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }, IME_RETRY_MS)
     }
 
     private fun hideInputRow() {
@@ -2172,6 +2290,10 @@ class MainActivity : Activity() {
             refreshLocalStatus()
         } else {
             applyOrientationLayout()
+            // L13：关设置后对话滑到底（Andee onSizeChanged 同款兜底）。
+            if (::chatScroll.isInitialized) chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+            // M37：补推设置页开着时暂存的字幕。
+            flushPendingSubtitles()
             // M41：设置页打开期间的状态变化没写过去重标记，关掉就无条件重推一次，不丢同步。
             hudLastPushedState = null
             pushHudState(JarvisAgent.currentState())
@@ -3599,4 +3721,135 @@ class MainActivity : Activity() {
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * 对话记录单例（Andee ChatHistory 同款，C14/L12）。
+ *
+ * 只记设备上亲眼见到的对话（用户说的话 / 助手回答 / 报错），不依赖任何 Activity 存活：
+ * MainActivity 只从 snapshot() 读记录渲染气泡，onDestroy 置空回调也不丢记录，切后台回来
+ * 回调重新接上后，语音回复照样进这个单例。
+ *
+ * - MAX_ENTRIES = 80，MAX_TEXT = 4000（约三屏中文）；
+ * - 每次 add() 后 trim() 再 save()，整份写 filesDir/chat_history.json；
+ * - save() 失败只记日志不丢内存；load() 兼容旧版裸数组格式。
+ */
+object ChatHistory {
+
+    enum class Role { USER, ASSISTANT, ERROR }
+
+    data class Entry(
+        val id: Long,
+        val ts: Long,
+        val role: Role,
+        val text: String,
+    )
+
+    const val MAX_ENTRIES = 80
+    const val MAX_TEXT = 4000
+
+    private const val TAG = "ChatHistory"
+    private const val FILE_NAME = "chat_history.json"
+    private const val KEY_ENTRIES = "entries"
+
+    private var appContext: Context? = null
+    private val lock = Any()
+    private val entries = ArrayList<Entry>()
+    private var nextId = 1L
+
+    @Volatile
+    private var listener: (() -> Unit)? = null
+
+    /** init 即 load；重复调是 no-op。 */
+    fun init(context: Context) {
+        synchronized(lock) {
+            if (appContext != null) return
+            appContext = context.applicationContext
+            load()
+        }
+        listener?.invoke()
+    }
+
+    fun setListener(l: (() -> Unit)?) {
+        listener = l
+    }
+
+    /** 最早的在前——气泡按这个顺序渲染。 */
+    fun snapshot(): List<Entry> = synchronized(lock) { ArrayList(entries) }
+
+    fun addUser(text: String) = add(Role.USER, text)
+
+    fun addAssistant(text: String) = add(Role.ASSISTANT, text)
+
+    fun addError(text: String) = add(Role.ERROR, text)
+
+    /** 清空对话（设置里「清空对话」用）：内存与落盘一起清，listener 收到后重渲染。 */
+    fun clear() {
+        synchronized(lock) {
+            entries.clear()
+            save()
+        }
+        listener?.invoke()
+    }
+
+    private fun add(role: Role, text: String) {
+        if (appContext == null) return
+        val clean = text.trim().let {
+            if (it.length > MAX_TEXT) it.take(MAX_TEXT) + "…" else it
+        }
+        if (clean.isEmpty()) return
+        synchronized(lock) {
+            entries.add(Entry(nextId++, System.currentTimeMillis(), role, clean))
+            trim()
+            save()
+        }
+        listener?.invoke()
+    }
+
+    /** 调用方持有 lock。 */
+    private fun trim() {
+        while (entries.size > MAX_ENTRIES) entries.removeAt(0)
+    }
+
+    private fun file(): File? = appContext?.let { File(it.filesDir, FILE_NAME) }
+
+    /** 调用方持有 lock。save 失败只记日志，不丢内存里的记录。 */
+    private fun save() {
+        val f = file() ?: return
+        runCatching {
+            val arr = JSONArray()
+            for (e in entries) {
+                arr.put(
+                    JSONObject()
+                        .put("id", e.id)
+                        .put("ts", e.ts)
+                        .put("role", e.role.name)
+                        .put("text", e.text)
+                )
+            }
+            f.writeText(JSONObject().put(KEY_ENTRIES, arr).toString())
+        }.onFailure { Log.w(TAG, "history: save failed: ${it.message}") }
+    }
+
+    /** 调用方持有 lock。兼容旧版裸数组格式（[{id, ts, role, text}, …]）。 */
+    private fun load() {
+        val f = file() ?: return
+        if (!f.exists()) return
+        runCatching {
+            val raw = f.readText().trim()
+            val bare = if (raw.startsWith("[")) JSONArray(raw) else null
+            val root = if (bare == null) JSONObject(raw) else null
+            val arr = bare ?: root!!.optJSONArray(KEY_ENTRIES) ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val role = runCatching { Role.valueOf(o.optString("role")) }.getOrNull() ?: continue
+                val id = o.optLong("id")
+                entries.add(Entry(id, o.optLong("ts"), role, o.optString("text")))
+                if (id >= nextId) nextId = id + 1
+            }
+        }.onFailure {
+            Log.w(TAG, "history: load failed, starting empty: ${it.message}")
+            entries.clear()
+        }
+    }
 }

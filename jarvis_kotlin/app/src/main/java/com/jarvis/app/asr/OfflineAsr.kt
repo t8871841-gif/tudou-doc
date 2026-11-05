@@ -3,6 +3,7 @@ package com.jarvis.app.asr
 import android.content.Context
 import android.util.Log
 import com.k2fsa.sherpa.onnx.EndpointConfig
+import com.k2fsa.sherpa.onnx.EndpointRule
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
@@ -50,6 +51,24 @@ class OfflineAsr(
     @Volatile
     private var closed = false
 
+    /**
+     * C3：close() 已被请求——此后新来的音频直接丢弃，但已经排进 io 队列的
+     * sendAudio 先处理完，释放时才置 [closed]。原来 close() 立置 closed=true，
+     * 在途音频会被 sendAudio 入口和队内检查两处丢弃，final 可能直接丢。
+     */
+    @Volatile
+    private var closeRequested = false
+
+    /**
+     * M3：sherpa 端点命中后置位，[OfflineAsrSession] 用它作为轮次结束的信号之一
+     * （与 partial 时钟配合），不再只用来攒文本。
+     */
+    @Volatile
+    private var endpointHit = false
+
+    /** M3：本轮是否命中过 sherpa 端点。 */
+    fun isEndpointHit(): Boolean = endpointHit
+
     // ---- 以下字段只在 io 这一条工作线程上读写 ----
 
     private var recognizer: OnlineRecognizer? = null
@@ -78,21 +97,23 @@ class OfflineAsr(
     }
 
     override fun sendAudio(pcm: ByteArray, isLast: Boolean) {
-        if (closed) return
+        if (closeRequested) return
         val block = if (isLast) null else pcm.copyOf()
-        io.execute {
-            if (closed) return@execute
-            if (failed) {
-                finishedLatch.countDown()
-                return@execute
+        runCatching {
+            io.execute {
+                if (closed) return@execute
+                if (failed) {
+                    finishedLatch.countDown()
+                    return@execute
+                }
+                val rec = recognizer ?: return@execute
+                val s = stream ?: return@execute
+                if (block != null && block.isNotEmpty()) {
+                    s.acceptWaveform(toFloats(block), SAMPLE_RATE)
+                    decodeAvailable(rec, s)
+                }
+                if (isLast) finishTurn(rec, s)
             }
-            val rec = recognizer ?: return@execute
-            val s = stream ?: return@execute
-            if (block != null && block.isNotEmpty()) {
-                s.acceptWaveform(toFloats(block), SAMPLE_RATE)
-                decodeAvailable(rec, s)
-            }
-            if (isLast) finishTurn(rec, s)
         }
     }
 
@@ -102,13 +123,17 @@ class OfflineAsr(
         finishedLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
 
     override fun close() {
-        closed = true
+        // C3：不要立置 closed=true 丢弃在途音频——把释放排到 io 队尾，已排队的
+        // sendAudio 先跑完，释放时才置 closed 并停掉线程池。
+        if (closeRequested) return
+        closeRequested = true
         runCatching {
             io.execute {
                 runCatching { stream?.release() }
                 stream = null
+                closed = true
+                io.shutdown()
             }
-            io.shutdown()
         }
     }
 
@@ -117,6 +142,9 @@ class OfflineAsr(
     private fun decodeAvailable(rec: OnlineRecognizer, s: OnlineStream) {
         while (rec.isReady(s)) rec.decode(s)
         if (rec.isEndpoint(s)) {
+            // M3：端点信号不只用来攒文本——置位后 Session 拿它当轮次结束信号之一。
+            endpointHit = true
+            Log.d(TAG, "endpoint hit (committed=${committed.length} chars)")
             val seg = rec.getResult(s).text
             if (seg.isNotBlank()) committed += seg
             rec.reset(s)
@@ -202,7 +230,15 @@ class OfflineAsr(
                         numThreads = 2,
                         modelType = "zipformer",
                     ),
-                    endpointConfig = EndpointConfig(),
+                    endpointConfig = EndpointConfig(
+                        // M3：不要空构造全用库默认——规则值与 Session 的时钟对齐：
+                        // rule1：4 秒没解出任何东西也算端点（对齐 SILENT_START_GRACE_MS）；
+                        // rule2：出字后 3 秒尾部静音算端点（对齐 SILENCE_MS）；
+                        // rule3：单轮 60 秒封顶（对齐 MAX_TURN_MS）。
+                        rule1 = EndpointRule(false, 4.0f, 0.0f),
+                        rule2 = EndpointRule(true, 3.0f, 0.0f),
+                        rule3 = EndpointRule(false, 0.0f, 60.0f),
+                    ),
                     enableEndpoint = true,
                     decodingMethod = "greedy_search",
                 )

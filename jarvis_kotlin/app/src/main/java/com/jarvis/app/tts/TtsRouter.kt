@@ -22,7 +22,7 @@ object TtsRouter {
     @Volatile
     private var stopSeq = 0
 
-    fun speak(ctx: Context, text: String, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
+    fun speak(ctx: Context, text: String, onStart: () -> Unit, onDone: (Boolean) -> Unit, onSentence: ((String) -> Unit)? = null) {
         val myStopSeq = stopSeq
         var started = false
         val startOnce: () -> Unit = {
@@ -32,18 +32,45 @@ object TtsRouter {
             }
         }
         when (JarvisPrefs.getTtsEngine(ctx)) {
-            "system" -> SystemTts.speak(ctx, text, onStart = startOnce) { ok -> onDone(ok) }
-            "edge" -> speakEdge(ctx, text, attemptsLeft = 2, startOnce, myStopSeq) { ok -> onDone(ok) }
-            else -> speakEdge(ctx, text, attemptsLeft = 2, startOnce, myStopSeq) { ok ->
+            "system" -> speakSystem(ctx, text, startOnce, onSentence) { ok -> onDone(ok) }
+            "edge" -> speakEdge(ctx, text, attemptsLeft = 2, startOnce, myStopSeq, onSentence) { ok -> onDone(ok) }
+            else -> speakEdge(ctx, text, attemptsLeft = 2, startOnce, myStopSeq, onSentence) { ok ->
                 if (ok) {
                     onDone(true)
                 } else if (stopSeq != myStopSeq) {
                     // 中途被停了：不要兜底到系统 TTS，直接报失败（调用方靠 genSeq 丢弃）。
                     onDone(false)
                 } else {
-                    SystemTts.speak(ctx, text, onStart = startOnce) { sysOk -> onDone(sysOk) }
+                    speakSystem(ctx, text, startOnce, onSentence) { sysOk -> onDone(sysOk) }
                 }
             }
+        }
+    }
+
+    /**
+     * 系统 TTS 兜底：Edge 的播报焦点只覆盖 Edge 路径，这里播报前同样申请焦点、
+     * 播完释放；SystemTts 不分句回调，onSentence 只能在开念时对整段发一次，
+     * 句级跟念只在 Edge 路径上才有。
+     */
+    private fun speakSystem(
+        ctx: Context,
+        text: String,
+        startOnce: () -> Unit,
+        onSentence: ((String) -> Unit)?,
+        done: (Boolean) -> Unit
+    ) {
+        EdgeTts.acquireAudioFocus(ctx)
+        var sentenceFired = false
+        val startWithSentence: () -> Unit = {
+            startOnce()
+            if (!sentenceFired) {
+                sentenceFired = true
+                onSentence?.invoke(text)
+            }
+        }
+        SystemTts.speak(ctx, text, onStart = startWithSentence) { sysOk ->
+            EdgeTts.releaseAudioFocus()
+            done(sysOk)
         }
     }
 
@@ -53,6 +80,7 @@ object TtsRouter {
         attemptsLeft: Int,
         startOnce: () -> Unit,
         stopSeqAtStart: Int,
+        onSentence: ((String) -> Unit)?,
         done: (Boolean) -> Unit
     ) {
         val voice = JarvisPrefs.getVoice(ctx).ifBlank { EdgeVoices.DEFAULT_ID }
@@ -64,10 +92,16 @@ object TtsRouter {
                 if (ok || attemptsLeft <= 1 || stopSeq != stopSeqAtStart) {
                     done(ok)
                 } else {
-                    speakEdge(ctx, text, attemptsLeft - 1, startOnce, stopSeqAtStart, done)
+                    speakEdge(ctx, text, attemptsLeft - 1, startOnce, stopSeqAtStart, onSentence, done)
                 }
-            }
+            },
+            onSentence = onSentence
         )
+    }
+
+    /** L8 Earcon：开麦/思考提示音，委托给 EdgeTts（不另起音频系统）。 */
+    fun playEarcon(kind: EdgeTts.EarconKind) {
+        EdgeTts.playEarcon(kind)
     }
 
     fun stop() {

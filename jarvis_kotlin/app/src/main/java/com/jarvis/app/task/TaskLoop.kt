@@ -1,5 +1,6 @@
 package com.jarvis.app.task
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -19,8 +20,10 @@ import com.jarvis.app.vision.OcrReader
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -45,9 +48,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *   图瞄准，提示词里会标明来源；隐私黑名单包（isShotBlocked）两条通道都不拍。
  *
  * 模型每步仍只能输出一个 JSON 动作（本工程两个 Client 都是单轮文本接口，
- * 没有原生 tool-calling，协议不变）。一次 run 的生命周期：构造专属
- * ScreenController 注册到无障碍服务 → 接管边框亮起 → 循环 → done/fail/急停
- * 收尾并注销。急停复用 JarvisAgent 的代次序号 + 本类 runSeq 双保险。
+ * 没有原生 tool-calling，协议不变）。一次 run 的生命周期：优先用无障碍服务持有
+ * 的长期 ScreenController（拿不到才新建一个注册上去）→ 接管边框亮起 → 循环 → done/fail/急停
+ * 收尾并注销（共享的控制器不注销）。急停复用 JarvisAgent 的代次序号 + 本类 runSeq 双保险。
  */
 object TaskLoop {
 
@@ -73,14 +76,23 @@ object TaskLoop {
     private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
     private const val COMPACT_CHARS = 2500
 
-    /** 历史段字符预算（单条提示词内，含任务与大纲之外的余量）。 */
-    private const val HISTORY_CHARS = 6000
+    /** 历史段字符预算（单条提示词内，含任务与大纲之外的余量）。M22：Andee 同款 60_000。 */
+    private const val HISTORY_CHARS = 60000
 
-    /** 每步结果摘要进历史时的截断（对应 LocalBrain 对单条工具结果的 MAX_TOOL_CHARS 思路，本工程量级更小）。 */
-    private const val STEP_RESULT_CHARS = 300
+    /** 每步结果摘要进历史时的截断（Andee 单条工具结果上限 24_000，M22 同款）。 */
+    private const val STEP_RESULT_CHARS = 24000
+
+    /** H8：单步执行超时（Andee dispatchWithTimeout 的 DEFAULT_TOOL_TIMEOUT_MS）。 */
+    private const val STEP_TIMEOUT_MS = 60_000L
+    /** H8：工具自带 timeout_ms 时加的 slack（Andee TIMEOUT_SLACK_MS）。 */
+    private const val STEP_TIMEOUT_SLACK_MS = 10_000L
 
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "jarvis-taskloop").apply { isDaemon = true }
+    }
+    /** H8：单步执行用的线程池（cached：flow 步里 execute 会嵌套再调 execute，单线程池会死锁）。 */
+    private val stepExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "jarvis-taskstep").apply { isDaemon = true }
     }
     private val runSeq = AtomicInteger(0)
 
@@ -92,10 +104,12 @@ object TaskLoop {
     fun isRunning(): Boolean = running
 
     // 「在<应用>里/上给<人>发信息…」「给<人>发微信…」「打开/用<应用>…发/给…」。
+    // M25：「发信息给老婆」——"发"在前、"给/向/跟+人名"在后的词序，SEND_TO 只认"给"在"发"前。
     // 保守优先：必须同时出现「应用或发送动作」与「收件/发送对象」两类信号才算任务；
     // 拿不准放行原流程（聊天/技能/单步指令）。
     private val IN_APP_SEND = Regex("在.{1,12}?(上|里|中).{0,10}?(给|向|跟).{1,16}?(发信息|发消息|发微信|发短信|发送|留言)")
     private val SEND_TO = Regex("(给|向|跟).{1,16}?(发微信|发信息|发消息|发短信|发送消息|发条消息)")
+    private val SEND_AFTER = Regex("发(个|条|送)?(信息|消息|微信|短信).{0,8}?(给|向|跟).{1,16}?")
     private val OPEN_THEN = Regex("^(打开|开启|启动|进入|用).{1,14}?(给|向|发|帮我).{2,}")
 
     /** 任务句式判定（JarvisAgent 路由用）。纯聊天、单步打开应用、提问句都不算。 */
@@ -105,6 +119,7 @@ object TaskLoop {
         if (t.contains('？') || t.contains('?')) return false
         return IN_APP_SEND.containsMatchIn(t) ||
             SEND_TO.containsMatchIn(t) ||
+            SEND_AFTER.containsMatchIn(t) ||
             OPEN_THEN.containsMatchIn(t)
     }
 
@@ -116,16 +131,20 @@ object TaskLoop {
     /**
      * 执行一个多步任务。[isAlive] 由调用方给（Agent 的代次检查）；[onReply] 只会被
      * 调用一次，内容是给用户的一句结果（完成说明或卡在哪一步的如实说明）。
+     * [onProgress] 是 M18 的每步播报：每步执行前按动作种类推一句（如“正在点按……”），
+     * 调用方拿它推字幕/气泡，不要只在最后调一次 onReply。
      * [resumeFrom] 非空时是从断点续跑：历史与步数接着上次的来（见 TaskResumeState）。
      * [saveResume] 为 false 时不写断点（也不清旧断点）：内部子任务用，
      * 免得顶掉用户断点（S16，如 TripLoop 的高德核验）。
      * 注意：onReply 必须放最后——调用方用尾随 lambda 传它，后面再加参数会
-     * 让尾随 lambda 绑错（jk-v55 的教训）。
+     * 让尾随 lambda 绑错（jk-v55 的教训）。onProgress 带默认值、放在 onReply
+     * 之前，尾随 lambda 仍绑到 onReply。
      */
     fun run(
         ctx: Context, taskText: String, isAlive: () -> Boolean,
         resumeFrom: TaskResumeState.ResumeInfo? = null,
         saveResume: Boolean = true,
+        onProgress: (String) -> Unit = {},
         onReply: (String) -> Unit
     ) {
         val mySeq = runSeq.incrementAndGet()
@@ -136,13 +155,13 @@ object TaskLoop {
         // 既不清除用户原来的断点，也不写自己的断点（S16）。
         if (resumeFrom == null && saveResume) TaskResumeState.clear()
         executor.execute {
-            runBlocking(appCtx, taskText, mySeq, isAlive, onReply, resumeFrom, saveResume)
+            runBlocking(appCtx, taskText, mySeq, isAlive, onProgress, onReply, resumeFrom, saveResume)
         }
     }
 
     private fun runBlocking(
         ctx: Context, taskText: String, mySeq: Int,
-        isAlive: () -> Boolean, onReply: (String) -> Unit,
+        isAlive: () -> Boolean, onProgress: (String) -> Unit, onReply: (String) -> Unit,
         resumeFrom: TaskResumeState.ResumeInfo? = null,
         saveResume: Boolean = true
     ) {
@@ -152,9 +171,14 @@ object TaskLoop {
             onReply("无障碍服务没有开启，跨应用任务做不了。请到设置里打开 Jarvis 无障碍服务。")
             return
         }
+        // M14：不要每步新建 ScreenController——优先用无障碍服务持有的长期控制器
+        // （服务路约定暴露的公开属性）；拿不到时才新建一个当兜底，并照旧注册上去、
+        // 结束时注销（共享的那个不是我们建的，结束时不注销，留给服务继续用）。
         // 构造签名 (service, marker, ownArea)：ownArea 用默认（不遮罩自家悬浮球区域）。
-        val controller = ScreenController(svc, TapMarkerUi(svc))
-        JarvisAccessibilityService.screenController = controller
+        val existingController = JarvisAccessibilityService.screenController
+        val controller = existingController ?: ScreenController(svc, TapMarkerUi(svc))
+        val ownsController = existingController == null
+        if (ownsController) JarvisAccessibilityService.screenController = controller
         AuditLog.append(ctx, "任务循环", taskText, "开始（上限 $MAX_STEPS 步）")
         TakeoverBorder.show()
         // 用户定：跨应用任务期球彻底隐藏，减少屏幕干扰、有利于定位；任务结束
@@ -224,6 +248,20 @@ object TaskLoop {
                     return
                 }
                 step++
+                // M19 锁屏守卫（现读，不缓存；Andee CommandDispatcher.keyguardLocked 同款）：
+                // 锁屏了就停下记断点，不烧步数；播报里明说，解锁后说「继续」接着做。
+                if (isKeyguardLocked(ctx)) {
+                    if (saveResume) {
+                        TaskResumeState.offer(taskText, history.toList(), step - 1)
+                        stoppedWithResume = true
+                        finalReply = "手机锁了，解锁后我再继续。已停在第 ${step - 1} 步，解锁后说「继续」可以接着做。"
+                        AuditLog.append(ctx, "任务循环", "第 $step 步前发现锁屏", "断点已记，解锁后说继续可续跑")
+                    } else {
+                        finalReply = "手机锁了，解锁后我再继续。"
+                        AuditLog.append(ctx, "任务循环", "第 $step 步前发现锁屏", "内部任务，不记断点")
+                    }
+                    return
+                }
                 // ---------- 观察 ----------
                 var dump = try {
                     controller.dumpUiTree()
@@ -550,6 +588,8 @@ object TaskLoop {
                 // 计数保留：连续 2 轮无真交互时强制带图（截图策略），让模型有图可破局。
                 noProgressSteps = if (kind in REAL_ACTION_KINDS) 0 else noProgressSteps + 1
                 // ---------- 执行 ----------
+                // M18：每步执行前推一句播报（Andee narrate(toolName) 同款），不要只在最后调一次 onReply。
+                onProgress(narrate(kind))
                 val r = execute(ctx, controller, action)
                 if (r.zoomImage != null) pendingImage = r.zoomImage
                 // 固定等 600ms 改成等界面静止：连续两次读到的界面哈希相同才算稳，
@@ -595,7 +635,7 @@ object TaskLoop {
             running = false
             TakeoverBorder.hide()
             com.jarvis.app.OrbController.setTaskHidden(false)
-            if (JarvisAccessibilityService.screenController === controller) {
+            if (ownsController && JarvisAccessibilityService.screenController === controller) {
                 JarvisAccessibilityService.screenController = null
             }
             val reply = finalReply
@@ -603,6 +643,27 @@ object TaskLoop {
             // 靠 stoppedWithResume 发出去，不然用户不知道可以说“继续”接着做。
             if (reply != null && (alive() || stoppedWithResume)) onReply(reply)
         }
+    }
+
+    /** M19：现读锁屏状态（Andee CommandDispatcher.keyguardLocked 同款：调一次系统服务，取不到默认当没锁）。 */
+    private fun isKeyguardLocked(ctx: Context): Boolean = runCatching {
+        (ctx.applicationContext.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked
+    }.getOrDefault(false)
+
+    /** M18：按动作种类叙述这一步在干什么（Andee LocalBrain.narrate(toolName) 同款）。 */
+    private fun narrate(kind: String): String = when (kind) {
+        "tap", "longPress", "tap_sel" -> "正在点按……"
+        "type" -> "正在输入……"
+        "submit" -> "正在提交……"
+        "swipe", "scroll_to" -> "正在滑动……"
+        "zoom" -> "正在放大看……"
+        "openApp" -> "正在打开应用……"
+        "browse", "browserTap", "browserBack" -> "正在打开网页……"
+        "back", "home" -> "正在返回……"
+        "find" -> "正在找目标……"
+        "flow" -> "正在按流程操作……"
+        "wait", "wait_idle", "wait_change" -> "正在等一等……"
+        else -> "正在执行 $kind……"
     }
 
     /** 历史段：总字符超预算时从最旧的整步丢弃，保留最近的，并在段首注明丢了几步。 */
@@ -628,14 +689,15 @@ object TaskLoop {
     private fun signatureOf(action: JSONObject): String {
         val kind = action.optString("action")
         val sb = StringBuilder(kind)
-        // 本地流：签名按流里各步的动作种类拼（tap→type→tap），同一种流连着发 3 次
-        // 照样被重复守卫拦下；步的种类不同就是另一种流，不算重复。
+        // 本地流：签名按流里各步的全量参数拼（Andee ToolCall.signature() =
+        // "$name/$argumentsRaw" 同款）——只拼动作种类会让点不同目标的流被误判
+        // 为原地打转；每步的 eid/坐标/文字都进签名，目标不同就是不同的流。
         if (kind == "flow") {
             val steps = action.optJSONArray("steps")
             if (steps != null) {
-                val types = (0 until steps.length())
-                    .map { steps.optJSONObject(it)?.optString("action").orEmpty() }
-                sb.append('|').append(types.joinToString(">"))
+                for (i in 0 until steps.length()) {
+                    sb.append('|').append(steps.optJSONObject(i)?.toString().orEmpty())
+                }
             }
             return sb.toString()
         }
@@ -783,7 +845,8 @@ object TaskLoop {
 
 /** 同步等一轮模型回复（askOnce 是回调式，这里用闩锁包成同步，跑在循环线程上）。
  * M11：不等满 200 秒——每 200ms 轮询一次闩锁，每轮检查任务是否还存活，
- * 不存活就提前返回，急停不用等模型回话。askOnce 的调用签名不动（另一路加 isAlive 参数）。 */
+ * 不存活就提前返回，急停不用等模型回话。L2：isAlive 同时传给两个任务 client
+ * （签名都已接受 isAlive），不要只靠外层闩锁轮询兜底。 */
 private fun askModel(ctx: Context, userText: String, image: String?, isAlive: () -> Boolean = { true }): Pair<String?, String?> {
 val latch = CountDownLatch(1)
 var reply: String? = null
@@ -795,11 +858,13 @@ if (JarvisPrefs.getModelMode(ctx) == "custom") {
 CustomClient.askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
 onResult = { reply = it; latch.countDown()},
-onError = { error = it; latch.countDown()}
+onError = { error = it; latch.countDown()},
+isAlive = isAlive
 )
 } else {
 AutoGLMClient.askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
+isAlive = isAlive,
 onResult = { reply = it; latch.countDown()},
 onError = { error = it; latch.countDown()}
 )
@@ -868,7 +933,40 @@ val outcomeUnknown: Boolean = false
 * 可带 screens 连滑多屏）；zoom 走 zoomAim（只吃 cell，x/y 先换算成 cell）。
 * internal：FlowRuntime 的变异步复用这里的映射，单步行为不变。
 */
+/**
+ * H8：单步执行包一个 deadline（Andee LocalBrain.dispatchWithTimeout 同款）：
+ * 默认 60 秒，动作自带 timeout_ms 则加 10 秒 slack。超时不要杀调用——只放弃
+ * 等待，把 timed_out 结果回喂模型，让它读屏再决定（调用可能还在后台跑）。
+ * FlowRuntime 的流内步也走这里，同样受这个上限保护。
+ */
 internal fun execute(
+ctx: Context, controller: ScreenController, action: JSONObject
+): StepResult {
+val kind = action.optString("action")
+// M19：锁屏下 screen.* 及相关动作直接报错，不执行、不烧步数；附带一句
+// “手机锁了，解锁后我再继续”，让模型下轮再试。
+if (kind !in setOf("wait", "wait_idle", "wait_change") && isKeyguardLocked(ctx)) {
+return StepResult("手机锁了，解锁后我再继续：锁屏下 $kind 不可用（未执行）", false, null, null, "LOCKED")
+}
+val declared = action.optLong("timeout_ms", 0L)
+val budget = if (declared > 0) declared + STEP_TIMEOUT_SLACK_MS else STEP_TIMEOUT_MS
+val future = stepExecutor.submit<StepResult> { executeInner(ctx, controller, action) }
+return try {
+future.get(budget, TimeUnit.MILLISECONDS)
+} catch (e: TimeoutException) {
+StepResult(
+"这一步 ${budget / 1000} 秒没返回（timed_out），可能还在后台跑——先读屏看看成没成，再决定下一步，不要直接重做",
+false, null, null, "TIMEOUT", true
+)
+} catch (e: ExecutionException) {
+StepResult("执行 $kind 出错：${e.cause?.message ?: e.message}", false, null, null, "UNKNOWN")
+} catch (e: InterruptedException) {
+Thread.currentThread().interrupt()
+throw e
+}
+}
+
+internal fun executeInner(
 ctx: Context, controller: ScreenController, action: JSONObject
 ): StepResult {
 val kind = action.optString("action")

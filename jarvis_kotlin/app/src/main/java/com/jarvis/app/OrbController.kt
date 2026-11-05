@@ -23,7 +23,7 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewConfiguration
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.TextView
 import com.jarvis.app.asr.OfflineAsrSession
@@ -81,7 +81,7 @@ object OrbController {
     // M51：拖动吸边动画（dragEnd 里 180ms 播完）的句柄。没有它时 180ms 内再拖，
     // 吸边动画和手指同时写 lp.x，球跟手指抢位置；dragStart() 里一并 cancel()。
     private var snapAnimator: ValueAnimator? = null
-    // M53：隐藏期间收到的气泡不启动销毁计时。气泡在 captureHidden/taskHidden
+    // M53：隐藏期间收到的气泡不启动销毁计时。气泡在 captureHidden
     // 下是 GONE 的，计时照常跑会在恢复前就把气泡销毁、用户永远看不到。
     // bubbleHidePending=true 表示销毁计时被推迟，恢复显示时在 applyVisibility()
     // 里按 bubbleHideDelayMs 重新计时。
@@ -202,23 +202,97 @@ object OrbController {
      */
     // 两层隐藏，任一层为真球和气泡都不显示：
     // captureHidden = 截图瞬间空白（screenshot/grab/captureScreen）；
-    // taskHidden = 跨应用任务期隐藏（用户定：减少屏幕干扰、有利于定位）。
-    // 分层是为了截图完恢复不会把任务期的隐藏顶掉——恢复只清自己那层。
+    // taskHidden = 跨应用任务期（C13/Andee FloatingWindowUi.setWorking：球不隐藏，
+    // 只沉到屏幕底沿下一半，留半个球可见、可点；气泡也不藏，任务进度反馈不断线）。
+    // 分层是为了截图完恢复不会把任务期的沉底顶掉——恢复只清自己那层。
     // 标志位无条件写（即使 orb 为空也写，保证成对调用下不残留）；真正改
     // View 只在 orb 存在时，且一律走主线程。
     private var captureHidden = false
     private var taskHidden = false
+    // C13：任务期沉底前球的位置，任务结束回原位；taskPerched = 当前正沉在底沿。
+    private var taskHomeX = 0
+    private var taskHomeY = 0
+    private var taskPerched = false
 
     /** 仅主线程调：按两层标志位统一落一次可见性。 */
     private fun applyVisibility() {
-        val vis = if (captureHidden || taskHidden) View.GONE else View.VISIBLE
-        orb?.visibility = vis
-        bubble?.visibility = vis
+        if (captureHidden) {
+            orb?.visibility = View.GONE
+            bubble?.visibility = View.GONE
+            return
+        }
+        if (taskHidden) {
+            // C13：任务期间球不隐藏——沉到屏幕底沿下一半，留半个球可见、可点；
+            // 气泡也不藏，任务进度反馈不断线。
+            orb?.visibility = View.VISIBLE
+            bubble?.visibility = View.VISIBLE
+            applyTaskPerch()
+        } else {
+            restoreTaskHome()
+            orb?.visibility = View.VISIBLE
+            bubble?.visibility = View.VISIBLE
+        }
         // M53：恢复显示时，隐藏期间被推迟的气泡销毁计时重新启动。
-        if (vis == View.VISIBLE && bubble != null && bubbleHidePending) {
+        if (bubble != null && bubbleHidePending) {
             bubbleHidePending = false
             main.postDelayed(hideBubbleRunnable, bubbleHideDelayMs)
         }
+    }
+
+    /** C13：球沉到屏幕底沿下一半的 y（Andee perchY 同款：半个球在沿下）。 */
+    private fun perchY(): Int {
+        val lp = orbLp ?: return 0
+        return bottomEdge() - lp.height / 2
+    }
+
+    /** C13/M39：屏幕底沿（Andee bottomEdge 同款：扣掉底部系统栏/刘海 inset，
+     * 免得半个球沉到导航栏后面去、只剩一条缝可见）。 */
+    private fun bottomEdge(): Int {
+        val s = svc ?: return 0
+        val w = wm ?: return 0
+        return try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                val m = w.currentWindowMetrics
+                val inset = m.windowInsets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                ).bottom
+                m.bounds.bottom - inset
+            } else {
+                s.resources.displayMetrics.heightPixels
+            }
+        } catch (_: Exception) {
+            s.resources.displayMetrics.heightPixels
+        }
+    }
+
+    /** C13：把球沉到屏幕底沿下一半（只记一次原位；收起态本来就只剩一小截在外面，不再另沉）。 */
+    private fun applyTaskPerch() {
+        val o = orb ?: return
+        val lp = orbLp ?: return
+        val w = wm ?: return
+        if (collapsed) return
+        if (!taskPerched) {
+            taskHomeX = lp.x
+            taskHomeY = lp.y
+            taskPerched = true
+        }
+        if (lp.y != perchY()) {
+            lp.y = perchY()
+            try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+            repositionBubble()
+        }
+    }
+
+    /** C13：任务结束，球回沉底前的位置。 */
+    private fun restoreTaskHome() {
+        if (!taskPerched) return
+        taskPerched = false
+        val o = orb ?: return
+        val lp = orbLp ?: return
+        lp.x = taskHomeX
+        lp.y = taskHomeY
+        try { wm?.updateViewLayout(o, lp) } catch (_: Exception) {}
+        repositionBubble()
     }
 
     fun setVisibleForCapture(visible: Boolean) {
@@ -255,7 +329,7 @@ object OrbController {
         }
     }
 
-    /** 跨应用任务期隐藏球（任务结束恢复；急停仍可用音量键双击）。 */
+    /** C13：跨应用任务期球沉底沿（不隐藏，留半个球可见、可点；任务结束回原位）。 */
     fun setTaskHidden(hidden: Boolean) {
         taskHidden = hidden
         if (Looper.myLooper() == Looper.getMainLooper()) applyVisibility()
@@ -284,9 +358,8 @@ object OrbController {
         dodgeX = lp.x
         dodgeY = lp.y
         dodged = true
-        // M50：让位会把球移到对侧边缘，气泡坐标是按旧位置算的、不会跟过去，
-        // 直接撤掉气泡（下次有新文字再按新位置重算），不要留一个悬空的气泡。
-        removeBubble()
+        // M35：让位只挪球，气泡跟着球走（不撤掉，下次有新文字也不用等重算）。
+        repositionBubble()
         // 让位期间不排收起：1.6 秒的定时器若在让位中途触发，doCollapse 会把
         // 让位后的临时位置记成 dockedX，恢复后球就回不到原来那条边。
         cancelCollapseSchedule()
@@ -314,6 +387,7 @@ object OrbController {
             lp.x = dodgeX
             lp.y = dodgeY
             try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+            repositionBubble()
             // 让位恢复后重新排收起：球回到了原来那条边，闲置够了就该照常收起，
             // 不然让位一次之后贴边隐藏就再也不触发了。
             scheduleCollapseIfDocked()
@@ -364,15 +438,15 @@ object OrbController {
         val hiddenAmount = (lp.width * (1f - COLLAPSED_VISIBLE_FRACTION)).toInt()
         val target = if (onLeft) -hiddenAmount else lp.x + hiddenAmount
         collapsed = true
-        // M50：收起会把球移出屏幕大半，气泡坐标是按展开位置算的、不会跟过去，
-        // 直接撤掉气泡（下次有新文字再按新位置重算）。
-        removeBubble()
+        // M35：收起会把球移出屏幕大半，气泡跟着球走（不撤掉）。
+        repositionBubble()
         edgeAnimator?.cancel()
         edgeAnimator = ValueAnimator.ofInt(lp.x, target).apply {
             duration = COLLAPSE_ANIM_MS
             addUpdateListener {
                 lp.x = it.animatedValue as Int
                 try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
+                repositionBubble()
             }
             start()
         }
@@ -437,6 +511,9 @@ object OrbController {
         val d = s.resources.displayMetrics
         // 真机反馈：jk-v11 时 56dp 太小，jk-v12 放大到 168dp 又太大，用户改定 120dp
         val size = (100 * d.density).toInt()
+        // M39：夹紧用的半个球（pad）与半沉底沿（perchY，Andee clampCompact 同款）。
+        val pad = size / 2
+        val perchY = bottomEdge() - size / 2
         val p = s.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val lp = WindowManager.LayoutParams(
             size, size, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -444,8 +521,8 @@ object OrbController {
             PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.TOP or Gravity.START
-        lp.x = p.getInt("x", d.widthPixels - size).coerceIn(0, (d.widthPixels - size).coerceAtLeast(0))
-        lp.y = p.getInt("y", d.heightPixels / 3).coerceIn(0, (d.heightPixels - size).coerceAtLeast(0))
+        lp.x = p.getInt("x", d.widthPixels - size).coerceIn(-pad, d.widthPixels - size + pad)
+        lp.y = p.getInt("y", d.heightPixels / 3).coerceIn(-pad, perchY)
         val v = OrbView(s, object : OrbView.Host {
             override fun dragStart() {
                 // 第二梯队批八：球收起时，这一下触摸先只负责展开，不当成"点一下"的正常手势——
@@ -453,6 +530,8 @@ object OrbController {
                 // 真正的贴边隐藏：收起态下拖球必须瞬时展开，不能走 220ms 动画——
                 // 动画和手指同时写 lp.x 会抢位置，而且 startX 会读到屏外坐标、拖起来整段都偏。
                 revealOnlyThisGesture = collapsed
+                // C13：用户亲手拖走了沉底的球，沉底态就此作罢（不再等任务结束把它拽回原位）。
+                if (taskPerched) taskPerched = false
                 if (collapsed) expandInstantly()
                 else cancelCollapseSchedule()
                 // M51：180ms 内再拖时，上一轮吸边动画还在播、会跟手指抢 lp.x，
@@ -461,13 +540,15 @@ object OrbController {
                 snapAnimator = null
                 startX = lp.x
                 startY = lp.y
-                removeBubble()
+                // M35：拖动开始不撤气泡，气泡在 dragBy 里跟着球走。
             }
 
             override fun dragBy(dx: Float, dy: Float) {
-                lp.x = (startX + dx).toInt().coerceIn(0, (d.widthPixels - size).coerceAtLeast(0))
-                lp.y = (startY + dy).toInt().coerceIn(0, (d.heightPixels - size).coerceAtLeast(0))
+                // M39/Andee clampCompact：球允许半沉出屏（x ∈ [-pad, 宽-side+pad]，y 可到半沉底沿 perchY）。
+                lp.x = (startX + dx).toInt().coerceIn(-pad, d.widthPixels - size + pad)
+                lp.y = (startY + dy).toInt().coerceIn(-pad, perchY)
                 try { w.updateViewLayout(orb, lp) } catch (_: Exception) {}
+                repositionBubble()
             }
 
             override fun dragEnd() {
@@ -485,9 +566,7 @@ object OrbController {
                     lp.x // 自由摆放：不挪动，就停在松手的地方
                 }
                 if (target != lp.x) {
-                    // M50：吸边动画会挪动球，气泡坐标是按松手位置算的、不会跟过去，
-                    // 先撤掉气泡（下次有新文字再按新位置重算）。
-                    removeBubble()
+                    // M35：吸边动画会挪动球，气泡在动画回调里跟着球走，不撤掉。
                     // M51：吸边动画存成字段，180ms 内再拖时 dragStart() 里能停掉它。
                     snapAnimator?.cancel()
                     snapAnimator = ValueAnimator.ofInt(lp.x, target).apply {
@@ -495,6 +574,7 @@ object OrbController {
                         addUpdateListener {
                             lp.x = it.animatedValue as Int
                             try { w.updateViewLayout(orb, lp) } catch (_: Exception) {}
+                            repositionBubble()
                         }
                         start()
                     }
@@ -530,7 +610,8 @@ object OrbController {
             w.addView(v, lp)
             orb = v
             orbLp = lp
-            if (captureHidden || taskHidden) v.visibility = View.GONE
+            // C13：任务期只沉底沿不隐藏、截图期才 GONE，都由 applyVisibility() 统一落。
+            applyVisibility()
             // 第二梯队批八：这次显示时如果上次保存的位置本来就贴边，空闲一段时间后也该收起，
             // 不用非得等用户这次又拖一下才开始计时。
             scheduleCollapseIfDocked()
@@ -585,8 +666,11 @@ object OrbController {
         if (orb == null || text.isBlank()) return
         removeBubble()
         val d = s.resources.displayMetrics
+        // M36：球旁气泡截断放宽到 Andee 的 4000 字上限（ChatHistory.MAX_TEXT，约三屏中文），
+        // 不再是 120 字。
+        val shown = if (text.length > ChatHistory.MAX_TEXT) text.take(ChatHistory.MAX_TEXT) + "…" else text
         val tv = TextView(s).apply {
-            this.text = if (text.length > 120) text.take(120) + "…" else text
+            this.text = shown
             setTextColor(Color.WHITE)
             textSize = 13f
             maxWidth = (240 * d.density).toInt()
@@ -601,10 +685,7 @@ object OrbController {
             View.MeasureSpec.makeMeasureSpec(tv.maxWidth, View.MeasureSpec.AT_MOST),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
-        val gap = (8 * d.density).toInt()
-        val onLeft = olp.x + olp.width / 2 < d.widthPixels / 2
-        val x = if (onLeft) olp.x + olp.width + gap else olp.x - tv.measuredWidth - gap
-        val y = olp.y + olp.height / 2 - tv.measuredHeight / 2
+        val (bx, by) = bubbleXY(tv, olp, d)
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -612,26 +693,50 @@ object OrbController {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            // M50：x 双向夹紧到屏幕内。原来只 coerceAtLeast(0)：球在左半屏偏右位置时
-            // 右侧公式 x = olp.x + olp.width + gap 可能超出右屏边，气泡被屏边裁掉。
-            this.x = x.coerceIn(0, (d.widthPixels - tv.measuredWidth).coerceAtLeast(0))
-            this.y = y.coerceAtLeast(0)
+            this.x = bx
+            this.y = by
         }
         try {
             w.addView(tv, lp)
             bubble = tv
-            if (captureHidden || taskHidden) tv.visibility = View.GONE
+            if (captureHidden) tv.visibility = View.GONE
             // M53：隐藏期间不启动销毁计时——气泡现在是 GONE 的，计时照常跑会在
             // 恢复显示前就把气泡销毁、用户永远看不到。恢复显示时 applyVisibility()
-            // 按 bubbleHideDelayMs 重新计时。
+            // 按 bubbleHideDelayMs 重新计时。（任务期 C13 不再隐藏气泡，不走这条。）
             val delayMs = (3500L + text.length * 60L).coerceAtMost(12000L)
-            if (captureHidden || taskHidden) {
+            if (captureHidden) {
                 bubbleHidePending = true
                 bubbleHideDelayMs = delayMs
             } else {
                 main.postDelayed(hideBubbleRunnable, delayMs)
             }
         } catch (_: Exception) {}
+    }
+
+    /** M35：气泡挂在球上的位置（Andee showSignboard 同款思路：窗口围着球长，球的屏幕位置不动）。
+     * 球在左半屏气泡挂右边、在右半屏挂左边；x/y 都夹紧到屏幕内，球半沉底沿时气泡也不出屏。 */
+    private fun bubbleXY(tv: TextView, olp: WindowManager.LayoutParams, d: android.util.DisplayMetrics): Pair<Int, Int> {
+        val gap = (8 * d.density).toInt()
+        val onLeft = olp.x + olp.width / 2 < d.widthPixels / 2
+        val x = if (onLeft) olp.x + olp.width + gap else olp.x - tv.measuredWidth - gap
+        val y = olp.y + olp.height / 2 - tv.measuredHeight / 2
+        return x.coerceIn(0, (d.widthPixels - tv.measuredWidth).coerceAtLeast(0)) to
+            y.coerceIn(0, (bottomEdge() - tv.measuredHeight).coerceAtLeast(0))
+    }
+
+    /** M35：球一动气泡就跟过去（拖动/吸边/收起/让位/沉底都走这里），不再 removeBubble()。 */
+    private fun repositionBubble() {
+        val tv = bubble ?: return
+        val olp = orbLp ?: return
+        val s = svc ?: return
+        val w = wm ?: return
+        val d = s.resources.displayMetrics
+        val lp = tv.layoutParams as? WindowManager.LayoutParams ?: return
+        val (bx, by) = bubbleXY(tv, olp, d)
+        if (lp.x == bx && lp.y == by) return
+        lp.x = bx
+        lp.y = by
+        try { w.updateViewLayout(tv, lp) } catch (_: Exception) {}
     }
 
     private fun removeBubble() {
@@ -660,7 +765,7 @@ object OrbController {
      *  中层：径向渐变圆盘
      *  核心：高光渐变 + 光晕
      * 颜色随状态：待命蓝 / 聆听青 / 思考橙 / 播报绿 / 急停红。呼吸脉冲沿用原动画机制。
-     * 拖动阈值 = 系统 touch slop × 2.5：点按时的轻微位移不再被当成拖动吃掉。
+     * M39/Andee BubbleUi 同款：拖动阈值 6dp、长按 500ms。
      */
     private class OrbView(ctx: Context, private val host: Host) : View(ctx) {
         interface Host {
@@ -673,7 +778,8 @@ object OrbController {
 
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val dp = ctx.resources.displayMetrics.density
-        private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2.5f
+        // M39：拖动阈值 6dp（Andee BubbleUi 同款，不再是系统 touch slop × 2.5 约 20dp）。
+        private val slop = 6f * dp
         private var st = "idle"
         private var rot = 0f
         private var anim: ValueAnimator? = null
@@ -912,7 +1018,8 @@ object OrbController {
                     pressed = true
                     invalidate()
                     host.dragStart()
-                    postDelayed(longRunnable, 600)
+                    // M39：长按 500ms（Andee BubbleUi 同款，不再是 600ms）。
+                    postDelayed(longRunnable, 500)
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {

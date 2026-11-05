@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.location.Geocoder
+import android.location.Location
 import android.location.LocationManager
 import android.media.AudioManager
 import android.net.ConnectivityManager
@@ -53,6 +54,8 @@ object DeviceCommands {
     private val RECENTS = setOf("打开最近任务", "看最近任务", "多任务", "打开多任务")
     private val VOL_UP = setOf("音量调大", "声音大一点", "音量大一点", "调大音量", "声音调大")
     private val VOL_DOWN = setOf("音量调小", "声音小一点", "音量小一点", "调小音量", "声音调小")
+    // M30：音量数值设定（Andee volume(level) 同款）：「音量调到50%」「音量50%」。
+    private val VOL_SET = Regex("音量.*?(\\d+)\\s*%|音量调到\\s*(\\d+)|声音调到\\s*(\\d+)")
 
     // 第二梯队批五新增：WiFi/蓝牙/飞行模式/系统勿扰。
     private val WIFI_PANEL = setOf("打开wifi", "打开WiFi", "打开无线网", "开wifi", "开WiFi", "wifi设置", "WiFi设置")
@@ -83,6 +86,9 @@ object DeviceCommands {
         // 「亮度调到50%会不会太亮」也会误触发改亮度；整句匹配只认纯指令。
         val brightPct = (BRIGHT_SET.matchEntire(t) ?: BRIGHT_SET.matchEntire(bare))
             ?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toIntOrNull()
+        // M30：音量数值同款处理。
+        val volPct = (VOL_SET.matchEntire(t) ?: VOL_SET.matchEntire(bare))
+            ?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toIntOrNull()
 
         when {
             t in TORCH_ON || bare in TORCH_ON -> { setTorch(ctx, true, speak); return true }
@@ -94,8 +100,9 @@ object DeviceCommands {
             t in QUICK_SETTINGS -> { global(ctx, android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS, "快捷设置", "快捷设置打开了", speak); return true }
             t in HOME -> { global(ctx, android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME, "回主页", "回主页了", speak); return true }
             t in RECENTS -> { global(ctx, android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS, "最近任务", "最近任务打开了", speak); return true }
-            t in VOL_UP -> { adjustVolume(ctx, AudioManager.ADJUST_RAISE, "音量调大了", speak); return true }
-            t in VOL_DOWN -> { adjustVolume(ctx, AudioManager.ADJUST_LOWER, "音量调小了", speak); return true }
+            t in VOL_UP -> { adjustVolume(ctx, AudioManager.ADJUST_RAISE, speak); return true }
+            t in VOL_DOWN -> { adjustVolume(ctx, AudioManager.ADJUST_LOWER, speak); return true }
+            volPct != null -> { setVolumePct(ctx, volPct, speak); return true }
             t in WIFI_PANEL -> { openWifiPanel(ctx, speak); return true }
             t in BT_PANEL -> { openBluetoothPanel(ctx, speak); return true }
             t in AIRPLANE_PANEL -> { openAirplaneModeSettings(ctx, speak); return true }
@@ -193,12 +200,18 @@ object DeviceCommands {
             return
         }
         try {
-            nm.setInterruptionFilter(
-                if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY
+            val want = if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY
                 else NotificationManager.INTERRUPTION_FILTER_ALL
-            )
-            AuditLog.append(ctx, "系统功能", "系统勿扰", if (on) "已开启" else "已关闭")
-            speak(if (on) "系统勿扰模式开了，只有重要通知会提醒" else "系统勿扰模式关了")
+            nm.setInterruptionFilter(want)
+            // H12：设完读回 currentInterruptionFilter 再报，系统没吃下就别谎报。
+            val actual = nm.currentInterruptionFilter
+            if (actual != want) {
+                AuditLog.append(ctx, "系统功能", "系统勿扰", "设置未生效（读回 $actual）")
+                speak("勿扰模式没切成，系统没吃下这个设置")
+            } else {
+                AuditLog.append(ctx, "系统功能", "系统勿扰", if (on) "已开启" else "已关闭")
+                speak(if (on) "系统勿扰模式开了，只有重要通知会提醒" else "系统勿扰模式关了")
+            }
         } catch (e: Exception) {
             AuditLog.append(ctx, "系统功能", "系统勿扰", "失败：${e.message}")
             speak("勿扰模式没切成：${e.message}")
@@ -280,8 +293,8 @@ object DeviceCommands {
             "dnd_off" -> setSystemDnd(ctx, false, speak)
             "torch_on" -> setTorch(ctx, true, speak)
             "torch_off" -> setTorch(ctx, false, speak)
-            "volume_up" -> adjustVolume(ctx, AudioManager.ADJUST_RAISE, "音量调大了", speak)
-            "volume_down" -> adjustVolume(ctx, AudioManager.ADJUST_LOWER, "音量调小了", speak)
+            "volume_up" -> adjustVolume(ctx, AudioManager.ADJUST_RAISE, speak)
+            "volume_down" -> adjustVolume(ctx, AudioManager.ADJUST_LOWER, speak)
             "wifi_panel" -> openWifiPanel(ctx, speak)
             "bt_panel" -> openBluetoothPanel(ctx, speak)
             "airplane_settings" -> openAirplaneModeSettings(ctx, speak)
@@ -319,14 +332,48 @@ object DeviceCommands {
         speak(if (ok) okText else "${label}没成，系统拒绝了这个动作")
     }
 
-    private fun adjustVolume(ctx: Context, dir: Int, okText: String, speak: (String) -> Unit) {
+    private fun adjustVolume(ctx: Context, dir: Int, speak: (String) -> Unit) {
         try {
             val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val before = am.getStreamVolume(AudioManager.STREAM_MUSIC)
             am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI)
-            AuditLog.append(ctx, "系统功能", "音量", okText)
-            speak(okText)
+            // H12：调完读回实际音量再报——已经到顶/到底时音量不会变，别谎报"调大了"。
+            val after = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (after == before) {
+                val edge = if (dir == AudioManager.ADJUST_RAISE) "已经是最大了" else "已经是最小了"
+                AuditLog.append(ctx, "系统功能", "音量", "未变（$edge，$after/$max）")
+                speak("音量没变，$edge")
+            } else {
+                AuditLog.append(ctx, "系统功能", "音量", "调到 $after/$max")
+                speak("音量调到 $after 了")
+            }
         } catch (e: Exception) {
             speak("音量没调成：${e.message}")
+        }
+    }
+
+    /** M30：音量数值设定（Andee volume(level) 同款）：按百分比设，写完读回再报。 */
+    private fun setVolumePct(ctx: Context, pct: Int, speak: (String) -> Unit) {
+        if (pct !in 0..100) {
+            speak("音量要在 0 到 100 之间")
+            return
+        }
+        try {
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val v = (pct * max / 100).coerceIn(0, max)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, v, AudioManager.FLAG_SHOW_UI)
+            val actual = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (actual != v) {
+                AuditLog.append(ctx, "系统功能", "音量", "数值设定未生效（读回 $actual/$max）")
+                speak("音量没设成，系统没吃下这个值")
+            } else {
+                AuditLog.append(ctx, "系统功能", "音量", "设到 $pct%")
+                speak("音量调到 $pct% 了")
+            }
+        } catch (e: Exception) {
+            speak("音量没设成：${e.message}")
         }
     }
 
@@ -393,17 +440,69 @@ object DeviceCommands {
         speak(text)
     }
 
+    /** M30：网络连通性验证——光连上不等于能上网（欠费、 captive portal 都可能没网）。 */
+    private fun networkValidated(ctx: Context): Boolean {
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /** 网络：看当前活动网络的传输类型（WiFi / 移动数据 / 都没有）。 */
     private fun reportNetwork(ctx: Context, speak: (String) -> Unit) {
-        val text = when (val t = networkType(ctx)) {
-            "未联网" -> "没联网，WiFi 和移动数据都没连上"
+        val t = networkType(ctx)
+        if (t == "未联网") {
+            AuditLog.append(ctx, "系统功能", "网络", "没联网，WiFi 和移动数据都没连上")
+            speak("没联网，WiFi 和移动数据都没连上")
+            return
+        }
+        val base = when (t) {
             "WiFi" -> "连着 WiFi"
             "移动数据" -> "用的是移动数据，没连 WiFi"
             "有线网络" -> "连着有线网络"
             else -> "联网了，但不是 WiFi 也不是移动数据"
         }
+        // M30：连上但没通过连通性验证时如实说，别谎报"能上网"。
+        val text = if (!networkValidated(ctx)) "$base，但上不了网" else base
         AuditLog.append(ctx, "系统功能", "网络", text)
         speak(text)
+    }
+
+    /** M30：位置时效——缓存超过 5 分钟就等最多 8 秒取新定位（Andee STALE_LOC_MS 同款）；回报带精度与定位时间。 */
+    private const val STALE_LOC_MS = 5 * 60_000L
+
+    private fun requestFreshLocation(ctx: Context): Location? {
+        return try {
+            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var result: Location? = null
+            val listener = object : android.location.LocationListener {
+                override fun onLocationChanged(loc: Location) {
+                    result = loc
+                    latch.countDown()
+                }
+            }
+            val looper = Looper.getMainLooper()
+            var requested = false
+            for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+                try {
+                    if (lm.isProviderEnabled(provider)) {
+                        lm.requestLocationUpdates(provider, 0L, 0f, listener, looper)
+                        requested = true
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            if (!requested) return null
+            latch.await(8, java.util.concurrent.TimeUnit.SECONDS)
+            try { lm.removeUpdates(listener) } catch (_: Exception) { }
+            result
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** 位置：取最后一次定位（不主动开 GPS 等新定位，秒回但可能是旧位置，如实说明）。
@@ -421,10 +520,21 @@ object DeviceCommands {
             val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
             val gps = try { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) } catch (_: Exception) { null }
             val net = try { lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) } catch (_: Exception) { null }
-            val loc = listOfNotNull(gps, net).maxByOrNull { it.time }
-            if (loc == null) {
+            val cached = listOfNotNull(gps, net).maxByOrNull { it.time }
+            if (cached == null) {
                 speak("定位还没拿到：系统里一条旧定位都没有，先打开地图定位一下")
                 return
+            }
+            // 显式非空类型：下面分支里会重赋值，靠智能转型在 Kotlin 1.9 下不可靠。
+            var loc: Location = cached
+            // M30：缓存超过 5 分钟就等最多 8 秒取新定位；主线程不阻塞等，直接报旧定位+时间。
+            var ageMs = System.currentTimeMillis() - loc.time
+            if (ageMs > STALE_LOC_MS && Looper.myLooper() != Looper.getMainLooper()) {
+                val fresh = requestFreshLocation(ctx)
+                if (fresh != null) {
+                    loc = fresh
+                    ageMs = System.currentTimeMillis() - loc.time
+                }
             }
             val lat = String.format(Locale.US, "%.4f", loc.latitude)
             val lng = String.format(Locale.US, "%.4f", loc.longitude)
@@ -432,7 +542,14 @@ object DeviceCommands {
                 Geocoder(ctx, Locale.getDefault()).getFromLocation(loc.latitude, loc.longitude, 1)
                     ?.firstOrNull()?.getAddressLine(0)
             } catch (_: Exception) { null }
-            val text = if (!place.isNullOrBlank()) "你在$place 附近" else "最后定位在北纬 $lat，东经 $lng"
+            val ageText = when {
+                ageMs < 60_000L -> "刚定位的"
+                ageMs < 3_600_000L -> "${ageMs / 60_000L} 分钟前的定位"
+                else -> "${ageMs / 3_600_000L} 小时前的定位"
+            }
+            val accText = if (loc.hasAccuracy()) "，精度约 ${loc.accuracy.toInt()} 米" else ""
+            val text = if (!place.isNullOrBlank()) "你在$place 附近（$ageText$accText）"
+                else "最后定位在北纬 $lat，东经 $lng（$ageText$accText）"
             AuditLog.append(ctx, "系统功能", "位置", text)
             speak(text)
         } catch (e: Exception) {
@@ -469,9 +586,16 @@ object DeviceCommands {
             val cur = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, 128)
             val next = (cur + delta).coerceIn(5, 255)
             Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, next)
-            val pct = next * 100 / 255
-            AuditLog.append(ctx, "系统功能", "亮度", "调到 $pct%")
-            speak("亮度调到 $pct% 了")
+            // H12：写完读回再报——系统没吃下这个值时别谎报。
+            val actual = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, next)
+            val pct = actual * 100 / 255
+            if (actual == cur && next != cur) {
+                AuditLog.append(ctx, "系统功能", "亮度", "写回未生效（仍是 $pct%）")
+                speak("亮度没调成，系统没吃下这个值")
+            } else {
+                AuditLog.append(ctx, "系统功能", "亮度", "调到 $pct%")
+                speak("亮度调到 $pct% 了")
+            }
         } catch (e: Exception) {
             speak("亮度没调成：${e.message}")
         }
@@ -492,8 +616,16 @@ object DeviceCommands {
             Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
             val v = (pct * 255 / 100).coerceIn(5, 255)
             Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, v)
-            AuditLog.append(ctx, "系统功能", "亮度", "调到 $pct%")
-            speak("亮度调到 $pct% 了")
+            // H12：写完读回再报——系统没吃下这个值时别谎报。
+            val actual = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, v)
+            val actualPct = actual * 100 / 255
+            if (actual != v) {
+                AuditLog.append(ctx, "系统功能", "亮度", "写回未生效（读回 $actualPct%）")
+                speak("亮度没调成，系统没吃下这个值")
+            } else {
+                AuditLog.append(ctx, "系统功能", "亮度", "调到 $pct%")
+                speak("亮度调到 $pct% 了")
+            }
         } catch (e: Exception) {
             speak("亮度没调成：${e.message}")
         }
@@ -517,8 +649,15 @@ object DeviceCommands {
         try {
             val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             am.ringerMode = if (on) AudioManager.RINGER_MODE_SILENT else AudioManager.RINGER_MODE_NORMAL
-            AuditLog.append(ctx, "系统功能", "静音", if (on) "已静音" else "已取消静音")
-            speak(if (on) "静音了，来电和通知都不响了" else "静音取消了")
+            // H12：设完读回 ringerMode 再报——勿扰/系统策略可能把响铃模式顶回去。
+            val want = if (on) AudioManager.RINGER_MODE_SILENT else AudioManager.RINGER_MODE_NORMAL
+            if (am.ringerMode != want) {
+                AuditLog.append(ctx, "系统功能", "静音", "设置未生效（读回 ${am.ringerMode}）")
+                speak("静音没切成，系统把响铃模式顶回去了")
+            } else {
+                AuditLog.append(ctx, "系统功能", "静音", if (on) "已静音" else "已取消静音")
+                speak(if (on) "静音了，来电和通知都不响了" else "静音取消了")
+            }
         } catch (e: Exception) {
             speak("静音没切成：${e.message}")
         }

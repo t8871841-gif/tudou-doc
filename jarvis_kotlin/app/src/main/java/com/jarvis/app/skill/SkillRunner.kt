@@ -17,6 +17,7 @@ import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
 import com.jarvis.app.vision.ScreenVisionAgent
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +69,8 @@ object SkillRunner {
     private const val WAIT_CHUNK_MS = 15_000L
     private const val TAP_MAX_ATTEMPTS = 3 // 首次 + 重试 2 次
     private const val INPUT_FOCUS_WAIT_MS = 700L
+    /** M16：等界面签名（captureScreenSig）的超时——回调不到就报错返回，不要永远等。 */
+    private const val CAPTURE_SIG_TIMEOUT_MS = 5000L
 
     /**
      * S19：取消序号。run() 启动新一轮时自增（作废上一轮），cancelInFlight() 自增；
@@ -89,6 +92,35 @@ object SkillRunner {
      */
     fun run(ctx: Context, skill: SkillItem, fromIndex: Int = 0, onDone: (Boolean, String, Int?) -> Unit) {
         val mySeq = runSeq.incrementAndGet()
+        // M16：onDone 只调一次——取消分支、失败分支、成功分支都可能走到这里，
+        // 用这个 guard 兜住，不让调用方收到两次“已取消/已完成”。
+        val doneOnce = AtomicBoolean(false)
+        val safeOnDone: (Boolean, String, Int?) -> Unit = { ok, msg, idx ->
+            if (doneOnce.compareAndSet(false, true)) onDone(ok, msg, idx)
+        }
+        if (fromIndex > 0) {
+            // M33：续跑时重新读取最新的 SkillItem，不要用 offer 时存的旧对象——
+            // 技能可能在失败后被用户改过（改短、改步骤），旧快照会重放已不存在的步骤。
+            // 读不到（已被删除）就明确报错，不拿旧对象硬跑。
+            scope.launch {
+                val fresh = try {
+                    SkillService.getAllSkills(ctx).firstOrNull { it.id == skill.id }
+                } catch (_: Exception) {
+                    null
+                }
+                if (fresh == null) {
+                    AuditLog.append(ctx, "技能「${skill.name}」", "续跑前重读失败：技能找不到了（可能已被删除）", "失败")
+                    safeOnDone(false, "技能「${skill.name}」找不到了（可能已被删除），没法接着做", null)
+                    return@launch
+                }
+                startRun(ctx, fresh, fromIndex, mySeq, safeOnDone)
+            }
+            return
+        }
+        startRun(ctx, skill, fromIndex, mySeq, safeOnDone)
+    }
+
+    private fun startRun(ctx: Context, skill: SkillItem, fromIndex: Int, mySeq: Int, onDone: (Boolean, String, Int?) -> Unit) {
         val steps = SkillService.parseSteps(skill.stepsJson)
         if (steps.isEmpty()) {
             scope.launch { SkillService.recordFailure(ctx, skill.id) }
@@ -105,7 +137,62 @@ object SkillRunner {
         val start = fromIndex
         val label = if (start > 0) "从第 ${start + 1} 步续播，共 ${steps.size} 步" else "开始重播 ${steps.size} 步"
         AuditLog.append(ctx, "技能「${skill.name}」", label, "进行中")
+        // M33：重跑失败步之前先核对该步是否已生效（已生效就跳过，不要重放一次——
+        // 比如 open 那步其实已经把应用打开了，再开一次是白跑；sys 那步想要的状态
+        // 已经在了，再执行一次可能反向拨回去）。只有能核对的步骤才跳过，核对不了
+        // 的（tap/input/swipe/wait）照旧重跑。
+        if (start > 0 && isStepAlreadyApplied(ctx, steps[start])) {
+            AuditLog.append(ctx, "技能「${skill.name}」", "第 ${start + 1} 步续跑前核对：这一步其实已经生效了，跳过不重放", "进行中")
+            val nextIndex = start + 1
+            if (nextIndex >= steps.size) {
+                scope.launch { SkillService.recordSuccess(ctx, skill.id) }
+                AuditLog.append(ctx, "技能「${skill.name}」", "重播完成，共 ${steps.size} 步（失败步已生效，跳过）", "成功")
+                onDone(true, "", null)
+                return
+            }
+            runStep(ctx, skill, steps, nextIndex, mySeq, onDone)
+            return
+        }
         runStep(ctx, skill, steps, start, mySeq, onDone)
+    }
+
+    /**
+     * M33：失败步是否其实已经生效了。只对能通用核对的步骤回答 true：
+     * open——目标应用已经在前台；sys——想要的状态已经在了（读回核对）。
+     * tap/input/swipe/wait 没有通用 oracle，返回 false，照旧重跑。
+     */
+    private fun isStepAlreadyApplied(ctx: Context, step: org.json.JSONObject): Boolean {
+        return when (step.optString("t")) {
+            "open" -> {
+                val pkg = step.optString("pkg")
+                if (pkg.isEmpty()) false else try {
+                    JarvisAccessibilityService.instance?.foregroundPackage() == pkg
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            "sys" -> isSysAlreadyInDesiredState(ctx, step.optString("action"))
+            else -> false
+        }
+    }
+
+    /** M33：sys 动作想要的终态是不是已经在了（读回当前状态比对）。校验不了的动作返回 false。 */
+    private fun isSysAlreadyInDesiredState(ctx: Context, action: String): Boolean {
+        val cur = readSysState(ctx, action) ?: return false
+        return when (action) {
+            "dnd_on" -> cur == NotificationManager.INTERRUPTION_FILTER_PRIORITY
+            "dnd_off" -> cur == NotificationManager.INTERRUPTION_FILTER_ALL
+            "mute_on" -> cur == AudioManager.RINGER_MODE_SILENT
+            "mute_off" -> cur == AudioManager.RINGER_MODE_NORMAL
+            "volume_up" -> {
+                val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                cur >= am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            }
+            "volume_down" -> cur <= 0
+            "brightness_up" -> cur >= 255
+            "brightness_down" -> cur <= 5
+            else -> false
+        }
     }
 
     private fun runStep(
@@ -113,9 +200,11 @@ object SkillRunner {
         mySeq: Int,
         onDone: (Boolean, String, Int?) -> Unit
     ) {
-        // S19：每步先校验取消序号；被取消就悄悄停下，不调 onDone（取消方已接管）。
+        // S19：每步先校验取消序号；M16：被取消就调 onDone 回调一次明确说“已取消”，
+        // 不要静默返回（调用方靠它收尾播报；onDone 有 once guard，不会重复触发）。
         if (mySeq != runSeq.get()) {
             AuditLog.append(ctx, "技能「${skill.name}」", "第 ${index + 1} 步前已取消", "已取消")
+            onDone(false, "已取消", index)
             return
         }
         if (index >= steps.size) {
@@ -127,11 +216,18 @@ object SkillRunner {
         val step = steps[index]
         val n = index + 1
         fun cancelled(): Boolean = mySeq != runSeq.get()
+        /** M16：中途被取消时向调用方报一次“已取消”（onDone 有 once guard，多处调也只生效一次）。 */
+        fun reportCancelled() {
+            onDone(false, "已取消", index)
+        }
         fun next(delayMs: Long) {
             main.postDelayed({ runStep(ctx, skill, steps, index + 1, mySeq, onDone) }, delayMs)
         }
         fun fail(detail: String) {
-            if (cancelled()) return
+            if (cancelled()) {
+                reportCancelled()
+                return
+            }
             scope.launch { SkillService.recordFailure(ctx, skill.id) }
             AuditLog.append(ctx, "技能「${skill.name}」", "第 $n 步失败", detail)
             onDone(false, "第 $n 步失败：$detail", index)
@@ -165,9 +261,12 @@ object SkillRunner {
                             fail("打开 $pkg 失败：$result，但前台是 ${fg.ifEmpty { "未知" }}，目标没到前台")
                         } else {
                             if (svc == null) {
-                                AuditLog.append(ctx, "技能「${skill.name}」", "第 $n 步 open：无障碍服务不可用，没校验前台包名", "进行中")
+                                // M32：无障碍缺失的 open 步不要只记审计就 next()——没法确认
+                                // 目标是不是真的到前台了，停下明确报错，不当成功继续跑。
+                                fail("打开 $pkg 后无障碍服务不可用，没法确认目标是不是真的打开了")
+                            } else {
+                                next(OPEN_SETTLE_MS)
                             }
-                            next(OPEN_SETTLE_MS)
                         }
                     } catch (e: Exception) {
                         fail("打开 $pkg 出错：${e.message}")
@@ -182,11 +281,25 @@ object SkillRunner {
                     // M14：失败先等界面稳定后重试 1–2 次；成功后校验界面是否变化，
                     // 没变化也重试一次，仍没变化才上报（可能没点中目标）。
                     fun tapAttempt(attempt: Int) {
-                        if (cancelled()) return
-                        captureScreenSig { preSig ->
-                            if (cancelled()) return@captureScreenSig
+                        if (cancelled()) {
+                            reportCancelled()
+                            return
+                        }
+                        captureScreenSig { preSig, preTimedOut ->
+                            if (cancelled()) {
+                                reportCancelled()
+                                return@captureScreenSig
+                            }
+                            // M16：点按前的签名回调不到（超时）就报错返回，不要永远等下去。
+                            if (preTimedOut) {
+                                fail("读界面签名超时：等了 ${CAPTURE_SIG_TIMEOUT_MS / 1000} 秒没回来，没法确认点按前后界面变没变")
+                                return@captureScreenSig
+                            }
                             ScreenVisionAgent.locateAndTap(ctx, target, "技能「${skill.name}」第 $n 步") { ok, detail ->
-                                if (cancelled()) return@locateAndTap
+                                if (cancelled()) {
+                                    reportCancelled()
+                                    return@locateAndTap
+                                }
                                 if (!ok) {
                                     if (attempt + 1 < TAP_MAX_ATTEMPTS) {
                                         AuditLog.append(ctx, "技能「${skill.name}」", "第 $n 步点按失败，界面稳定后重试（第 ${attempt + 2} 次）", detail)
@@ -196,9 +309,20 @@ object SkillRunner {
                                     }
                                 } else {
                                     main.postDelayed({
-                                        if (cancelled()) return@postDelayed
-                                        captureScreenSig { postSig ->
-                                            if (cancelled()) return@captureScreenSig
+                                        if (cancelled()) {
+                                            reportCancelled()
+                                            return@postDelayed
+                                        }
+                                        captureScreenSig { postSig, postTimedOut ->
+                                            if (cancelled()) {
+                                                reportCancelled()
+                                                return@captureScreenSig
+                                            }
+                                            // M16：点按后的签名回调不到（超时）就报错返回，不要永远等下去。
+                                            if (postTimedOut) {
+                                                fail("点了「$target」之后等界面签名超时，没法确认点中没有")
+                                                return@captureScreenSig
+                                            }
                                             // 截图取不到签名（安全窗口/前台是 Jarvis 自己等）时不校验，直接认成功。
                                             if (preSig != null && postSig != null && preSig == postSig) {
                                                 if (attempt + 1 < TAP_MAX_ATTEMPTS) {
@@ -226,15 +350,18 @@ object SkillRunner {
                 } else {
                     // M16：每步 input 前重新取服务并校验焦点节点是可编辑输入框；
                     // 没有焦点时先定位输入框点进去再打，失败明说"没点进输入框"。
-                    // 控制器也不再复用 run() 开头建的那一个，每步现建现用。
+                    // M14：控制器用无障碍服务持有的长期 ScreenController，拿不到才现建一个兜底。
                     fun inputAttempt(focusedOnce: Boolean) {
-                        if (cancelled()) return
+                        if (cancelled()) {
+                            reportCancelled()
+                            return
+                        }
                         val svc = JarvisAccessibilityService.instance
                         if (svc == null) {
                             fail("无障碍服务不可用，打不了字")
                             return
                         }
-                        val fresh = ScreenController(svc, TapMarkerUi(svc))
+                        val fresh = sharedController(svc)
                         // 树被遮住（安全窗口）时焦点查不到，但自家输入法若已绑编辑器仍能打字。
                         if (hasEditableFocus(svc) || A11yIme.editing(svc)) {
                             try {
@@ -275,8 +402,10 @@ object SkillRunner {
                         when (verifySysState(ctx, action, before)) {
                             SysCheck.OK -> next(STEP_GAP_MS)
                             SysCheck.UNVERIFIABLE -> {
+                                // M32：不可校验的 sys 步骤不要当成功继续跑——停下并明确报错，
+                                // 只记一句审计就 next() 会让没生效的步骤混进“成功”。
                                 AuditLog.append(ctx, "技能「${skill.name}」", "第 $n 步 sys:$action 已尝试，但未确认是否生效", detail)
-                                next(STEP_GAP_MS)
+                                fail("已尝试 $action，但没法确认是否生效（这步校验不了），不敢当成功继续跑")
                             }
                             SysCheck.FAILED -> fail("已尝试 $action，但未确认是否生效：状态没变（可能没权限或被系统拒绝）")
                         }
@@ -292,7 +421,10 @@ object SkillRunner {
                     AuditLog.append(ctx, "技能「${skill.name}」", "第 $n 步 wait 要求 ${asked}ms，超过上限 ${MAX_WAIT_MS}ms，已截断为 ${MAX_WAIT_MS}ms", "进行中")
                 }
                 fun waitChunk(remaining: Long) {
-                    if (cancelled()) return
+                    if (cancelled()) {
+                        reportCancelled()
+                        return
+                    }
                     if (remaining <= 0) {
                         runStep(ctx, skill, steps, index + 1, mySeq, onDone)
                         return
@@ -311,11 +443,17 @@ object SkillRunner {
                     // 左右向无障碍服务没有现成方法，用现建的 ScreenController 按坐标划。
                     when (val dir = step.optString("dir", "down")) {
                         "up" -> svc.swipeScreen(false) { ok, _ ->
-                            if (cancelled()) return@swipeScreen
+                            if (cancelled()) {
+                                reportCancelled()
+                                return@swipeScreen
+                            }
                             if (ok) next(STEP_GAP_MS) else fail("滑动被拒绝")
                         }
                         "down" -> svc.swipeScreen(true) { ok, _ ->
-                            if (cancelled()) return@swipeScreen
+                            if (cancelled()) {
+                                reportCancelled()
+                                return@swipeScreen
+                            }
                             if (ok) next(STEP_GAP_MS) else fail("滑动被拒绝")
                         }
                         "left", "right" -> {
@@ -324,7 +462,8 @@ object SkillRunner {
                                 val w = m.widthPixels
                                 val y = m.heightPixels / 2
                                 val (x1, x2) = if (dir == "left") (w * 3 / 4) to (w / 4) else (w / 4) to (w * 3 / 4)
-                                val controller = ScreenController(svc, TapMarkerUi(svc))
+                                // M14：左右向滑动也用服务持有的长期控制器，拿不到才现建一个兜底。
+                                val controller = sharedController(svc)
                                 val result = controller.swipe(x1, y, x2, y, 320L, false)
                                 if (result.optBoolean("completed")) next(STEP_GAP_MS) else fail("向 $dir 滑动没完成")
                             } catch (e: Exception) {
@@ -341,14 +480,28 @@ object SkillRunner {
 
     // ---------- M14：界面变化校验 ----------
 
-    /** 取当前屏 16x16 灰度签名（captureScreen 的 sig），取不到返回 null（不因此判失败）。回调一律回主线程。 */
-    private fun captureScreenSig(done: (String?) -> Unit) {
-        val svc = JarvisAccessibilityService.instance ?: run { done(null); return }
-        try {
-            svc.captureScreen { result -> main.post { done(result["sig"] as? String) } }
-        } catch (_: Exception) {
-            done(null)
+    /** M14：优先用无障碍服务持有的长期 ScreenController，拿不到才新建一个当兜底。 */
+    private fun sharedController(svc: JarvisAccessibilityService): ScreenController =
+        JarvisAccessibilityService.screenController ?: ScreenController(svc, TapMarkerUi(svc))
+
+    /**
+     * 取当前屏 16x16 灰度签名（captureScreen 的 sig），取不到返回 null（不因此判失败）。回调一律回主线程。
+     * M16：加超时兜底——[CAPTURE_SIG_TIMEOUT_MS] 内回调不到就以 timedOut=true 回一次，
+     * 不要永远等；调用方据此报错返回。已触发过一次后，后到的回调直接丢弃。
+     */
+    private fun captureScreenSig(done: (sig: String?, timedOut: Boolean) -> Unit) {
+        val svc = JarvisAccessibilityService.instance ?: run { done(null, false); return }
+        val fired = AtomicBoolean(false)
+        fun fire(sig: String?, timedOut: Boolean) {
+            if (fired.compareAndSet(false, true)) main.post { done(sig, timedOut) }
         }
+        try {
+            svc.captureScreen { result -> fire(result["sig"] as? String, false) }
+        } catch (_: Exception) {
+            fire(null, false)
+            return
+        }
+        main.postDelayed({ fire(null, true) }, CAPTURE_SIG_TIMEOUT_MS)
     }
 
     // ---------- M16：输入焦点校验 ----------

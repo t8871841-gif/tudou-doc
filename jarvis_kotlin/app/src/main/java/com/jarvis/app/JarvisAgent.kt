@@ -8,6 +8,7 @@ import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.command.LocalCommands
+import com.jarvis.app.command.PendingClarification
 import com.jarvis.app.data.WeatherTool
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
@@ -68,9 +69,13 @@ object JarvisAgent {
     @Volatile
     private var genSeq = 0 // 每次状态切换/急停自增，老的异步回调靠这个号失效
 
-    /** L1：上一次已推到面板的收音中途文字（防刷屏：首现 ≥2 字推一次，之后每长出 ≥8 字再推）。 */
+    /** L1：上一次已推到面板的收音中途文字（去重用：相同文字不重复推；新 partial 立即推，不节流）。 */
     @Volatile
     private var lastPartialShown = ""
+
+    /** M20/M23：最近一句用户原话，供 speakReply 单落点写历史、触发记忆提取。 */
+    @Volatile
+    private var lastUserText = ""
 
     fun start(ctx: Context) {
         val app = ctx.applicationContext
@@ -176,14 +181,13 @@ object JarvisAgent {
         }
         OfflineAsrSession.listenOnce(
             ctx,
-            // L1：收音中途也给面板实时反馈（“正在听”气泡），但不刷屏——首现 ≥2 字
-            // 推一次，之后每比上次多出 ≥8 字才再推；定稿仍由 onFinal 经 onUserUtterance 推。
-            // MainActivity 的 addBubble 没有“更新已有气泡”的接口，只能节流推送。
+            // L1：收音中途也给面板实时反馈（“正在听”气泡），每个新 partial 立即推一次，
+            // 不节流；相同文字不重复推。定稿仍由 onFinal 经 onUserUtterance 推。
             onPartial = { txt ->
                 main.post {
                     if (mySeq != genSeq) return@post
                     val t = txt.trim()
-                    if (t.length >= 2 && (lastPartialShown.isEmpty() || t.length - lastPartialShown.length >= 8)) {
+                    if (t.isNotEmpty() && t != lastPartialShown) {
                         lastPartialShown = t
                         onUserText?.invoke("🎤 $t")
                     }
@@ -214,8 +218,46 @@ object JarvisAgent {
     private val BARE_SEND = Regex("^(帮我)?发(个|条)?(信息|消息|微信|短信)")
     private val BARE_SEND_QUESTION = Regex("(吗|？|\\?|怎么|为什么|为何|多少|是不是|能不能|会不会)")
 
+    // M7：语音退出命令（Andee VoiceExitCommand 同款，归一化后整句精确匹配才认，
+    // 问怎么退出、复述命令都不算；命中且是用户主动说的就停掉助手回 idle）。
+    private val EXIT_COMMANDS = setOf(
+        "退出Jarvis", "关闭Jarvis", "Jarvis退出", "Jarvis关闭",
+        "休息一下", "先休息一下", "你先休息一下", "退下",
+        "exitJarvis", "closeJarvis", "quitJarvis",
+        "Jarvisexit", "Jarvisclose", "Jarvisquit",
+        "takeabreak", "Jarvistakeabreak"
+    )
+
+    private fun isExitCommand(text: String): Boolean {
+        val norm = text.lowercase().filter { it.isLetterOrDigit() }
+        return norm in EXIT_COMMANDS
+    }
+
+    /** M29：输入像不像澄清答案（数字/“第几个”/单个中文序数）。 */
+    private fun looksLikeClarificationAnswer(text: String): Boolean {
+        val t = text.trim()
+        if (t.contains(Regex("[0-9]"))) return true
+        if (Regex("第?[一二三四五六七八九十]+个?").containsMatchIn(t)) return true
+        return t in setOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+    }
+
+    /** M26：回复结尾带 ?/？/吗/呢 的问句强制视为未结束；否则按连续对话开关决定。 */
+    private fun shouldContinueListening(ctx: Context, reply: String): Boolean {
+        val t = reply.trim()
+        if (t.endsWith('?') || t.endsWith('？') || t.endsWith("吗") || t.endsWith("呢")) return true
+        return JarvisPrefs.isContinuousChat(ctx)
+    }
+
     private fun onUserUtterance(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq) return
+        lastUserText = text
+        // M7：语音退出命令命中就停掉助手回 idle，不发给模型当闲聊。
+        if (isExitCommand(text)) {
+            onUserText?.invoke(text)
+            setState(ctx, "idle")
+            maybeStartWakeLoop()
+            return
+        }
         // 批二十四：空/近空识别结果直接丢弃，不发模型、不回复。
         // 唤醒词被环境噪声误触发时，空识别结果发给模型会换来一句"你说什么，
         // 我没听清楚"。只认纯空白/纯标点，以及单个语气词——这些都不构成指令；
@@ -232,6 +274,17 @@ object JarvisAgent {
             setState(ctx, "idle")
             maybeStartWakeLoop()
             return
+        }
+        // M29：澄清优先于技能续跑——有待决的联系人澄清且输入像澄清答案时先 resolve；
+        // tryResolve 命中才消费 pending 并返回 true（onResolved 回调里已执行动作），
+        // 不匹配返回 false 且不消费 pending（约定），落到下面继续处理。
+        if (PendingClarification.hasPending() && looksLikeClarificationAnswer(text)) {
+            // tryResolve 约定：Boolean?——true 命中并消费，false 明确取消（已消费），
+            // null 不匹配且不消费 pending；只有 true 才直接 return。
+            if (PendingClarification.tryResolve(text) == true) {
+                onUserText?.invoke(text)
+                return
+            }
         }
         // 第一梯队批三：技能断点续播——先看有没有技能卡在某一步等"继续"，这句话优先
         // 当作回答解析。命中就从断点接着做，不再往下走记忆/技能匹配/聊天这套正常流程；
@@ -397,8 +450,8 @@ object JarvisAgent {
                 val local = LocalLlm.generate(ctx, text, localMem)
                 if (mySeq != genSeq) return@launch
                 if (!local.isNullOrBlank()) {
+                    // M20/M23：历史与记忆提取已由 speakReply 单落点做，不再这里重复调。
                     speakReply(ctx, mySeq, local)
-                    triggerMemoryExtraction(ctx, text, local)
                 } else {
                     askCustom(ctx, mySeq, text, memoryContext, localTried = true)
                 }
@@ -461,9 +514,10 @@ object JarvisAgent {
                 // 面板里没有回复气泡，用户说“语音回复没有文字”）。
                 onReplyText?.invoke(fullText)
                 triggerMemoryExtraction(ctx, text, fullText)
-                // 批二「连续对话」：开着的话说完答案直接继续听，不用再喊一次唤醒词。
-                if (JarvisPrefs.isContinuousChat(ctx)) {
-                    beginListening(ctx, fromWake = false, prefilledText = null)
+                // M26：问句结尾强制视为未结束；L6：播完等 3 秒再开麦，避开尾音残响被当成插话。
+                // 延迟开麦前再验一次代次：3 秒内用户点了停/球，代次已变就不开麦。
+                if (shouldContinueListening(ctx, fullText)) {
+                    main.postDelayed({ if (mySeq == genSeq) beginListening(ctx, fromWake = false, prefilledText = null) }, 3000)
                 } else {
                     setState(ctx, "idle")
                     maybeStartWakeLoop()
@@ -476,6 +530,8 @@ object JarvisAgent {
             onDone = { session.onStreamDone() },
             onError = { msg ->
                 main.post {
+                    // C5：流中途出错先停掉播报会话（清队列、不再念残句），失败走单一终点。
+                    session.stop()
                     if (mySeq != genSeq) return@post
                     val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
                     if (!canFallback) {
@@ -492,8 +548,8 @@ object JarvisAgent {
                         if (mySeq != genSeq) return@launch
                         if (!local.isNullOrBlank()) {
                             OrbController.showBubble("云端连不上，已用本地模型回答")
+                            // M20/M23：历史与记忆提取已由 speakReply 单落点做。
                             speakReply(ctx, mySeq, local)
-                            triggerMemoryExtraction(ctx, text, local)
                         } else {
                             // S25：前台时悬浮球不存在，失败也要进对话面板。
                             showFailureBubble("出错了：$msg")
@@ -507,13 +563,15 @@ object JarvisAgent {
     }
 
     /**
-     * 流式播报：大模型边吐字边念。句子到了就排队，一句接一句念，不用等整段回完——
-     * 第一句完整出来立刻开念，体感上“几乎没有延迟”。
-     * 用法：askCustom 里建一个，onToken 喂增量，onStreamDone 标记流结束；
-     * 队列念空且流已结束时调 onFinish（全文），由调用方做记忆提取与状态收尾。
-     * 打断监听每句开念时重启一次（M3：只在第一句启动一次的话，只覆盖前约 7 秒，
-     * 后面的句子打断不了；startBargeInWatch 自带 1200ms 延迟），
-     * 回声比对取的是实时全文（取数器），流式增长的文本也能过滤。
+     * 流式播报（C4：整段一次 speak + 句回调跟念）。
+     * 大模型边吐字，token 只切句进队列、不逐句调 speak——逐句调 speak 会让
+     * EdgeTts 每次都重新握手，句间空 1–3 秒；等流结束拿到全文后调一次
+     * TtsRouter.speak(ctx, fullText, onSentence=…)，EdgeTts 内部的 split()
+     * 循环在同一个会话里把各句念完，气泡跟念改由 onSentence 句回调驱动。
+     * 代价：首句音频要等整段流结束才开念。
+     * 用法：askCustom 里建一个，onToken 喂增量，onStreamDone 触发整段播报；
+     * 播完（或全文为空）时调 onFinish（全文），由调用方做记忆提取与状态收尾。
+     * 打断监听在开念时启动一次（单次 speak 覆盖整段回复），回声比对取实时全文。
      */
     // 注意：JarvisAgent 是 object（单例），里面不能用 inner class（inner 要绑外层实例，
     // object 没有外层实例可绑）。嵌套类在 object 里本来就能直接用 object 的成员
@@ -523,94 +581,115 @@ object JarvisAgent {
         private val mySeq: Int,
         private val onFinish: (fullText: String) -> Unit
     ) {
+        // C4：队列只做切句缓冲，播报不再逐句从这里取句（整段一次 speak，由 EdgeTts 内部分句）。
         private val queue = ArrayDeque<String>()
         private val pending = StringBuilder()
         private val fullText = StringBuilder()
-        private var speaking = false
         private var streamDone = false
         private var finished = false
+        private var stopped = false
 
-        /** 流里来了一段增量：拼进全文，按句切分，完整句子进队列。 */
+        /** 流里来了一段增量：拼进全文，按句切分进队列；C4：只切句，不逐句调 speak。 */
         fun onToken(token: String) {
-            if (finished) return
+            if (finished || stopped) return
             fullText.append(token)
             pending.append(token)
             drainSentences()
-            pump()
         }
 
-        /** 流结束了：把 pending 里剩下的半句也推进队列，等念完收尾。 */
+        /**
+         * 流结束了：拿全文调一次 speak（C4），让 EdgeTts 在同一个会话里念完全段；
+         * 气泡跟念由 onSentence 句回调驱动。全文为空时直接收尾，不开念。
+         */
         fun onStreamDone() {
-            if (finished) return
+            if (finished || stopped) return
             streamDone = true
-            val rest = pending.toString().trim()
-            if (rest.isNotEmpty()) {
-                queue.addLast(rest)
-                pending.clear()
+            pending.clear()
+            val text = fullText.toString().trim()
+            if (text.isEmpty()) {
+                finish()
+                return
             }
-            pump()
+            // 已被打断/急停（代次已变）：不再开念，也不走 onFinish（调用方已回 idle）。
+            if (mySeq != genSeq) {
+                finished = true
+                return
+            }
+            TtsRouter.speak(
+                ctx, text,
+                onStart = {
+                    main.post {
+                        if (mySeq != genSeq) return@post
+                        setState(ctx, "speaking")
+                        if (JarvisPrefs.isBargeInEnabled(ctx)) {
+                            startBargeInWatch(ctx, mySeq) { fullText.toString() }
+                        }
+                    }
+                },
+                // C4：气泡跟念由句回调驱动（TTS 路约定的 onSentence 可选参数）。
+                onSentence = { sentence -> main.post { OrbController.showBubble(sentence) } },
+                onDone = { ok ->
+                    // M11：取消/打断（代次已变）不记“TTS 全部通道失败”审计，
+                    // 只有真正播报失败才记。
+                    if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", text.take(40))
+                    main.post {
+                        // C6：被停（代次已变）就不再收尾——单次 speak 本来也没有下一句可念。
+                        if (mySeq != genSeq) return@post
+                        finish()
+                    }
+                }
+            )
         }
 
-        /** 从 pending 里切出完整句子（以 。！？\n 结尾；超长半句在 ，处断开，免得等太久）。 */
+        /** C5：流中途出错时停掉会话——清队列、不再念残句，也不走 finish 收尾。 */
+        fun stop() {
+            stopped = true
+            finished = true
+            queue.clear()
+            pending.clear()
+        }
+
+        /**
+         * 从 pending 里切出完整句子。M13：与播报侧 EdgeTts.split 对齐——
+         * 认 ASCII ? ! 和 ". "（英文句末）；超长半句断句时中英文逗号都认（， 和 ,）；
+         * 纯标点句过滤（须含字母或数字才进队列），不让纯标点句走到 speak 里被滤空后白白重试。
+         */
         private fun drainSentences() {
             while (true) {
                 val text = pending.toString()
-                val endIdx = text.indexOfFirst { it == '。' || it == '！' || it == '？' || it == '\n' }
+                var endIdx = -1
+                var i = 0
+                while (i < text.length) {
+                    val c = text[i]
+                    if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '\n') {
+                        endIdx = i
+                        break
+                    }
+                    // 英文句末 ". "：句点后跟空格才算句末（"3.5" 这种小数点不算）。
+                    if (c == '.' && i + 1 < text.length && text[i + 1] == ' ') {
+                        endIdx = i
+                        break
+                    }
+                    i++
+                }
                 if (endIdx >= 0) {
                     val sentence = text.substring(0, endIdx + 1).trim()
-                    if (sentence.isNotEmpty()) queue.addLast(sentence)
+                    if (sentence.any { it.isLetterOrDigit() }) queue.addLast(sentence)
                     pending.delete(0, endIdx + 1)
                     continue
                 }
-                // 没有句末标点：半句太长（>60 字）就在最后一个 ，处断开
+                // 没有句末标点：半句太长（>60 字）就在最后一个中/英文逗号处断开
                 if (text.length > 60) {
-                    val commaIdx = text.lastIndexOf('，')
+                    val commaIdx = maxOf(text.lastIndexOf('，'), text.lastIndexOf(','))
                     if (commaIdx > 20) {
                         val sentence = text.substring(0, commaIdx + 1).trim()
-                        if (sentence.isNotEmpty()) queue.addLast(sentence)
+                        if (sentence.any { it.isLetterOrDigit() }) queue.addLast(sentence)
                         pending.delete(0, commaIdx + 1)
                         continue
                     }
                 }
                 break
             }
-        }
-
-        /** 泵：没在念、队列有句子，就念下一句；队列空了且流已结束，就收尾。 */
-        private fun pump() {
-            if (finished || speaking) return
-            // Kotlin 的 ArrayDeque 没有 pollFirst（那是 java.util.Deque 的方法），
-            // 用 removeFirstOrNull：空队列返回 null，正好接下面的判空。
-            val sentence = queue.removeFirstOrNull()
-            if (sentence == null) {
-                if (streamDone) finish()
-                return
-            }
-            speaking = true
-            // 气泡跟上：显示正在念的这句（jk-v66：原来只显示全文前 80 字，跟念的不同步）
-            OrbController.showBubble(sentence)
-            TtsRouter.speak(
-                ctx, sentence,
-                onStart = {
-                    main.post {
-                        if (mySeq != genSeq) return@post
-                        setState(ctx, "speaking")
-                        // M3：每句开念都重启一次打断监听（旧监听会被 listenOnce 开头的
-                        // stop() 顶掉，不叠加），播报全程都能打断。
-                        if (JarvisPrefs.isBargeInEnabled(ctx)) {
-                            startBargeInWatch(ctx, mySeq) { fullText.toString() }
-                        }
-                    }
-                },
-                onDone = { ok ->
-                    if (!ok) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", sentence.take(40))
-                    main.post {
-                        speaking = false
-                        if (mySeq != genSeq) return@post
-                        pump()
-                    }
-                }
-            )
         }
 
         private fun finish() {
@@ -622,6 +701,11 @@ object JarvisAgent {
 
     private fun speakReply(ctx: Context, mySeq: Int, reply: String) {
         if (mySeq != genSeq) return
+        // M20：本地模型/任务/技能/天气/本地指令/看屏的回复也进聊天历史。
+        // 聊天流式路径（askCustom）由 CustomClient.askStream 成对写历史，不走这里，不会重复记。
+        CustomClient.addAssistantTurn(reply)
+        // M23：各回复落点都触发记忆提取（聊天流式路径在 askCustom.onFinish 里触发）。
+        if (lastUserText.isNotBlank()) triggerMemoryExtraction(ctx, lastUserText, reply)
         OrbController.showBubble(reply.take(80))
         onReplyText?.invoke(reply)
         if (JarvisPrefs.isMuted(ctx)) {
@@ -642,12 +726,13 @@ object JarvisAgent {
                 }
             },
             onDone = { ok ->
-                if (!ok) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", reply.take(40))
+                // M11：取消/打断（代次已变）不记“TTS 全部通道失败”审计，只有真正播报失败才记。
+                if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", reply.take(40))
                 main.post {
                     if (mySeq != genSeq) return@post
-                    // 批二「连续对话」：开着的话说完答案直接继续听，不用再喊一次唤醒词。
-                    if (JarvisPrefs.isContinuousChat(ctx)) {
-                        beginListening(ctx, fromWake = false, prefilledText = null)
+                    // M26：问句结尾强制视为未结束；L6：播完等 3 秒再开麦，避开尾音残响被当成插话。
+                    if (shouldContinueListening(ctx, reply)) {
+                        main.postDelayed({ if (mySeq == genSeq) beginListening(ctx, fromWake = false, prefilledText = null) }, 3000)
                     } else {
                         setState(ctx, "idle")
                         maybeStartWakeLoop()
@@ -685,6 +770,10 @@ object JarvisAgent {
             fun triggerBargeIn() {
                 main.post {
                     if (mySeq != genSeq || state != "speaking") return@post
+                    // C6：先自增代次（旧轮次所有回调失效），再停播、再开听——
+                    // 否则 TtsRouter.stop() 触发的 onDone(false) 会把打断本身顶掉、
+                    // 或打断后继续念下一句。
+                    genSeq++
                     TtsRouter.stop()
                     OrbController.showBubble("打断了，在听…")
                     beginListening(ctx, fromWake = false, prefilledText = null)

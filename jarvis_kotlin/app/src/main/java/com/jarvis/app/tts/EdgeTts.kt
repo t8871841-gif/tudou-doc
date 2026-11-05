@@ -2,7 +2,9 @@ package com.jarvis.app.tts
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaDataSource
@@ -10,6 +12,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -19,10 +22,16 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * 微软 Edge 神经网络语音（云扬）——移植自参考实现（Flutter 版 Jarvis 真机验证过的协议）。
@@ -54,21 +63,54 @@ object EdgeTts {
     private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.UTF_8)
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "EdgeTts").apply { isDaemon = true } }
     private val main = Handler(Looper.getMainLooper())
+    // M8 预取：下一句的取音/解码在上一句还在写 AudioTrack 时就跑在另一条线程上，
+    // 与主合成线程（io）分开，否则上一句写完前下一句根本没机会开始。
+    private val prefetchIo = Executors.newSingleThreadExecutor { r -> Thread(r, "EdgeTts-Prefetch").apply { isDaemon = true } }
 
     @Volatile private var mySeq = 0
     @Volatile private var socket: SSLSocket? = null
+    @Volatile private var prefetchSocket: SSLSocket? = null
     @Volatile private var track: AudioTrack? = null
+
+    // H4 失速看门狗（对齐 Andee TtsController.armStallWatchdog）：每 5 秒查一次，
+    // 以 lastProgressAt 为准，20 秒无 PCM 进展即取消本次合成、停播、回 idle 并记可见报错。
+    // lastProgressAt 每次收到二进制帧 / 解出 PCM / 写出音频时刷新（主线程与预取线程都会刷）。
+    private const val STALL_CHECK_MS = 5_000L
+    private const val STALL_AFTER_MS = 20_000L
+    @Volatile private var lastProgressAt = 0L
+    @Volatile private var stallFired = false
+    private var stallWatchdog: Runnable? = null
+    private var stallWatchdogSeq = -1
+
+    // H3 播报侧音频焦点（内联实现，不新建共享文件；对齐 Andee AudioFocusGate 的
+    // USAGE_ASSISTANT + AUDIOFOCUS_GAIN_TRANSIENT）：播报前申请，播完/取消/失速时释放；
+    // 丢焦点（来电/别的 App 抢焦点）时停播。
+    @Volatile private var focusRequest: AudioFocusRequest? = null
+    @Volatile private var focusManager: AudioManager? = null
+    @Volatile private var focusHeld = false
+    @Volatile private var focusSeq = -1
+
+    // L8 Earcon（对齐 Andee audio/Earcon.kt）：开麦上行五度、思考下行四度，
+    // 峰值 0.20，尾部留 250ms 静默防抖（quietUntil），150ms 内不重复响。
+    enum class EarconKind { LISTENING, THINKING }
+    private const val EARCON_RATE = 24_000
+    private const val EARCON_PEAK = 0.20
+    private const val EARCON_TAIL_MS = 250L
+    private const val EARCON_MIN_GAP_MS = 150L
+    @Volatile private var earconQuietUntil = 0L
+    @Volatile private var earconLastPlayAt = 0L
 
     fun speak(
         ctx: Context, text: String, voice: String = DEFAULT_VOICE,
         ratePct: Int = DEFAULT_RATE_PCT, pitchHz: Int = DEFAULT_PITCH_HZ,
-        onStart: () -> Unit, onDone: (Boolean) -> Unit
+        onStart: () -> Unit, onDone: (Boolean) -> Unit,
+        onSentence: ((String) -> Unit)? = null
     ) {
         stop()
         val seq = ++mySeq
         val clean = text.replace(Regex("[\r\n]+"), " ").trim()
         if (clean.isEmpty()) { onDone(false); return }
-        io.execute { runSynthesis(ctx, seq, clean, voice, ratePct, pitchHz, onStart, onDone) }
+        io.execute { runSynthesis(ctx, seq, clean, voice, ratePct, pitchHz, onStart, onDone, onSentence) }
     }
 
     /** 急停/打断：关掉在飞的 socket（唤醒读写阻塞立即抛异常）和播放轨道；在飞的 runSynthesis 会在 finally 里回调 onDone(false)（L4），调用方状态机总能收敛。 */
@@ -76,6 +118,9 @@ object EdgeTts {
         mySeq++
         runCatching { socket?.close() }
         socket = null
+        runCatching { prefetchSocket?.close() }
+        prefetchSocket = null
+        releaseAudioFocus()
         val t = track
         track = null
         if (t != null) {
@@ -88,9 +133,182 @@ object EdgeTts {
 
     private fun cancelled(seq: Int) = seq != mySeq
 
-    private fun runSynthesis(ctx: Context, seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit) {
+    // ---------- H3 音频焦点（内联） ----------
+
+    /** 播报前申请焦点；系统拒绝也继续播（来电中直接哑火比盖过铃声更糟，沿用 Andee 的做法）。 */
+    fun acquireAudioFocus(ctx: Context, seq: Int = mySeq): Boolean {
+        val am = ctx.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setOnAudioFocusChangeListener { change ->
+                // 丢焦点（来电/别的 App 抢焦点）时停播；只认当前这一轮，旧轮的回调不碰新轮。
+                if (change == AudioManager.AUDIOFOCUS_LOSS ||
+                    change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
+                    change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
+                ) {
+                    if (focusSeq == mySeq) {
+                        Log.i(TAG, "audio focus lost ($change), stopping playback")
+                        focusHeld = false
+                        stop()
+                        // 系统兜底路径也在播时同样停掉（EdgeTts.stop() 只停 Edge）。
+                        SystemTts.stop()
+                    }
+                }
+            }
+            .setWillPauseWhenDucked(true)
+            .build()
+        val ok = am.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if (ok) {
+            focusManager = am
+            focusRequest = req
+            focusHeld = true
+            focusSeq = seq
+        } else {
+            Log.w(TAG, "audio focus request denied, speaking anyway")
+        }
+        return ok
+    }
+
+    /** 播完/取消/失速时释放；可重复调。 */
+    fun releaseAudioFocus() {
+        val req = focusRequest
+        val am = focusManager
+        focusRequest = null
+        focusManager = null
+        if (!focusHeld) return
+        focusHeld = false
+        if (req != null && am != null) runCatching { am.abandonAudioFocusRequest(req) }
+    }
+
+    // ---------- H4 失速看门狗 ----------
+
+    private fun markProgress() {
+        lastProgressAt = SystemClock.elapsedRealtime()
+    }
+
+    private fun armStallWatchdog(ctx: Context, seq: Int) {
+        disarmStallWatchdog()
+        stallFired = false
+        stallWatchdogSeq = seq
+        markProgress()
+        val r = object : Runnable {
+            override fun run() {
+                if (seq != mySeq || seq != stallWatchdogSeq) return
+                if (cancelled(seq)) return
+                if (SystemClock.elapsedRealtime() - lastProgressAt < STALL_AFTER_MS) {
+                    main.postDelayed(this, STALL_CHECK_MS)
+                    return
+                }
+                // 20 秒无进展：取消本次合成、停播、记可见报错；stop() 会让 runSynthesis
+                // 的循环看到 cancelled 而收尾，finally 里按 stallFired 记审计并报 onDone(false)。
+                stallWatchdog = null
+                stallFired = true
+                Log.e(TAG, "edge tts stall: no progress for ${STALL_AFTER_MS}ms, cancelling synthesis")
+                com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 播报失速已停播", "20 秒无音频进展")
+                stop()
+            }
+        }
+        stallWatchdog = r
+        main.postDelayed(r, STALL_CHECK_MS)
+    }
+
+    private fun disarmStallWatchdog() {
+        stallWatchdog?.let { main.removeCallbacks(it) }
+        stallWatchdog = null
+    }
+
+    // ---------- L8 Earcon ----------
+
+    /** 开麦上行 / 思考下行提示音；峰值 0.20，尾部留 250ms 静默防抖。 */
+    fun playEarcon(kind: EarconKind) {
+        val now = SystemClock.uptimeMillis()
+        if (now - earconLastPlayAt < EARCON_MIN_GAP_MS) return
+        earconLastPlayAt = now
+        val pcm = when (kind) {
+            EarconKind.LISTENING -> renderEarcon(listOf(880.0 to 420, 1318.5 to 470), listOf(0, 85), listOf(1.0, 0.9))
+            EarconKind.THINKING -> renderEarcon(listOf(587.33 to 460, 440.0 to 560), listOf(0, 110), listOf(0.55, 0.5))
+        }
+        val ms = pcm.size.toLong() / 2 * 1000 / EARCON_RATE
+        earconQuietUntil = now + ms + EARCON_TAIL_MS
+        io.execute {
+            runCatching {
+                val t = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(EARCON_RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(pcm.size)
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .build()
+                if (t.write(pcm, 0, pcm.size) > 0) {
+                    t.play()
+                    try { Thread.sleep(ms + 80) } catch (_: InterruptedException) { }
+                    runCatching { t.stop() }
+                }
+                t.release()
+            }
+        }
+    }
+
+    fun isEarconSounding(): Boolean = SystemClock.uptimeMillis() < earconQuietUntil
+
+    /** 两段正弦叠加、快起音 + 指数衰减（Andee Earcon 的简化版：峰值归一到 0.20）。 */
+    private fun renderEarcon(notes: List<Pair<Double, Int>>, atMs: List<Int>, gains: List<Double>): ByteArray {
+        val totalMs = notes.indices.maxOf { atMs[it] + notes[it].second }
+        val total = EARCON_RATE * totalMs / 1000
+        val buf = DoubleArray(total)
+        val attack = EARCON_RATE * 7 / 1000
+        for (k in notes.indices) {
+            val hz = notes[k].first
+            val len = EARCON_RATE * notes[k].second / 1000
+            val start = EARCON_RATE * atMs[k] / 1000
+            val tau = len / 4.5
+            for (i in 0 until len) {
+                val at = start + i
+                if (at >= total) break
+                val t = i.toDouble() / EARCON_RATE
+                val decay = exp(-i / tau)
+                val rise = if (i < attack) 0.5 - 0.5 * cos(PI * i / attack) else 1.0
+                var s = sin(2 * PI * hz * t)
+                s += 0.5 * sin(2 * PI * hz * 1.004 * t)
+                s += 0.12 * sin(4 * PI * hz * t) * exp(-i / (tau * 0.4))
+                buf[at] += s * rise * decay * gains[k]
+            }
+        }
+        var peak = 0.0
+        for (v in buf) if (v > peak) peak = v else if (-v > peak) peak = -v
+        val scale = if (peak > 0) EARCON_PEAK * Short.MAX_VALUE / peak else 0.0
+        val out = ByteArray(total * 2)
+        for (i in 0 until total) {
+            val v = (buf[i] * scale).toInt().coerceIn(-32768, 32767)
+            out[i * 2] = (v and 0xFF).toByte()
+            out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    // M12：一段回复只建一次 AudioTrack（runSynthesis 内一个 track 用到底，不每句新建）；
+    // M4 会话复用仍在：多句复用同一 EdgeSession，建会话失败或会话中途失败再逐句回落。
+    private fun runSynthesis(ctx: Context, seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit, onSentence: ((String) -> Unit)? = null) {
         val sentences = split(text)
         if (sentences.isEmpty()) { main.post { onDone(false) }; return }
+        // H3：播报前申请音频焦点；H4：失速看门狗在合成开始时武装。
+        acquireAudioFocus(ctx, seq)
+        armStallWatchdog(ctx, seq)
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val t = AudioTrack.Builder()
             .setAudioAttributes(
@@ -118,10 +336,27 @@ object EdgeTts {
         // 这里累计实际写入的帧数，播完后先等放音头追上再 stop。
         var totalFrames = 0L
         var abortedAt: Int? = null
-        // M4：会话式合成——每段回复只建一次连接，多句复用同一 socket；
-        // 建会话失败就全程走旧的逐句握手；会话中途任何一句失败就关会话、
-        // 该句及之后全改逐句握手，绝不哑火。
+        var firstFailureReason: String? = null
         var session: EdgeSession? = null
+        var prefetchFuture: Future<PrefetchResult>? = null
+        var prefetchIndex = -1
+        // M9：onStart 早发——会话打开（或确定走逐句回落）时就发，不等首句取音+解码+首段写入。
+        val fireStartOnce: () -> Unit = {
+            if (!started) {
+                started = true
+                main.post { if (!cancelled(seq)) onStart() }
+            }
+        }
+        // M10：中间句失败当时就记一次可见报错（带原因），不只在 finally 留一条审计；
+        // abortedAt/firstFailureReason 让 finally 的 onDone(false) 告诉调用方这段缺了一句。
+        val recordFailure: (Int, String) -> Unit = { i, reason ->
+            Log.e(TAG, "edge tts sentence $i failed: $reason")
+            if (abortedAt == null) {
+                abortedAt = i
+                firstFailureReason = reason
+            }
+            com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句播报失败", reason)
+        }
         try {
             t.play()
             try {
@@ -130,56 +365,119 @@ object EdgeTts {
                 Log.w(TAG, "edge tts session open failed, fallback to per-sentence", e)
                 session = null
             }
+            fireStartOnce()
             for ((i, sentence) in sentences.withIndex()) {
                 if (cancelled(seq)) break
-                try {
-                    val mp3: ByteArray = if (session != null) {
+                // M8 预取：下一句的取音/解码在上一句还在写 AudioTrack 时就跑在 prefetchIo 上，
+                // 不等上一句写完才开始；预取走独立逐句连接，不抢当前句的共享会话。
+                if (i + 1 < sentences.size && prefetchFuture == null) {
+                    val nextSentence = sentences[i + 1]
+                    prefetchIndex = i + 1
+                    prefetchFuture = prefetchIo.submit(Callable<PrefetchResult> {
+                        if (cancelled(seq)) return@Callable PrefetchResult(emptyList(), false, "cancelled")
+                        val collected = ArrayList<ByteArray>()
+                        val r = streamSentence(seq, nextSentence, voice, ratePct, pitchHz, null, usePrefetchSocket = true) { pcm ->
+                            collected.add(pcm)
+                            true
+                        }
+                        if (cancelled(seq)) PrefetchResult(emptyList(), false, "cancelled")
+                        else if (!r.ok) PrefetchResult(emptyList(), false, r.reason ?: "prefetch failed")
+                        else PrefetchResult(collected, true, null)
+                    })
+                }
+                // 1) 预取已到：直接写已解好的 PCM，不再等取音。
+                var sentenceDone = false
+                if (prefetchIndex == i && prefetchFuture != null) {
+                    val fut = prefetchFuture
+                    prefetchFuture = null
+                    prefetchIndex = -1
+                    var pref: PrefetchResult? = null
+                    try {
+                        while (!fut.isDone) {
+                            if (cancelled(seq)) break
+                            try { Thread.sleep(50) } catch (_: InterruptedException) { break }
+                        }
+                        if (!cancelled(seq)) pref = fut.get()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "edge tts prefetch wait failed, streaming fallback", e)
+                    }
+                    if (pref != null && pref.ok && pref.pcms.isNotEmpty()) {
+                        // H5：每句开始播放时回调一次 onSentence(sentence)。
+                        main.post { if (!cancelled(seq)) onSentence?.invoke(sentence) }
+                        var writeOk = true
+                        for (pcm in pref.pcms) {
+                            if (cancelled(seq)) break
+                            if (pcm.isEmpty()) continue
+                            val frames = writePcmFully(t, pcm)
+                            if (frames < 0) { writeOk = false; break }
+                            totalFrames += frames
+                            sawAny = true
+                        }
+                        if (!writeOk) {
+                            recordFailure(i, "AudioTrack.write 失败")
+                            break
+                        }
+                        sentenceDone = true
+                    } else if (pref != null && !pref.ok) {
+                        // 预取失败不直接判死刑：下面走流式现取现播再试一次，成功了就不算缺句。
+                        Log.w(TAG, "edge tts sentence $i prefetch failed (${pref.reason}), streaming fallback")
+                    }
+                }
+                if (sentenceDone) continue
+                if (cancelled(seq)) break
+                // 2) 流式现取现播：边收帧边解码边写（见 streamSentence），不收满整句 MP3。
+                var sentenceFired = false
+                val playOne: (EdgeSession?) -> StreamResult = { sess ->
+                    streamSentence(seq, sentence, voice, ratePct, pitchHz, sess) { pcm ->
+                        if (pcm.isEmpty()) return@streamSentence true
+                        if (!sentenceFired) {
+                            sentenceFired = true
+                            // H5：每句开始播放时回调一次 onSentence(sentence)。
+                            main.post { if (!cancelled(seq)) onSentence?.invoke(sentence) }
+                        }
+                        val frames = writePcmFully(t, pcm)
+                        if (frames < 0) false else {
+                            totalFrames += frames
+                            sawAny = true
+                            true
+                        }
+                    }
+                }
+                val result: StreamResult = try {
+                    if (session != null) {
                         try {
-                            fetchMp3OnSession(session, seq, sentence, voice, ratePct, pitchHz)
+                            playOne(session)
                         } catch (e: Exception) {
                             Log.w(TAG, "edge tts session sentence $i failed, fallback to per-sentence", e)
                             closeSession(session)
                             session = null
                             if (cancelled(seq)) throw e
-                            fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+                            playOne(null)
                         }
                     } else {
-                        fetchMp3(seq, sentence, voice, ratePct, pitchHz)
-                    }
-                    if (cancelled(seq)) break
-                    if (mp3.isEmpty()) {
-                        if (i == 0) break // 第一句就没声音，当失败处理
-                        continue
-                    }
-                    val pcms = decodeMp3(seq, mp3)
-                    if (pcms.isEmpty()) {
-                        // 解码失败（坏 MP3/超时放弃）：按句跳过，不卡住执行器。
-                        Log.w(TAG, "edge tts sentence $i decode empty, skipped")
-                        if (i == 0) { abortedAt = i; break }
-                        abortedAt = abortedAt ?: i
-                        continue
-                    }
-                    for (pcm in pcms) {
-                        if (cancelled(seq)) break
-                        if (pcm.isEmpty()) continue
-                        if (!started) { started = true; main.post { if (!cancelled(seq)) onStart() } }
-                        sawAny = true
-                        t.write(pcm, 0, pcm.size)
-                        totalFrames += pcm.size / 2 // PCM 16bit 单声道：2 字节一帧
+                        playOne(null)
                     }
                 } catch (e: Exception) {
-                    // 旧代码：中间一句取音/解码一抛，整个循环直接进 finally，
-                    // 后面所有句子全丢，表现为“播到一半就断了”。现在只记一次、
-                    // 跳过这一句继续播后面的；第一句就失败才当整体失败。
                     Log.e(TAG, "edge tts sentence $i failed", e)
-                    if (i == 0) { abortedAt = i; break }
-                    abortedAt = abortedAt ?: i
+                    StreamResult(false, e.message ?: "取音失败", false)
+                }
+                if (cancelled(seq)) break
+                if (!result.ok) {
+                    recordFailure(i, result.reason ?: "取音/解码失败")
+                    // 第一句就失败当整体失败；写轨道失败说明轨道已死，后面也不用再试。
+                    if (i == 0 || result.reason == "AudioTrack.write 失败") break
                     continue
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "edge tts failed", e)
         } finally {
+            disarmStallWatchdog()
+            prefetchFuture?.cancel(true)
+            prefetchFuture = null
+            val ps = prefetchSocket
+            prefetchSocket = null
+            runCatching { ps?.close() }
             if (!cancelled(seq)) {
                 // 等尾巴播完再停：放音头追上总帧数，或超过“音频时长 + 3 秒”就放弃等。
                 if (totalFrames > 0) {
@@ -198,17 +496,381 @@ object EdgeTts {
             runCatching { t.release() }
             if (track === t) track = null
             closeSession(session)
+            // H3：播完/取消/失速时释放音频焦点。
+            releaseAudioFocus()
             // L4：取消时也回调一次 onDone(false)，调用方状态机总能收敛；
             // finally 只走一次，正常完成与取消只发一条，不会调两次。
             // wasCancelled 在 post 前先定住，避免 post 执行前又被新的 stop 翻转。
-            val wasCancelled = cancelled(seq)
+            // M10：中间有句子失败被跳过时 onDone(false)，调用方知道这段回复缺了一句
+            // （失败原因已在当时记进审计，不在这里重复记一条）。
+            val wasCancelled = cancelled(seq) || stallFired
+            val incomplete = abortedAt != null
+            val failReason = firstFailureReason
             main.post {
-                // 中间有句子失败被跳过时留一条审计，否则“少播一句”从界面上看不见原因。
-                if (!wasCancelled && abortedAt != null) {
-                    com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 中间句子失败已跳过", "第 ${abortedAt + 1}/${sentences.size} 句")
+                if (!wasCancelled && incomplete) {
+                    Log.w(TAG, "edge tts incomplete: sentence ${abortedAt!! + 1} failed: $failReason")
                 }
-                onDone(if (wasCancelled) false else sawAny)
+                onDone(if (wasCancelled) false else if (incomplete) false else sawAny)
             }
+        }
+    }
+
+    private data class PrefetchResult(val pcms: List<ByteArray>, val ok: Boolean, val reason: String?)
+    private data class StreamResult(val ok: Boolean, val reason: String?, val sawAudio: Boolean)
+
+    // L7：AudioTrack.write 的返回值必须检查，<= 0 即停；返回实际写入的帧数（失败返回 -1），
+    // 调用方按返回值累加帧数，不再丢弃返回值后按 pcm.size/2 硬算。
+    // 每次成功写出都刷新失速看门狗的 lastProgressAt。
+    private fun writePcmFully(t: AudioTrack, pcm: ByteArray): Int {
+        var off = 0
+        while (off < pcm.size) {
+            val n = try {
+                t.write(pcm, off, pcm.size - off)
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioTrack.write threw", e)
+                return -1
+            }
+            if (n <= 0) {
+                Log.e(TAG, "AudioTrack.write returned $n, stopping playback")
+                return -1
+            }
+            off += n
+            markProgress()
+        }
+        return off / 2
+    }
+
+    // ---------- M8 句内流式：边收帧边解码边写 ----------
+
+    /** 二进制帧里的 "Path:audio" 段解析器：跨帧的段头也能拼出来，未到下一个段头前不吐旧数据。 */
+    private class AudioSegmentParser {
+        private val buf = ByteArrayOutputStream()
+        private val hdr = "Path:audio\r\n".toByteArray(Charsets.UTF_8)
+        private var sawHeader = false
+
+        fun feed(payload: ByteArray): ByteArray {
+            buf.write(payload)
+            val data = buf.toByteArray()
+            val out = ByteArrayOutputStream()
+            var pos = 0
+            while (true) {
+                val h = indexOfFromStatic(data, hdr, pos)
+                if (h < 0) break
+                sawHeader = true
+                val segStart = h + hdr.size
+                val nextH = indexOfFromStatic(data, hdr, segStart)
+                if (nextH < 0) break
+                if (nextH > segStart) out.write(data, segStart, nextH - segStart)
+                pos = nextH
+            }
+            val keep = data.copyOfRange(pos, data.size)
+            buf.reset()
+            buf.write(keep)
+            return out.toByteArray()
+        }
+
+        fun finish(): ByteArray {
+            val data = buf.toByteArray()
+            buf.reset()
+            if (!sawHeader) return data
+            val h = indexOfFromStatic(data, hdr, 0)
+            if (h < 0) return ByteArray(0)
+            val start = h + hdr.size
+            return if (start < data.size) data.copyOfRange(start, data.size) else ByteArray(0)
+        }
+
+        companion object {
+            fun indexOfFromStatic(haystack: ByteArray, needle: ByteArray, from: Int): Int {
+                if (needle.isEmpty() || haystack.size < needle.size) return -1
+                outer@ for (i in from..haystack.size - needle.size) {
+                    for (j in needle.indices) if (haystack[i + j] != needle[j]) continue@outer
+                    return i
+                }
+                return -1
+            }
+        }
+    }
+
+    /** 增量 MP3 解码器：MP3 块随到随喂 MediaCodec，随到随出 PCM；不用 MediaExtractor 等整段。 */
+    private class StreamingMp3Decoder {
+        private val codec: MediaCodec
+        private var rateChecked = false
+        private var outputDone = false
+        private var finished = false
+
+        init {
+            codec = MediaCodec.createDecoderByType("audio/mpeg")
+            val format = MediaFormat.createAudioFormat("audio/mpeg", SAMPLE_RATE, 1)
+            codec.configure(format, null, null, 0)
+            codec.start()
+        }
+
+        fun feed(mp3: ByteArray): List<ByteArray> {
+            val out = ArrayList<ByteArray>()
+            var off = 0
+            var guard = 0
+            while (off < mp3.size) {
+                if (++guard > 10_000) {
+                    Log.e(TAG, "streaming decoder feed guard tripped")
+                    break
+                }
+                val inIdx = codec.dequeueInputBuffer(10_000)
+                if (inIdx < 0) {
+                    out.addAll(drainAll(0))
+                    try { Thread.sleep(1) } catch (_: InterruptedException) { break }
+                    continue
+                }
+                val inBuf = codec.getInputBuffer(inIdx) ?: continue
+                inBuf.clear()
+                val n = min(inBuf.remaining(), mp3.size - off)
+                inBuf.put(mp3, off, n)
+                off += n
+                codec.queueInputBuffer(inIdx, 0, n, 0, 0)
+                out.addAll(drainAll(0))
+            }
+            return out
+        }
+
+        fun finish(): List<ByteArray> {
+            if (finished) return emptyList()
+            finished = true
+            val out = ArrayList<ByteArray>()
+            var tries = 0
+            while (tries++ < 200) {
+                val inIdx = codec.dequeueInputBuffer(10_000)
+                if (inIdx >= 0) {
+                    codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    break
+                }
+                out.addAll(drainAll(0))
+                if (outputDone) return out
+            }
+            val deadline = System.currentTimeMillis() + 10_000L
+            while (!outputDone && System.currentTimeMillis() < deadline) {
+                out.addAll(drainAll(10_000))
+            }
+            return out
+        }
+
+        fun close() {
+            runCatching { codec.stop() }
+            runCatching { codec.release() }
+        }
+
+        private fun drainAll(timeoutUs: Long): List<ByteArray> {
+            val out = ArrayList<ByteArray>()
+            while (true) {
+                val pcm = drainOnce(timeoutUs) ?: break
+                out.add(pcm)
+                if (outputDone) break
+            }
+            return out
+        }
+
+        private fun drainOnce(timeoutUs: Long): ByteArray? {
+            val info = MediaCodec.BufferInfo()
+            val outIdx = codec.dequeueOutputBuffer(info, timeoutUs)
+            if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                checkRate(runCatching { codec.outputFormat }.getOrNull())
+                return null
+            }
+            if (outIdx < 0) return null
+            var pcm: ByteArray? = null
+            val outBuf = codec.getOutputBuffer(outIdx)
+            if (outBuf != null && info.size > 0) {
+                pcm = ByteArray(info.size)
+                outBuf.position(info.offset)
+                outBuf.limit(info.offset + info.size)
+                outBuf.get(pcm)
+            }
+            val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+            codec.releaseOutputBuffer(outIdx, false)
+            if (eos) outputDone = true
+            return pcm
+        }
+
+        // L7：核对解码器实际采样率与声明的 24000 是否一致，不一致记日志告警。
+        private fun checkRate(format: MediaFormat?) {
+            if (rateChecked || format == null) return
+            rateChecked = true
+            val rate = runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) }.getOrNull() ?: return
+            if (rate != SAMPLE_RATE) {
+                Log.w(TAG, "Edge MP3 sample rate $rate != declared $SAMPLE_RATE, audio may sound wrong")
+            }
+        }
+    }
+
+    /**
+     * 流式合成一句：发 SSML 后边读 WebSocket 帧边把已到的 MP3 解码、边解边把 PCM 交给 onPcm
+     * （调用方写进 AudioTrack，或预取时收进列表）。session 非空用共享会话，否则自建逐句连接。
+     * 解码器建不起来时（个别设备）回落到旧的整句取音+解码路径，不哑火；预取线程不走这个回落，
+     * 以免它动全局 socket，失败了由主线程流式重试。
+     */
+    private fun streamSentence(
+        seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int,
+        session: EdgeSession?, usePrefetchSocket: Boolean = false,
+        onPcm: (ByteArray) -> Boolean
+    ): StreamResult {
+        val decoder: StreamingMp3Decoder
+        try {
+            decoder = StreamingMp3Decoder()
+        } catch (e: Exception) {
+            Log.w(TAG, "streaming decoder unavailable, fallback to whole-mp3", e)
+            if (usePrefetchSocket) return StreamResult(false, "流式解码器不可用", false)
+            return streamSentenceWhole(seq, sentence, voice, ratePct, pitchHz, session, onPcm)
+        }
+        val parser = AudioSegmentParser()
+        var sawPcm = false
+        var gotAudio = false
+        var writeFailed = false
+        try {
+            val ssmlMsg = "X-RequestId:${hexId()}\r\n" +
+                "Content-Type:application/ssml+xml\r\n" +
+                "X-Timestamp:${dateString()}Z\r\n" +
+                "Path:ssml\r\n\r\n" +
+                ssml(sentence, voice, ratePct, pitchHz)
+            val readLoop: (FrameReader, Boolean) -> Unit = { reader, closeThrows ->
+                while (!cancelled(seq) && !writeFailed) {
+                    val (opcode, payload) = reader.readFrame()
+                    when (opcode) {
+                        0x2 -> if (payload.isNotEmpty()) {
+                            markProgress()
+                            gotAudio = true
+                            val mp3chunk = parser.feed(payload)
+                            if (mp3chunk.isNotEmpty()) {
+                                for (pcm in decoder.feed(mp3chunk)) {
+                                    if (pcm.isEmpty()) continue
+                                    sawPcm = true
+                                    markProgress()
+                                    if (!onPcm(pcm)) { writeFailed = true; break }
+                                }
+                            }
+                        }
+                        0x1 -> {
+                            val msg = String(payload, Charsets.UTF_8)
+                            if (msg.contains("turn.end")) break
+                        }
+                        0x8 -> if (closeThrows) throw java.io.IOException("Edge 语音连接已关闭") else break
+                    }
+                }
+            }
+            if (session != null) {
+                sendTextFrame(session.out, ssmlMsg)
+                readLoop(session.reader, true)
+            } else {
+                val own = openEdgeSocket(usePrefetchSocket)
+                try {
+                    sendTextFrame(own.out, ssmlMsg)
+                    readLoop(own.reader, false)
+                } finally {
+                    closeSession(own)
+                }
+            }
+            if (cancelled(seq)) return StreamResult(false, "cancelled", sawPcm)
+            if (!writeFailed) {
+                val tailMp3 = parser.finish()
+                if (tailMp3.isNotEmpty()) {
+                    for (pcm in decoder.feed(tailMp3)) {
+                        if (pcm.isEmpty()) continue
+                        sawPcm = true
+                        markProgress()
+                        if (!onPcm(pcm)) { writeFailed = true; break }
+                    }
+                }
+            }
+            if (!writeFailed) {
+                for (pcm in decoder.finish()) {
+                    if (pcm.isEmpty()) continue
+                    sawPcm = true
+                    markProgress()
+                    if (!onPcm(pcm)) { writeFailed = true; break }
+                }
+            }
+        } catch (e: Exception) {
+            if (cancelled(seq)) return StreamResult(false, "cancelled", sawPcm)
+            throw e
+        } finally {
+            decoder.close()
+        }
+        if (writeFailed) return StreamResult(false, "AudioTrack.write 失败", sawPcm)
+        if (!sawPcm) return StreamResult(false, if (gotAudio) "解码无音频" else "取音为空", false)
+        return StreamResult(true, null, true)
+    }
+
+    /** 流式解码器不可用时的旧路径：整句取音再整句解码（已验证过的回落，不动它）。 */
+    private fun streamSentenceWhole(
+        seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int,
+        session: EdgeSession?, onPcm: (ByteArray) -> Boolean
+    ): StreamResult {
+        val mp3: ByteArray = if (session != null) {
+            fetchMp3OnSession(session, seq, sentence, voice, ratePct, pitchHz)
+        } else {
+            fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+        }
+        if (cancelled(seq)) return StreamResult(false, "cancelled", false)
+        if (mp3.isEmpty()) return StreamResult(false, "取音为空", false)
+        val pcms = decodeMp3(seq, mp3)
+        if (pcms.isEmpty()) return StreamResult(false, "解码为空", false)
+        var saw = false
+        for (pcm in pcms) {
+            if (pcm.isEmpty()) continue
+            saw = true
+            markProgress()
+            if (!onPcm(pcm)) return StreamResult(false, "AudioTrack.write 失败", saw)
+        }
+        return StreamResult(true, null, saw)
+    }
+
+    /** 流式逐句连接用的握手 + speech.config（与 openSession/fetchMp3 同流程，只供新流式路径用）。 */
+    private fun openEdgeSocket(isPrefetch: Boolean): EdgeSession {
+        val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
+        if (isPrefetch) prefetchSocket = ssl else socket = ssl
+        try {
+            ssl.connect(InetSocketAddress(HOST, 443), 15_000)
+            ssl.soTimeout = 45_000
+            ssl.startHandshake()
+            val reader = FrameReader(ssl.inputStream)
+            val out = ssl.outputStream
+            val key = android.util.Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, android.util.Base64.NO_WRAP)
+            val path = "/consumer/speech/synthesize/readaloud/edge/v1" +
+                "?TrustedClientToken=$TOKEN" +
+                "&ConnectionId=${hexId()}" +
+                "&Sec-MS-GEC=${secMsGec()}" +
+                "&Sec-MS-GEC-Version=2-$CHROMIUM_MAJOR.0.3650.75"
+            val request = "GET $path HTTP/1.1\r\n" +
+                "Host: $HOST\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Pragma: no-cache\r\n" +
+                "Cache-Control: no-cache\r\n" +
+                "Sec-WebSocket-Key: $key\r\n" +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold\r\n" +
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/$CHROMIUM_MAJOR.0.0.0 Safari/537.36 Edg/$CHROMIUM_MAJOR.0.0.0\r\n" +
+                "\r\n"
+            out.write(request.toByteArray(Charsets.UTF_8))
+            out.flush()
+            val head = reader.readUntil(HEADER_END)
+            val statusLine = String(head, Charsets.UTF_8).lineSequence().firstOrNull().orEmpty()
+            check(statusLine.contains("101")) { "Edge 语音握手失败：$statusLine" }
+            val date = dateString()
+            val configMsg = "X-Timestamp:$date\r\n" +
+                "Content-Type:application/json; charset=utf-8\r\n" +
+                "Path:speech.config\r\n\r\n" +
+                "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":" +
+                "{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}," +
+                "\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}\r\n"
+            sendTextFrame(out, configMsg)
+            return EdgeSession(ssl, reader, out)
+        } catch (e: Exception) {
+            if (isPrefetch) {
+                if (prefetchSocket === ssl) prefetchSocket = null
+            } else {
+                if (socket === ssl) socket = null
+            }
+            runCatching { ssl.close() }
+            throw e
         }
     }
 
@@ -539,6 +1201,11 @@ object EdgeTts {
                 if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) { track = i; format = f; break }
             }
             if (track < 0 || format == null) return out
+            // L7：核对 MediaFormat 里的采样率与声明的 24000 是否一致，不一致记日志告警。
+            val wireRate = runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) }.getOrNull()
+            if (wireRate != null && wireRate != SAMPLE_RATE) {
+                Log.w(TAG, "Edge MP3 sample rate $wireRate != declared $SAMPLE_RATE, audio may sound wrong")
+            }
             extractor.selectTrack(track)
             val mime = format.getString(MediaFormat.KEY_MIME) ?: return out
             codec = MediaCodec.createDecoderByType(mime)

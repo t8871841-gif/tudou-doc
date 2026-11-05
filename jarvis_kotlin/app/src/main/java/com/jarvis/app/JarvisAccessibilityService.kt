@@ -163,12 +163,21 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
 
         /** v3：截图 / 坐标点击的安全黑名单（比看屏白名单更严：银行、支付、钱包、系统设置、安装器一律拒绝）。 */
+        // L10：支付宝已从黑名单去掉——它在 HARD_WHITELIST 里，截图黑名单含它自相矛盾；
+        // 是否拍得到只由系统 FLAG_SECURE 决定（见 isShotBlocked 的显式豁免）。
+        // 注意：单删 "alipay" 不够，"pay" 这个子串仍会命中 AlipayGphone，见下。
         private val SHOT_DENY = Regex(
-            "settings|packageinstaller|permissioncontroller|bank|wallet|pay|finance|security|alipay|unionpay|icbc|ccb|abchina|cmbchina",
+            "settings|packageinstaller|permissioncontroller|bank|wallet|pay|finance|security|unionpay|icbc|ccb|abchina|cmbchina",
             RegexOption.IGNORE_CASE
         )
 
-        fun isShotBlocked(pkg: String): Boolean = pkg.isEmpty() || SHOT_DENY.containsMatchIn(pkg)
+        fun isShotBlocked(pkg: String): Boolean {
+            if (pkg.isEmpty()) return true
+            // L10：支付宝在 HARD_WHITELIST 里，截图不拦；拍不拍得到只由系统 FLAG_SECURE 决定。
+            // 显式豁免是必需的：SHOT_DENY 里的 "pay" 子串仍会命中 AlipayGphone，光删 "alipay" 不够。
+            if (pkg == "com.eg.android.AlipayGphone") return false
+            return SHOT_DENY.containsMatchIn(pkg)
+        }
 
         @Volatile
         var lastCaptureError: String = ""
@@ -307,6 +316,16 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * M14：服务持有的长期 ScreenController，按约定暴露的公开只读属性。
+     * 服务连接时创建，断开时置空；任务循环和技能执行读它而不是每步新建。
+     * 存取点是 companion 的同名 var（TaskLoop 的旧写法仍经由它读写）；
+     * 实例上的同名 val 只是只读视图，读到的就是同一份控制器。
+     */
+    val screenController: com.jarvis.app.screen.ScreenController?
+        get() = Companion.screenController
+
     private var lastScan = 0L
     private var rescanPending = false
     private var task: Task? = null
@@ -349,6 +368,13 @@ class JarvisAccessibilityService : AccessibilityService() {
             Log.w(TAG, "re-assert serviceInfo failed", e)
         }
         instance = this
+        // M14：长期 ScreenController——服务连上就创建（每次连接都建新的：新连接
+        // 意味着新的 service 实例，旧控制器绑的是已死的连接），断开时置空；
+        // onAccessibilityEvent 无条件转发给它 noteEvent，不只在任务进行中。
+        // 任务循环和技能执行读它而不是每步新建（另两路按此约定改）。
+        Companion.screenController = com.jarvis.app.screen.ScreenController(
+            this, com.jarvis.app.screen.TapMarkerUi(this),
+        )
         OrbController.attach(this) // 悬浮球：开关记在 SharedPreferences，服务起来就自动恢复
         TakeoverBorder.attach(this) // 三期：看屏代理接管时的彩光边框
         com.jarvis.app.screen.GroundingLog.init(this) // 批九：移植的落点记录（默认关，开后才真正初始化）
@@ -395,7 +421,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         OrbController.detach()
         TakeoverBorder.detach()
         com.jarvis.app.screen.GroundingLog.shutdown() // 批九
-        screenController = null
+        Companion.screenController = null
         instance = null
         disarm()
         // 返回 true 允许系统在被 ROM 回收后自动重绑（Flyme 等系统杀无障碍时更易自恢复）
@@ -406,7 +432,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         OrbController.detach()
         TakeoverBorder.detach()
         com.jarvis.app.screen.GroundingLog.shutdown() // 批九
-        screenController = null
+        Companion.screenController = null
         instance = null
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -701,12 +727,52 @@ class JarvisAccessibilityService : AccessibilityService() {
         val cx = rect.centerX().toFloat()
         val cy = rect.centerY().toFloat()
         val path = Path().apply { moveTo(cx, cy) }
-        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build()
+        // L9：笔画 150ms（与 tapXY 和 Andee 一致；60ms 在这台机器上是 no-op）。
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 150)).build()
         val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
-            override fun onCompleted(d: GestureDescription?) { done(true, "") }
+            override fun onCompleted(d: GestureDescription?) {
+                // L9：手势发出去了 ≠ 窗口关掉了——300ms 后复查：同一小窗还在（同 bounds
+                // 且标题栏里仍有“关闭”）就是没关成，报失败，不报 done(true)。
+                handler.postDelayed({
+                    val closed = runCatching {
+                        val cur = rootInActiveWindow ?: return@runCatching true
+                        try {
+                            val curRect = Rect()
+                            cur.getBoundsInScreen(curRect)
+                            if (curRect != winRect) return@runCatching true
+                            val top = curRect.top + (curRect.height() * 0.15f).toInt()
+                            !hasCloseInTitleBar(cur, top)
+                        } finally {
+                            recycleCompat(cur)
+                        }
+                    }.getOrDefault(true)
+                    if (closed) done(true, "") else done(false, "not_closed")
+                }, 300)
+            }
             override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
         }, null)
         if (!ok) done(false, "dispatch_failed")
+    }
+
+    /**
+     * L9：标题栏里是否还有“关闭”节点（tryCloseSmallWindow 点完复查用）。
+     * 只在标题栏高度内找，与点按时的找法一致。
+     */
+    private fun hasCloseInTitleBar(node: AccessibilityNodeInfo, topLimit: Int): Boolean {
+        val t = node.text?.toString()?.trim().orEmpty()
+        val d = node.contentDescription?.toString()?.trim().orEmpty()
+        if (t == "关闭" || d == "关闭") {
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            if (!r.isEmpty && r.centerY() <= topLimit) return true
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = hasCloseInTitleBar(child, topLimit)
+            child.recycle()
+            if (found) return true
+        }
+        return false
     }
 
     /**
@@ -830,10 +896,11 @@ class JarvisAccessibilityService : AccessibilityService() {
     // ---------------- 旧模式：事件驱动，只点“发送” ----------------
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 批九：先喂任务循环的 ScreenController（界面静稳判定靠它），与下面旧模式互不影响。
+        // M14：无条件转发给长期 ScreenController（界面静稳判定靠它），与下面旧模式互不影响。
+        // 不要只在任务进行中才转发——控制器是服务持有的，事件来了就喂。
         if (event != null) {
             try {
-                screenController?.noteEvent(event)
+                Companion.screenController?.noteEvent(event)
             } catch (_: Exception) {
             }
         }

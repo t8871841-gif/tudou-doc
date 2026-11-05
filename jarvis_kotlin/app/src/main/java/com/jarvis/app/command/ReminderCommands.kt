@@ -62,14 +62,21 @@ object ReminderCommands {
                 minuteRaw == "半" -> 30
                 else -> minuteRaw.toIntOrNull() ?: 0
             }
-            var hour24 = hourRaw.coerceIn(0, 23)
+            // C12：非法钟点不静默 clamp 到 23——直接拒掉，让用户重说。
+            if (hourRaw !in 0..23) {
+                speak("这个钟点不对，$hourRaw 点不存在，你再说一遍")
+                return true
+            }
+            var hour24 = hourRaw
             // 中文钟点口语里"H点"默认指 12 小时制，要靠上下午/晚上词消歧；
             // 没说上下午时，沿用用户常见默认：7 点以下当下午/晚上说的概率更高的不在此猜测范围内，
             // 这里保守处理——没有时段词时，按 24 小时制原样理解（用户说"18点"已经是 24 小时制）。
             if (hourRaw in 1..11) {
                 when (periodWord) {
                     "下午", "晚上", "傍晚" -> hour24 = hourRaw + 12
-                    "中午" -> hour24 = if (hourRaw == 12) 12 else hourRaw + 12
+                    // C12："中午 11 点"是 11 点不是 23 点——中午只有 11/12/1 三个说法；
+                    // 11→11、12→12、1→13，2..10 配"中午"是口误，不加 12。
+                    "中午" -> hour24 = if (hourRaw == 11 || hourRaw == 12) hourRaw else if (hourRaw == 1) 13 else hourRaw
                     "早上", "上午" -> hour24 = hourRaw
                     else -> {} // 没说时段，按原数字理解（用户自己说清楚了就用哪个）
                 }
@@ -78,6 +85,8 @@ object ReminderCommands {
                 set(Calendar.HOUR_OF_DAY, hour24); set(Calendar.MINUTE, minute)
                 set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
             }
+            // C12：算出来的时间已过、顺延到明天时，播报里必须说"明天"，不能悄悄顺延。
+            var rolledToTomorrow = false
             when (dayWord) {
                 "明天", "明早" -> cal.add(Calendar.DAY_OF_YEAR, 1)
                 else -> if (cal.timeInMillis <= System.currentTimeMillis()) {
@@ -85,9 +94,10 @@ object ReminderCommands {
                     // 已经过去的提醒（ReminderScheduler.schedule 对过去时间的行为未定义，
                     // 不要指望它自己处理）。
                     cal.add(Calendar.DAY_OF_YEAR, 1)
+                    rolledToTomorrow = true
                 }
             }
-            scheduleAndReport(ctx, cal.timeInMillis, content, speak, confirmDay = dayWord.isBlank())
+            scheduleAndReport(ctx, cal.timeInMillis, content, speak, confirmDay = dayWord.isBlank() || rolledToTomorrow)
             return true
         }
 

@@ -20,12 +20,16 @@ import java.util.concurrent.TimeUnit
  * 未配置时直接报错，不发请求。
  *
  * 维护一份进程内滚动对话历史（不落盘——持久化记忆是需求第 9 条，未排期），
- * 超过 MAX_TURNS 轮后从最早的一轮开始丢弃，避免单次请求体无限增长。
+ * 双预算裁剪（M21，Andee LocalBrain 同款：60 条消息且 60_000 字符，超了从最旧丢；
+ * 完整的 HARVEST 复盘不在此做，只做双预算）。
  * 流式 askStream（边想边说）与单轮 askOnce 共用同一套配置。
  */
 object CustomClient {
 
-    private const val MAX_TURNS = 12
+    /** M21：历史预算——60 条消息（Andee MAX_HISTORY 同款），不是 60 轮。 */
+    private const val MAX_TURNS = 60
+    /** M21：历史预算另一半——总字符数（Andee MAX_HISTORY_CHARS 同款）。 */
+    private const val MAX_HISTORY_CHARS = 60_000
     private const val SYSTEM_PROMPT =
         "你是 Jarvis，用户的个人智能助理。自称 Jarvis，称呼用户\"先生\"。默认使用中文回答，" +
             "语气克制、干练、不啰嗦；你的回答会直接被朗读出来，所以不要使用markdown、列表符号、" +
@@ -55,8 +59,70 @@ object CustomClient {
     @Volatile
     private var cancelSeq = 0
 
+    /** C7：飞行中的 OkHttp Call（Andee LlmClient.current 同款），cancelInFlight() 连同网络一起取消。 */
+    @Volatile
+    private var inFlightCall: Call? = null
+
+    /** C7：急停——序号作废 + 断开网络（正在读流的 readUtf8Line 会因此立即抛 IOException 打断，不用等满 180 秒读超时）。 */
     fun cancelInFlight() {
         cancelSeq++
+        runCatching { inFlightCall?.cancel() }
+    }
+
+    private fun clearInFlight(call: Call) {
+        if (call === inFlightCall) inFlightCall = null
+    }
+
+    /** M21：双预算裁剪——消息数或总字符数任一超标都从最旧丢，至少保留最后一条。调用方须已持 history 锁（本函数可重入）。 */
+    private fun trimHistory() {
+        synchronized(this) {
+            while (history.size > 1 &&
+                (history.size > MAX_TURNS || history.sumOf { it.second.length } > MAX_HISTORY_CHARS)
+            ) {
+                history.removeAt(0)
+            }
+        }
+    }
+
+    /** JarvisAgent 路约定：把一段助手回复追加进 history（并按双预算裁剪）。空文本不追加。 */
+    fun addAssistantTurn(text: String) {
+        val reply = text.trim()
+        if (reply.isEmpty()) return
+        synchronized(this) {
+            history.add("assistant" to reply)
+            trimHistory()
+        }
+    }
+
+    /** 从服务端错误体里取 detail（Andee LlmHttpException.detail 同款）。 */
+    private fun errorDetail(body: String): String {
+        val detail = runCatching {
+            val err = JSONObject(body).opt("error")
+            when (err) {
+                is JSONObject -> err.optString("message")
+                is String -> err
+                else -> ""
+            }
+        }.getOrDefault("").ifBlank { body }.trim()
+        return detail
+    }
+
+    /** M27：按 Andee explainFailure 分码给可操作文案，调用方原样报给用户即可。 */
+    private fun httpError(prefix: String, code: Int, body: String): String = when (code) {
+        402 -> "大模型账户余额不足（HTTP 402），请先充值后再试"
+        401, 403 -> "大模型鉴权失败（HTTP $code），请检查 API Key 是否正确、是否过期"
+        400 -> "大模型请求被拒（HTTP 400）：${errorDetail(body).take(160).ifBlank { "HTTP 400" }}"
+        404 -> "大模型接口或模型不存在（HTTP 404），请检查接口地址和模型名是否填对"
+        408, 429 -> "大模型请求太频繁或超时（HTTP $code），请稍等一会儿再试"
+        in 500..599 -> "大模型服务暂时不可用（HTTP $code），请稍后再试"
+        else -> "$prefix：HTTP $code"
+    }
+
+    /** M27：超时 / 断网各一句（Andee explainFailure 同款）。 */
+    private fun networkError(e: IOException): String = when (e) {
+        is java.net.SocketTimeoutException -> "大模型请求超时，请检查网络后重试"
+        is java.net.UnknownHostException, is java.net.ConnectException -> "网络未连接或连不上大模型服务，请检查网络后再试"
+        else -> "网络请求失败：${e.message}"
     }
 
     /**
@@ -84,6 +150,7 @@ object CustomClient {
             return
         }
         val mySeq = ++cancelSeq
+        inFlightCall?.cancel() // 新一轮取代旧一轮：旧请求序号已作废，网络也一并断开，不叠加跑
         if (isAlive?.invoke() == false) return // 发请求前检查：已急停就不发
         val userContent: Any = if (jpegBase64.isNullOrBlank()) {
             userText
@@ -111,29 +178,37 @@ object CustomClient {
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        client.newCall(req).enqueue(object : Callback {
+        val call = client.newCall(req)
+        inFlightCall = call
+        call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                clearInFlight(call)
                 if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃
-                onError("网络请求失败：${e.message}")
+                onError(networkError(e))
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
-                response.use { resp ->
-                    if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃结果
-                    if (!resp.isSuccessful) {
-                        onError("自定义大模型接口返回错误：HTTP ${resp.code}")
-                        return
+                try {
+                    response.use { resp ->
+                        if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃结果
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            onError(httpError("自定义大模型接口返回错误", resp.code, errBody))
+                            return
+                        }
+                        try {
+                            val text = resp.body?.string().orEmpty()
+                            val json = JSONObject(text)
+                            val reply = json.getJSONArray("choices")
+                                .getJSONObject(0).getJSONObject("message").getString("content").trim()
+                            if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 回调时再查一次
+                            onResult(reply)
+                        } catch (e: Exception) {
+                            onError("解析自定义大模型返回内容失败：${e.message}")
+                        }
                     }
-                    try {
-                        val text = resp.body?.string().orEmpty()
-                        val json = JSONObject(text)
-                        val reply = json.getJSONArray("choices")
-                            .getJSONObject(0).getJSONObject("message").getString("content").trim()
-                        if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 回调时再查一次
-                        onResult(reply)
-                    } catch (e: Exception) {
-                        onError("解析自定义大模型返回内容失败：${e.message}")
-                    }
+                } finally {
+                    clearInFlight(call)
                 }
             }
         })
@@ -144,10 +219,12 @@ object CustomClient {
      * 按模型开关取配置：GLM 模式用内置 glm-4v-plus + 智谱地址，自定义模式用视觉三项
      * （留空则回退到自定义大模型）；模型是否真支持图片输入取决于后端，
      * 这里按 OpenAI 多模态消息格式（image_url + data URL）发送。
+     * L3：与 ask / askStream 同款取消守卫（mySeq + isAlive），取消后回调不再执行。
      */
     fun askVision(
         ctx: Context, prompt: String, jpegBase64: String,
-        onResult: (String) -> Unit, onError: (String) -> Unit
+        onResult: (String) -> Unit, onError: (String) -> Unit,
+        isAlive: (() -> Boolean)? = null
     ) {
         val base = JarvisPrefs.getVisionBaseUrl(ctx)
         val model = JarvisPrefs.getVisionModel(ctx)
@@ -160,6 +237,9 @@ object CustomClient {
             onError("未配置视觉模型接口地址，请先去设置里填写")
             return
         }
+        val mySeq = ++cancelSeq
+        inFlightCall?.cancel() // 新一轮取代旧一轮：旧请求序号已作废，网络也一并断开，不叠加跑
+        if (isAlive?.invoke() == false) return // 发请求前检查：已急停就不发
         val content = JSONArray()
             .put(JSONObject().put("type", "text").put("text", prompt))
             .put(
@@ -181,26 +261,37 @@ object CustomClient {
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        client.newCall(req).enqueue(object : Callback {
+        val call = client.newCall(req)
+        inFlightCall = call
+        call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                onError("网络请求失败：${e.message}")
+                clearInFlight(call)
+                if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃
+                onError(networkError(e))
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
-                response.use { resp ->
-                    if (!resp.isSuccessful) {
-                        onError("视觉模型返回错误：HTTP ${resp.code}")
-                        return
+                try {
+                    response.use { resp ->
+                        if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃结果
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            onError(httpError("视觉模型返回错误", resp.code, errBody))
+                            return
+                        }
+                        try {
+                            val text = resp.body?.string().orEmpty()
+                            val json = JSONObject(text)
+                            val reply = json.getJSONArray("choices")
+                                .getJSONObject(0).getJSONObject("message").getString("content").trim()
+                            if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 回调时再查一次
+                            onResult(reply)
+                        } catch (e: Exception) {
+                            onError("解析视觉模型返回内容失败：${e.message}")
+                        }
                     }
-                    try {
-                        val text = resp.body?.string().orEmpty()
-                        val json = JSONObject(text)
-                        val reply = json.getJSONArray("choices")
-                            .getJSONObject(0).getJSONObject("message").getString("content").trim()
-                        onResult(reply)
-                    } catch (e: Exception) {
-                        onError("解析视觉模型返回内容失败：${e.message}")
-                    }
+                } finally {
+                    clearInFlight(call)
                 }
             }
         })
@@ -222,11 +313,13 @@ object CustomClient {
             return
         }
         val mySeq = ++cancelSeq
+        inFlightCall?.cancel() // 新一轮取代旧一轮：旧请求序号已作废，网络也一并断开，不叠加跑
 
-        // 批三：长期记忆拼在系统提示词后面（memoryContext 为空时与原来完全一致）
-        val fullSystemPrompt = if (memoryContext.isNotBlank()) SYSTEM_PROMPT + memoryContext else SYSTEM_PROMPT
+        // L5：记忆不拼进 system prompt（system prompt 保持常量，保住前缀缓存，Andee 同款），
+        // 改拼到本轮用户消息上；memoryContext 本身以 "\n\n以下是关于用户的一些长期记忆…" 开头，直接追加即可。
+        val userContent = if (memoryContext.isBlank()) userText else userText + memoryContext
         val messages = JSONArray()
-        messages.put(JSONObject().put("role", "system").put("content", fullSystemPrompt))
+        messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
         synchronized(this) {
             for ((role, content) in history) {
                 messages.put(JSONObject().put("role", role).put("content", content))
@@ -234,7 +327,7 @@ object CustomClient {
         }
         // L6：本轮 user 先不进 history，只放进本次请求的 messages；拿到回复后再与 assistant 成对写入，
         // 失败/被取消时不留孤儿 user 消息。
-        messages.put(JSONObject().put("role", "user").put("content", userText))
+        messages.put(JSONObject().put("role", "user").put("content", userContent))
         val body = JSONObject()
             .put("model", model)
             .put("messages", messages)
@@ -248,37 +341,46 @@ object CustomClient {
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        client.newCall(req).enqueue(object : Callback {
+        val call = client.newCall(req)
+        inFlightCall = call
+        call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                clearInFlight(call)
                 if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃
-                onError("网络请求失败：${e.message}")
+                onError(networkError(e))
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
-                response.use { resp ->
-                    if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃结果
-                    if (!resp.isSuccessful) {
-                        onError("自定义大模型接口返回错误：HTTP ${resp.code}")
-                        return
-                    }
-                    try {
-                        val text = resp.body?.string().orEmpty()
-                        val json = JSONObject(text)
-                        val reply = json.getJSONArray("choices")
-                            .getJSONObject(0)
-                            .getJSONObject("message")
-                            .getString("content")
-                            .trim()
-                        synchronized(this@CustomClient) {
-                            // L6：user 与 assistant 成对写入（发请求前没写 history，失败/取消时不留孤儿 user）
-                            history.add("user" to userText)
-                            history.add("assistant" to reply)
-                            while (history.size > MAX_TURNS * 2) history.removeAt(0)
+                try {
+                    response.use { resp ->
+                        if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃结果
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            onError(httpError("自定义大模型接口返回错误", resp.code, errBody))
+                            return
                         }
-                        onResult(reply)
-                    } catch (e: Exception) {
-                        onError("解析自定义大模型返回内容失败：${e.message}")
+                        try {
+                            val text = resp.body?.string().orEmpty()
+                            val json = JSONObject(text)
+                            val reply = json.getJSONArray("choices")
+                                .getJSONObject(0)
+                                .getJSONObject("message")
+                                .getString("content")
+                                .trim()
+                            synchronized(this@CustomClient) {
+                                // L6：user 与 assistant 成对写入（发请求前没写 history，失败/取消时不留孤儿 user）
+                                // history 里只存用户原话，不存拼进去的记忆文本。
+                                history.add("user" to userText)
+                                history.add("assistant" to reply)
+                                trimHistory()
+                            }
+                            onResult(reply)
+                        } catch (e: Exception) {
+                            onError("解析自定义大模型返回内容失败：${e.message}")
+                        }
                     }
+                } finally {
+                    clearInFlight(call)
                 }
             }
         })
@@ -307,9 +409,12 @@ object CustomClient {
             return
         }
         val mySeq = ++cancelSeq
-        val fullSystemPrompt = if (memoryContext.isNotBlank()) SYSTEM_PROMPT + memoryContext else SYSTEM_PROMPT
+        inFlightCall?.cancel() // 新一轮取代旧一轮：旧请求序号已作废，网络也一并断开，不叠加跑
+        // L5：记忆不拼进 system prompt（system prompt 保持常量，保住前缀缓存，Andee 同款），
+        // 改拼到本轮用户消息上；history 里只存用户原话。
+        val userContent = if (memoryContext.isBlank()) userText else userText + memoryContext
         val messages = JSONArray()
-        messages.put(JSONObject().put("role", "system").put("content", fullSystemPrompt))
+        messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
         synchronized(this) {
             for ((role, content) in history) {
                 messages.put(JSONObject().put("role", role).put("content", content))
@@ -317,7 +422,7 @@ object CustomClient {
         }
         // L6：本轮 user 先不进 history，只放进本次请求的 messages；流结束后再与 assistant 成对写入，
         // 失败/被取消时不留孤儿 user 消息。
-        messages.put(JSONObject().put("role", "user").put("content", userText))
+        messages.put(JSONObject().put("role", "user").put("content", userContent))
         val body = JSONObject()
             .put("model", model)
             .put("messages", messages)
@@ -329,59 +434,82 @@ object CustomClient {
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        client.newCall(req).enqueue(object : Callback {
+        val call = client.newCall(req)
+        inFlightCall = call
+        call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                clearInFlight(call)
                 if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃
-                onError("网络请求失败：${e.message}")
+                onError(networkError(e))
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
-                response.use { resp ->
-                    if (mySeq != cancelSeq) return
-                    if (!resp.isSuccessful) {
-                        onError("自定义大模型接口返回错误：HTTP ${resp.code}")
-                        return
-                    }
-                    val full = StringBuilder()
-                    try {
-                        val source = resp.body?.source() ?: run {
-                            onError("自定义大模型流式返回为空")
+                try {
+                    response.use { resp ->
+                        if (mySeq != cancelSeq) return
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            onError(httpError("自定义大模型接口返回错误", resp.code, errBody))
                             return
                         }
-                        while (true) {
-                            if (mySeq != cancelSeq) return // 已被急停/下一轮覆盖，丢弃
-                            val line = source.readUtf8Line() ?: break
-                            val data = line.trim()
-                            if (data.isEmpty()) continue
-                            if (!data.startsWith("data:")) continue
-                            val payload = data.removePrefix("data:").trim()
-                            if (payload == "[DONE]") break
-                            try {
-                                val json = JSONObject(payload)
-                                val delta = json.optJSONArray("choices")
-                                    ?.optJSONObject(0)
-                                    ?.optJSONObject("delta")
-                                    ?.optString("content").orEmpty()
-                                if (delta.isNotEmpty()) {
-                                    full.append(delta)
-                                    onToken(delta)
-                                }
-                            } catch (_: Exception) {
-                                // 单个分片解析失败就跳过，不中断整条流
+                        val full = StringBuilder()
+                        // H9：流结束（成功 / 取消 / 中途失败）时，把已完整收到/念出的助手文本写进 history，
+                        // 哪怕只有一部分；只存一次，空文本不留孤儿 user 消息。
+                        var historySaved = false
+                        fun savePartialHistory() {
+                            if (historySaved) return
+                            historySaved = true
+                            val reply = full.toString().trim()
+                            if (reply.isEmpty()) return
+                            synchronized(this@CustomClient) {
+                                history.add("user" to userText)
+                                history.add("assistant" to reply)
+                                trimHistory()
                             }
                         }
-                        val reply = full.toString().trim()
-                        synchronized(this@CustomClient) {
-                            // L6：user 与 assistant 成对写入（发请求前没写 history，失败/取消时不留孤儿 user）
-                            history.add("user" to userText)
-                            history.add("assistant" to reply)
-                            while (history.size > MAX_TURNS * 2) history.removeAt(0)
+                        try {
+                            val source = resp.body?.source() ?: run {
+                                onError("自定义大模型流式返回为空")
+                                return
+                            }
+                            while (true) {
+                                if (mySeq != cancelSeq) {
+                                    savePartialHistory()
+                                    return // 已被急停/下一轮覆盖，丢弃
+                                }
+                                // C7：cancelInFlight() 会调 call.cancel() 关掉连接，readUtf8Line 立即抛
+                                // IOException 走下面的 catch，不用等满 180 秒读超时。
+                                val line = source.readUtf8Line() ?: break
+                                val data = line.trim()
+                                if (data.isEmpty()) continue
+                                if (!data.startsWith("data:")) continue
+                                val payload = data.removePrefix("data:").trim()
+                                if (payload == "[DONE]") break
+                                try {
+                                    val json = JSONObject(payload)
+                                    val delta = json.optJSONArray("choices")
+                                        ?.optJSONObject(0)
+                                        ?.optJSONObject("delta")
+                                        ?.optString("content").orEmpty()
+                                    if (delta.isNotEmpty()) {
+                                        full.append(delta)
+                                        onToken(delta)
+                                    }
+                                } catch (_: Exception) {
+                                    // 单个分片解析失败就跳过，不中断整条流
+                                }
+                            }
+                            savePartialHistory()
+                            onDone(full.toString().trim())
+                        } catch (e: Exception) {
+                            // 取消打断读循环也会走到这里：先把已收到的部分存进历史，再静默丢弃。
+                            savePartialHistory()
+                            if (mySeq != cancelSeq) return
+                            onError("解析自定义大模型流式返回失败：${e.message}")
                         }
-                        onDone(reply)
-                    } catch (e: Exception) {
-                        if (mySeq != cancelSeq) return
-                        onError("解析自定义大模型流式返回失败：${e.message}")
                     }
+                } finally {
+                    clearInFlight(call)
                 }
             }
         })

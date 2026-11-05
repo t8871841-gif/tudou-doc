@@ -18,7 +18,10 @@ object SkillResumeState {
     private data class Pending(val info: ResumeInfo, val expiresAt: Long)
 
     private const val TTL_MS = 120_000L // 失败后等用户说"继续"的时间比联系人澄清更长——用户可能要先看一眼手机现场情况
-    private val CONTINUE_WORDS = listOf("继续", "接着", "接着做", "接着来", "再试一次", "从这继续", "从这里继续")
+    private val CONTINUE_WORDS = listOf("从这里继续", "从这继续", "再试一次", "继续", "接着做", "接着来", "接着")
+    private val NEGATE_WORDS = listOf("不要再继续", "别再继续", "不用再继续", "不要继续", "别继续", "不用继续", "不继续了")
+    /** 只允许跟在“继续”类说法后面的语气词/客套词，多一个实义词都不算“继续”。 */
+    private val CONTINUE_FILLERS = listOf("帮我", "麻烦", "谢谢", "一下", "吧", "啊", "呀", "呢", "哦", "嗯", "哈", "请", "了", "就", "好")
 
     @Volatile
     private var pending: Pending? = null
@@ -43,15 +46,40 @@ object SkillResumeState {
     fun clear() { pending = null }
 
     /**
-     * 用这句话判断要不要继续。命中"继续"类说法才返回 [ResumeInfo]（调用方据此重新
-     * 发起 [SkillRunner.run] 并传入 fromIndex）；没命中（包括直接是别的新指令）一律
-     * 清掉待处理状态并返回 null，交还正常流程处理这句话——不强行追问第二遍。
+     * 用这句话判断要不要继续。M29：只在输入是真正的“继续”类说法（且不是否定）
+     * 时才消费断点并返回 [ResumeInfo]（调用方据此重新发起 [SkillRunner.run]
+     * 并传入 fromIndex）；输入不匹配（包括直接是别的新指令、否定句）一律返回 null
+     * 且不消费断点——断点留着，等用户之后说“继续”、或新任务开始、或 TTL 过期。
+     * 不要开头就 pending = null，那会和澄清状态机互相吃掉对方的状态。
+     * （JarvisAgent 路会先查澄清、再查技能续跑；这里只改 tryResolve 本身的消费语义。）
      */
     fun tryResolve(text: String): ResumeInfo? {
         val p = pending ?: return null
-        pending = null // 不管命中与否先消费掉，见类注释
-        if (System.currentTimeMillis() > p.expiresAt) return null
+        if (System.currentTimeMillis() > p.expiresAt) {
+            pending = null
+            return null
+        }
         val t = text.trim()
-        return if (CONTINUE_WORDS.any { t.contains(it) }) p.info else null
+        // 否定先判：含“继续”子串的否定句（“不要继续了，帮我查天气”）不是“继续”，不断点、不消费。
+        if (NEGATE_WORDS.any { t.contains(it) }) return null
+        if (!isContinueUtterance(t)) return null // 不是“继续”，不断点、不消费
+        pending = null // 确认是真正的“继续”意图才消费断点
+        return p.info
+    }
+
+    /**
+     * 整句是否以继续类说法为主：去掉继续类词、语气词/客套词与标点空白后不剩
+     * 任何实义词才算。“继续”“接着做吧”“嗯，继续”算；“继续查天气”
+     * “从这里继续做完转账”不算——后者带了额外任务内容，留待用户说一句干净的
+     * “继续”再续跑。注意顺序：去“继续”类词时按从长到短删，先删“从这里继续”
+     * 再删“继续”，否则短词先删会把长词拆散、残留“从这里”被误判成新指令。
+     */
+    private fun isContinueUtterance(t: String): Boolean {
+        if (t.isEmpty()) return false
+        var rest = t
+        for (w in CONTINUE_WORDS) rest = rest.replace(w, "")
+        for (f in CONTINUE_FILLERS) rest = rest.replace(f, "")
+        rest = rest.filterNot { it.isWhitespace() || it in "，。！？、；：,.!?;:" }
+        return rest.isEmpty()
     }
 }
