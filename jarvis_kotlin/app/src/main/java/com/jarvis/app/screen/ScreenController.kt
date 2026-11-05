@@ -287,7 +287,16 @@ class ScreenController(
      */
     fun expandFloatingApp(targetPkg: String): JSONObject {
         val out = JSONObject()
-        val before = appWindow(targetPkg)
+        // 等窗口出现：冷启动的应用 1.2 秒可能还没打开窗口，最多等 3 秒；
+        // 窗口一出现就动手，不硬等满。
+        var before: Rect? = null
+        val deadline = SystemClock.uptimeMillis() + 3000
+        while (before == null && SystemClock.uptimeMillis() < deadline) {
+            before = appWindow(targetPkg)
+            if (before == null) {
+                try { Thread.sleep(300) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+            }
+        }
         if (before == null) {
             out.put("expanded", false)
             out.put("detail", "没找到应用窗口，可能还没打开")
