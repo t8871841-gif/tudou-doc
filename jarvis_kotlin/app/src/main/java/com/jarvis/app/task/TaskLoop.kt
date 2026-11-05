@@ -792,6 +792,18 @@ null
 } else {
 null
 }
+// flow 方向的落地（2026-11-05）：zoom 图已到手，目标就在图中央（十字准星处）。
+// 直接在 zoom 图中央落点，不用再问模型——autoglm-phone 的 do() 格式
+// 表达不出 on="zoom"，等它重试只会再被拒一次，空转到 MAX_REPEATS。
+// zoom→点在同一步内原子完成，中间没有模型往返，zoom 不会过期。
+// 成了就当这一步成功；没成就回落到原有行为，把 zoom 图交给模型。
+val autoTap = runCatching { controller.tapAim("zoom", 500, 500, null, null) }.getOrNull()
+if (autoTap != null) {
+val autoResult = markTimeoutUnknown("tap", autoTap, summarize("tap", autoTap))
+if (autoResult.ok) {
+return autoResult.copy(summary = "点按被拒后已自动 zoom 并点中目标（zoom 图中央）。${autoResult.summary}")
+}
+}
 if (jpeg == null) throw e
 return StepResult("点按被拒：${e.message}。已自动对同一目标重拍 zoom 图（见附图），请直接从这张图上用 on=\"zoom\" 点目标，不要再做 zoom、导航等中间动作。", false, null, jpeg, "TAP_REFUSED")
 }
