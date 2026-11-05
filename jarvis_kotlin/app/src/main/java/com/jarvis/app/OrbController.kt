@@ -13,7 +13,6 @@ import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.RadialGradient
 import android.graphics.Shader
-import android.graphics.SweepGradient
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
@@ -880,11 +879,12 @@ object OrbController {
     }
 
     /**
-     * 球本体：同心三层、全部渐变色（无图标）。
-     *  外层：环绕渐变环（SweepGradient，非待命时缓慢旋转）
-     *  中层：径向渐变圆盘
-     *  核心：高光渐变 + 光晕
-     * 颜色随状态：待命蓝 / 聆听青 / 思考橙 / 播报绿 / 急停红。呼吸脉冲沿用原动画机制。
+     * 球本体（第三批水滴改版）：一颗圆形玻璃水珠，无尖顶、无贝塞尔水滴形。
+     *  共用画法：软阴影椭圆 + 径向渐变球体（中心亮、边缘深）+ 左上高光 + 底部亮边；
+     *  颜色是主信号：六种状态各一个主色，切换时 700ms 插值平滑过渡（不跳变）；
+     *  动画为辅：待机慢呼吸、聆听涟漪环、思考单弧快转、回复随幅度缩放+声波环、
+     *  出错红+抖动、工作中深紫+整圈光环慢转。旧的 6 层几何画法（光晕、sweep 弧环、
+     *  虚线环、脉冲波纹、核心光球、环绕小卫星）已删。
      * M39/Andee BubbleUi 同款：拖动阈值 6dp、长按 500ms。
      */
     private class OrbView(ctx: Context, private val host: Host) : View(ctx) {
@@ -913,9 +913,78 @@ object OrbController {
         private var animStartMs = SystemClock.uptimeMillis()
         /** 音量 0..1：OrbController 接 OfflineAsrSession.currentLevel（聆听时有效） */
         var amplitude: () -> Float = { 0f }
-        private var ringShader: Shader? = null
-        private var glowShader: Shader? = null
-        private var coreShader: Shader? = null
+        /** 颜色过渡 600–800ms（取 700ms）：当前显示色 → 目标状态色，逐帧插值，不跳变。 */
+        private val COLOR_BLEND_MS = 700L
+
+        // 六种状态的主色（颜色是主信号，动画为辅）：
+        // 待机淡紫/薰衣草、聆听亮蓝、思考琥珀橙、回复青绿（与聆听的蓝区分开）、
+        // 出错红、工作中深紫（与待机的淡紫区分：更深更饱和）。
+        private val COLOR_IDLE = 0xFFBFA8F0.toInt()
+        private val COLOR_LISTENING = 0xFF2A8CFF.toInt()
+        private val COLOR_THINKING = 0xFFFF9F1C.toInt()
+        private val COLOR_SPEAKING = 0xFF00C896.toInt()
+        private val COLOR_ERROR = 0xFFEF5350.toInt()
+        private val COLOR_WORKING = 0xFF6A2FE0.toInt()
+        /** 当前正在显示的主色（插值过程中的中间值）；初始即待机淡紫。 */
+        private var curColor = COLOR_IDLE
+        private var colorAnim: ValueAnimator? = null
+
+        private fun alpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
+
+        /** 状态 → 主色；"stopped"（急停 1.8 秒）与 error 同走红色。 */
+        private fun colorFor(s: String) = when (s) {
+            "listening" -> COLOR_LISTENING
+            "thinking" -> COLOR_THINKING
+            "speaking" -> COLOR_SPEAKING
+            STATE_WORKING -> COLOR_WORKING
+            STATE_ERROR, "stopped" -> COLOR_ERROR
+            else -> COLOR_IDLE
+        }
+
+        /** 向白混 f（0..1）：球体渐变的亮端。 */
+        private fun lighten(c: Int, f: Float): Int {
+            val r = (Color.red(c) + (255 - Color.red(c)) * f).toInt().coerceIn(0, 255)
+            val g = (Color.green(c) + (255 - Color.green(c)) * f).toInt().coerceIn(0, 255)
+            val b = (Color.blue(c) + (255 - Color.blue(c)) * f).toInt().coerceIn(0, 255)
+            return Color.argb(255, r, g, b)
+        }
+
+        /** 向黑混 f（0..1）：球体渐变的深端。 */
+        private fun darken(c: Int, f: Float): Int {
+            val r = (Color.red(c) * (1f - f)).toInt().coerceIn(0, 255)
+            val g = (Color.green(c) * (1f - f)).toInt().coerceIn(0, 255)
+            val b = (Color.blue(c) * (1f - f)).toInt().coerceIn(0, 255)
+            return Color.argb(255, r, g, b)
+        }
+
+        private fun lerpColor(a: Int, b: Int, f: Float): Int {
+            val r = (Color.red(a) + (Color.red(b) - Color.red(a)) * f).toInt().coerceIn(0, 255)
+            val g = (Color.green(a) + (Color.green(b) - Color.green(a)) * f).toInt().coerceIn(0, 255)
+            val bl = (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * f).toInt().coerceIn(0, 255)
+            return Color.argb(255, r, g, bl)
+        }
+
+        /** 从当前显示色向目标色插值过渡 700ms；状态连变时从当前中间色重新起步，不跳变。 */
+        private fun startColorBlend(target: Int) {
+            if (target == curColor) return
+            colorAnim?.cancel()
+            val from = curColor
+            colorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = COLOR_BLEND_MS
+                addUpdateListener {
+                    curColor = lerpColor(from, target, it.animatedValue as Float)
+                    invalidate()
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        curColor = target
+                        invalidate()
+                    }
+                })
+                start()
+            }
+        }
+
         private val longRunnable = Runnable {
             longFired = true
             performHapticFeedback(
@@ -925,57 +994,14 @@ object OrbController {
             host.longPress()
         }
 
-        // 颜色：设计语言蓝 #2A8CFF / 橙 #FF7A2E；停止态沿用原红色（安全态，不在设计里）。
-        private val BLUE = 0xFF2A8CFF.toInt()
-        private val ORANGE = 0xFFFF7A2E.toInt()
-        private val RED_L = 0xFFFFCDD2.toInt()
-        private val RED_B = 0xFFEF5350.toInt()
-        private val RED_D = 0xFF8E0000.toInt()
-
-        private fun alpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
-
-        private fun buildShaders() {
-            val cx = width / 2f
-            val cy = height / 2f
-            if (cx <= 0f) return
-            val half = min(cx, cy)
-            val r1 = half * 0.80f
-            val stopped = st == "stopped" || st == STATE_ERROR
-            // 外环 sweep：正常蓝→橙→蓝；停止态红系
-            ringShader = SweepGradient(
-                cx, cy,
-                if (stopped) intArrayOf(RED_L, RED_B, RED_D, RED_B, RED_L)
-                else intArrayOf(BLUE, ORANGE, BLUE, ORANGE, BLUE),
-                null
-            )
-            // 光晕：中心亮、边缘透明
-            val glowC = if (stopped) RED_B else BLUE
-            glowShader = RadialGradient(
-                cx, cy, r1 * 1.15f,
-                intArrayOf(alpha(glowC, 150), alpha(glowC, 50), alpha(glowC, 0)),
-                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
-            )
-            // 核心：白→琥珀→橙；停止态红系
-            coreShader = RadialGradient(
-                cx - r1 * 0.10f, cy - r1 * 0.11f, r1 * 0.55f,
-                if (stopped) intArrayOf(0xFFFFFFFF.toInt(), RED_L, RED_B)
-                else intArrayOf(0xFFFFFFFF.toInt(), 0xFFFFC08A.toInt(), 0xFFFF7A2E.toInt()),
-                floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP
-            )
-        }
-
-        override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-            super.onSizeChanged(w, h, ow, oh)
-            buildShaders()
-        }
-
-        /** 状态定转速：待机 30°/秒、思考 90°/秒、任务执行 70°/秒、说话/聆听 55°/秒、停止/出错 0 */
+        /** 状态定转速（第三批水滴改版后按新动画语义复核）：只有思考（单弧快转 90°/秒）
+         * 与工作中（整圈光环慢转 70°/秒）转弧；待机只呼吸、聆听只涟漪、回复只随幅度
+         * 缩放，三者都不转弧；停止/出错 0。第一批的待机 30°/秒与说话/聆听 55°/秒
+         * 随旧画法（旋转 sweep 环）一并作废。 */
         private fun speedFor(s: String) = when (s) {
             "thinking" -> 90f
             STATE_WORKING -> 70f
-            "speaking", "listening" -> 55f
-            "stopped", STATE_ERROR -> 0f
-            else -> 30f
+            else -> 0f
         }
 
         private var shakeAnim: ValueAnimator? = null
@@ -1001,9 +1027,10 @@ object OrbController {
         fun setState(s: String) {
             if (s != st) {
                 st = s
-                buildShaders()
+                // 颜色是主信号：当前显示色向新状态主色插值 700ms 平滑过渡，不跳变。
+                startColorBlend(colorFor(s))
             }
-            // 旋转动画常驻（待机也要 30°/秒慢转）；只按状态换速度，不跳变。
+            // 旋转动画常驻（只思考/工作中转弧，其余状态 speedFor 为 0）；只按状态换速度，不跳变。
             if (anim == null) {
                 lastTickMs = SystemClock.uptimeMillis()
                 anim = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -1020,14 +1047,14 @@ object OrbController {
                 }
             }
             if (s == "idle") {
-                // 待机呼吸：整球极轻微缩放（±2%），3 秒一周期；只动缩放，不动透明度（沿用原机制）。
+                // 待机呼吸：整球缩放 1.0↔1.04，2.5 秒一周期；只动缩放，不动透明度（沿用原机制）。
                 if (breathAnim == null) {
                     breathAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 3000
+                        duration = 2500
                         repeatCount = ValueAnimator.INFINITE
                         addUpdateListener {
                             val v = it.animatedValue as Float
-                            val k = 1f + 0.02f * kotlin.math.sin(v * 2f * Math.PI.toFloat())
+                            val k = 1f + 0.04f * (0.5f - 0.5f * kotlin.math.cos(v * 2f * Math.PI.toFloat()))
                             scaleX = k
                             scaleY = k
                         }
@@ -1048,6 +1075,8 @@ object OrbController {
             anim = null
             breathAnim?.cancel()
             breathAnim = null
+            colorAnim?.cancel()
+            colorAnim = null
             shakeAnim?.cancel()
             shakeAnim = null
             super.onDetachedFromWindow()
@@ -1058,97 +1087,161 @@ object OrbController {
             val cy = height / 2f
             if (cx <= 0f) return
             val half = min(cx, cy)
-            val r1 = half * 0.80f
-            val ringW = 3.5f * dp
-            val rr = r1 - ringW / 2f
-            val coreR = r1 * 0.42f
+            val r = half * 0.80f
             val elapsed = (SystemClock.uptimeMillis() - animStartMs) / 1000f
-            val stopped = st == "stopped" || st == STATE_ERROR
-            // 有效音量：聆听取麦克风；播报无 TTS 电平，用 2 秒呼吸合成；其余取麦克风（常为 0）。
+            // 幅度来源：
+            //  - 聆听：真包络。amplitude() 接 OfflineAsrSession.currentLevel()，是采集线程
+            //    每 100ms 块算的真 RMS（maxRms / 4000，0..1），开麦时实时更新、轮次结束清零。
+            //  - 回复：没有真包络。Edge TTS 把解出的 PCM 直写 AudioTrack，全仓没有任何
+            //    RMS / Visualizer / 电平回调，拿不到播报振幅；按任务要求退回固定节奏
+            //    （2 秒一周期正弦 0.20..0.70），不要静止。真包络要等 EdgeTts 侧在
+            //    onPcm 回调里算 RMS 并暴露出来，属另一批活，本批不动 TTS。
             val mic = amplitude().coerceIn(0f, 1f)
             val amp = if (st == "speaking") 0.45f + 0.25f * kotlin.math.sin(elapsed * Math.PI.toFloat()) else mic
-            val accent = if (stopped) RED_B else BLUE
+            val main = curColor
 
-            paint.reset()
-            paint.isAntiAlias = true
             if (pressed) {
                 c.save()
                 c.scale(0.92f, 0.92f, cx, cy)
             }
-            // 层 1：径向光晕（随音量变亮）
-            paint.style = Paint.Style.FILL
-            paint.shader = glowShader
-            paint.alpha = (90 + amp * 130).toInt().coerceIn(0, 255)
-            c.drawCircle(cx, cy, r1 * 1.15f, paint)
-            paint.shader = null
-            // 层 2：外环带缺口（sweep 渐变，270° 弧 + 尾部光点），思考态快闪
+            // 动画层画在球体之下（不盖高光与亮边），按当前状态分发到六个画法。
+            when (st) {
+                "listening" -> drawListeningRipples(c, cx, cy, r, elapsed, main)
+                "thinking" -> drawThinkingArc(c, cx, cy, r, main)
+                "speaking" -> drawSpeakingRings(c, cx, cy, r, elapsed, amp, main)
+                STATE_WORKING -> drawWorkingHalo(c, cx, cy, r, main)
+                // idle：只靠呼吸缩放（setState 里的 breathAnim），无附加层；
+                // error / stopped：红色主色 + shakeError 抖动，无附加层。
+            }
+            // 共用圆形玻璃水珠：回复态随幅度胀缩（说得响胀大、轻缩小），其余状态等大。
+            val ballR = r * (1f + if (st == "speaking") 0.10f * amp else 0f)
+            drawGlassBall(c, cx, cy, ballR, main)
+            if (pressed) c.restore()
+        }
+
+        /** 共用画法：圆形玻璃水珠——软阴影 + 径向渐变球体 + 左上高光 + 底部亮边。 */
+        private fun drawGlassBall(c: Canvas, cx: Float, cy: Float, r: Float, main: Int) {
+            // 软阴影：球体下方一枚横向压扁的模糊椭圆（径向渐变黑→透明），不用 setShadowLayer
+            //（硬件加速画布下对形状无效，渐变椭圆在各机型上表现一致）。
             paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = ringW
-            paint.strokeCap = Paint.Cap.ROUND
-            paint.shader = ringShader
-            paint.alpha = if (st == "thinking") (205 + 50 * kotlin.math.sin(elapsed * 12f)).toInt().coerceIn(0, 255) else 255
-            val arcRect = android.graphics.RectF(cx - rr, cy - rr, cx + rr, cy + rr)
+            paint.style = Paint.Style.FILL
+            paint.shader = RadialGradient(
+                cx, cy + r * 0.55f, r * 1.05f,
+                intArrayOf(alpha(0xFF000000.toInt(), 70), alpha(0xFF000000.toInt(), 0)),
+                floatArrayOf(0f, 1f), Shader.TileMode.CLAMP
+            )
             c.save()
-            c.rotate(rot, cx, cy)
-            c.drawArc(arcRect, 0f, 270f, false, paint)
-            // 尾部光点：弧终点（旋转系里的正上方）
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.FILL
-            paint.color = if (stopped) RED_L else 0xFFFFFFFF.toInt()
-            c.drawCircle(cx, cy - rr, 2.6f * dp, paint)
+            c.scale(1f, 0.45f, cx, cy + r * 0.55f)
+            c.drawCircle(cx, cy + r * 0.55f, r * 1.05f, paint)
             c.restore()
             paint.shader = null
-            // 层 3：反向旋转中环（细虚线）
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 1.5f * dp
-            paint.color = accent
-            paint.alpha = 160
-            paint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f * dp, 8f * dp), 0f)
-            c.save()
-            c.rotate(-rot * 1.5f, cx, cy)
-            c.drawCircle(cx, cy, r1 * 0.62f, paint)
-            c.restore()
-            paint.pathEffect = null
-            // 层 4：脉冲波纹（每 2.5 秒一圈，播报/聆听时更明显）
-            val rippleT = (elapsed % 2.5f) / 2.5f
-            val rippleR = coreR + (r1 * 1.05f - coreR) * rippleT
-            val rippleA = ((1f - rippleT) * (if (st == "speaking" || st == "listening") 130f + 110f * amp else 70f)).toInt().coerceIn(0, 255)
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 1.5f * dp
-            paint.color = accent
-            paint.alpha = rippleA
-            c.drawCircle(cx, cy, rippleR, paint)
-            // 层 5：核心光球（2 秒呼吸 + 音量缩放）
-            val breath = 1f + 0.06f * kotlin.math.sin(elapsed * Math.PI.toFloat())
-            val coreScale = breath * (1f + 0.18f * amp)
+            // 球体：径向渐变（中心亮、边缘深），营造球体通透感。
             paint.reset(); paint.isAntiAlias = true
             paint.style = Paint.Style.FILL
-            paint.shader = coreShader
-            c.drawCircle(cx, cy, coreR * coreScale, paint)
+            paint.shader = RadialGradient(
+                cx - r * 0.18f, cy - r * 0.22f, r * 1.15f,
+                intArrayOf(lighten(main, 0.55f), main, darken(main, 0.45f)),
+                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
+            )
+            c.drawCircle(cx, cy, r, paint)
             paint.shader = null
-            // 层 6：环绕小卫星 + 高光点
+            // 左上高光：小白椭圆（-30° 斜置）。
             paint.reset(); paint.isAntiAlias = true
             paint.style = Paint.Style.FILL
             paint.color = 0xFFFFFFFF.toInt()
-            val sat1 = Math.toRadians((elapsed * 40.0) % 360.0)
-            c.drawCircle(
-                (cx + r1 * 0.95f * kotlin.math.cos(sat1)).toFloat(),
-                (cy + r1 * 0.95f * kotlin.math.sin(sat1)).toFloat(),
-                2f * dp, paint
+            paint.alpha = 210
+            c.save()
+            c.translate(cx - r * 0.38f, cy - r * 0.42f)
+            c.rotate(-30f)
+            c.drawOval(android.graphics.RectF(-r * 0.22f, -r * 0.10f, r * 0.22f, r * 0.10f), paint)
+            c.restore()
+            // 底部亮边：下沿一圈亮弧（35° 起 110°，即正下方一段）。
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 2f * dp
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.color = 0xFFFFFFFF.toInt()
+            paint.alpha = 150
+            c.drawArc(
+                android.graphics.RectF(cx - r * 0.92f, cy - r * 0.92f, cx + r * 0.92f, cy + r * 0.92f),
+                35f, 110f, false, paint
             )
-            paint.alpha = 200
-            val sat2 = Math.toRadians((-elapsed * 28.0 + 180.0) % 360.0)
-            c.drawCircle(
-                (cx + r1 * 1.02f * kotlin.math.cos(sat2)).toFloat(),
-                (cy + r1 * 1.02f * kotlin.math.sin(sat2)).toFloat(),
-                1.5f * dp, paint
-            )
+        }
+
+        /** 聆听：涟漪环从水珠向外扩散——3 圈错相、1.8 秒一周期、越扩越淡。 */
+        private fun drawListeningRipples(c: Canvas, cx: Float, cy: Float, r: Float, elapsed: Float, main: Int) {
+            for (i in 0 until 3) {
+                val t = ((elapsed / 1.8f) + i / 3f) % 1f
+                paint.reset(); paint.isAntiAlias = true
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f * dp
+                paint.color = main
+                paint.alpha = ((1f - t) * 160f).toInt().coerceIn(0, 255)
+                c.drawCircle(cx, cy, r * (1.05f + 0.45f * t), paint)
+            }
+        }
+
+        /** 思考：一条弧线绕水珠旋转（单弧快转，像加载圈）——120° 弧 + 前端亮点，90°/秒。 */
+        private fun drawThinkingArc(c: Canvas, cx: Float, cy: Float, r: Float, main: Int) {
+            val rr = r * 1.08f
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3f * dp
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.color = lighten(main, 0.20f)
             paint.alpha = 230
-            c.drawCircle(cx - coreR * 0.35f, cy - coreR * 0.38f, coreR * 0.18f, paint)
-            if (pressed) c.restore()
+            c.save()
+            c.rotate(rot, cx, cy)
+            c.drawArc(
+                android.graphics.RectF(cx - rr, cy - rr, cx + rr, cy + rr),
+                -90f, 120f, false, paint
+            )
+            // 前端亮点：弧终点（旋转系里 -90° + 120° = 30° 方向）。
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.FILL
+            paint.color = 0xFFFFFFFF.toInt()
+            paint.alpha = 230
+            val a = Math.toRadians(30.0)
+            c.drawCircle((cx + rr * kotlin.math.cos(a)).toFloat(), (cy + rr * kotlin.math.sin(a)).toFloat(), 2.6f * dp, paint)
+            c.restore()
+        }
+
+        /** 回复：向外辐射声波环——2 圈错相、1.2 秒一周期，透明度与线宽随幅度起伏。 */
+        private fun drawSpeakingRings(c: Canvas, cx: Float, cy: Float, r: Float, elapsed: Float, amp: Float, main: Int) {
+            for (i in 0 until 2) {
+                val t = ((elapsed / 1.2f) + i / 2f) % 1f
+                paint.reset(); paint.isAntiAlias = true
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = (1.5f + 1.5f * amp) * dp
+                paint.color = main
+                paint.alpha = ((1f - t) * (90f + 120f * amp)).toInt().coerceIn(0, 255)
+                c.drawCircle(cx, cy, r * (1.05f + 0.35f * t), paint)
+            }
+        }
+
+        /** 工作中：缓慢旋转的光环——整圈细环打底 + 一段 70° 亮弧随 rot 慢转（70°/秒），
+         * 与思考的单弧快转区分开（思考无底环、弧 120°、90°/秒）。 */
+        private fun drawWorkingHalo(c: Canvas, cx: Float, cy: Float, r: Float, main: Int) {
+            val rr = r * 1.08f
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 2f * dp
+            paint.color = main
+            paint.alpha = 120
+            c.drawCircle(cx, cy, rr, paint)
+            paint.reset(); paint.isAntiAlias = true
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3.5f * dp
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.color = lighten(main, 0.35f)
+            paint.alpha = 230
+            c.save()
+            c.rotate(rot, cx, cy)
+            c.drawArc(
+                android.graphics.RectF(cx - rr, cy - rr, cx + rr, cy + rr),
+                -90f, 70f, false, paint
+            )
+            c.restore()
         }
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
