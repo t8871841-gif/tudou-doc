@@ -177,6 +177,8 @@ object TaskLoop {
         // 上一步是不是 outcomeUnknown：是就下一轮先核对、不要直接重做。
         var prevOutcomeUnknown = false
         var prevScreenChanged: Boolean? = null
+        // R3 轻量核验（2026-11-05）：模型说“done”被顶回过没有，只顶回一次。
+        var doneChallenged = false
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
         var prevScreenSig = ""
@@ -270,7 +272,9 @@ object TaskLoop {
                     pkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(pkg)
                 if (ocrNeeded) {
                     val ocrBmp = try {
-                        val shot = controller.screenshot(reason = "ocr", grid = false)
+                        // 干净图（不画网格）+ 原分辨率：ML Kit 认小字需要原图，
+                        // 缩到一半后 14sp 的字只剩 20 来像素，认错/认不出。
+                        val shot = controller.screenshot(reason = "ocr", grid = false, fullRes = true)
                         val b64 = shot.optString("png_base64")
                         if (b64.isEmpty()) null
                         else Base64.decode(b64, Base64.DEFAULT)
@@ -465,6 +469,20 @@ object TaskLoop {
                 }
                 val kind = action.optString("action")
                 if (kind == "done" || kind == "fail") {
+                    // R3 轻量核验（2026-11-05）：模型说“做完了”不能直接信——
+                    // 上一步结果未知，或界面自上一个真动作后纹丝没动，说明它可能
+                    // 根本没做成。只顶回一次：请它再看一眼确认；它坚持说完就信。
+                    // “fail”不顶回：模型说做不下去就停，别逼它硬撑。
+                    // 注意：第一步就说 done 时 prevOutcomeUnknown 与 screenSameAsPrev
+                    // 都是 false，不会误顶（任务可能本来就已做完）。
+                    if (kind == "done" && !doneChallenged && (prevOutcomeUnknown || screenSameAsPrev)) {
+                        doneChallenged = true
+                        val reason = if (prevOutcomeUnknown) "上一步结果未知" else "界面自上一步起完全没变"
+                        history += "第 $step 步：模型说做完了，但$reason，已请它再确认一次"
+                        AuditLog.append(ctx, "任务循环", "done 待核验", reason)
+                        lastError = "你说做完了，但$reason——请再看一眼界面（紧凑表和截图），确认要找的东西/要发的内容真的在屏上，再决定是真的做完了还是继续做。不要只凭感觉说 done。"
+                        continue@stepLoop
+                    }
                     val msg = if (kind == "done") {
                         action.optString("message").ifEmpty { "任务完成了" }
                     } else {

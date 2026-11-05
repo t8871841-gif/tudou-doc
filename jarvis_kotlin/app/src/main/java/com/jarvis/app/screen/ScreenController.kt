@@ -2375,7 +2375,7 @@ class ScreenController(
      *   then crops it, and a crop carrying the full screen's grid lines and
      *   cell labels would put two contradictory grids on one image.
      */
-    fun screenshot(reason: String = "tool", grid: Boolean = true): JSONObject {
+    fun screenshot(reason: String = "tool", grid: Boolean = true, fullRes: Boolean = false): JSONObject {
         // Only a screenshot the brain ASKED for clears the fling streak. Every
         // internal capture (tap_after, fling_after, miss_shot) goes through
         // here too, and counting those would make the streak unbuildable.
@@ -2432,7 +2432,11 @@ class ScreenController(
                             // the extra pixels, while every vision token is
                             // billed. Safe for coordinates because the whole
                             // protocol is 0-1000 relative — scale-invariant.
-                            val scale = SHOT_MAX_SIDE.toFloat() / maxOf(w, h)
+                            // 例外：fullRes=true 时不缩（OCR 专用）：ML Kit 认小字
+                            // 需要原分辨率，缩到一半后 14sp 的字只剩 20 来像素，
+                            // 认错/认不出；原图 40 多像素才稳。OCR 不走模型 token，
+                            // 不怕图大，认完位图就回收。
+                            val scale = if (fullRes) 1f else SHOT_MAX_SIDE.toFloat() / maxOf(w, h)
                             val outBmp = if (scale < 1f) {
                                 Bitmap.createScaledBitmap(
                                     bmp,
@@ -2476,7 +2480,8 @@ class ScreenController(
             // and the callback runs on `executor`, which is shutdown two lines
             // below. Same downscale arithmetic as above, since `w`/`h` are
             // deliberately reported as the SOURCE dimensions.
-            val scale = SHOT_MAX_SIDE.toFloat() / maxOf(w, h)
+            // fullRes=true 时上面没缩，这里也别算缩了，保持日志与实际一致。
+            val scale = if (fullRes) 1f else SHOT_MAX_SIDE.toFloat() / maxOf(w, h)
             val outW = if (scale < 1f) (w * scale).toInt().coerceAtLeast(1) else w
             val outH = if (scale < 1f) (h * scale).toInt().coerceAtLeast(1) else h
             val shotId = GroundingLog.noteShot(
