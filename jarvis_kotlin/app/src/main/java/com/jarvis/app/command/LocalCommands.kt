@@ -126,6 +126,12 @@ object LocalCommands {
         // 放在后面容易被其他正则抢先误吞。
         if (ReminderCommands.tryHandle(ctx, t, speak)) return true
 
+        // 复制自 Andee config/：日历与闹钟（CalendarCommands）。
+        // 放在 ReminderCommands 之后，提醒句式优先；与场景句式无重叠。
+        if (CalendarCommands.tryHandle(ctx, t, speak)) return true
+        // 复制自 Andee config/ScenePresets：场景进入/退出/新建/采用预设（SceneCommands）。
+        if (SceneCommands.tryHandle(ctx, t, speak)) return true
+
         // 全息拆解指令（7 台内置拆解机）：「拆解一台汽车发动机」「拆解变速箱」「收起拆解」。
         // 走 HUD 的 machineCommand，不进大模型；图已随包内置（holo/ + figure-raptor.html）。
         // 放在 CLOSE_APP 前面，别让「关闭拆解」被当成关一个叫「拆解」的应用。

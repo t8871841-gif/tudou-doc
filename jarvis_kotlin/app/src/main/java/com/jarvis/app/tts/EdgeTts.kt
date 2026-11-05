@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.jarvis.app.device.CallState
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
@@ -106,6 +107,7 @@ object EdgeTts {
         onStart: () -> Unit, onDone: (Boolean) -> Unit,
         onSentence: ((String) -> Unit)? = null
     ) {
+        attachCallState(ctx)
         stop()
         val seq = ++mySeq
         val clean = text.replace(Regex("[\r\n]+"), " ").trim()
@@ -134,6 +136,28 @@ object EdgeTts {
     private fun cancelled(seq: Int) = seq != mySeq
 
     // ---------- H3 音频焦点（内联） ----------
+
+    // 通话接线（移植自 Andee device/CallState 的停播规则）：来电/通话中时停播
+    // 并释放音频焦点（stop() 内已释放）；挂断后不自动续播。监听只注册一次；
+    // CallState.start() 在无权限时只记日志、不抛异常，这里不额外处理权限缺失。
+    // 注意：这里不做 speak() 入口的通话门——speak() 被拒会调 onDone(false)，
+    // TtsRouter 在 auto 档会把它当 Edge 失败、兜底到系统 TTS 反而在通话中出声；
+    // 新开播报的总门在 TtsRouter.speak 入口（onDone(true) 吞掉，不重试不兜底），
+    // JarvisAgent 的 beginListening 门是第二道。
+    @Volatile
+    private var callListenerAttached = false
+
+    fun attachCallState(ctx: Context) {
+        if (callListenerAttached) return
+        callListenerAttached = true
+        CallState.start(ctx.applicationContext)
+        CallState.addListener { inCall ->
+            if (inCall && isSpeaking()) {
+                Log.i(TAG, "call started, stopping playback and releasing audio focus")
+                stop()
+            }
+        }
+    }
 
     /** 播报前申请焦点；系统拒绝也继续播（来电中直接哑火比盖过铃声更糟，沿用 Andee 的做法）。 */
     fun acquireAudioFocus(ctx: Context, seq: Int = mySeq): Boolean {

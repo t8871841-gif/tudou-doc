@@ -12,6 +12,7 @@ import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.command.DeviceCommands
 import com.jarvis.app.command.LocalCommands
+import com.jarvis.app.config.ScenePresets
 import com.jarvis.app.screen.A11yIme
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
@@ -82,6 +83,81 @@ object SkillRunner {
 
     fun cancelInFlight() {
         runSeq.incrementAndGet()
+    }
+
+    // ---------- 场景接线（Andee ScenePresets 移植，M15/L15） ----------
+    //
+    // Jarvis 的“场景”以前只是 sys 步骤的拼盘（几个系统动作编排在一个技能里），
+    // 没有生命周期：进没进不知道，退出不恢复，触发应用也不会自动进。
+    // 这里只接三根线，执行引擎本身（run/runStep）一个字没动：
+    //  - 进入：ScenePresets.beginEnter 先拍进入前快照、记活动场景，再把场景的
+    //    stepsJson 当成一个技能跑一遍（id=0 的合成 SkillItem，只占跑步骤的道，
+    //    不进技能库；成功/失败不记技能的 successCount/failCount，因为库里没它）。
+    //  - 退出：停掉还在跑的场景步骤，按快照把系统状态恢复回去。
+    //  - 自动进入：触发应用命中时（由总协调从前台包变化处调），和手动进入走同一条路。
+    // 注意：进入场景会自增 runSeq，等于取消上一轮还在跑的技能——一次只做一件事。
+
+    /**
+     * 进入场景。先做模式切换（快照 + 记活动场景），再跑场景的步骤。
+     * [onDone] 的 ok 只代表步骤跑没跑完——场景本身只要 beginEnter 成功就算进了：
+     * 步骤中途失败，场景仍在活动，调用方按 detail 播报失败即可。
+     * 纯规则场景（stepsJson 为空数组）没有步骤可跑，直接报成功。
+     */
+    fun enterScene(ctx: Context, scene: ScenePresets.Scene, onDone: (Boolean, String) -> Unit) {
+        val entered = ScenePresets.beginEnter(ctx, scene.name)
+        if (entered == null) {
+            onDone(false, "场景「${scene.name}」找不到了（可能已被删除）")
+            return
+        }
+        val steps = SkillService.parseSteps(entered.stepsJson)
+        if (steps.isEmpty()) {
+            AuditLog.append(ctx, "场景「${entered.title}」", "进入场景", "已进入，无步骤可跑")
+            onDone(true, "")
+            return
+        }
+        val skill = SkillItem(id = 0L, name = "场景「${entered.title}」", triggerText = "", stepsJson = entered.stepsJson)
+        run(ctx, skill) { ok, detail, _ -> onDone(ok, detail) }
+    }
+
+    /**
+     * 退出场景：停掉还在跑的场景步骤，清活动标记，按进入快照恢复系统状态。
+     * 返回播报用的一句话。没在任何场景里也返回一句话，不抛异常。
+     */
+    fun exitScene(ctx: Context): String {
+        val (left, snapshot) = ScenePresets.exitScene(ctx)
+        if (left == null) return "现在没在任何场景里"
+        // 退出时停掉场景步骤的重播（如果还在跑）；注意这也会取消同一时刻
+        // 在跑的普通技能——一次只做一件事，退出场景优先。
+        cancelInFlight()
+        val title = ScenePresets.scene(ctx, left)?.title ?: left
+        if (snapshot == null) return "已退出「$title」"
+        val restored = ScenePresets.restoreSnapshot(ctx, snapshot)
+        AuditLog.append(ctx, "场景「$title」", "退出场景，恢复进入前状态", restored.joinToString("；"))
+        return if (restored.isEmpty()) "已退出「$title」" else "已退出「$title」，${restored.joinToString("，")}"
+    }
+
+    /**
+     * 前台包变成 [pkg] 时的自动进入（触发应用）。挑中场景后和手动进入走同一条路。
+     * [isTaskActive] 由调用方提供（任务执行中不许被触发应用拖进场景）；
+     * [onEntered] 只在真的进入了时回调一次，参数是播报用的一句话。
+     * 接线点（总协调）：无障碍服务的前台包变化处，先调
+     * ScenePresets.noteForegroundPackage(pkg)，再调这里。
+     */
+    fun maybeAutoEnterScene(
+        ctx: Context,
+        pkg: String,
+        isTaskActive: () -> Boolean = { false },
+        onEntered: (String) -> Unit,
+    ) {
+        val picked = ScenePresets.pickAutoEnterScene(ctx, pkg, isTaskActive) ?: return
+        enterScene(ctx, picked) { ok, detail ->
+            val msg = if (ok) {
+                "打开 $pkg，自动进入了「${picked.title}」场景"
+            } else {
+                "打开 $pkg，自动进入了「${picked.title}」场景，但步骤没跑完：$detail"
+            }
+            onEntered(msg)
+        }
     }
 
     /**

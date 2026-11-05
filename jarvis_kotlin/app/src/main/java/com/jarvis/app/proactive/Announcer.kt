@@ -5,6 +5,8 @@ import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAgent
 import com.jarvis.app.JarvisNotificationListener
 import com.jarvis.app.JarvisPrefs
+import com.jarvis.app.brain.NotificationTriage
+import com.jarvis.app.brain.SpeechMood
 import com.jarvis.app.tts.TtsRouter
 
 /**
@@ -31,6 +33,46 @@ object Announcer {
             val title = m["title"] as? String ?: ""
             val text = m["text"] as? String ?: ""
             if (CODE_HINT.containsMatchIn(title) || CODE_HINT.containsMatchIn(text)) return
+            // 脑移植 NotificationTriage：配好模型时先让模型判这条通知值不值得打扰。
+            // decide 是阻塞调用（走网络），放工作线程；无结论/异常时回落白名单，不静默丢消息。
+            val triage = NotificationTriage.fromPrefs(ctx)
+            if (triage != null) {
+                Thread {
+                    try {
+                        val verdict = triage.decide(NotificationTriage.NotificationRecord.fromMap(m), "zh")
+                        when {
+                            verdict == null -> whitelistSpeak(ctx, m)
+                            verdict.action == NotificationTriage.Action.IGNORE -> {
+                                AuditLog.append(ctx, "通知筛选", "已过滤：${m["app"] as? String ?: ""}", verdict.why.take(60))
+                            }
+                            verdict.action == NotificationTriage.Action.TELL -> {
+                                val line = SpeechMood.parse(verdict.line).text
+                                if (line.isNotBlank() && JarvisAgent.currentState() == "idle") {
+                                    AuditLog.append(ctx, "主动播报", line.take(60), "已播报")
+                                    TtsRouter.speak(ctx, line, onStart = {}, onDone = {})
+                                }
+                            }
+                            // ACT：暂无进 agent 循环的入口，回落白名单（不自己编动作）。
+                            else -> whitelistSpeak(ctx, m)
+                        }
+                    } catch (_: Exception) {
+                        whitelistSpeak(ctx, m)
+                    }
+                }.start()
+                return
+            }
+            whitelistSpeak(ctx, m)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 旧白名单路径（同步）：来电/短信各自开关、其他应用只播白名单内的。 */
+    private fun whitelistSpeak(ctx: Context, m: Map<String, Any>) {
+        try {
+            // 工作线程回落时状态可能已变，播报前重查一次 idle，别在用户说话时插播。
+            if (JarvisAgent.currentState() != "idle") return
+            val title = m["title"] as? String ?: ""
+            val text = m["text"] as? String ?: ""
             val app = m["app"] as? String ?: ""
             val pkg = m["pkg"] as? String ?: ""
             val isCall = m["call"] as? Boolean ?: false

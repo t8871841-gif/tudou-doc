@@ -63,6 +63,7 @@ import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
+import com.jarvis.app.wake.WakeWordEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
@@ -2595,41 +2596,15 @@ class MainActivity : Activity() {
         })
 
         root.addView(sectionTitle("唤醒词"))
-        root.addView(switchRow("开启唤醒词「贾维斯」", "离线识别轮询，非专用低功耗 KWS，见自检详情",
+        root.addView(switchRow("开启唤醒词「贾维斯」", "轻量 MFCC+DTW 本地检测，只认已录制的唤醒短语；未录制时开了也不起作用",
             JarvisPrefs.isWakeEnabled(this@MainActivity)) { checked ->
             JarvisPrefs.setWakeEnabled(this@MainActivity, checked)
-            if (checked) JarvisAgent.maybeStartWakeLoop() else JarvisAgent.stopWakeLoop()
+            if (checked) WakeWordEngine.resume() else WakeWordEngine.pause()
         })
 
-        // ---- 唤醒严格度：严格/标准/宽松三档（批二替换掉原来的 0..100 滑杆） ----
+        // 旧唤醒严格度三档已随旧的离线识别轮询一并撤掉（新唤醒是 MFCC+DTW，阈值在录制的模板里）。
         root.addView(TextView(this).apply {
-            text = "唤醒严格度"; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
-        })
-        val strictRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val strictLabels = listOf("严格", "标准", "宽松")
-        val strictButtons = ArrayList<Button>()
-        fun paintStrict(sel: Int) {
-            strictButtons.forEachIndexed { i, b ->
-                b.alpha = if (i == sel) 1f else 0.5f
-            }
-        }
-        strictLabels.forEachIndexed { i, label ->
-            val b = styleBtn(Button(this).apply {
-                text = label
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                setOnClickListener {
-                    JarvisPrefs.setWakeStrictness(this@MainActivity, i)
-                    paintStrict(i)
-                }
-            }, false)
-            strictButtons.add(b)
-            strictRow.addView(b)
-        }
-        paintStrict(JarvisPrefs.getWakeStrictness(this))
-        root.addView(strictRow)
-        root.addView(TextView(this).apply {
-            text = "严格：“贾维斯”须在句首且整句较短；标准：在句首附近；宽松：句中任意位置。" +
-                "唤醒后约 6 秒没有有效指令会自动回到待命；10 分钟内误唤醒 3 次会临时调到严格。"
+            text = "唤醒词模板与 Andee 同一格式（wake_templates.json）；已在 Andee 录过唤醒词的，把模板文件迁过来即可直接用，未录制需另行录制。"
             textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, dp(8))
         })
 

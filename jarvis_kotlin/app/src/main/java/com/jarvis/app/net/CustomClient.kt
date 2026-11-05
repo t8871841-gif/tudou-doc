@@ -2,6 +2,7 @@ package com.jarvis.app.net
 
 import android.content.Context
 import com.jarvis.app.JarvisPrefs
+import com.jarvis.app.config.ScenePresets
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -37,7 +38,10 @@ object CustomClient {
             // 批九硬约束（jk-v14 真机：问天气被编出"晴朗，60 度"）：实时信息没来源就不许编。
             "特别注意：天气、气温、时间日期、新闻、价格、汇率、股价、路况这类实时信息，" +
             "你没有任何数据来源，不知道就是不知道，必须明说\"这个我查不到\"，绝对禁止编造具体数值、" +
-            "预报或看似确切的说法。记不清的事实同样不要装作确定。"
+            "预报或看似确切的说法。记不清的事实同样不要装作确定。" +
+            // 脑移植 SpeechMood：模型可在回复开头带一个心情标记（如 [happy]、[calm]、[curious]），
+            // 表示语气；标记不朗读、不显示。没把握时不带标记也行。
+            "你可以在回复开头带一个心情标记（如 [happy]、[calm]、[curious]、[tense]、[concerned]）表示语气，标记不会被朗读出来；不确定时不用带。"
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -413,8 +417,18 @@ object CustomClient {
         // L5：记忆不拼进 system prompt（system prompt 保持常量，保住前缀缓存，Andee 同款），
         // 改拼到本轮用户消息上；history 里只存用户原话。
         val userContent = if (memoryContext.isBlank()) userText else userText + memoryContext
+        // 场景移植 ScenePresets：活动场景的规则 + 场景列表拼进 system prompt，模型按场景行事；
+        // 无场景时 system prompt 保持常量（L5 前缀缓存不受影响）。
+        val activeSceneName = ScenePresets.activeScene(ctx)
+        val activeScenePrompt = activeSceneName?.let { ScenePresets.scene(ctx, it)?.prompt }.orEmpty()
+        val sceneList = ScenePresets.scenesForPrompt(ctx)
+        val systemContent = buildString {
+            append(SYSTEM_PROMPT)
+            if (activeScenePrompt.isNotBlank()) append("\n\n当前场景「$activeSceneName」的规则：$activeScenePrompt")
+            if (sceneList.isNotBlank()) append("\n\n可用场景：\n$sceneList")
+        }
         val messages = JSONArray()
-        messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+        messages.put(JSONObject().put("role", "system").put("content", systemContent))
         synchronized(this) {
             for ((role, content) in history) {
                 messages.put(JSONObject().put("role", role).put("content", content))

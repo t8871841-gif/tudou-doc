@@ -23,6 +23,12 @@ object TtsRouter {
     private var stopSeq = 0
 
     fun speak(ctx: Context, text: String, onStart: () -> Unit, onDone: (Boolean) -> Unit, onSentence: ((String) -> Unit)? = null) {
+        // 通话中不播报（移植自 Andee device/CallState）：直接 onDone(true) 吞掉，不重试、不兜底系统 TTS。
+        // 回复文字仍在气泡/历史里，不丢。CallState 未启动（没给电话权限）时 isInCall() 恒 false，门是惰性的。
+        if (com.jarvis.app.device.CallState.isInCall()) {
+            onDone(true)
+            return
+        }
         val myStopSeq = stopSeq
         var started = false
         val startOnce: () -> Unit = {

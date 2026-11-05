@@ -5,8 +5,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.brain.SpeechMood
+import com.jarvis.app.device.CallState
+import com.jarvis.app.wake.WakeWordEngine
 import com.jarvis.app.command.LocalCommands
 import com.jarvis.app.command.PendingClarification
 import com.jarvis.app.data.WeatherTool
@@ -63,8 +67,38 @@ object JarvisAgent {
 
     fun currentState(): String = state
 
+    // ---------- 通话接线（移植自 Andee device/CallState） ----------
+    //
+    // 来电/通话中：停掉当前收音轮次与播报（hardResetToIdle：停 TTS/ASR/任务循环，
+    // 回 idle），通话期间不重启唤醒轮询、不新开收音轮次；挂断后恢复待命。
+    // CallState 在主线程回调，这里直接处理。挂断后不自动续播、不自动续听。
+
+    /** 通话进行中：唤醒监听与新收音轮次都暂停（见 WakeWordEngine 门控的通话检查与 beginListening 的门）。 */
     @Volatile
-    private var wakeLoopRunning = false
+    private var callActive = false
+
+    private val callListener = CallState.Listener { inCall ->
+        val ctx = appCtx ?: return@Listener
+        if (inCall) onCallStarted(ctx) else onCallEnded(ctx)
+    }
+
+    /** 来电/通话中：停收音停播报，回 idle；通话期间不重启唤醒监听。 */
+    private fun onCallStarted(ctx: Context) {
+        if (callActive) return
+        callActive = true
+        Log.i("JarvisAgent", "call started, stopping recording and playback")
+        AuditLog.append(ctx, "通话", "来电/通话中", "已停收音与播报")
+        WakeWordEngine.pause()
+        hardResetToIdle(ctx)
+    }
+
+    /** 挂断：恢复待命（唤醒监听按开关恢复）。 */
+    private fun onCallEnded(ctx: Context) {
+        if (!callActive) return
+        callActive = false
+        Log.i("JarvisAgent", "call ended, resuming standby")
+        WakeWordEngine.resume()
+    }
 
     @Volatile
     private var genSeq = 0 // 每次状态切换/急停自增，老的异步回调靠这个号失效
@@ -87,9 +121,18 @@ object JarvisAgent {
         JarvisAccessibilityService.setUserWhitelist(JarvisPrefs.visionWhitelistSet(app))
         // 批六：接上通知监听的主动播报钩子（决策在 Announcer，含勿扰/验证码/开关）
         com.jarvis.app.proactive.Announcer.attach(app)
+        // 通话接线（移植自 Andee device/CallState）：来电/通话中停收音停播报，挂断后恢复待命。
+        // CallState.start 幂等、无权限时只记日志；同一 listener 实例重复 add 会被集合去重。
+        CallState.start(app)
+        CallState.addListener(callListener)
         // 批六：顺带扫一遍今日日程排出发提醒（幂等，同日程同 id 覆盖；晨报到点时也会扫）
         com.jarvis.app.proactive.DeparturePlanner.scan(app)
-        maybeStartWakeLoop()
+        // 唤醒词（移植自 Andee wake/）：轻量 MFCC+DTW 关键词检测，替代旧的离线识别轮询。
+        // onWake 在 WakeWord 监督线程回调，先 main.post 再碰 agent 状态。
+        WakeWordEngine.init(app)
+        WakeWordEngine.start {
+            main.post { beginListening(app, fromWake = true, prefilledText = null) }
+        }
     }
 
     /** 悬浮球短按兜底 launchApp("assist") / 磁贴 / 数字助理入口都会走到这里：等价于"再按一次球"。 */
@@ -141,7 +184,7 @@ object JarvisAgent {
         com.jarvis.app.skill.SkillRunner.cancelInFlight() // S19：技能一并急停
         TakeoverBorder.hide()
         setState(ctx, "idle")
-        maybeStartWakeLoop()
+        WakeWordEngine.resume()
     }
 
     private fun setState(ctx: Context, s: String) {
@@ -162,7 +205,7 @@ object JarvisAgent {
     // ---------- 主流程：听 → 问 → 答 → 播 ----------
 
     private fun beginListening(ctx: Context, fromWake: Boolean, prefilledText: String?) {
-        wakeLoopRunning = false // 正式进入对话流程，暂停唤醒词轮询
+        WakeWordEngine.pause() // 正式进入对话流程，暂停唤醒词监听
         val mySeq = genSeq
         lastPartialShown = "" // L1：新一轮收音，中途文字从头开始累计
         // 真机反馈（jk-v11）：没录音权限时别默默失败，给一句看得见的明示（重装后权限会被清掉）。
@@ -171,6 +214,12 @@ object JarvisAgent {
         ) {
             // S25：前台时悬浮球不存在，失败也要进对话面板。
             showFailureBubble("麦克风没授权：打开 App 自检页，或去系统设置给 Jarvis 录音权限")
+            setState(ctx, "idle")
+            return
+        }
+        // 通话接线：通话中不新开收音轮次（在途的轮次由来电回调的 hardResetToIdle 停掉）。
+        if (CallState.isInCall()) {
+            showFailureBubble("正在通话中，等挂断再说")
             setState(ctx, "idle")
             return
         }
@@ -199,9 +248,8 @@ object JarvisAgent {
                     if (mySeq != genSeq) return@post
                     // S25：前台时悬浮球不存在，失败也要进对话面板。
                     showFailureBubble(if (fromWake) "没听清，继续待命" else "没听清：$msg")
-                    if (fromWake) noteFalseWake() // 唤醒了但没等到有效指令，算一次疑似误唤醒
                     setState(ctx, "idle")
-                    maybeStartWakeLoop()
+                    WakeWordEngine.resume()
                 }
             }
         )
@@ -255,7 +303,7 @@ object JarvisAgent {
         if (isExitCommand(text)) {
             onUserText?.invoke(text)
             setState(ctx, "idle")
-            maybeStartWakeLoop()
+            WakeWordEngine.resume()
             return
         }
         // 批二十四：空/近空识别结果直接丢弃，不发模型、不回复。
@@ -265,14 +313,14 @@ object JarvisAgent {
         val norm = text.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
         if (norm.isEmpty()) {
             setState(ctx, "idle")
-            maybeStartWakeLoop()
+            WakeWordEngine.resume()
             return
         }
         // L2：单个语气词也留一条输入气泡，面板里看得到“听到了”，而不是悄悄丢掉。
         if (norm in setOf("啊", "嗯", "呃", "哦", "额")) {
             onUserText?.invoke(text)
             setState(ctx, "idle")
-            maybeStartWakeLoop()
+            WakeWordEngine.resume()
             return
         }
         // M29：澄清优先于技能续跑——有待决的联系人澄清且输入像澄清答案时先 resolve；
@@ -507,7 +555,7 @@ object JarvisAgent {
                     // S25：前台时悬浮球不存在，失败也要进对话面板。
                     showFailureBubble("没听清，你再说一遍")
                     setState(ctx, "idle")
-                    maybeStartWakeLoop()
+                    WakeWordEngine.resume()
                     return@post
                 }
                 // jk-v66：聊天流结束时把全文推进对话面板（原来只在悬浮球上闪前 80 字，
@@ -520,7 +568,7 @@ object JarvisAgent {
                     main.postDelayed({ if (mySeq == genSeq) beginListening(ctx, fromWake = false, prefilledText = null) }, 3000)
                 } else {
                     setState(ctx, "idle")
-                    maybeStartWakeLoop()
+                    WakeWordEngine.resume()
                 }
             }
         }
@@ -538,7 +586,7 @@ object JarvisAgent {
                         // S25：前台时悬浮球不存在，失败也要进对话面板。
                         showFailureBubble("出错了：$msg")
                         setState(ctx, "idle")
-                        maybeStartWakeLoop()
+                        WakeWordEngine.resume()
                         return@post
                     }
                     // 云端失败 → 本地兜底：答出来就播，答不出再走原来的报错收尾
@@ -554,7 +602,7 @@ object JarvisAgent {
                             // S25：前台时悬浮球不存在，失败也要进对话面板。
                             showFailureBubble("出错了：$msg")
                             setState(ctx, "idle")
-                            maybeStartWakeLoop()
+                            WakeWordEngine.resume()
                         }
                     }
                 }
@@ -606,7 +654,10 @@ object JarvisAgent {
             streamDone = true
             pending.clear()
             val text = fullText.toString().trim()
-            if (text.isEmpty()) {
+            // 脑移植 SpeechMood：去心情标记后再念（模型没发标记时原样返回）；
+            // 纯标记、无正文时直接收尾，不空念一次。
+            val spoken = SpeechMood.parse(text).text
+            if (spoken.isEmpty()) {
                 finish()
                 return
             }
@@ -616,13 +667,13 @@ object JarvisAgent {
                 return
             }
             TtsRouter.speak(
-                ctx, text,
+                ctx, spoken,
                 onStart = {
                     main.post {
                         if (mySeq != genSeq) return@post
                         setState(ctx, "speaking")
                         if (JarvisPrefs.isBargeInEnabled(ctx)) {
-                            startBargeInWatch(ctx, mySeq) { fullText.toString() }
+                            startBargeInWatch(ctx, mySeq) { spoken }
                         }
                     }
                 },
@@ -631,7 +682,7 @@ object JarvisAgent {
                 onDone = { ok ->
                     // M11：取消/打断（代次已变）不记“TTS 全部通道失败”审计，
                     // 只有真正播报失败才记。
-                    if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", text.take(40))
+                    if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", spoken.take(40))
                     main.post {
                         // C6：被停（代次已变）就不再收尾——单次 speak 本来也没有下一句可念。
                         if (mySeq != genSeq) return@post
@@ -701,41 +752,44 @@ object JarvisAgent {
 
     private fun speakReply(ctx: Context, mySeq: Int, reply: String) {
         if (mySeq != genSeq) return
+        // 脑移植 SpeechMood：先解析心情标记，去标记后的正文用于播报/记历史/推气泡；
+        // 模型没发标记时 parse 原样返回，不影响现有回复。
+        val text = SpeechMood.parse(reply).text
         // M20：本地模型/任务/技能/天气/本地指令/看屏的回复也进聊天历史。
         // 聊天流式路径（askCustom）由 CustomClient.askStream 成对写历史，不走这里，不会重复记。
-        CustomClient.addAssistantTurn(reply)
+        CustomClient.addAssistantTurn(text)
         // M23：各回复落点都触发记忆提取（聊天流式路径在 askCustom.onFinish 里触发）。
-        if (lastUserText.isNotBlank()) triggerMemoryExtraction(ctx, lastUserText, reply)
-        OrbController.showBubble(reply.take(80))
-        onReplyText?.invoke(reply)
+        if (lastUserText.isNotBlank()) triggerMemoryExtraction(ctx, lastUserText, text)
+        OrbController.showBubble(text.take(80))
+        onReplyText?.invoke(text)
         if (JarvisPrefs.isMuted(ctx)) {
             // 批一新增：HUD 静音按钮开着——只留文字（气泡已经显示了），不过 EdgeTts，直接回 idle。
             setState(ctx, "idle")
-            maybeStartWakeLoop()
+            WakeWordEngine.resume()
             return
         }
         // 真机反馈（jk-v11）：改走 TtsRouter——Edge 失败自动落系统 TTS，不再哑火；
         // 此前这里把 EdgeTts 的 onDone(false) 直接忽略，网络不通时连失败都看不见。
         TtsRouter.speak(
-            ctx, reply,
+            ctx, text,
             onStart = {
                 main.post {
                     if (mySeq != genSeq) return@post
                     setState(ctx, "speaking")
-                    if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq) { reply }
+                    if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq) { text }
                 }
             },
             onDone = { ok ->
                 // M11：取消/打断（代次已变）不记“TTS 全部通道失败”审计，只有真正播报失败才记。
-                if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", reply.take(40))
+                if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", text.take(40))
                 main.post {
                     if (mySeq != genSeq) return@post
                     // M26：问句结尾强制视为未结束；L6：播完等 3 秒再开麦，避开尾音残响被当成插话。
-                    if (shouldContinueListening(ctx, reply)) {
+                    if (shouldContinueListening(ctx, text)) {
                         main.postDelayed({ if (mySeq == genSeq) beginListening(ctx, fromWake = false, prefilledText = null) }, 3000)
                     } else {
                         setState(ctx, "idle")
-                        maybeStartWakeLoop()
+                        WakeWordEngine.resume()
                     }
                 }
             }
@@ -811,113 +865,7 @@ object JarvisAgent {
         }, 1200)
     }
 
-    // ---------- 第 5 条：唤醒词（仍是降级版——真离线 ASR 已接上，但不是专门的低功耗 KWS） ----------
-
-    /**
-     * 三期-B 换上 sherpa-onnx 真离线识别后，这里的唤醒词本质上还是"反复跑一次完整的流式识别、
-     * 看文字里有没有命中关键词"，不是专门为常驻监听设计的轻量级关键词唤醒模型(KWS)——
-     * 识别器本身常驻在内存里（首次用时才加载,之后复用），比之前砸系统在线识别省电一些，
-     * 但持续跑 zipformer 编解码仍然比真正的 KWS 耗电，具体耗电数据同样没有真机实测。
-     * 如果连续待命发热/掉电明显，先把唤醒严格度调到"严格"或直接关掉这个开关。
-     */
-    fun maybeStartWakeLoop() {
-        val ctx = appCtx ?: return
-        if (!JarvisForegroundService.running) return
-        if (!JarvisPrefs.isWakeEnabled(ctx)) return
-        if (state != "idle") return
-        if (wakeLoopRunning) return
-        wakeLoopRunning = true
-        wakeTick(ctx, genSeq)
-    }
-
-    fun stopWakeLoop() {
-        wakeLoopRunning = false
-    }
-
-    private fun wakeTick(ctx: Context, mySeq: Int) {
-        if (!wakeLoopRunning || mySeq != genSeq || state != "idle" || !JarvisPrefs.isWakeEnabled(ctx)) {
-            wakeLoopRunning = false
-            return
-        }
-        OfflineAsrSession.listenOnce(
-            ctx,
-            onPartial = { },
-            onFinal = { text -> main.post { onWakeResult(ctx, mySeq, text) } },
-            onError = { msg ->
-                main.post {
-                    // L3：永久性错误（没权限/模型缺失）不能每 400ms 空转重试——退避到
-                    // 60 秒重试，并只提示一次；只有“没听清/静音超时”这类正常情况才 400ms 续跑。
-                    if (msg.contains("权限") || msg.contains("模型文件缺失")) {
-                        if (!wakePermErrorNoted) {
-                            wakePermErrorNoted = true
-                            // S25 同理：前台时悬浮球不存在，提示也要进对话面板。
-                            showFailureBubble("唤醒监听停了：$msg")
-                        }
-                        main.postDelayed({ wakeTick(ctx, mySeq) }, 60_000)
-                    } else {
-                        // 静音超时很正常，短暂间隔后继续下一轮轮询
-                        main.postDelayed({ wakeTick(ctx, mySeq) }, 400)
-                    }
-                }
-            }
-        )
-    }
-
-    // 批二：10 分钟内 3 次"唤醒了但没等到有效指令"，临时把判定收紧到严格档，缓解误唤醒。
-    private val falseWakeTimes = ArrayList<Long>()
-    /** L3：永久性唤醒错误（权限/模型缺失）是否已给过一次可见提示（成功识别一次后清零）。 */
-    @Volatile
-    private var wakePermErrorNoted = false
-    private fun noteFalseWake() {
-        val now = System.currentTimeMillis()
-        falseWakeTimes.removeAll { now - it > 10 * 60_000L }
-        falseWakeTimes.add(now)
-    }
-    private fun effectiveStrictness(ctx: Context): Int {
-        val now = System.currentTimeMillis()
-        falseWakeTimes.removeAll { now - it > 10 * 60_000L }
-        if (falseWakeTimes.size >= 3) return 0
-        return JarvisPrefs.getWakeStrictness(ctx)
-    }
-
-    private fun wakeHitIndex(text: String): Int {
-        for (w in WAKE_WORDS) {
-            val i = text.indexOf(w, ignoreCase = true)
-            if (i >= 0) return i
-        }
-        return -1
-    }
-
-    private fun onWakeResult(ctx: Context, mySeq: Int, text: String) {
-        if (mySeq != genSeq || state != "idle") return
-        wakePermErrorNoted = false // L3：识别器又出结果了，永久性错误提示位清零
-        val idx = wakeHitIndex(text)
-        val hit = when {
-            idx < 0 -> false
-            // 严格：「贾维斯」须在句首（容忍 1 个前导字符的识别误差）且整句短，像一句独立的唤醒指令。
-            effectiveStrictness(ctx) == 0 -> idx <= 1 && text.length <= 12
-            // 标准：在句首附近就行。
-            effectiveStrictness(ctx) == 1 -> idx <= 6
-            // 宽松：句中任意位置都算命中。
-            else -> true
-        }
-        if (!hit) {
-            main.postDelayed({ wakeTick(ctx, mySeq) }, 400)
-            return
-        }
-        // 命中唤醒词：如果同一句话里唤醒词后面还带了指令（比如"贾维斯，几点了"），直接把剩余部分当问题；
-        // 否则进入正常的听一句模式。
-        wakeLoopRunning = false
-        val remainder = WAKE_WORDS.fold(text) { acc, w -> acc.replace(w, "") }
-            .trim(' ', ',', '，', '。', '！', '!')
-        OrbController.showBubble("我在")
-        if (remainder.length >= 2) {
-            setState(ctx, "listening")
-            onUserUtterance(ctx, genSeq, remainder)
-        } else {
-            beginListening(ctx, fromWake = true, prefilledText = null)
-        }
-    }
-
-    private val WAKE_WORDS = listOf("贾维斯", "Jarvis", "jarvis", "贾维思", "加维斯")
+    // ---------- 唤醒词（移植自 Andee wake/：轻量 MFCC+DTW 本地关键词检测） ----------
+    // 监听与门控在 WakeWordEngine；start() 里 init+start，beginListening() 里 pause，
+    // 各收尾处 resume。旧的离线识别轮询（maybeStartWakeLoop/wakeTick/onWakeResult）已删。
 }

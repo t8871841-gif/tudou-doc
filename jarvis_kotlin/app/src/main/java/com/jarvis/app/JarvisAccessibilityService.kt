@@ -904,6 +904,21 @@ class JarvisAccessibilityService : AccessibilityService() {
             } catch (_: Exception) {
             }
         }
+        // 场景移植 ScenePresets：前台应用变化时自动进入有触发应用的场景（Andee maybeAutoEnterScene 同款）。
+        // 只在 TYPE_WINDOW_STATE_CHANGED 时判断；任务进行中也记录包名但不进入（pickAutoEnterScene 内部处理）。
+        // 注意：不要先调 noteForegroundPackage 再调 maybeAutoEnterScene——pickAutoEnterScene 靠
+        // lastForegroundPkg 做去重，先调会让它永远返回 null。
+        if (event != null && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val pkg = event.packageName?.toString()
+            if (pkg != null) {
+                try {
+                    com.jarvis.app.skill.SkillRunner.maybeAutoEnterScene(this, pkg, { task != null }) { msg ->
+                        com.jarvis.app.tts.TtsRouter.speak(this, msg, onStart = {}, onDone = {})
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
         if (event == null || task != null || !isArmed()) return
         val type = event.eventType
         if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
