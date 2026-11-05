@@ -36,6 +36,9 @@ object HudPalette {
         "listening" -> ROSE
         // L31：急停态原来回落成待命紫（BLUE2），急停红被吞掉；现在明确给停止红。
         "stopped" -> 0xFFEF5350.toInt()
+        // 差距 6：ERROR 同样给停止红；working 给星系橙核，与思考紫区分。
+        "error" -> 0xFFEF5350.toInt()
+        "working" -> GALAXY_CORE
         else -> BLUE2 // idle / booting
     }
 
@@ -43,6 +46,9 @@ object HudPalette {
         "listening" -> "LISTENING" to "正在聆听"
         "thinking" -> "PROCESSING" to "思考中"
         "speaking" -> "RESPONDING" to "回应中"
+        // 差距 6：新状态的 HUD 文案。
+        "working" -> "WORKING" to "任务执行中"
+        "error" -> "ERROR" to "出错了"
         else -> if (wakeMode) "WAKE WORD" to "等待唤醒" else "STANDBY" to "待命"
     }
 

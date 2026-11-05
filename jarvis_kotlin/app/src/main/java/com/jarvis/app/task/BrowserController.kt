@@ -58,6 +58,9 @@ object BrowserController {
 
     /** 打开内置浏览器并加载 URL（已开着就切过去加载）。 */
     fun open(ctx: Context, url: String): String {
+        // 差距 8c：内置浏览器由任务循环驱动时球沉底沿（只挂起不恢复：浏览器还开着，
+        // 恢复由 TaskLoop 的 finally 统一做，这里清掉会把球中途弹回原位）。
+        com.jarvis.app.OrbController.setTaskHidden(true)
         val fixed = fixUrl(url)
         val intent = Intent(ctx, BrowserActivity::class.java).apply {
             putExtra(BrowserActivity.EXTRA_URL, fixed)
@@ -69,6 +72,8 @@ object BrowserController {
 
     /** 浏览器里后退一步；没得退返回 false。 */
     fun goBack(): Boolean {
+        // 差距 8c：同 open，驱动屏幕期间球沉底沿，恢复归 TaskLoop。
+        com.jarvis.app.OrbController.setTaskHidden(true)
         val wv = webView ?: return false
         val latch = CountDownLatch(1)
         var wentBack = false
@@ -90,6 +95,8 @@ object BrowserController {
 
     /** 点页面里第 index 个链接（按快照里的编号）；点完刷新快照。 */
     fun clickLink(index: Int): String {
+        // 差距 8c：同 open，驱动屏幕期间球沉底沿，恢复归 TaskLoop。
+        com.jarvis.app.OrbController.setTaskHidden(true)
         val wv = webView ?: return "内置浏览器没开着"
         val snap = lastSnapshot ?: return "还没有页面快照，先等页面加载"
         val link = snap.links.getOrNull(index) ?: return "没有第 $index 个链接（共 ${snap.links.size} 个）"

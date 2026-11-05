@@ -103,6 +103,15 @@ object TaskLoop {
     private var running = false
     fun isRunning(): Boolean = running
 
+    // 差距 8e 的守卫要认“在跑的那个任务是不是还活着”：新任务顶掉旧任务是正常流程
+    // （JarvisAgent 先 hardResetToIdle，旧任务的 isAlive 已死），只拦“旧任务还活着
+    // 又来一个新任务”。currentAlive/currentAliveSeq 只由 run() 写、runBlocking 的
+    // finally 按序号清（序号对不上不碰，免得先到的 finally 把后到的任务标志清掉）。
+    @Volatile
+    private var currentAlive: (() -> Boolean)? = null
+    @Volatile
+    private var currentAliveSeq = -1
+
     // 「在<应用>里/上给<人>发信息…」「给<人>发微信…」「打开/用<应用>…发/给…」。
     // M25：「发信息给老婆」——"发"在前、"给/向/跟+人名"在后的词序，SEND_TO 只认"给"在"发"前。
     // 保守优先：必须同时出现「应用或发送动作」与「收件/发送对象」两类信号才算任务；
@@ -147,7 +156,17 @@ object TaskLoop {
         onProgress: (String) -> Unit = {},
         onReply: (String) -> Unit
     ) {
+        // 差距 8e：running 守卫——在跑的任务还活着时直接回绝，不递增 runSeq（递增会杀死
+        // 在跑任务的 alive 检查、让它的 finally 在新任务还在跑时把球恢复，把两个任务的
+        // 沉底态搅在一起）。旧任务已被顶掉（isAlive 已死，如新指令前的 hardReset）时放行，
+        // 单线程执行器保证旧任务的 finally 先于新任务的 runBlocking 跑完。
+        if (running && currentAlive?.invoke() == true) {
+            onReply("已经有一个任务在进行中，等它做完或喊停再说新的。")
+            return
+        }
         val mySeq = runSeq.incrementAndGet()
+        currentAlive = isAlive
+        currentAliveSeq = mySeq
         val appCtx = ctx.applicationContext
         // 新任务开始清掉旧的断点（续跑的那次不调这里，resumeFrom 非空）；否则
         // 上次停下的任务会一直挂着等“继续”，用户说了新任务还会被误续。
@@ -168,6 +187,13 @@ object TaskLoop {
         fun alive() = mySeq == runSeq.get() && isAlive()
         val svc = JarvisAccessibilityService.instance
         if (svc == null) {
+            // 差距 8e：早退路也在置位之前——但 run() 已登记了 currentAliveSeq，自己的那份要清掉，
+            // 否则 running 会一直留在 true、把后面的任务全挡在守卫外。
+            if (currentAliveSeq == mySeq) {
+                running = false
+                currentAlive = null
+                currentAliveSeq = -1
+            }
             onReply("无障碍服务没有开启，跨应用任务做不了。请到设置里打开 Jarvis 无障碍服务。")
             return
         }
@@ -181,8 +207,9 @@ object TaskLoop {
         if (ownsController) JarvisAccessibilityService.screenController = controller
         AuditLog.append(ctx, "任务循环", taskText, "开始（上限 $MAX_STEPS 步）")
         TakeoverBorder.show()
-        // 用户定：跨应用任务期球彻底隐藏，减少屏幕干扰、有利于定位；任务结束
-        // 在 finally 里恢复。截图空白是另一层标志，互不顶掉（见 OrbController）。
+        // 跨应用任务期球沉底沿（右下角，留半个球可见、可点；任务结束回原位）——
+        // 不是彻底隐藏：沉底才能让球不挡点按落点、又不断任务进度反馈。
+        // 截图空白是另一层标志，互不顶掉（见 OrbController）。
         com.jarvis.app.OrbController.setTaskHidden(true)
         // 断点续跑：历史与步数接着上次的来；新任务从空开始。
         val history = resumeFrom?.history?.toMutableList() ?: mutableListOf<String>()
@@ -632,7 +659,15 @@ object TaskLoop {
             finalReply = "任务执行中出错：${e.message}"
             AuditLog.append(ctx, "任务循环", "异常", e.message ?: e.javaClass.simpleName)
         } finally {
-            running = false
+            // 差距 8e：只清自己的 running 标志——新任务已入队（currentAliveSeq 已是新序号）
+            // 时不碰，否则先到的 finally 会把还在跑的新任务的 running 清掉、让再下一个
+            // run() 误判为“没任务在跑”。setTaskHidden(false) 不用守：单线程执行器保证
+            // 先到的 finally 一定在新任务的 runBlocking 之前跑完，不会清到新任务头上。
+            if (currentAliveSeq == mySeq) {
+                running = false
+                currentAlive = null
+                currentAliveSeq = -1
+            }
             TakeoverBorder.hide()
             com.jarvis.app.OrbController.setTaskHidden(false)
             if (ownsController && JarvisAccessibilityService.screenController === controller) {

@@ -730,6 +730,18 @@ object TripLoop {
      * 上面的 1.5 秒等待只是双保险。
      */
     private fun runVerifyTask(ctx: Context, taskText: String, isAliveFn: () -> Boolean): String {
+        // 差距 8c：高德核验子任务驱动屏幕，球沉底沿。TaskLoop.run 自己的 runBlocking 里也会挂，
+        // 这里再显式挂一次，覆盖入队到起跑之间的窗口；恢复由 TaskLoop 的 finally 和下面的
+        // finally 双重做（setTaskHidden 是幂等标志位，不会互相顶掉）。
+        com.jarvis.app.OrbController.setTaskHidden(true)
+        try {
+            return runVerifyTaskInner(ctx, taskText, isAliveFn)
+        } finally {
+            com.jarvis.app.OrbController.setTaskHidden(false)
+        }
+    }
+
+    private fun runVerifyTaskInner(ctx: Context, taskText: String, isAliveFn: () -> Boolean): String {
         val latch = CountDownLatch(1)
         var result: String? = null
         TaskLoop.run(ctx, taskText, isAlive = isAliveFn, saveResume = false) { reply ->

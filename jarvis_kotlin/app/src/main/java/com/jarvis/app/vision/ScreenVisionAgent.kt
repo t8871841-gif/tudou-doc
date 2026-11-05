@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /**
@@ -110,16 +111,25 @@ object ScreenVisionAgent {
      */
     fun locateAndTap(ctx: Context, targetDescription: String, taskLabel: String, onDone: (Boolean, String) -> Unit) {
         if (!com.jarvis.app.JarvisPrefs.isVisionEnabled(ctx)) { onDone(false, "视觉看屏没开，去设置里开一下"); return }
+        // 差距 8c：视觉定位驱动屏幕期间球沉底沿；所有终点（成功/失败）都经 safeOnDone 恢复一次。
+        com.jarvis.app.OrbController.setTaskHidden(true)
+        val doneOnce = AtomicBoolean(false)
+        val safeOnDone: (Boolean, String) -> Unit = { ok, detail ->
+            if (doneOnce.compareAndSet(false, true)) {
+                com.jarvis.app.OrbController.setTaskHidden(false)
+                onDone(ok, detail)
+            }
+        }
         val mySeq = ++genSeq
         resetRepeatGuard()
         TakeoverBorder.show()
         AuditLog.append(ctx, taskLabel, "视觉看屏定位「$targetDescription」", "进行中")
         captureAllowed(ctx, { bmp, sw, sh ->
-            askGridCell(ctx, mySeq, bmp, sw, sh, targetDescription, taskLabel, onDone)
+            askGridCell(ctx, mySeq, bmp, sw, sh, targetDescription, taskLabel, safeOnDone)
         }, { reason ->
             TakeoverBorder.hide()
             AuditLog.append(ctx, taskLabel, "视觉看屏定位「$targetDescription」", "失败：$reason")
-            main.post { onDone(false, reason) }
+            main.post { safeOnDone(false, reason) }
         })
     }
 

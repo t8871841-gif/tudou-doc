@@ -64,6 +64,12 @@ object OrbController {
     private var enabled = false
     private var appForeground = false
     private var state = "idle"
+
+    // 差距 6：状态名集中定义——新状态 working/error 只从这里取（JarvisAgent 同样引用
+    // 这里，禁止手写字面量）；旧的 idle/listening/thinking/speaking/stopped 仍用字面量，
+    // 不做全量 enum 重构。
+    const val STATE_WORKING = "working"
+    const val STATE_ERROR = "error"
     private var startX = 0
     private var startY = 0
     private val main = Handler(Looper.getMainLooper())
@@ -100,7 +106,9 @@ object OrbController {
     var eventSink: ((String, (Boolean) -> Unit) -> Unit)? = null
 
     private var stopUntil = 0L
-    private var lastTapAt = 0L
+    // 差距 9、10：350ms 窗口内累计点按次数，超时未满按已点的次数结算（单击说话 / 双击打字 / 三击停止）。
+    private var tapCount = 0
+    private val tapSettleRunnable = Runnable { settleTaps() }
 
     /**
      * 2026-10-24 用户定：锁屏和息屏都不显示悬浮球，解锁后恢复。
@@ -172,13 +180,31 @@ object OrbController {
     }
 
     fun setAppForeground(fg: Boolean) {
-        appForeground = fg
-        refresh()
+        // 可见性规则 6a：短暂 onPause（系统权限弹窗、通知栏下拉）不立刻把球放出来——
+        // 600ms 内 onResume（或 BrowserActivity.onResume）回来就取消，避免球闪现；
+        // 真切走才放球。置 true 时立即生效并取消待放的 false。
+        main.removeCallbacks(foregroundOffRunnable)
+        if (fg) {
+            appForeground = true
+            refresh()
+        } else {
+            main.postDelayed(foregroundOffRunnable, 600)
+        }
     }
+
+    private val foregroundOffRunnable = Runnable { appForeground = false; refresh() }
 
     fun setState(s: String) {
         state = s
-        main.post { orb?.setState(displayState()) }
+        main.post {
+            orb?.setState(displayState())
+            // 差距 6：ERROR 的球上区别——红色（OrbView 按 error 走 stopped 同款红系）+
+            // 抖动（Andee Action.SHAKE）+ REJECT 震动（Andee State.ERROR 同款）。
+            if (s == STATE_ERROR) {
+                orb?.shakeError()
+                buzz(orb, HapticFeedbackConstants.REJECT)
+            }
+        }
     }
 
     fun isEnabled(): Boolean = enabled
@@ -214,6 +240,9 @@ object OrbController {
     private var taskHomeX = 0
     private var taskHomeY = 0
     private var taskPerched = false
+    // 差距 8d：用户亲手把沉底的球拖离底沿后，沉底态就此作罢（截图/重显不再拽回）；
+    // 拖回底沿重新挂住时清掉。任务结束（setTaskHidden(false)）时也清掉。
+    private var taskPerchDetached = false
 
     /** 仅主线程调：按两层标志位统一落一次可见性。 */
     private fun applyVisibility() {
@@ -271,17 +300,42 @@ object OrbController {
         val o = orb ?: return
         val lp = orbLp ?: return
         val w = wm ?: return
-        if (collapsed) return
+        // 差距 8b：任务开始前球已收起，先展开再沉底（收起态只剩一小截在屏外，沉底无意义）。
+        if (collapsed) expandInstantly()
+        // 差距 8d：用户亲手拖离底沿后不再拽回（除非拖回底沿重新挂住，见 dragEnd 的 wantsPerch）。
+        if (taskPerchDetached) return
         if (!taskPerched) {
             taskHomeX = lp.x
             taskHomeY = lp.y
             taskPerched = true
         }
-        if (lp.y != perchY()) {
-            lp.y = perchY()
+        // 差距 8a：沉底同时收进右下角（Andee FloatingWindowUi.perchX 同款）——
+        // 停在底部正中的球落在系统上滑手势带里。
+        val tx = perchX()
+        val ty = perchY()
+        if (lp.x != tx || lp.y != ty) {
+            lp.x = tx
+            lp.y = ty
             try { w.updateViewLayout(o, lp) } catch (_: Exception) {}
             repositionBubble()
         }
+    }
+
+    /** 差距 8a：沉底的 x——右下角（Andee perchX 同款：球窗大半出右沿，只留球面一小截在屏内）。 */
+    private fun perchX(): Int {
+        val lp = orbLp ?: return 0
+        val s = svc ?: return 0
+        val d = s.resources.displayMetrics
+        val pad = lp.width / 2
+        val margin = (8 * d.density).toInt()
+        return (d.widthPixels - lp.width + pad - margin).coerceAtLeast(0)
+    }
+
+    /** 差距 8d：球是不是被拖回了底沿（距半沉底沿 32dp 内就算挂住）。 */
+    private fun wantsPerch(y: Int): Boolean {
+        val s = svc ?: return false
+        val threshold = (32 * s.resources.displayMetrics.density).toInt()
+        return y >= perchY() - threshold
     }
 
     /** C13：任务结束，球回沉底前的位置。 */
@@ -354,6 +408,7 @@ object OrbController {
     /** C13：跨应用任务期球沉底沿（不隐藏，留半个球可见、可点；任务结束回原位）。 */
     fun setTaskHidden(hidden: Boolean) {
         taskHidden = hidden
+        if (!hidden) taskPerchDetached = false
         if (Looper.myLooper() == Looper.getMainLooper()) applyVisibility()
         else main.post { applyVisibility() }
     }
@@ -451,6 +506,8 @@ object OrbController {
         collapseRunnable = null
         if (collapsed) return
         if (dodged) return // 让位期间不收起：这时 lp.x 是让位后的临时位置，记成 dockedX 就错了
+        // 差距 8b：任务沉底期间不收起——沉底后 doCollapse 再把它收成 15%，就跟任务沉底打架了。
+        if (taskHidden || taskPerched) return
         val w = wm ?: return
         val o = orb ?: return
         val lp = orbLp ?: return
@@ -501,7 +558,7 @@ object OrbController {
 
     /**
      * 一键急停：取消原生任务引擎、球变红 + 气泡“已停止”，并通知 Dart 取消 agent 循环 / 播报 / 聆听。
-     * 来源：悬浮球双击、音量+/-同按、Dart 自己发起（notifyDart=false，避免回环）。
+     * 来源：悬浮球三击（差距 9：急停从双击移到三击）、音量+/-同按、Dart 自己发起（notifyDart=false，避免回环）。
      * 降级：Dart 不在时只做原生侧取消和反馈。
      */
     fun emergencyStop(notifyDart: Boolean = true) {
@@ -552,8 +609,12 @@ object OrbController {
                 // 真正的贴边隐藏：收起态下拖球必须瞬时展开，不能走 220ms 动画——
                 // 动画和手指同时写 lp.x 会抢位置，而且 startX 会读到屏外坐标、拖起来整段都偏。
                 revealOnlyThisGesture = collapsed
-                // C13：用户亲手拖走了沉底的球，沉底态就此作罢（不再等任务结束把它拽回原位）。
-                if (taskPerched) taskPerched = false
+                // 差距 8d：用户亲手拖走了沉底的球，沉底态就此作罢（下次截图/重显不再把它拽回底沿）；
+                // 拖回底沿重新挂住（dragEnd 里实时算 wantsPerch）。
+                if (taskHidden && taskPerched) {
+                    taskPerched = false
+                    taskPerchDetached = true
+                }
                 if (collapsed) expandInstantly()
                 else cancelCollapseSchedule()
                 // M51：180ms 内再拖时，上一轮吸边动画还在播、会跟手指抢 lp.x，
@@ -602,6 +663,12 @@ object OrbController {
                     }
                 }
                 p.edit().putInt("x", target).putInt("y", lp.y).apply()
+                // 差距 8d：任务期被拖走的球，松手时若已拖回底沿就重新挂住沉底（实时算 wantsPerch），
+                // 否则继续由用户摆布，任务结束也不拽回。
+                if (taskHidden && taskPerchDetached && wantsPerch(lp.y)) {
+                    taskPerchDetached = false
+                    applyTaskPerch()
+                }
                 // 只有确实停在边上才值得排"贴边自动收起"；停在屏幕中间的自由摆放不收起。
                 scheduleCollapseIfDocked()
             }
@@ -621,6 +688,11 @@ object OrbController {
                 if (revealOnlyThisGesture) {
                     revealOnlyThisGesture = false
                     scheduleCollapseIfDocked()
+                    return
+                }
+                // 差距 10：任务进行中长按不切走当前应用，只显示任务状态气泡，避免打断任务上下文。
+                if (taskHidden) {
+                    showBubble("任务进行中，稍等一下…")
                     return
                 }
                 launchApp(null)
@@ -647,20 +719,46 @@ object OrbController {
      * 旧逻辑先走 Dart eventSink，桥没起来就兜底 launchApp("assist") 打开主界面——
      * 纯 Kotlin 版里 agent 没启动时桥永远没起来，于是每次短按都变成“进主界面”，
      * 正是用户报的“点击就进入”。现在直接走原生入口 triggerListenFromAssist
-     * （内部会先 start() 再 beginListening），全程不打开主界面；
-     * 350ms 内连点两次仍是急停。
+     * （内部会先 start() 再 beginListening），全程不打开主界面。
+     * 差距 9、10（Andee：单击说话、双击打字、三击停止、长按展开卡片）：350ms 窗口内
+     * 累计——1 下等窗口结算后说话，2 下结算后切打字，3 下立即停止；急停从双击移到
+     * 三击，350ms 双击窗口误停的问题随迁移自然解决。单击要等 350ms 结算才开听，
+     * 是多击接线的固定代价。
      */
     private fun handleTap() {
-        val now = System.currentTimeMillis()
         buzz(orb, HapticFeedbackConstants.KEYBOARD_TAP) // 点中立即震动，先给手感反馈
-        if (now - lastTapAt < 350) {
-            lastTapAt = 0
+        tapCount++
+        if (tapCount >= 3) {
+            main.removeCallbacks(tapSettleRunnable)
+            tapCount = 0
             emergencyStop()
             return
         }
-        lastTapAt = now
-        val s = svc ?: return
-        JarvisAgent.triggerListenFromAssist(s)
+        // 重新计时：下一按要在 350ms 内再来，否则按已点的次数结算。
+        main.removeCallbacks(tapSettleRunnable)
+        main.postDelayed(tapSettleRunnable, 350)
+    }
+
+    /** 350ms 窗口结算：1 下说话，2 下切打字输入。 */
+    private fun settleTaps() {
+        when (tapCount) {
+            1 -> {
+                tapCount = 0
+                val s = svc ?: return
+                JarvisAgent.triggerListenFromAssist(s)
+            }
+            2 -> {
+                tapCount = 0
+                onTextInputToggle()
+            }
+            else -> tapCount = 0
+        }
+    }
+
+    /** 差距 9：双击 = 切换打字输入（新入口）：打开主界面并切换输入行（MainActivity 的 show_input 动作）。 */
+    private fun onTextInputToggle() {
+        cancelCollapseSchedule()
+        launchApp("show_input")
     }
 
     /** 触觉反馈：用 View.performHapticFeedback，不需要 VIBRATE 权限；忽略系统“触感反馈”总开关，保证点中有感觉。 */
@@ -842,7 +940,7 @@ object OrbController {
             if (cx <= 0f) return
             val half = min(cx, cy)
             val r1 = half * 0.80f
-            val stopped = st == "stopped"
+            val stopped = st == "stopped" || st == STATE_ERROR
             // 外环 sweep：正常蓝→橙→蓝；停止态红系
             ringShader = SweepGradient(
                 cx, cy,
@@ -871,12 +969,33 @@ object OrbController {
             buildShaders()
         }
 
-        /** 状态定转速：待机 30°/秒、思考 90°/秒、说话/聆听 55°/秒、停止 0 */
+        /** 状态定转速：待机 30°/秒、思考 90°/秒、任务执行 70°/秒、说话/聆听 55°/秒、停止/出错 0 */
         private fun speedFor(s: String) = when (s) {
             "thinking" -> 90f
+            STATE_WORKING -> 70f
             "speaking", "listening" -> 55f
-            "stopped" -> 0f
+            "stopped", STATE_ERROR -> 0f
             else -> 30f
+        }
+
+        private var shakeAnim: ValueAnimator? = null
+
+        /** 差距 6：ERROR 抖动（Andee Action.SHAKE 同款：左右小幅摆动半秒后回正）。 */
+        fun shakeError() {
+            shakeAnim?.cancel()
+            shakeAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 500
+                addUpdateListener {
+                    val p = it.animatedValue as Float
+                    translationX = kotlin.math.sin(p * 3f * Math.PI.toFloat()) * (1f - p) * 8f * dp
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        translationX = 0f
+                    }
+                })
+                start()
+            }
         }
 
         fun setState(s: String) {
@@ -929,6 +1048,8 @@ object OrbController {
             anim = null
             breathAnim?.cancel()
             breathAnim = null
+            shakeAnim?.cancel()
+            shakeAnim = null
             super.onDetachedFromWindow()
         }
 
@@ -942,7 +1063,7 @@ object OrbController {
             val rr = r1 - ringW / 2f
             val coreR = r1 * 0.42f
             val elapsed = (SystemClock.uptimeMillis() - animStartMs) / 1000f
-            val stopped = st == "stopped"
+            val stopped = st == "stopped" || st == STATE_ERROR
             // 有效音量：聆听取麦克风；播报无 TTS 电平，用 2 秒呼吸合成；其余取麦克风（常为 0）。
             val mic = amplitude().coerceIn(0f, 1f)
             val amp = if (st == "speaking") 0.45f + 0.25f * kotlin.math.sin(elapsed * Math.PI.toFloat()) else mic

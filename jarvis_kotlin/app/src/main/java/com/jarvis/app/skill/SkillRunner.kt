@@ -172,8 +172,15 @@ object SkillRunner {
         // 用这个 guard 兜住，不让调用方收到两次“已取消/已完成”。
         val doneOnce = AtomicBoolean(false)
         val safeOnDone: (Boolean, String, Int?) -> Unit = { ok, msg, idx ->
-            if (doneOnce.compareAndSet(false, true)) onDone(ok, msg, idx)
+            if (doneOnce.compareAndSet(false, true)) {
+                // 差距 8c：技能重播结束（成功/失败/取消）恢复球的位置；挂起由下面的
+                // setTaskHidden(true) 做，两个调用成对。
+                com.jarvis.app.OrbController.setTaskHidden(false)
+                onDone(ok, msg, idx)
+            }
         }
+        // 差距 8c：技能重播驱动屏幕期间球沉底沿（TaskLoop 同款），不只 TaskLoop 才沉底。
+        com.jarvis.app.OrbController.setTaskHidden(true)
         if (fromIndex > 0) {
             // M33：续跑时重新读取最新的 SkillItem，不要用 offer 时存的旧对象——
             // 技能可能在失败后被用户改过（改短、改步骤），旧快照会重放已不存在的步骤。

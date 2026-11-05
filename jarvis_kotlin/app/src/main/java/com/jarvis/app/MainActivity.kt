@@ -289,6 +289,9 @@ class MainActivity : Activity() {
         // 真机反馈（jk-v11）：语音问答同步进对话——用户的话和回复都落成气泡
         JarvisAgent.onUserText = { t -> runOnUiThread { addBubble(t, mine = true) } }
         JarvisAgent.onReplyText = { t -> runOnUiThread { addBubble(t, mine = false) } }
+        // 差距 17：收音中途文字只推 HUD 字幕 PARTIAL（打字行 transient），不定稿、
+        // 不进 addBubble、不记 ChatHistory；定稿（FINAL）仍走 onUserText → addBubble。
+        JarvisAgent.onPartialText = { t -> runOnUiThread { pushHudSubtitle("you", t, SubtitleKind.PARTIAL) } }
         // 语音指令动 HUD 的桥：本地指令层（拆解等）把 JS 串交过来，在主线程喂给 HUD WebView。
         JarvisAgent.onRunHudJs = { js -> runOnUiThread { hudWebView.evaluateJavascript(js, null) } }
         onAgentStateChanged(JarvisAgent.currentState())
@@ -3342,7 +3345,9 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        OrbController.setAppForeground(true)
+        // 可见性规则 6c：分屏/小窗时 Jarvis 不独占前台，另一半是其他 App 的页面，球要出现；
+        // 全屏时才算自家前台、藏球。
+        OrbController.setAppForeground(!isInMultiWindowMode)
         isResumed = true
         maybeLaunchPendingApp()
         if (showingSettings) refresh()
@@ -3392,12 +3397,20 @@ class MainActivity : Activity() {
         main.removeCallbacks(hudPeriodicRunnable)
     }
 
+    /** 可见性规则 6c：前台分屏/小窗状态变化时重算球的门控（不重建 Activity 也会回调这里）。 */
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode)
+        if (isResumed) OrbController.setAppForeground(!isInMultiWindowMode)
+    }
+
     override fun onPause() {
         isResumed = false
         stopHudPeriodicRefresh()
         if (::hudWebView.isInitialized) {
             hudWebView.onPause()
         }
+        // 可见性规则 6a：置 false 时 OrbController 内有 600ms 防抖——权限弹窗、
+        // 通知栏下拉这类短暂 onPause 不会让球闪现，真切走才放球。
         OrbController.setAppForeground(false)
         super.onPause()
     }
@@ -3413,6 +3426,7 @@ class MainActivity : Activity() {
         // L23/S27：四处回调统一无条件置 null（原来 onStateChanged 还写 if != null 才清，留竞态口子）。
         JarvisAgent.onStateChanged = null
         JarvisAgent.onUserText = null
+        JarvisAgent.onPartialText = null
         JarvisAgent.onReplyText = null
         JarvisAgent.onRunHudJs = null
         uiScope.cancel()
@@ -3439,6 +3453,10 @@ class MainActivity : Activity() {
         if (action == "assist") {
             if (::detailView.isInitialized) detailView.text = "已通过悬浮球/磁贴/数字助理唤起，已开始听。"
             JarvisAgent.triggerListenFromAssist(this)
+        }
+        // 差距 9：悬浮球双击 = 切换打字输入（OrbController.onTextInputToggle 经 EXTRA_ACTION 进来）。
+        if (action == "show_input") {
+            if (showInput) hideInputRow() else showInputRow()
         }
         // 批六：点开晨报/提醒/出发提醒的通知 → 正文进对话并朗读（静音时只显示）
         if (action == "morning_brief" || action == "reminder") {

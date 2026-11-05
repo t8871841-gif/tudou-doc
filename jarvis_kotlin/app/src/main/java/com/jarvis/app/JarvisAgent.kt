@@ -59,6 +59,11 @@ object JarvisAgent {
     @Volatile
     var onUserText: ((String) -> Unit)? = null
 
+    // 差距 17：收音中途文字（partial）只走这里——MainActivity 接成 HUD 字幕 PARTIAL
+    // （打字行 transient），不定稿、不进 addBubble、不记 ChatHistory。定稿仍走 onUserText。
+    @Volatile
+    var onPartialText: ((String) -> Unit)? = null
+
     @Volatile
     var onReplyText: ((String) -> Unit)? = null
 
@@ -135,7 +140,7 @@ object JarvisAgent {
         // L3：onMicError 是麦克风永久故障的一次性提示（60 秒退避），回调跑在监督线程，先 main.post 再碰 UI。
         WakeWordEngine.start(
             onWake = { main.post { beginListening(app, fromWake = true, prefilledText = null) } },
-            onMicError = { msg -> main.post { showFailureBubble(msg) } },
+            onMicError = { msg -> main.post { setErrorState(app, msg) } },
         )
     }
 
@@ -207,6 +212,22 @@ object JarvisAgent {
         onReplyText?.invoke(msg)
     }
 
+    /**
+     * 差距 6：ERROR 状态（Andee State.ERROR 同款：红球 + 抖动 + REJECT 震动，见 OrbController）。
+     * 失败气泡照常推（前台进面板、后台挂球旁）；2 秒后仍是 error 才回 idle 并恢复唤醒，
+     * 用户没新操作时不卡在红球上；2 秒内用户有新操作（代次已变）就不动，等新流程接管。
+     */
+    private fun setErrorState(ctx: Context, msg: String, mySeq: Int = genSeq) {
+        showFailureBubble(msg)
+        setState(ctx, OrbController.STATE_ERROR)
+        main.postDelayed({
+            if (mySeq == genSeq && state == OrbController.STATE_ERROR) {
+                setState(ctx, "idle")
+                WakeWordEngine.resume()
+            }
+        }, 2000)
+    }
+
     // ---------- 主流程：听 → 问 → 答 → 播 ----------
 
     private fun beginListening(ctx: Context, fromWake: Boolean, prefilledText: String?) {
@@ -218,8 +239,8 @@ object JarvisAgent {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
         ) {
             // S25：前台时悬浮球不存在，失败也要进对话面板。
-            showFailureBubble("麦克风没授权：打开 App 自检页，或去系统设置给 Jarvis 录音权限")
-            setState(ctx, "idle")
+            // 差距 6：麦克风没授权是配置错误，置 ERROR（红球 + 抖动），2 秒后自动回 idle。
+            setErrorState(ctx, "麦克风没授权：打开 App 自检页，或去系统设置给 Jarvis 录音权限")
             return
         }
         // 通话接线：通话中不新开收音轮次（在途的轮次由来电回调的 hardResetToIdle 停掉）。
@@ -239,13 +260,15 @@ object JarvisAgent {
             ctx,
             // L1：收音中途也给面板实时反馈（“正在听”气泡），每个新 partial 立即推一次，
             // 不节流；相同文字不重复推。定稿仍由 onFinal 经 onUserUtterance 推。
+            // 差距 17：partial 只走 onPartialText → HUD 字幕 PARTIAL 打字行（transient），
+            // 不再经 onUserText 进 addBubble（原来每变一次 partial 就多一行永久气泡 + 一条落盘历史）。
             onPartial = { txt ->
                 main.post {
                     if (mySeq != genSeq) return@post
                     val t = txt.trim()
                     if (t.isNotEmpty() && t != lastPartialShown) {
                         lastPartialShown = t
-                        onUserText?.invoke("🎤 $t")
+                        onPartialText?.invoke("🎤 $t")
                     }
                 }
             },
@@ -254,9 +277,9 @@ object JarvisAgent {
                 main.post {
                     if (mySeq != genSeq) return@post
                     // S25：前台时悬浮球不存在，失败也要进对话面板。
-                    showFailureBubble(if (fromWake) "没听清，继续待命" else "没听清：$msg")
-                    setState(ctx, "idle")
-                    WakeWordEngine.resume()
+                    // 差距 6：收音失败置 ERROR（离线识别模型文件缺失也走这里，见 OfflineAsrSession），
+                    // 2 秒后自动回 idle 并恢复唤醒。
+                    setErrorState(ctx, if (fromWake) "没听清，继续待命" else "没听清：$msg", mySeq)
                 }
             }
         )
@@ -371,6 +394,14 @@ object JarvisAgent {
                 }
                 com.jarvis.app.task.TaskLoop.run(
                     ctx, resume.taskText, isAlive = { mySeq == genSeq },
+                    // 差距 6、7：任务运行时置 working（与 thinking 区分，球转速另有一档），
+                    // 每步的 onProgress 叙述（“正在点按……”）既推状态也推气泡，不断线。
+                    onProgress = { prog ->
+                        if (mySeq == genSeq) {
+                            setState(ctx, OrbController.STATE_WORKING)
+                            OrbController.showBubble(prog)
+                        }
+                    },
                     onReply = { reply -> speakReply(ctx, mySeq, reply) },
                     resumeFrom = resume
                 )
@@ -442,7 +473,16 @@ object JarvisAgent {
         if (com.jarvis.app.task.TaskLoop.looksLikeTask(text)) {
             setState(ctx, "thinking")
             AuditLog.append(ctx, "任务路由", text, "命中多步任务句式，进任务循环")
-            com.jarvis.app.task.TaskLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
+            com.jarvis.app.task.TaskLoop.run(
+                ctx, text, isAlive = { mySeq == genSeq },
+                // 差距 6、7：同上，任务期逐步骤推 working 状态（见断点续跑那路的注释）。
+                onProgress = { prog ->
+                    if (mySeq == genSeq) {
+                        setState(ctx, OrbController.STATE_WORKING)
+                        OrbController.showBubble(prog)
+                    }
+                }
+            ) { reply ->
                 speakReply(ctx, mySeq, reply)
             }
             return
@@ -593,9 +633,8 @@ object JarvisAgent {
                     val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
                     if (!canFallback) {
                         // S25：前台时悬浮球不存在，失败也要进对话面板。
-                        showFailureBubble("出错了：$msg")
-                        setState(ctx, "idle")
-                        WakeWordEngine.resume()
+                        // 差距 6：网络报错置 ERROR（红球 + 抖动），2 秒后自动回 idle 并恢复唤醒。
+                        setErrorState(ctx, "出错了：$msg", mySeq)
                         return@post
                     }
                     // 云端失败 → 本地兜底：答出来就播，答不出再走原来的报错收尾
@@ -609,9 +648,8 @@ object JarvisAgent {
                             speakReply(ctx, mySeq, local)
                         } else {
                             // S25：前台时悬浮球不存在，失败也要进对话面板。
-                            showFailureBubble("出错了：$msg")
-                            setState(ctx, "idle")
-                            WakeWordEngine.resume()
+                            // 差距 6：本地兜底也失败，同样置 ERROR。
+                            setErrorState(ctx, "出错了：$msg", mySeq)
                         }
                     }
                 }
@@ -779,6 +817,9 @@ object JarvisAgent {
         }
         // 真机反馈（jk-v11）：改走 TtsRouter——Edge 失败自动落系统 TTS，不再哑火；
         // 此前这里把 EdgeTts 的 onDone(false) 直接忽略，网络不通时连失败都看不见。
+        // 差距 16：非流式回复也句级跟念——给 TtsRouter.speak 传 onSentence，每句开播
+        // 回调 showBubble（流式主路径 StreamSpeakSession.onStreamDone 同款）；系统 TTS
+        // 兜底时无句级回调（TtsRouter 注释自认），只修 Edge 路径。
         TtsRouter.speak(
             ctx, text,
             onStart = {
@@ -788,6 +829,7 @@ object JarvisAgent {
                     if (JarvisPrefs.isBargeInEnabled(ctx)) startBargeInWatch(ctx, mySeq) { text }
                 }
             },
+            onSentence = { sentence -> main.post { OrbController.showBubble(sentence) } },
             onDone = { ok ->
                 // M11：取消/打断（代次已变）不记“TTS 全部通道失败”审计，只有真正播报失败才记。
                 if (!ok && mySeq == genSeq) AuditLog.append(ctx, "语音播报", "TTS 全部通道失败", text.take(40))

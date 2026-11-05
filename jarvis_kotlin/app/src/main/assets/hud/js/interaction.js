@@ -1,7 +1,7 @@
 'use strict';
 /* ---------------- interaction ---------------- */
 const sub = $('#subtitle'), stateText = $('#stateText'), badge = $('#badge'), input = $('#cmd');
-const STATE_LABEL = { idle: '待命中', listening: '正在聆听…', thinking: '思考中…', speaking: '正在回答', boot: '启动中…' };
+const STATE_LABEL = { idle: '待命中', listening: '正在聆听…', thinking: '思考中…', speaking: '正在回答', working: '任务执行中…', error: '出错了', boot: '启动中…' };
 let closeT = null;
 function openTalk() { clearTimeout(closeT); document.body.classList.add('talk'); }
 function scheduleClose(ms = 6000) { clearTimeout(closeT); closeT = setTimeout(() => { if (state === 'idle' && document.activeElement !== input && !input.value && !(approvalBox && approvalBox.isConnected)) document.body.classList.remove('talk'); }, ms); }
@@ -17,5 +17,5 @@ function sleepUI(ms = 15000) {                 /* back to the starfield once the
 }
 addEventListener('keydown', e => { if (!e.metaKey && !e.ctrlKey && document.body.classList.contains('dormant')) { dormHold = false; wakeUI(); sleepUI(30000); } }, true);
 addEventListener('pointerdown', () => { if (document.body.classList.contains('dormant')) { dormHold = false; wakeUI(); sleepUI(30000); window.__hudJustWoke = true; } }, true);
-function setState(s) { if (s !== 'idle' && typeof window.dqHide === 'function') window.dqHide(); if (dormAsked && s !== 'speaking' && s !== 'thinking') dormNow(); if (s === 'listening' || s === 'thinking' || s === 'speaking') wakeUI(); else if (s === 'idle' && !document.body.classList.contains('dormant')) sleepUI(); state = s; document.body.dataset.state = s; stateText.textContent = STATE_LABEL[s]; badge.textContent = s === 'listening' ? 'LISTENING' : 'THINKING'; if (s === 'listening' || s === 'thinking' || s === 'speaking') openTalk(); else if (s === 'idle') scheduleClose(); }
+function setState(s) { if (s !== 'idle' && typeof window.dqHide === 'function') window.dqHide(); if (dormAsked && s !== 'speaking' && s !== 'thinking' && s !== 'working') dormNow(); if (s === 'listening' || s === 'thinking' || s === 'speaking' || s === 'working') wakeUI(); else if (s === 'idle' && !document.body.classList.contains('dormant')) sleepUI(); state = s; document.body.dataset.state = s; stateText.textContent = STATE_LABEL[s] || s; badge.textContent = s === 'listening' ? 'LISTENING' : 'THINKING'; if (s === 'listening' || s === 'thinking' || s === 'speaking' || s === 'working') openTalk(); else if (s === 'idle') scheduleClose(); }
 let typeTimer = null;

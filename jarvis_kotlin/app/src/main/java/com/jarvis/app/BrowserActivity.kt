@@ -136,6 +136,26 @@ class BrowserActivity : Activity() {
         if (url.isNotEmpty()) webView.loadUrl(url)
     }
 
+    // 可见性规则 6a：内置浏览器算 Jarvis 自家界面，球不出现——MainActivity.onPause
+    // 先跑、会把球放出来，这里 onResume 再把它藏回去；onPause 置 false（OrbController
+    // 内有 600ms 防抖，权限弹窗/通知栏下拉这类短暂切走不闪球）。
+    override fun onResume() {
+        super.onResume()
+        // 可见性规则 6c：分屏/小窗时另一半是其他 App 的页面，球要出现；全屏才藏球。
+        OrbController.setAppForeground(!isInMultiWindowMode)
+    }
+
+    override fun onPause() {
+        OrbController.setAppForeground(false)
+        super.onPause()
+    }
+
+    /** 可见性规则 6c：前台分屏/小窗状态变化时重算球的门控。 */
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode)
+        OrbController.setAppForeground(!isInMultiWindowMode)
+    }
+
     override fun onBackPressed() {
         if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
