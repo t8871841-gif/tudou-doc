@@ -48,8 +48,16 @@ object WakeWord {
     /** How often the supervisor reconsiders. Also the worst-case wake latency added. */
     private const val POLL_MS = 100L
 
-    /** Backoff when the device refuses the microphone (another app holds it). */
-    private const val RETRY_MS = 2_000L
+    /**
+     * L3: permanent mic failure (permission denied / init failed) backoff —
+     * same 60 s the old polling loop (4e16b61 `wakeTick`) waited before
+     * retrying. `mic.start()` returning false means the device refused the
+     * microphone, which will not heal in 2 s; retrying every 2 s spun
+     * the supervisor thread on a dead mic. Transient "mic busy" is not told
+     * apart here — `start()` returns only a Boolean — so every open failure
+     * takes the long backoff.
+     */
+    private const val PERMANENT_RETRY_MS = 60_000L
 
     /** One wake per this long, so a doubled phrase can't start two turns. */
     private const val REFRACTORY_MS = 2_500L
@@ -68,14 +76,33 @@ object WakeWord {
 
     @Volatile private var lastWakeAt = 0L
 
+    /** L3: earliest uptime (ms) a failed mic open may be retried; 0 = no backoff active. */
+    @Volatile private var nextRetryAt = 0L
+
+    /** L3: the current permanent-failure episode has already been reported once. */
+    @Volatile private var micErrorNoted = false
+
+    /**
+     * L3: one-shot listener for a permanent mic failure, set via [init].
+     * Invoked on the supervisor thread (like [onWake]); the caller must post
+     * to the main thread before touching UI or agent state. Null = log only.
+     */
+    private var onMicError: ((String) -> Unit)? = null
+
     private var thread: Thread? = null
     private val mic = WakeMic { pcm, n -> segmenter.feed(pcm, n) }
     private val segmenter = VoiceSegmenter { seg -> onSegment(seg) }
 
-    fun init(context: Context, gate: () -> Boolean, onWake: () -> Unit) {
+    fun init(
+        context: Context,
+        gate: () -> Boolean,
+        onWake: () -> Unit,
+        onMicError: ((String) -> Unit)? = null,
+    ) {
         this.appContext = context.applicationContext
         this.gate = gate
         this.onWake = onWake
+        this.onMicError = onMicError
     }
 
     fun enrolled(): Boolean {
@@ -102,6 +129,9 @@ object WakeWord {
 
     fun stop() {
         running = false
+        // L3: a fresh start() after stop() is a new episode — it may notify again.
+        nextRetryAt = 0L
+        micErrorNoted = false
         val t = thread
         thread = null
         mic.stop()
@@ -159,8 +189,33 @@ object WakeWord {
         val want = !paused && enrolled() && runCatching { gate() }.getOrDefault(false)
         if (want) {
             if (!mic.isOpen()) {
+                // L3: permanent open failure (mic refused / init failed) backs
+                // off 60 s before the next attempt — the old polling loop's
+                // 60_000 + notify-once (4e16b61 wakeTick). While backing off
+                // the loop just re-polls every POLL_MS; no 2 s spin, no retry.
+                val now = SystemClock.uptimeMillis()
+                if (now < nextRetryAt) return
                 segmenter.reset()
-                if (!mic.start()) Thread.sleep(RETRY_MS)
+                if (!mic.start()) {
+                    nextRetryAt = now + PERMANENT_RETRY_MS
+                    if (!micErrorNoted) {
+                        micErrorNoted = true
+                        val reason = mic.lastStartError ?: "未知原因"
+                        val listener = onMicError
+                        if (listener != null) {
+                            runCatching { listener("唤醒监听停了：麦克风打不开（$reason），60 秒后重试") }
+                                .onFailure { Log.w(TAG, "onMicError failed", it) }
+                        } else {
+                            Log.w(TAG, "wake mic failed to open ($reason); retrying in 60s")
+                        }
+                    }
+                } else {
+                    // Mic opened again: this failure episode is over; a later
+                    // failure notifies once again (old loop cleared its flag
+                    // when recognition produced a result).
+                    nextRetryAt = 0L
+                    micErrorNoted = false
+                }
             }
         } else if (mic.isOpen()) {
             mic.stop()

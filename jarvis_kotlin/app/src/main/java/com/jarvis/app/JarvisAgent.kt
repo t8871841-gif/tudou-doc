@@ -16,12 +16,14 @@ import com.jarvis.app.command.PendingClarification
 import com.jarvis.app.data.WeatherTool
 import com.jarvis.app.local.LocalLlm
 import com.jarvis.app.memory.MemoryService
+import com.jarvis.app.net.AutoGLMClient
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.net.ChatRouter
 import com.jarvis.app.skill.SkillItem
 import com.jarvis.app.skill.SkillRunner
 import com.jarvis.app.skill.SkillResumeState
 import com.jarvis.app.skill.SkillService
+import com.jarvis.app.tts.EdgeTts
 import com.jarvis.app.tts.TtsRouter
 import com.jarvis.app.vision.ScreenVisionAgent
 import kotlinx.coroutines.CoroutineScope
@@ -130,9 +132,11 @@ object JarvisAgent {
         // 唤醒词（移植自 Andee wake/）：轻量 MFCC+DTW 关键词检测，替代旧的离线识别轮询。
         // onWake 在 WakeWord 监督线程回调，先 main.post 再碰 agent 状态。
         WakeWordEngine.init(app)
-        WakeWordEngine.start {
-            main.post { beginListening(app, fromWake = true, prefilledText = null) }
-        }
+        // L3：onMicError 是麦克风永久故障的一次性提示（60 秒退避），回调跑在监督线程，先 main.post 再碰 UI。
+        WakeWordEngine.start(
+            onWake = { main.post { beginListening(app, fromWake = true, prefilledText = null) } },
+            onMicError = { msg -> main.post { showFailureBubble(msg) } },
+        )
     }
 
     /** 悬浮球短按兜底 launchApp("assist") / 磁贴 / 数字助理入口都会走到这里：等价于"再按一次球"。 */
@@ -176,6 +180,7 @@ object JarvisAgent {
     private fun hardResetToIdle(ctx: Context) {
         genSeq++
         CustomClient.cancelInFlight()
+        AutoGLMClient.cancelInFlight() // C7：任务大脑在飞的请求一并取消（与 CustomClient 同款接线）
         TtsRouter.stop()
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
@@ -228,6 +233,8 @@ object JarvisAgent {
             onUserUtterance(ctx, mySeq, prefilledText)
             return
         }
+        // L8：开麦提示音（上行五度），只在真正开麦时响一次（prefilled 直走 onUserUtterance 的不经过这里）。
+        TtsRouter.playEarcon(EdgeTts.EarconKind.LISTENING)
         OfflineAsrSession.listenOnce(
             ctx,
             // L1：收音中途也给面板实时反馈（“正在听”气泡），每个新 partial 立即推一次，
@@ -545,6 +552,8 @@ object JarvisAgent {
     }
 
     private fun askCustom(ctx: Context, mySeq: Int, text: String, memoryContext: String, localTried: Boolean) {
+        // L8：思考提示音（下行四度），模型开始想时响一次。
+        TtsRouter.playEarcon(EdgeTts.EarconKind.THINKING)
         // 流式对话：GLM 边吐字边念，第一句完整出来立刻开念，不用等整段回完。
         // onToken/onDone 跑在 OkHttp 线程上，进会话的方法里自己不碰主线程的东西
         // （气泡/TTS/状态都在 TtsRouter 回调里回主线程）；onFinish 在主线程收尾。

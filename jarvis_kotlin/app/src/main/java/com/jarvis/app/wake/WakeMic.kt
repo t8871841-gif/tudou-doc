@@ -40,15 +40,28 @@ class WakeMic(private val onPcm: (ShortArray, Int) -> Unit) {
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
 
+    /**
+     * L3: why the latest [start] failed, for the one-shot mic-error notice
+     * ("麦克风权限被拒" / "麦克风初始化失败" / "录音启动失败" / "无可用麦克风").
+     * Null when the mic is open or has never failed to open.
+     */
+    @Volatile
+    var lastStartError: String? = null
+        private set
+
     fun isOpen(): Boolean = running.get()
 
     /** False if the device refused the microphone — caller should back off and retry. */
     fun start(): Boolean {
         if (running.get()) return true
+        lastStartError = null
         val minBuf = AudioRecord.getMinBufferSize(
             Mfcc.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
         )
-        if (minBuf <= 0) return false
+        if (minBuf <= 0) {
+            lastStartError = "无可用麦克风"
+            return false
+        }
         // VOICE_RECOGNITION for the same reason the ASR path uses it: the
         // platform's own noise suppression and AGC, without the audiofx
         // attachments that stalled the HAL on this hardware.
@@ -63,10 +76,12 @@ class WakeMic(private val onPcm: (ShortArray, Int) -> Unit) {
             )
         } catch (t: Throwable) {
             Log.w(TAG, "AudioRecord ctor failed", t)
+            lastStartError = if (t is SecurityException) "麦克风权限被拒" else "麦克风初始化失败"
             return false
         }
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
             rec.release()
+            lastStartError = "麦克风初始化失败"
             return false
         }
         running.set(true)
@@ -102,6 +117,7 @@ class WakeMic(private val onPcm: (ShortArray, Int) -> Unit) {
             true
         } catch (t: Throwable) {
             Log.w(TAG, "startRecording failed", t)
+            lastStartError = if (t is SecurityException) "麦克风权限被拒" else "录音启动失败"
             running.set(false)
             runCatching { rec.release() }
             false

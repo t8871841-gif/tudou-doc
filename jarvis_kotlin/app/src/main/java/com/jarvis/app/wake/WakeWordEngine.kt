@@ -53,7 +53,8 @@ import com.jarvis.app.device.CallState
  * thread. The caller must post to the main thread before touching agent
  * state (e.g. `main.post { beginListening(...) }`). The mic is already
  * closed and the segmenter reset before [onWake] fires, so the ASR path can
- * open its recorder immediately.
+ * open its recorder immediately. The same thread rule holds for the
+ * `onMicError` callback passed to [start].
  *
  * ## Refractory
  *
@@ -83,15 +84,22 @@ object WakeWordEngine {
      *
      * Does nothing until `init()` has run. If no wake phrase is enrolled yet
      * the supervisor idles without ever opening the microphone.
+     *
+     * L3: [onMicError] is the one-shot notice for a permanent mic failure
+     * (permission denied / init failed — the supervisor then backs off 60 s
+     * before retrying). It runs on the WakeWord supervisor thread, like
+     * [onWake]: post to the main thread before touching UI or agent state
+     * (e.g. `main.post { showFailureBubble(msg) }`). Null = log only.
+     * Wired in `JarvisAgent.start()`.
      */
-    fun start(onWake: () -> Unit) {
+    fun start(onWake: () -> Unit, onMicError: ((String) -> Unit)? = null) {
         val ctx = appContext ?: return
         if (started) {
-            WakeWord.init(ctx, ::gate, onWake)
+            WakeWord.init(ctx, ::gate, onWake, onMicError)
             WakeWord.resume()
             return
         }
-        WakeWord.init(ctx, ::gate, onWake)
+        WakeWord.init(ctx, ::gate, onWake, onMicError)
         WakeWord.start()
         started = true
     }

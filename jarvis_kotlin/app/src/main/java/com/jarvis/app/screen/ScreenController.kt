@@ -1046,6 +1046,8 @@ class ScreenController(
     fun swipeNorm(
         nx1: Int, ny1: Int, nx2: Int, ny2: Int,
         durationMs: Long, fling: Boolean, screens: Int? = null,
+        // H6：交接步的滑动同样要把标志带给 swipe，否则前台校验会拦。
+        handover: Boolean = false,
     ): JSONObject {
         requireNorm(nx1, "x1"); requireNorm(ny1, "y1")
         requireNorm(nx2, "x2"); requireNorm(ny2, "y2")
@@ -1057,8 +1059,8 @@ class ScreenController(
         GroundingLog.noteSwipe(nx1, ny1, nx2, ny2, durationMs, actor = "brain")
         val px1 = nx1.toPixel(screenW); val py1 = ny1.toPixel(screenH)
         val px2 = nx2.toPixel(screenW); val py2 = ny2.toPixel(screenH)
-        if (screens != null) return swipeScreens(px1, py1, px2, py2, durationMs, screens)
-        return swipe(px1, py1, px2, py2, durationMs, fling)
+        if (screens != null) return swipeScreens(px1, py1, px2, py2, durationMs, screens, handover)
+        return swipe(px1, py1, px2, py2, durationMs, fling, handover = handover)
     }
 
     /**
@@ -1078,7 +1080,7 @@ class ScreenController(
      * half of it — a list that has nowhere left to go says so instead of
      * swallowing the gesture.
      */
-    private fun swipeScreens(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long, screens: Int): JSONObject {
+    private fun swipeScreens(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long, screens: Int, handover: Boolean = false): JSONObject {
         // L11：时长在这里钳制一次（每段 swipe 内部还会按同一区间钳制，结果一致），
         // 实际用的时长与原值一起返回，不静默。
         val dur = durationMs.coerceIn(SWIPE_DURATION_MIN_MS, SWIPE_DURATION_MAX_MS)
@@ -1088,7 +1090,7 @@ class ScreenController(
         for (i in 0 until n) {
             val before = screenFingerprint()
             val beforePx = if (before.optBoolean("blind")) pixelSignature() else null
-            swipe(x1, y1, x2, y2, durationMs, fling = false)
+            swipe(x1, y1, x2, y2, durationMs, fling = false, handover = handover)
             try { Thread.sleep(SCREEN_SETTLE_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
             val after = screenFingerprint()
             var changed = before.optString("pkg") != after.optString("pkg") ||
@@ -1434,14 +1436,16 @@ class ScreenController(
      * 没有可点祖先就直说。index 超出会直说（“只找到 N 个，第 M 个不存在”），
      * 不点别的元素。
      */
-    fun tapBySelector(sel: JSONObject, index: Int): JSONObject =
-        tapSelector(sel, index, hold = false, durationMs = 0)
+    // H6：交接步（分享面板/外部链接/权限弹窗后在另一应用上点）把标志带进来，
+    // 否则 tapSelector 里 requireForeground() 会以前台包不对把手势拦住。
+    fun tapBySelector(sel: JSONObject, index: Int, handover: Boolean = false): JSONObject =
+        tapSelector(sel, index, hold = false, durationMs = 0, handover = handover)
 
-    fun longPressBySelector(sel: JSONObject, index: Int, durationMs: Long): JSONObject =
-        tapSelector(sel, index, hold = true, durationMs = durationMs)
+    fun longPressBySelector(sel: JSONObject, index: Int, durationMs: Long, handover: Boolean = false): JSONObject =
+        tapSelector(sel, index, hold = true, durationMs = durationMs, handover = handover)
 
-    private fun tapSelector(sel: JSONObject, index: Int, hold: Boolean, durationMs: Long): JSONObject {
-        requireForeground()
+    private fun tapSelector(sel: JSONObject, index: Int, hold: Boolean, durationMs: Long, handover: Boolean = false): JSONObject {
+        requireForeground(handover = handover)
         val found = selectNodes(sel)
         val nodes = found.nodes
         // M33: 预算耗尽时结果是截断的，按索引点可能点到“第 N 个”之外的元素——拒绝。

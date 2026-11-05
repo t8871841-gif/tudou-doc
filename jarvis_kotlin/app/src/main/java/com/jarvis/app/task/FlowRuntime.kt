@@ -212,6 +212,9 @@ object FlowRuntime {
         }
 
         // ---------- 变异动作：走 TaskLoop.execute 的既有映射 ----------
+        // H6：流内步的 "handover":true（如点开分享面板/外部链接后，在另一应用
+        // 上的那步）不用这里另处理——step 原样交给 TaskLoop.execute，那里读
+        // 字段并透传给 requireForeground；这里只负责把步 JSON 原样递过去。
         val result = TaskLoop.execute(ctx, controller, step)
         // 动作跑完才发现已过时限：这一步的效果没来得及验证，标 outcomeUnknown，
         // 绝不把“不知道成没成”说成成功。

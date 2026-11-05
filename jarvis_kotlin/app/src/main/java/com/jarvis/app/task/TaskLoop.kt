@@ -970,6 +970,11 @@ internal fun executeInner(
 ctx: Context, controller: ScreenController, action: JSONObject
 ): StepResult {
 val kind = action.optString("action")
+// H6：交接步骤——动作 JSON 带 "handover":true 时，这一步是在已跳到另一应用的
+// 界面上做的（点开分享面板/外部链接/权限弹窗之后，前台自然不是原应用），
+// 把标志透传给 ScreenController，让 requireForeground 放行这一步。
+// 缺省 false：其余步骤照旧校验，不撒网。流里的步同样走这里，字段原样透传。
+val handover = action.optBoolean("handover", false)
 return try {
 when (kind) {
 "tap", "longPress" -> {
@@ -981,23 +986,23 @@ val ms = action.optLong("ms", 700)
 val result = try {
 when {
 eid.isNotEmpty() ->
-if (kind == "tap") controller.tapByEid(eid)
-else controller.longPressByEid(eid, ms)
+if (kind == "tap") controller.tapByEid(eid, handover = handover)
+else controller.longPressByEid(eid, ms, handover = handover)
 action.has("sel") -> {
 val sel = action.optJSONObject("sel")
 ?: return StepResult("$kind 的 sel 不是对象", false, null, null, "PARSE_ERROR")
 val index = action.optInt("index", 0)
-if (kind == "tap") controller.tapBySelector(sel, index)
-else controller.longPressBySelector(sel, index, ms)
+if (kind == "tap") controller.tapBySelector(sel, index, handover = handover)
+else controller.longPressBySelector(sel, index, ms, handover = handover)
 }
 cell!= null ->
-if (kind == "tap") controller.tapAim(on, null, null, cell, part)
-else controller.longPressAim(on, null, null, cell, part, ms)
+if (kind == "tap") controller.tapAim(on, null, null, cell, part, handover = handover)
+else controller.longPressAim(on, null, null, cell, part, ms, handover = handover)
 action.has("x") && action.has("y") -> {
 val x = action.optInt("x", -1)
 val y = action.optInt("y", -1)
-if (kind == "tap") controller.tapAim(on, x, y, null, part)
-else controller.longPressAim(on, x, y, null, null, ms)
+if (kind == "tap") controller.tapAim(on, x, y, null, part, handover = handover)
+else controller.longPressAim(on, x, y, null, null, ms, handover = handover)
 }
 else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null, null, "PARSE_ERROR")
 }
@@ -1030,7 +1035,7 @@ null
 // 表达不出 on="zoom"，等它重试只会再被拒一次，空转到 MAX_REPEATS。
 // zoom→点在同一步内原子完成，中间没有模型往返，zoom 不会过期。
 // 成了就当这一步成功；没成就回落到原有行为，把 zoom 图交给模型。
-val autoTap = runCatching { controller.tapAim("zoom", 500, 500, null, null) }.getOrNull()
+val autoTap = runCatching { controller.tapAim("zoom", 500, 500, null, null, handover = handover) }.getOrNull()
 if (autoTap != null) {
 val autoResult = markTimeoutUnknown("tap", autoTap, summarize("tap", autoTap))
 if (autoResult.ok) {
@@ -1051,7 +1056,7 @@ null
 val result = controller.swipeNorm(
 action.optInt("x1", 500), action.optInt("y1", 700),
 action.optInt("x2", 500), action.optInt("y2", 300),
-durationMs = 350, fling = false, screens = screens
+durationMs = 350, fling = false, screens = screens, handover = handover
 )
 markTimeoutUnknown(kind, result, summarize(kind, result))
 }
@@ -1059,7 +1064,7 @@ markTimeoutUnknown(kind, result, summarize(kind, result))
 val text = action.optString("text")
 if (text.isEmpty()) return StepResult("type 动作没有文字", false, null, null, "PARSE_ERROR")
 // M6：type 也包 markTimeoutUnknown，超时标“结果未知”，别让模型原样重发一遍。
-val rawType = controller.typeText(text, null)
+val rawType = controller.typeText(text, null, handover = handover)
 markTimeoutUnknown(kind, rawType, summarize(kind, rawType))
 }
 "submit" -> {
@@ -1221,7 +1226,7 @@ StepResult(summary, s.found, null, null, if (s.found) "" else "ELEMENT_NOT_FOUND
 val sel = action.optJSONObject("sel")
 ?: return StepResult("tap_sel 缺少 sel", false, null, null, "PARSE_ERROR")
 val index = action.optInt("index", 0)
-val raw = controller.tapBySelector(sel, index)
+val raw = controller.tapBySelector(sel, index, handover = handover)
 markTimeoutUnknown(kind, raw, summarize(kind, raw))
 }
 "find" -> {
@@ -1400,6 +1405,7 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"tap\",\"eid\":\"s3f9a2\"} 点紧凑表里的稳定编号（最优先、最稳；e 数字编号也认，但只对当轮有效）；" +
 "或 {\"action\":\"tap\",\"x\":540,\"y\":1200} 按 0-1000 相对坐标点你刚看到的全屏截图；" +
 "或 {\"action\":\"tap\",\"cell\":\"D7\",\"part\":\"tr\"} 按截图上的网格格号点（part 是格内九宫格部位，可省略）。" +
+"若这一步是在已跳到另一应用的界面上点的（点开分享面板/外部链接/权限弹窗之后，前台已不是原应用），加 \"handover\":true，否则前台校验会拦住；流里的交接步同样加这个字段。" +
 "{\"action\":\"longPress\",\"eid\":\"s3f9a2\"} 长按稳定编号，可加 \"ms\":800。" +
 "{\"action\":\"find\",\"sel\":{\"textContains\":\"发送\"}} 按条件找元素（text/textContains/description/descriptionContains/viewId/className/packageName/clickable/editable/enabled/visible 可组合，都满足才算中；默认不区分大小写），回前 10 个的稳定编号、类型、文字和中心坐标，外加总数；一个都找不到会直说。" +
 "{\"action\":\"tap\",\"sel\":{\"textContains\":\"发送\"},\"index\":0} 按选择器点第 N 个匹配（index 缺省 0；只找到 N 个、要第 M 个不存在会直说）；点之前会先爬到最近的可点父节点。选择器是兜底：有稳定编号的元素优先用 eid 点，编号没有或要在一堆同名元素里挑时才用 sel。" +

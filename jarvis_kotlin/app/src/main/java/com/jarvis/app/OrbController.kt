@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -298,8 +299,11 @@ object OrbController {
     fun setVisibleForCapture(visible: Boolean) {
         val v = orb
         if (!visible) {
-            // 主线程调用时只隐藏不等帧；后台线程才走闩锁等帧（见上方注释）。
+            // L26：主线程上等不了帧——帧回调（postOnAnimation）要在主线程跑，主线程
+            // await() 它会死锁；这里只能先隐藏不等帧。主线程的截图调用方必须走
+            // hideForCapture{}（隐藏→下一帧回调里继续截图），不要调这个同步版。
             if (Looper.myLooper() == Looper.getMainLooper()) {
+                Log.w("OrbController", "setVisibleForCapture(false) on main thread: orb hidden without waiting a frame; main-thread screenshot callers must use hideForCapture{}")
                 captureHidden = true
                 applyVisibility()
                 return
@@ -327,6 +331,24 @@ object OrbController {
         } else {
             main.post { captureHidden = false; applyVisibility() }
         }
+    }
+
+    /**
+     * L26：主线程可用的“隐藏→等一帧”异步链。同步版 [setVisibleForCapture] 在主线程
+     * 上等不了帧（帧回调要主线程跑，主线程 await() 它会死锁），所以主线程的截图调用方
+     * 走这里：先隐藏，下一帧回调里再继续截图；后台线程复用同步版的闩锁等帧，回调里
+     * 继续。orb 为空时无帧可等，标志位写完直接继续。恢复显示不需要等帧，仍走同步版。
+     */
+    fun hideForCapture(onHidden: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            val v = orb
+            captureHidden = true
+            applyVisibility()
+            if (v == null) onHidden() else v.postOnAnimation { onHidden() }
+            return
+        }
+        setVisibleForCapture(false)
+        onHidden()
     }
 
     /** C13：跨应用任务期球沉底沿（不隐藏，留半个球可见、可点；任务结束回原位）。 */
