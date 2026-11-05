@@ -302,7 +302,9 @@ object LocalCommands {
      * 全屏后截图里只有目标应用、没有背后的 Jarvis 界面，看图模型干扰少、任务量小。
      * setLaunchWindowingMode 是 @hide 接口（公开 SDK 里没有，直接调编译不过，
      * jk-v61 首版就因此构建失败），只能反射调；WINDOWING_MODE_FULLSCREEN 的值是 1。
-     * 反射在部分系统上也被拦，失败就回落到普通启动，不让一次启动失败整个任务。 */
+     * 反射在部分系统上也被拦，失败就回落到普通启动，不让一次启动失败整个任务。
+     * 成败都写审计日志：反射失败时审计里能看到“回落普通启动”，
+     * 便于区分“没装 jk-v61”和“装了但系统拦了反射”两种情况。 */
     fun startActivityFullscreen(ctx: Context, intent: Intent) {
         try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
@@ -312,10 +314,12 @@ object LocalCommands {
                 )
                 m.invoke(opts, 1) // WindowConfiguration.WINDOWING_MODE_FULLSCREEN
                 ctx.startActivity(intent, opts.toBundle())
+                AuditLog.append(ctx, "本地指令", "全屏启动", "已请求全屏窗口")
                 return
             }
-        } catch (_: Exception) {
-            // 反射失败，回落到普通启动
+        } catch (e: Exception) {
+            // 反射失败，回落到普通启动；写审计，免得小窗出现时查不到原因
+            AuditLog.append(ctx, "本地指令", "全屏启动", "反射失败，已回落普通启动：${e.javaClass.simpleName}")
         }
         try {
             ctx.startActivity(intent)
