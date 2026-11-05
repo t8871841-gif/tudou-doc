@@ -21,9 +21,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <!-- 阶段 1：Termux RUN_COMMAND 权限（跑 Python/Node 用）。这是 Termux 自定义的权限，
-         须在 Manifest 声明 + Termux 侧授权（allow-external-apps=true 后首次使用时授权）。 -->
-    <uses-permission android:name="com.termux.permission.RUN_COMMAND"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
@@ -71,10 +68,6 @@
             android:name=".CaptureForegroundService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"/>
-        <!-- 阶段 1：接收 Termux RUN_COMMAND 的 PendingIntent 结果，只接本应用的回调。 -->
-        <service
-            android:name=".task.TermuxResultService"
-            android:exported="false"/>
         <service
             android:name=".JarvisNotificationListener"
             android:label="Jarvis 通知读取"

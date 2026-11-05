@@ -128,7 +128,6 @@ object JarvisAgent {
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
         com.jarvis.app.task.TaskLoop.cancelInFlight() // 批九：跨应用任务循环一并急停
-        com.jarvis.app.task.CodeLoop.cancelInFlight() // 阶段 0：编码循环一并急停
         com.jarvis.app.task.TripLoop.cancelInFlight() // 行程规划阶段 0：规划循环一并急停
         TakeoverBorder.hide()
         setState(ctx, "idle")
@@ -260,33 +259,21 @@ object JarvisAgent {
         // 不再掉进大模型被学舌反问（jk-v12 真机反馈）。注意：speak 必须显式传参，
         // 不能写尾随 lambda——尾随 lambda 会被当成最后一个参数 runJs，导致 speak 缺失。
         if (LocalCommands.tryHandle(ctx, text, speak = { reply -> speakReply(ctx, mySeq, reply) }, runJs = onRunHudJs)) return
-        // 阶段 0（2026-11-05）：写代码任务进编码循环（CodeLoop），不走跨应用任务循环。
-        // 编码走 glm-4.5（聊天模型通道），动作是读写文件，不是点按屏幕。
-        // 放在 TaskLoop 之前：写代码的句式不该被当成跨应用任务。
-        if (com.jarvis.app.task.CodeLoop.looksLikeCodeTask(text)) {
-            setState(ctx, "thinking")
-            AuditLog.append(ctx, "任务路由", text, "命中写代码句式，进编码循环")
-            com.jarvis.app.task.CodeLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
-                speakReply(ctx, mySeq, reply)
-            }
-            return
-        }
         // 行程规划阶段 0（2026-11-05）：行程规划任务进规划循环（TripLoop），不走跨应用任务循环。
         // 规划走 glm-4.5（聊天模型通道），动作是问清信息、出按天排的行程，不是点按屏幕。
-        // 放在 CodeLoop 之后、TaskLoop 之前：行程句式不该被当成跨应用任务；
-        // 待问问题未答时，下一句（非任务、非写代码）也当成回答接着排。
+        // 放在 TaskLoop 之前：行程句式不该被当成跨应用任务；
+        // 待问问题未答时，下一句（非任务）也当成回答接着排。
         // 阶段 2（2026-11-05）：改行程 / 看行程也进 TripLoop（只改已存行程的指定部分、
-        // 或读最新存档）。改行程句式带任务/写代码排除：跨应用任务里也可能出现
+        // 或读最新存档）。改行程句式带任务排除：跨应用任务里也可能出现
         // “第二天改…”（如“在微信上给桑田发信息：第二天改去华山吃饭”），那句必须
         // 归 TaskLoop，不能被改行程抢走。
-        val notTaskOrCode = !com.jarvis.app.task.TaskLoop.looksLikeTask(text) &&
-            !com.jarvis.app.task.CodeLoop.looksLikeCodeTask(text)
+        val notTask = !com.jarvis.app.task.TaskLoop.looksLikeTask(text)
         val tripHit = com.jarvis.app.task.TripLoop.looksLikeTripTask(text) ||
             (com.jarvis.app.task.TripLoop.looksLikeTripRevision(text) &&
-                com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTaskOrCode) ||
+                com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTask) ||
             (com.jarvis.app.task.TripLoop.looksLikeTripView(text) &&
-                com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTaskOrCode) ||
-            (com.jarvis.app.task.TripLoop.hasPendingQuestion(ctx) && notTaskOrCode)
+                com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTask) ||
+            (com.jarvis.app.task.TripLoop.hasPendingQuestion(ctx) && notTask)
         if (tripHit) {
             setState(ctx, "thinking")
             AuditLog.append(ctx, "任务路由", text, "命中行程规划句式，进规划循环")

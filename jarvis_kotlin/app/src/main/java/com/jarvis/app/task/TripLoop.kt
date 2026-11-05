@@ -98,7 +98,7 @@ object TripLoop {
         }
     }
 
-    /** 急停：自增序号，正在跑的循环下一步检查时自行中止（与 CodeLoop 同款）。 */
+    /** 急停：自增序号，正在跑的循环下一步检查时自行中止（与 TaskLoop 同款）。 */
     fun cancelInFlight() {
         runSeq.incrementAndGet()
     }
@@ -363,7 +363,7 @@ object TripLoop {
         }
     }
 
-    // ---------- 问模型（阻塞式，等 CustomClient 回调；抄 CodeLoop 的 askModel） ----------
+    // ---------- 问模型（阻塞式，等 CustomClient 回调） ----------
 
     /**
      * 问模型一次。429 限流时指数退避重试（2 秒起、翻倍、30 秒封顶，最多 3 次），
