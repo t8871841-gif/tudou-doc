@@ -128,6 +128,7 @@ object JarvisAgent {
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
         com.jarvis.app.task.TaskLoop.cancelInFlight() // 批九：跨应用任务循环一并急停
+        com.jarvis.app.task.CodeLoop.cancelInFlight() // 阶段 0：编码循环一并急停
         TakeoverBorder.hide()
         setState(ctx, "idle")
         maybeStartWakeLoop()
@@ -258,6 +259,17 @@ object JarvisAgent {
         // 不再掉进大模型被学舌反问（jk-v12 真机反馈）。注意：speak 必须显式传参，
         // 不能写尾随 lambda——尾随 lambda 会被当成最后一个参数 runJs，导致 speak 缺失。
         if (LocalCommands.tryHandle(ctx, text, speak = { reply -> speakReply(ctx, mySeq, reply) }, runJs = onRunHudJs)) return
+        // 阶段 0（2026-11-05）：写代码任务进编码循环（CodeLoop），不走跨应用任务循环。
+        // 编码走 glm-4.5（聊天模型通道），动作是读写文件，不是点按屏幕。
+        // 放在 TaskLoop 之前：写代码的句式不该被当成跨应用任务。
+        if (com.jarvis.app.task.CodeLoop.looksLikeCodeTask(text)) {
+            setState(ctx, "thinking")
+            AuditLog.append(ctx, "任务路由", text, "命中写代码句式，进编码循环")
+            com.jarvis.app.task.CodeLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
+                speakReply(ctx, mySeq, reply)
+            }
+            return
+        }
         // 批九：多步跨应用任务句式（「在微信上给桑田发信息：…」）进任务循环
         // （移植的 ScreenController + task/TaskLoop 步进驱动）。放在技能之后、
         // TAP_INTENT 之前：技能匹配在上层已对任务句式让行（见 submitText 处），
