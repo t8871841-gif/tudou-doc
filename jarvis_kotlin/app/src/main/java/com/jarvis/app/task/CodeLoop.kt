@@ -230,12 +230,43 @@ object CodeLoop {
     }
 
     /**
-     * 执行一个文件动作，返回给模型看的结果（"OK..." 或错误说明）。
-     * 动作：write_file / read_file / list_dir / edit_file。
+     * 执行一个动作，返回给模型看的结果（"OK..." 或错误说明）。
+     * 文件动作：write_file / read_file / list_dir / edit_file。
+     * 执行动作（阶段 1）：run_shell（Shizuku 跑 shell 命令）/
+     * run_python（Termux 跑 Python 代码，heredoc 传进去）/
+     * run_termux（Termux 跑任意 bash 脚本）。
      */
     private fun executeFileAction(ctx: Context, action: JSONObject): String {
         return try {
             when (val kind = action.optString("action")) {
+                "run_shell" -> {
+                    val command = action.optString("command")
+                    if (command.isBlank()) return "错误：run_shell 缺 command"
+                    blockedReason(command)?.let { return "错误：命令被安全规则拦下：$it" }
+                    if (!ShizukuHelper.isShizukuAvailable(ctx)) {
+                        return "错误：Shizuku 不可用（没装或服务没启动），run_shell 跑不了"
+                    }
+                    if (!ShizukuHelper.hasPermission()) {
+                        return "错误：没有 Shizuku 授权，请先在 Shizuku 里给 Jarvis 授权"
+                    }
+                    // Shizuku 的 runShell 内部把超时钳到 10 秒，shell 命令够用了。
+                    val r = ShizukuHelper.runShell(arrayOf("sh", "-c", command))
+                    formatExecResult(ctx, "run_shell", command, r.stdout, "", r.exitCode)
+                }
+                "run_python" -> {
+                    val code = action.optString("code")
+                    if (code.isBlank()) return "错误：run_python 缺 code"
+                    if (code.length > TermuxExecutor.MAX_SCRIPT_CHARS) {
+                        return "错误：代码超过 ${TermuxExecutor.MAX_SCRIPT_CHARS} 字，请拆小一点"
+                    }
+                    runTermuxPython(ctx, code)
+                }
+                "run_termux" -> {
+                    val script = action.optString("script")
+                    if (script.isBlank()) return "错误：run_termux 缺 script"
+                    blockedReason(script)?.let { return "错误：命令被安全规则拦下：$it" }
+                    runTermuxScript(ctx, script)
+                }
                 "write_file" -> {
                     val path = action.optString("path")
                     val content = action.optString("content")
@@ -293,11 +324,102 @@ object CodeLoop {
                     file.writeText(text.replace(search, replace))
                     "OK：已修改 $path（一处）"
                 }
-                else -> "错误：不认识的动作 $kind（可用：write_file / read_file / list_dir / edit_file / done / fail）"
+                else -> "错误：不认识的动作 $kind（可用：write_file / read_file / list_dir / edit_file / run_shell / run_python / run_termux / done / fail）"
             }
         } catch (e: Exception) {
             "错误：${e.message ?: e.javaClass.simpleName}"
         }
+    }
+
+    // ---------- 执行（阶段 1）：Shizuku shell + Termux Python ----------
+
+    /**
+     * 命令安全检查：拦下最危险的几类。返回拦下的原因，没拦下返回 null。
+     * 这是底线防护，不是万能——工作区白名单 + 审计日志是另外两道线。
+     */
+    private fun blockedReason(script: String): String? {
+        val s = script.lowercase()
+        // 删根目录 / 家目录
+        if (Regex("rm\\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\\s+(/|/\\*|~|\\$home)").containsMatchIn(s)) {
+            return "rm -rf 根目录/家目录"
+        }
+        // 管道进 shell（curl|sh、wget|bash 这类远程代码执行）
+        if (Regex("\\|\\s*(sh|bash|zsh|dash)\\b").containsMatchIn(s)) return "管道进 shell（| sh / | bash）"
+        // 格式化、清盘
+        if (s.contains("mkfs.") || Regex("dd\\s+.*if=/dev/zero").containsMatchIn(s)) return "格式化/清盘命令"
+        // fork 炸弹
+        if (s.contains(":(){") && s.contains(":|:&")) return "fork 炸弹"
+        return null
+    }
+
+    /** Termux 跑 Python 代码：heredoc 传进去，不用先写文件（省掉共享存储中转）。 */
+    private fun runTermuxPython(ctx: Context, code: String): String {
+        // heredoc 标记要足够特别，避免跟代码内容撞上。
+        val script = "python3 <<'PYEOF_JARVIS'\n$code\nPYEOF_JARVIS"
+        return runTermuxScript(ctx, script)
+    }
+
+    private fun runTermuxScript(ctx: Context, script: String): String {
+        if (!TermuxExecutor.isInstalled(ctx)) {
+            return "错误：Termux 没有安装，run_termux 跑不了"
+        }
+        if (!TermuxExecutor.hasPermission(ctx)) {
+            return "错误：没有 Termux RUN_COMMAND 权限（去 Termux 里开 allow-external-apps 并授权）"
+        }
+        return try {
+            val r = TermuxExecutor.runScript(ctx, script)
+            formatExecResult(ctx, "run_termux", script, r.stdout, r.stderr, r.exitCode, r.errorMessage)
+        } catch (e: Exception) {
+            "错误：Termux 执行失败：${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    /**
+     * 执行结果格式化（抄 OpenCode）：stdout/stderr/exitCode 三件套一次给全；
+     * 默认截断到 2000 行 / 50KB 给模型，全量输出落盘到工作区 runs/<时间戳>.log，
+     * 模型看到截断版 + 文件路径，可再读文件。成功但无输出时明确说出来，
+     * 别让模型误判为卡住。
+     */
+    private fun formatExecResult(
+        ctx: Context, kind: String, command: String,
+        stdout: String, stderr: String, exitCode: Int, errorMessage: String = "",
+    ): String {
+        val full = buildString {
+            append("命令：").append(command.take(500)).append('\n')
+            append("exitCode：").append(exitCode).append('\n')
+            if (errorMessage.isNotBlank()) append("Termux 错误：").append(errorMessage).append('\n')
+            append("--- stdout ---\n").append(stdout).append('\n')
+            if (stderr.isNotBlank()) append("--- stderr ---\n").append(stderr).append('\n')
+        }
+        // 全量落盘（工作区 runs/，模型可再读）。
+        val logPath = try {
+            val runsDir = File(workspaceDir(ctx), "runs").apply { mkdirs() }
+            val logFile = File(runsDir, "${System.currentTimeMillis()}.log")
+            logFile.writeText(full)
+            "runs/${logFile.name}"
+        } catch (_: Exception) {
+            ""
+        }
+        val truncated = truncateOutput(full)
+        val head = if (exitCode == 0) "OK：命令成功（exitCode 0）" else "命令退出码 $exitCode（非 0，失败）"
+        val emptyNote = if (stdout.isBlank() && stderr.isBlank()) "（成功且无输出）" else ""
+        val logNote = if (logPath.isNotEmpty()) "\n（完整输出已存 $logPath，可用 read_file 再读）" else ""
+        return "$head$emptyNote\n$truncated$logNote"
+    }
+
+    private fun truncateOutput(text: String): String {
+        val maxChars = 50_000
+        val maxLines = 2000
+        val lines = text.lines()
+        var out = if (lines.size > maxLines) {
+            lines.take(maxLines).joinToString("\n") + "\n（输出太长，已截断到前 $maxLines 行）"
+        } else {
+            text
+        }
+        if (out.length > maxChars) {
+            out = out.take(maxChars) + "\n（输出太长，已截断到前 50KB）"
+        }
+        return out
     }
 
     /** 找文件里与 SEARCH 最相似的一行（按共同子串长度），供 did-you-mean 回显。 */
@@ -333,11 +455,17 @@ object CodeLoop {
             "3. {\"action\":\"list_dir\",\"path\":\"相对路径或空\"}：列出目录内容（空表示工作区根目录）。\n" +
             "4. {\"action\":\"edit_file\",\"path\":\"相对路径\",\"search\":\"原文\",\"replace\":\"新文\"}：把文件里与 search 逐字一致的那一处换成 replace。" +
             "search 必须与文件内容逐字一致（包括缩进、空行），且只能匹配一处；不确定时先 read_file 看清楚再改。\n" +
-            "5. {\"action\":\"done\",\"message\":\"完成说明\"}：任务做完了。\n" +
-            "6. {\"action\":\"fail\",\"reason\":\"做不下去的原因\"}：任务做不下去。\n" +
+            "5. {\"action\":\"run_shell\",\"command\":\"shell 命令\"}：经 Shizuku 跑一条 shell 命令（如 ls、cat、sh 脚本），回 stdout + 退出码。\n" +
+            "6. {\"action\":\"run_python\",\"code\":\"Python 代码\"}：经 Termux 跑一段 Python 代码，回 stdout/stderr + 退出码。\n" +
+            "7. {\"action\":\"run_termux\",\"script\":\"bash 脚本\"}：经 Termux 跑任意 bash 脚本（如 pip install、node）。\n" +
+            "8. {\"action\":\"done\",\"message\":\"完成说明\"}：任务做完了。\n" +
+            "9. {\"action\":\"fail\",\"reason\":\"做不下去的原因\"}：任务做不下去。\n" +
             "规则：所有路径都是相对工作区 code-workspace/ 的相对路径，只能读写这里面的文件；" +
             "写代码前先 list_dir 看看工作区里有什么、再 read_file 看相关文件；" +
             "不要凭印象编造文件内容，没看过的文件先读；" +
-            "一次只改一处，改完读回来确认；做完了输出 done，做不下去输出 fail。"
+            "一次只改一处，改完读回来确认；" +
+            "写完代码要跑起来验证：先 run_python/run_termux 跑一遍，看输出和退出码，" +
+            "报错就按报错改、再跑，直到跑通或确认做不下去；" +
+            "做完了输出 done，做不下去输出 fail。"
     }
 }
