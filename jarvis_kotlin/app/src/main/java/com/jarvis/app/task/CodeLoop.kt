@@ -226,9 +226,10 @@ object CodeLoop {
                 onError = { error = it; latch.countDown() },
             )
             latch.await(ASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            if (error == null) return result
-            lastError = error
-            if (!error.contains("429")) throw IllegalStateException(error)
+            val err = error
+            if (err == null) return result
+            lastError = err
+            if (!err.contains("429")) throw IllegalStateException(err)
             backoffMs = if (backoffMs == 0L) 2000 else minOf(backoffMs * 2, 30000)
         }
         throw IllegalStateException(lastError ?: "问模型失败")
