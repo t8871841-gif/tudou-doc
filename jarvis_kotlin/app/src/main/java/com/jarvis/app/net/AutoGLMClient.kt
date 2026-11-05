@@ -87,15 +87,16 @@ object AutoGLMClient {
         ctx: Context, @Suppress("UNUSED_PARAMETER") systemPrompt: String, userText: String, jpegBase64: String?,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val base = JarvisPrefs.getCustomBaseUrl(ctx).trim().trimEnd('/')
-        val model = JarvisPrefs.getCustomModel(ctx)
-        val key = JarvisPrefs.getCustomKey(ctx)
+        // GLM 模式专用：接口地址与模型名取内置 GLM 配置（智谱 + autoglm-phone），Key 用共用的 API Key 栏位。
+        val base = JarvisPrefs.getTaskBaseUrl(ctx).trim().trimEnd('/')
+        val model = JarvisPrefs.getTaskModel(ctx)
+        val key = JarvisPrefs.getTaskKey(ctx)
         if (base.isBlank() || model.isBlank()) {
-            onError("未配置自定义大模型接口地址或模型名，请先去设置里填写（AutoGLM 用智谱地址与 autoglm-phone 模型）")
+            onError("未配置任务模型接口地址或模型名")
             return
         }
         if (key.isBlank()) {
-            onError("未配置自定义大模型 API Key，请先去设置里填写")
+            onError("未配置 API Key，请先去设置里填写")
             return
         }
         val userContent: Any = if (jpegBase64.isNullOrBlank()) {

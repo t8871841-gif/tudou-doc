@@ -15,7 +15,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 对话大脑：GLM / 自定义大模型（OpenAI 兼容的 /chat/completions 接口）。
- * 接口地址、模型名、Key 都从设置里的“自定义大模型”三项读取，默认预填智谱 GLM；
+ * 按模型开关（JarvisPrefs.getModelMode）取配置：GLM 模式用内置智谱（聊天 glm-4.5），
+ * 自定义模式用设置里用户填的地址/模型；Key 两种模式共用同一个 API Key 栏位。
  * 未配置时直接报错，不发请求。
  *
  * 维护一份进程内滚动对话历史（不落盘——持久化记忆是需求第 9 条，未排期），
@@ -67,9 +68,9 @@ object CustomClient {
         ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val base = JarvisPrefs.getCustomBaseUrl(ctx).trim().trimEnd('/')
-        val model = JarvisPrefs.getCustomModel(ctx)
-        val key = JarvisPrefs.getCustomKey(ctx)
+        val base = JarvisPrefs.getChatBaseUrl(ctx).trim().trimEnd('/')
+        val model = JarvisPrefs.getChatModel(ctx)
+        val key = JarvisPrefs.getChatKey(ctx)
         if (base.isBlank() || model.isBlank()) {
             onError("未配置自定义大模型接口地址或模型名，请先去设置里填写")
             return
@@ -131,19 +132,19 @@ object CustomClient {
 
     /**
      * 单轮多模态问答（看屏用）——带一张图片，不进滚动对话历史（看屏问答与日常聊天分开计数）。
-     * 视觉模型/接口地址/Key 分别支持单独配置，留空则回退到自定义大模型的那一套
-     * （默认预填 GLM：glm-4v-plus + 智谱地址）；模型是否真支持图片输入取决于后端，
+     * 按模型开关取配置：GLM 模式用内置 glm-4v-plus + 智谱地址，自定义模式用视觉三项
+     * （留空则回退到自定义大模型）；模型是否真支持图片输入取决于后端，
      * 这里按 OpenAI 多模态消息格式（image_url + data URL）发送。
      */
     fun askVision(
         ctx: Context, prompt: String, jpegBase64: String,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val base = JarvisPrefs.getVisionBaseUrl(ctx).ifBlank { JarvisPrefs.getCustomBaseUrl(ctx) }
-        val model = JarvisPrefs.getVisionModel(ctx).ifBlank { "glm-4v-plus" }
-        val key = JarvisPrefs.getVisionApiKey(ctx).ifBlank { JarvisPrefs.getCustomKey(ctx) }
+        val base = JarvisPrefs.getVisionBaseUrl(ctx)
+        val model = JarvisPrefs.getVisionModel(ctx)
+        val key = JarvisPrefs.getVisionApiKey(ctx)
         if (key.isBlank()) {
-            onError("未配置视觉模型 Key（也没有配置自定义大模型 Key 可回退），请先去设置里填写")
+            onError("未配置 API Key，请先去设置里填写")
             return
         }
         if (base.isBlank()) {
@@ -200,9 +201,9 @@ object CustomClient {
      * 发起一次对话（非流式）。onResult 在后台线程回调；onError 携带可读错误信息（网络失败 / 未配置 Key / HTTP 错误码）。
      */
     fun ask(ctx: Context, userText: String, memoryContext: String = "", onResult: (String) -> Unit, onError: (String) -> Unit) {
-        val base = JarvisPrefs.getCustomBaseUrl(ctx).trim().trimEnd('/')
-        val model = JarvisPrefs.getCustomModel(ctx)
-        val key = JarvisPrefs.getCustomKey(ctx)
+        val base = JarvisPrefs.getChatBaseUrl(ctx).trim().trimEnd('/')
+        val model = JarvisPrefs.getChatModel(ctx)
+        val key = JarvisPrefs.getChatKey(ctx)
         if (base.isBlank() || model.isBlank()) {
             onError("未配置自定义大模型接口地址或模型名，请先去设置里填写")
             return
@@ -283,9 +284,9 @@ object CustomClient {
         ctx: Context, userText: String, memoryContext: String = "",
         onToken: (String) -> Unit, onDone: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val base = JarvisPrefs.getCustomBaseUrl(ctx).trim().trimEnd('/')
-        val model = JarvisPrefs.getCustomModel(ctx)
-        val key = JarvisPrefs.getCustomKey(ctx)
+        val base = JarvisPrefs.getChatBaseUrl(ctx).trim().trimEnd('/')
+        val model = JarvisPrefs.getChatModel(ctx)
+        val key = JarvisPrefs.getChatKey(ctx)
         if (base.isBlank() || model.isBlank()) {
             onError("未配置自定义大模型接口地址或模型名，请先去设置里填写")
             return

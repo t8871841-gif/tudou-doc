@@ -774,32 +774,23 @@ class MainActivity : Activity() {
 
         /**
          * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
-         * Key 本身绝不返回。provider 跟原生任务脑子走（getTaskBrain：autoglm 默认 / custom）。
+         * Key 本身绝不返回。provider 跟模型开关走（getModelMode：glm 默认 / custom）。
          */
         @JavascriptInterface
         fun getModelInfo(): String {
             return try {
                 val o = JSONObject()
-                when (JarvisPrefs.getTaskBrain(this@MainActivity)) {
+                when (JarvisPrefs.getModelMode(this@MainActivity)) {
                     "custom" -> {
                         o.put("provider", "custom")
                         o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
                         o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
                         o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
                     }
-                    "autoglm" -> {
-                        // 手机专用模型：地址/模型/Key 复用“自定义大模型”三项（填智谱地址与 autoglm-phone）。
-                        // 不能掉进下面的 else 分支，否则 HUD 型号面板会错显示。
-                        o.put("provider", "autoglm")
-                        o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
-                        o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
-                        o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
-                    }
                     else -> {
-                        // 默认 autoglm（Agnes 已移除）。
-                        o.put("provider", "autoglm")
-                        o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
-                        o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
+                        o.put("provider", "glm")
+                        o.put("base_url", JarvisPrefs.GLM_BASE_URL)
+                        o.put("model", JarvisPrefs.GLM_CHAT_MODEL)
                         o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
                     }
                 }
@@ -807,7 +798,7 @@ class MainActivity : Activity() {
                 o.put("name", "")
                 o.toString()
             } catch (e: Exception) {
-                "{\"provider\":\"autoglm\",\"base_url\":\"\",\"model\":\"\",\"has_key\":false,\"local_enabled\":false,\"name\":\"\"}"
+                "{\"provider\":\"glm\",\"base_url\":\"\",\"model\":\"\",\"has_key\":false,\"local_enabled\":false,\"name\":\"\"}"
             }
         }
     }
@@ -1163,10 +1154,8 @@ class MainActivity : Activity() {
                       var presets = [];
                       if (info.provider === 'custom') {
                         presets.push({id:'custom', name:'自定义', base_url: info.base_url, model: info.model, key: true, key_url: ''});
-                      } else if (info.provider === 'autoglm') {
-                        presets.push({id:'autoglm', name:'AutoGLM', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       } else {
-                        presets.push({id:'autoglm', name:'AutoGLM', base_url: info.base_url, model: info.model, key: true, key_url: ''});
+                        presets.push({id:'glm', name:'GLM', base_url: info.base_url, model: info.model, key: true, key_url: ''});
                       }
                       ONBOARD.msg({kind:'status', presets: presets, configured: !!info.has_key, provider: info.provider, base_url: info.base_url, model: info.model, has_key: !!info.has_key, name: info.name || ''});
                     } catch(e){ console.warn('hud model:', e); }
@@ -2138,32 +2127,38 @@ class MainActivity : Activity() {
         root.addView(detail2)
     }
 
-    /** 二期：对话 Key、唤醒词开关与灵敏度、打断说话开关——都在设置里直接能看能改。 */
+    /** 二期：模型开关、API Key、唤醒词开关与灵敏度、打断说话开关——都在设置里直接能看能改。 */
     private fun buildVoiceSettingsSection(root: LinearLayout) {
         val section = TextView(this).apply {
             text = "对话与语音设置"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         }
         root.addView(section)
 
-        // 对话与跨应用任务共用下面“自定义大模型”三项（默认预填智谱 GLM）。
-        // ---- 跨应用任务模型切换 + 自定义大模型 ----
-        // 任务循环（task/TaskLoop）的大脑二选一：自定义走用户自己填的
-        // OpenAI 兼容接口，带图问；AutoGLM 走手机专用模型 autoglm-phone
-        //（do(...) 格式由 AutoGLMClient 转成 JSON 动作），接口地址/模型名/Key
-        // 复用下面“自定义大模型”三项（填智谱地址与 autoglm-phone）。
-        root.addView(segmentedRow("跨应用任务模型", listOf("自定义", "AutoGLM"),
-            when (JarvisPrefs.getTaskBrain(this)) { "custom" -> 0; else -> 1 }) { i ->
-            val next = when (i) { 0 -> "custom"; else -> "autoglm" }
-            JarvisPrefs.setTaskBrain(this, next)
+        // 模型开关：GLM（默认，内置智谱）/ 自定义（下面三项自己填）。聊天、任务、看屏都跟着走。
+        root.addView(segmentedRow("模型", listOf("GLM", "自定义"),
+            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; else -> 0 }) { i ->
+            val next = when (i) { 1 -> "custom"; else -> "glm" }
+            JarvisPrefs.setModelMode(this, next)
             toast(
                 when (next) {
-                    "custom" -> "跨应用任务改用自定义大模型（带截图问）"
-                    else -> "跨应用任务改用 AutoGLM 手机专用模型（带截图问）"
+                    "custom" -> "改用自定义模型"
+                    else -> "改用 GLM（内置智谱）"
                 }
             )
         })
 
-        root.addView(sectionTitle("自定义大模型"))
+        root.addView(sectionTitle("API Key（GLM 与自定义共用）"))
+        val customKeyInput = EditText(this).apply {
+            hint = "Key（GLM 模式下填智谱 Key）"; setTextColor(Color.WHITE)
+            setText(JarvisPrefs.getCustomKey(this@MainActivity))
+        }
+        root.addView(customKeyInput)
+        root.addView(primaryBtn("保存 Key") {
+            JarvisPrefs.setCustomKey(this, customKeyInput.text.toString())
+            toast("已保存")
+        })
+
+        root.addView(sectionTitle("自定义模型（仅自定义模式使用）"))
         val customBaseInput = EditText(this).apply {
             hint = "接口地址（如 https://xxx/v1）"; setTextColor(Color.WHITE)
             setText(JarvisPrefs.getCustomBaseUrl(this@MainActivity))
@@ -2172,17 +2167,11 @@ class MainActivity : Activity() {
             hint = "模型名"; setTextColor(Color.WHITE)
             setText(JarvisPrefs.getCustomModel(this@MainActivity))
         }
-        val customKeyInput = EditText(this).apply {
-            hint = "Key（跨应用任务选自定义时用）"; setTextColor(Color.WHITE)
-            setText(JarvisPrefs.getCustomKey(this@MainActivity))
-        }
         root.addView(customBaseInput)
         root.addView(customModelInput)
-        root.addView(customKeyInput)
-        root.addView(primaryBtn("保存自定义大模型") {
+        root.addView(primaryBtn("保存自定义模型") {
             JarvisPrefs.setCustomBaseUrl(this, customBaseInput.text.toString())
             JarvisPrefs.setCustomModel(this, customModelInput.text.toString())
-            JarvisPrefs.setCustomKey(this, customKeyInput.text.toString())
             toast("已保存")
         })
 
@@ -3144,7 +3133,7 @@ class MainActivity : Activity() {
             appendLine("常驻服务：${if (JarvisForegroundService.running) "运行中" else "未运行"}")
             appendLine("悬浮球：${if (OrbController.isEnabled()) "已开启" else "已关闭"}")
             val keyOk = JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank()
-            appendLine("对话 Key（自定义大模型）：${if (keyOk) "已配置" else "未配置（对话会报错）"}")
+            appendLine("API Key：${if (keyOk) "已配置" else "未配置（对话会报错）"}")
             appendLine("离线语音识别(sherpa-onnx)：${if (OfflineAsrSession.isAvailable(this@MainActivity)) "模型文件已就位" else "缺模型文件(assets/asr 下没放齐 4 个文件)，听写/唤醒词都用不了"}")
             appendLine("语音合成：Edge TTS（云扬），需联网，无需 Key")
             if (a11y) append("无障碍详情：${JarvisAccessibilityService.status()}")
