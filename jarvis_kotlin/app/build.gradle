@@ -82,4 +82,9 @@ dependencies {
     // 来源：Maven Central，dev.rikka.shizuku:api / :provider，MIT 协议。
     implementation libs.shizuku.api
     implementation libs.shizuku.provider
+    // OCR 补字层（2026-11-05，Mika 同款）：ML Kit 文本识别 Bundled 版，中文 + 拉丁
+    // 双识别器，模型静态打包进 APK（约 +8MB/ABI），离线、不用 Play Services，
+    // 国行魅族可用。树不够用时才跑 OCR，把图里的字捞回成可点坐标。
+    implementation libs.mlkit.text.recognition
+    implementation libs.mlkit.text.recognition.chinese
 }

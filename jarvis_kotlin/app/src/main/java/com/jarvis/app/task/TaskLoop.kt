@@ -15,6 +15,7 @@ import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
 import com.jarvis.app.TakeoverBorder
 import com.jarvis.app.vision.GridOverlay
+import com.jarvis.app.vision.OcrReader
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
@@ -256,6 +257,62 @@ object TaskLoop {
                     }
                 }
 
+                // ---------- OCR 补字层（2026-11-05，Mika 同款） ----------
+                // 树不够用时才跑（树空/太薄、被扣留、紧凑表空白），不每步跑。
+                // 取一张干净图（不画网格）做 OCR，不然网格字母会被认成字。
+                // 结果追加到紧凑表后面单独一段，不混进紧凑表（OCR 行没有 eid，只有坐标）。
+                // OCR 坐标与 tap 同一套 0–1000，模型可直接点；盲树下被守卫拒了，
+                // 由 4b42bcd 的自动 zoom→点接住，拼成 OCR 找字 → auto-flow 落点。
+                // 失败不卡步：超时/抛错/取不到图 → 当作本步无 OCR，继续走原有流程。
+                var ocrSection: String? = null
+                var ocrStatus: String? = null
+                val ocrNeeded = (treeTooThin || withheld || compact.isBlank()) &&
+                    pkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(pkg)
+                if (ocrNeeded) {
+                    val ocrBmp = try {
+                        val shot = controller.screenshot(reason = "ocr", grid = false)
+                        val b64 = shot.optString("png_base64")
+                        if (b64.isEmpty()) null
+                        else Base64.decode(b64, Base64.DEFAULT)
+                            .let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                    } catch (e: Exception) {
+                        AuditLog.append(ctx, "OCR", "取干净图失败", e.message ?: e.javaClass.simpleName)
+                        null
+                    }
+                    if (ocrBmp != null) {
+                        // 树已判不够用时放宽到 5 秒，树只是判不准时 2 秒（Mika 两档一致）。
+                        val timeoutMs = if (nodesUseful < 3) 5000L else 2000L
+                        try {
+                            val raw = OcrReader.read(ocrBmp, timeoutMs)
+                            val legible = OcrReader.legible(raw)
+                            // 树上已有的文字：从元素大纲里抽
+                            // （格式 e3*|Button|发送|[540,2100]，第 3 段是文字）。
+                            val knownTexts = elements.lineSequence()
+                                .map { it.trim().split("|") }
+                                .filter { it.size >= 3 }
+                                .map { it[2].trim() }
+                                .filter { it.isNotEmpty() }
+                                .toSet()
+                            val missing = OcrReader.missing(knownTexts, legible)
+                            if (missing.isNotEmpty()) {
+                                ocrSection = missing.joinToString("\n") {
+                                    "${it.text}|[${it.centerX},${it.centerY}]"
+                                }
+                            } else if (raw.isEmpty()) {
+                                ocrStatus = "empty"
+                            } else if (legible.isEmpty()) {
+                                ocrStatus = "illegible"
+                            }
+                            // legible 非空但 missing 为空：OCR 的字树里都有，不用报状态。
+                        } catch (e: Exception) {
+                            ocrStatus = "failed"
+                            AuditLog.append(ctx, "OCR", "识别失败", e.message ?: e.javaClass.simpleName)
+                        }
+                    } else {
+                        ocrStatus = "unavailable"
+                    }
+                }
+
                 val userText = buildString {
                     append("任务：").append(taskText).append('\n')
                     append("当前前台应用包名：").append(pkg.ifEmpty { "未知" }).append('\n')
@@ -292,6 +349,15 @@ object TaskLoop {
                     ).append('\n')
                     if (compactDropped > 0) {
                         append("（紧凑表只列了前 40 个可操作元素，另有 $compactDropped 个没列出；要找没列出的，滑一滑或缩小范围再看）\n")
+                    }
+                    // OCR 补字：树不够用时认出的屏上文字（只列树里没有的），坐标与 tap
+                    // 同一套 0–1000，可直接用 {"action":"tap","x":cx,"y":cy} 点。
+                    // 树不够用且 OCR 一行没有时，给出原因，让模型知道该看图找、而不是再读一次。
+                    if (ocrSection != null) {
+                        append("屏幕可见文字（OCR，只列树里没有的；每行：文字|[中心x,中心y]，坐标 0–1000，可直接点）：\n")
+                        append(ocrSection).append('\n')
+                    } else if (ocrStatus != null) {
+                        append("OCR 状态：$ocrStatus（树不够用且没认出可用文字，请看截图找目标）\n")
                     }
                     if (needImage && image == null) {
                         append("（本轮需要截图但没能拿到，只能按界面树操作）\n")
