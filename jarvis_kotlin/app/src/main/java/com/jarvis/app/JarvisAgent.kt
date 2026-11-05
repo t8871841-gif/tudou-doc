@@ -412,6 +412,9 @@ object JarvisAgent {
                     maybeStartWakeLoop()
                     return@post
                 }
+                // jk-v66：聊天流结束时把全文推进对话面板（原来只在悬浮球上闪前 80 字，
+                // 面板里没有回复气泡，用户说“语音回复没有文字”）。
+                onReplyText?.invoke(fullText)
                 triggerMemoryExtraction(ctx, text, fullText)
                 // 批二「连续对话」：开着的话说完答案直接继续听，不用再喊一次唤醒词。
                 if (JarvisPrefs.isContinuousChat(ctx)) {
@@ -537,8 +540,8 @@ object JarvisAgent {
                 return
             }
             speaking = true
-            // 气泡跟上：显示到当前为止的全文（截 80 字）
-            OrbController.showBubble(fullText.toString().take(80))
+            // 气泡跟上：显示正在念的这句（jk-v66：原来只显示全文前 80 字，跟念的不同步）
+            OrbController.showBubble(sentence)
             TtsRouter.speak(
                 ctx, sentence,
                 onStart = {

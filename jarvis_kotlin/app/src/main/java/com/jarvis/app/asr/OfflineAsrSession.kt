@@ -30,8 +30,10 @@ object OfflineAsrSession {
 
     /** 简单能量阈值：16bit PCM 样本绝对值的平均数超过这个数就算"有人在说话"。 */
     private const val VOICE_RMS_THRESHOLD = 600
-    /** 说过话之后，安静满这么久就认为这一轮说完了。 */
-    private const val SILENCE_MS = 1_600L
+    /** 说过话之后，安静满这么久就认为这一轮说完了。
+     * jk-v66：原来 1600ms 太短，正常句间停顿就被掐断（“一句话没说完就开始了”，
+     * 高德导航那半句就是这么丢的）。改成 3000ms，跟 OfflineAsr 声明的 silenceMs 一致。 */
+    private const val SILENCE_MS = 3_000L
     /** 从开始监听到现在，如果一直没检测到人声，等这么久就放弃（避免无限占着麦克风）。 */
     private const val MAX_WAIT_FOR_SPEECH_MS = 6_000L
 
