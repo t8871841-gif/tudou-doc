@@ -14,6 +14,12 @@ android {
         targetSdk 34
         versionCode 1
         versionName "0.1.0"
+
+        // jk-v65 瘦身：只打 arm64-v8a。魅族 20 Pro 是 arm64，
+        // 其余三种 ABI（x86/x86_64/armeabi-v7a）的 .so 白占约 130MB。
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
     }
 
     // 签名统一（jk-v39/jk-v58 教训）：Gradle 默认 debug 签名没用上 CI 恢复的
