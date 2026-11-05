@@ -440,7 +440,10 @@ object JarvisAgent {
      * 打断监听只在第一句开念时启动一次（startBargeInWatch 自带 1200ms 延迟），
      * 回声比对取的是实时全文（取数器），流式增长的文本也能过滤。
      */
-    private inner class StreamSpeakSession(
+    // 注意：JarvisAgent 是 object（单例），里面不能用 inner class（inner 要绑外层实例，
+    // object 没有外层实例可绑）。嵌套类在 object 里本来就能直接用 object 的成员
+    //（main / genSeq / setState / startBargeInWatch），不用 inner。
+    private class StreamSpeakSession(
         private val ctx: Context,
         private val mySeq: Int,
         private val onFinish: (fullText: String) -> Unit
@@ -502,7 +505,9 @@ object JarvisAgent {
         /** 泵：没在念、队列有句子，就念下一句；队列空了且流已结束，就收尾。 */
         private fun pump() {
             if (finished || speaking) return
-            val sentence = queue.pollFirst()
+            // Kotlin 的 ArrayDeque 没有 pollFirst（那是 java.util.Deque 的方法），
+            // 用 removeFirstOrNull：空队列返回 null，正好接下面的判空。
+            val sentence = queue.removeFirstOrNull()
             if (sentence == null) {
                 if (streamDone) finish()
                 return
