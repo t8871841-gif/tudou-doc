@@ -184,7 +184,7 @@ object CalendarCommands {
             return
         }
         val now = System.currentTimeMillis()
-        val (from, to, label): Triple<Long, Long, String> = when {
+        val (from, to, label) = when {
             dayWord == "今天" -> dayWindow(0).let { Triple(it.first, it.second, "今天") }
             dayWord == "明天" -> dayWindow(1).let { Triple(it.first, it.second, "明天") }
             dayWord == "后天" -> dayWindow(2).let { Triple(it.first, it.second, "后天") }
