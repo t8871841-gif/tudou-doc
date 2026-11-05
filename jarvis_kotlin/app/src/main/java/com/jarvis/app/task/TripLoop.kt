@@ -1,0 +1,333 @@
+package com.jarvis.app.task
+
+import android.content.Context
+import com.jarvis.app.AuditLog
+import com.jarvis.app.net.CustomClient
+import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * 行程规划循环（阶段 0，2026-11-05）：独立循环，不塞进 TaskLoop。
+ * TaskLoop 是“看屏点按”，规划是“问清信息、出按天排的行程”，动作空间、
+ * 提示词、终止条件全不同；只共用 CustomClient（glm-4.5 聊天模型通道）
+ * 和 AuditLog。阶段 0 只出文字行程、存文件，不碰高德 App（那是阶段 1）。
+ *
+ * 行程文件存在应用私有目录 trips/ 下：<时间>-<目的地>.md；进行中的
+ * 待问问题存在 trips/pending.txt（原任务 + 上一个问题），用户下一句
+ * 回答就接着往下排，不用从头再说一遍。
+ */
+object TripLoop {
+    private const val MAX_STEPS = 6
+    private const val MAX_REPEATS = 3
+    private const val ASK_TIMEOUT_MS = 60_000L
+    private const val TRIP_DIR = "trips"
+    private const val PENDING_FILE = "pending.txt"
+
+    private val runSeq = AtomicInteger(0)
+    private val executor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "TripLoop").apply { isDaemon = true }
+    }
+
+    @Volatile
+    var running = false
+
+    /** 行程规划的关键词分流：命中即走规划模式，不走跨应用任务循环。 */
+    private val TRIP_KEYWORDS = listOf(
+        "规划行程", "行程规划", "帮我规划", "旅游攻略", "行程安排",
+        "去玩", "出游", "自驾游", "去哪玩", "玩几天", "旅游", "旅行",
+        "周边游", "自由行",
+    )
+
+    fun looksLikeTripTask(text: String): Boolean {
+        val t = text.trim()
+        if (t.length < 4) return false
+        return TRIP_KEYWORDS.any { t.contains(it) }
+    }
+
+    /** 急停：自增序号，正在跑的循环下一步检查时自行中止（与 CodeLoop 同款）。 */
+    fun cancelInFlight() {
+        runSeq.incrementAndGet()
+    }
+
+    // ---------- 待问问题（pending） ----------
+
+    private fun tripDir(ctx: Context): File =
+        File(ctx.filesDir, TRIP_DIR).apply { mkdirs() }
+
+    private fun pendingFile(ctx: Context): File = File(tripDir(ctx), PENDING_FILE)
+
+    /** 是否有个待回答的行程问题（用户上一句被问住了，下一句就是答案）。 */
+    fun hasPendingQuestion(ctx: Context): Boolean {
+        return try {
+            pendingFile(ctx).isFile
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun loadPending(ctx: Context): String? {
+        return try {
+            val f = pendingFile(ctx)
+            if (!f.isFile) null else f.readText().ifBlank { null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun savePending(ctx: Context, task: String, question: String) {
+        try {
+            pendingFile(ctx).writeText("$task\n---\n$question")
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun clearPending(ctx: Context) {
+        try {
+            pendingFile(ctx).delete()
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * 执行一个行程规划任务。[isAlive] 由调用方给（Agent 的代次检查）；[onReply]
+     * 只会被调用一次，内容是给用户的一句结果（行程摘要、追问、或卡在哪的说明）。
+     * 注意：onReply 必须放最后——调用方用尾随 lambda 传它，后面再加参数会
+     * 让尾随 lambda 绑错（TaskLoop jk-v55 的教训）。
+     */
+    fun run(
+        ctx: Context, taskText: String, isAlive: () -> Boolean,
+        onReply: (String) -> Unit
+    ) {
+        val mySeq = runSeq.incrementAndGet()
+        val appCtx = ctx.applicationContext
+        executor.execute {
+            runBlocking(appCtx, taskText, mySeq, isAlive, onReply)
+        }
+    }
+
+    private fun runBlocking(
+        ctx: Context, taskText: String, mySeq: Int,
+        isAlive: () -> Boolean, onReply: (String) -> Unit
+    ) {
+        fun alive() = mySeq == runSeq.get() && isAlive()
+        // 新的行程句式 = 从头排，旧的待问问题作废；否则是回答上一轮的追问，
+        // 把原任务 + 这一句拼起来接着排。
+        val fresh = looksLikeTripTask(taskText)
+        val pending = if (fresh) null else loadPending(ctx)
+        val effectiveTask = if (pending != null) {
+            val orig = pending.substringBefore("\n---\n").ifBlank { pending }
+            "$orig\n用户补充回答：$taskText"
+        } else {
+            taskText
+        }
+        clearPending(ctx)
+        AuditLog.append(ctx, "行程规划", effectiveTask, "开始（上限 $MAX_STEPS 步）")
+        val history = mutableListOf<String>()
+        var lastError = ""
+        var lastSignature = ""
+        var repeats = 0
+        var finalReply: String? = null
+        running = true
+        try {
+            var step = 0
+            stepLoop@ while (step < MAX_STEPS) {
+                if (!alive()) {
+                    finalReply = null
+                    return
+                }
+                step++
+                // ---------- 观察：任务 + 今天日期 + 历史 ----------
+                val userText = buildString {
+                    append("用户想规划行程：").append(effectiveTask).append('\n')
+                    append("今天是 ").append(todayString()).append("。\n")
+                    if (history.isNotEmpty()) {
+                        append("已执行步骤（旧→新）：\n")
+                        history.forEach { append(it).append('\n') }
+                    }
+                    if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
+                    append("现在只输出下一步的一个 JSON 动作。")
+                }
+                // ---------- 问模型（glm-4.5 聊天模型通道） ----------
+                val reply = try {
+                    askModel(ctx, TRIP_SYSTEM_PROMPT, userText)
+                } catch (e: Exception) {
+                    lastError = "问模型失败：${e.message ?: e.javaClass.simpleName}"
+                    history += "第 $step 步：$lastError"
+                    AuditLog.append(ctx, "行程规划", "第 $step 步问模型失败", lastError)
+                    continue@stepLoop
+                }
+                if (reply == null) {
+                    lastError = "问模型超时（${ASK_TIMEOUT_MS / 1000} 秒没回）"
+                    history += "第 $step 步：$lastError"
+                    AuditLog.append(ctx, "行程规划", "第 $step 步问模型失败", lastError)
+                    continue@stepLoop
+                }
+                val action = parseAction(reply)
+                if (action == null) {
+                    lastError = "模型输出不是合法的 JSON 动作"
+                    history += "第 $step 步：输出无法解析 — ${reply.take(80)}"
+                    AuditLog.append(ctx, "行程规划", "第 $step 步输出无法解析", reply.take(200))
+                    continue@stepLoop
+                }
+                val kind = action.optString("action")
+                // ---------- 追问：关键信息缺了，问一句就停，等用户下一句回答 ----------
+                if (kind == "ask") {
+                    val question = action.optString("question").ifBlank { "还想问一句：去哪、玩几天？" }
+                    history += "第 $step 步：ask — $question"
+                    AuditLog.append(ctx, "行程规划", "追问", question)
+                    savePending(ctx, effectiveTask, question)
+                    finalReply = question
+                    return
+                }
+                // ---------- 完成 / 做不下去 ----------
+                if (kind == "done" || kind == "fail") {
+                    if (kind == "done") {
+                        val dest = action.optString("destination").ifBlank { "行程" }
+                        val summary = action.optString("summary")
+                        val itinerary = action.optString("itinerary").ifBlank { summary }
+                        val saved = saveItinerary(ctx, dest, itinerary)
+                        history += "第 $step 步：done — 已存 $saved"
+                        AuditLog.append(ctx, "行程规划", "done", saved)
+                        finalReply = if (summary.isNotBlank()) {
+                            "$summary\n行程全文已存好（$saved），要看全文、改哪天，随时说。"
+                        } else {
+                            "行程排好了，全文已存好（$saved），要看全文、改哪天，随时说。"
+                        }
+                    } else {
+                        val reason = action.optString("reason").ifEmpty { "排不出来" }
+                        history += "第 $step 步：fail — $reason"
+                        AuditLog.append(ctx, "行程规划", "fail", reason)
+                        finalReply = "行程没排出来：$reason"
+                    }
+                    return
+                }
+                // ---------- 重复守卫：同一动作连着来 3 次即停 ----------
+                val sig = signatureOf(action)
+                if (sig == lastSignature) {
+                    repeats++
+                } else {
+                    lastSignature = sig
+                    repeats = 0
+                }
+                if (repeats >= MAX_REPEATS) {
+                    finalReply = "行程规划卡住了，同一个动作连着重复多次，已停下。你再说一遍想去哪、玩几天，我重新排。"
+                    AuditLog.append(ctx, "行程规划", "重复守卫触发", "$kind 连续重复")
+                    return
+                }
+                lastError = "模型输出了不认识的动作 $kind"
+                history += "第 $step 步：$lastError"
+                AuditLog.append(ctx, "行程规划", "动作无法执行", kind)
+            }
+            finalReply = "行程规划到第 $MAX_STEPS 步还没排出来，已停下。你再说一遍想去哪、玩几天，我重新排。"
+            AuditLog.append(ctx, "行程规划", "步数上限", "到 $MAX_STEPS 步未完成")
+        } finally {
+            running = false
+            if (finalReply != null && alive()) onReply(finalReply)
+        }
+    }
+
+    // ---------- 问模型（阻塞式，等 CustomClient 回调；抄 CodeLoop 的 askModel） ----------
+
+    /**
+     * 问模型一次。429 限流时指数退避重试（2 秒起、翻倍、30 秒封顶，最多 3 次），
+     * 非 429 错误直接抛。注意：error 是被闭包改写的 var，判空后要先存到
+     * val 再用，否则智能转换失效（jk-v63 编译错的教训）。
+     */
+    private fun askModel(ctx: Context, systemPrompt: String, userText: String): String? {
+        var backoffMs = 0L
+        var lastError: String? = null
+        repeat(3) { attempt ->
+            if (backoffMs > 0) {
+                AuditLog.append(ctx, "行程规划", "问模型 429 限流", "第 ${attempt + 1} 次，等 ${backoffMs / 1000} 秒再试")
+                try {
+                    Thread.sleep(backoffMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IllegalStateException("问模型被打断")
+                }
+            }
+            val latch = CountDownLatch(1)
+            var result: String? = null
+            var error: String? = null
+            CustomClient.askOnce(
+                ctx, systemPrompt, userText, null,
+                onResult = { result = it; latch.countDown() },
+                onError = { error = it; latch.countDown() },
+            )
+            latch.await(ASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            val err = error
+            if (err == null) return result
+            lastError = err
+            if (!err.contains("429")) throw IllegalStateException(err)
+            backoffMs = if (backoffMs == 0L) 2000 else minOf(backoffMs * 2, 30000)
+        }
+        throw IllegalStateException(lastError ?: "问模型失败")
+    }
+
+    private fun parseAction(reply: String): JSONObject? {
+        val start = reply.indexOf('{')
+        val end = reply.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        return try {
+            val obj = JSONObject(reply.substring(start, end + 1))
+            if (obj.optString("action").isEmpty()) null else obj
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun signatureOf(action: JSONObject): String {
+        val kind = action.optString("action")
+        val key = action.optString("question").ifBlank { action.optString("destination") }
+        return "$kind:$key"
+    }
+
+    // ---------- 行程文件 ----------
+
+    private fun todayString(): String =
+        SimpleDateFormat("yyyy-MM-dd EEEE", Locale.CHINA).format(Date())
+
+    /** 行程存成 Markdown：trips/<时间>-<目的地>.md，返回文件名。 */
+    private fun saveItinerary(ctx: Context, destination: String, content: String): String {
+        val safe = destination.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+            .take(20).ifBlank { "行程" }
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
+        val name = "$stamp-$safe.md"
+        return try {
+            val file = File(tripDir(ctx), name)
+            file.writeText("# $destination 行程（${todayString()}规划）\n\n$content")
+            name
+        } catch (e: Exception) {
+            "（存文件失败：${e.message}）"
+        }
+    }
+
+    companion object {
+        /**
+         * 行程规划的 system prompt：动作格式 + 规则。模型每步只输出一个 JSON 动作。
+         * 只问目的地和天数这两样关键的；人数、预算、想玩什么按默认来（2 个人、
+         * 中等预算、经典景点），在行程里把假设写清楚。
+         */
+        private const val TRIP_SYSTEM_PROMPT = "你是一个手机上的行程规划助手，正在帮用户规划一次出游。" +
+            "用户在河南新乡，出发地默认新乡，除非他说了别的出发地。" +
+            "你每次只输出一个 JSON 动作，不要任何其他文字。可用动作：\n" +
+            "1. {\"action\":\"ask\",\"question\":\"问题\"}：关键信息缺了才问，一次只问一个问题。" +
+            "只问目的地或天数这两样关键的；人数、预算、想玩什么不用问，按默认来（2 个人、中等预算、经典景点），" +
+            "在行程里把假设写清楚。\n" +
+            "2. {\"action\":\"done\",\"destination\":\"目的地\",\"summary\":\"简短口头版\",\"itinerary\":\"完整行程\"}：行程排好了。" +
+            "summary 是念给用户听的短版（几天、每天一句话，不超过 100 字）；itinerary 是完整行程（Markdown，" +
+            "按天排：每天上午/下午/晚上去哪、先后顺序、每个地方大概待多久、两地之间怎么走、大概吃什么）。\n" +
+            "只写有名的地方，别编具体的饭馆名、酒店名；不确定的地方宁可不写；每天排 2 到 4 个景点，别赶；" +
+            "最后一天要写返程。\n" +
+            "3. {\"action\":\"fail\",\"reason\":\"做不下去的原因\"}：排不出来（比如没说去哪、用户又不肯说）。\n" +
+            "规则：先看用户给了目的地和天数没有，缺关键的就 ask；齐了就 done；" +
+            "用户的补充回答如果跟行程无关（问天气、闲聊），输出 fail，reason 说清这句不是在回答行程问题。"
+    }
+}

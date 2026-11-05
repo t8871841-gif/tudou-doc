@@ -129,6 +129,7 @@ object JarvisAgent {
         ScreenVisionAgent.cancelInFlight()
         com.jarvis.app.task.TaskLoop.cancelInFlight() // 批九：跨应用任务循环一并急停
         com.jarvis.app.task.CodeLoop.cancelInFlight() // 阶段 0：编码循环一并急停
+        com.jarvis.app.task.TripLoop.cancelInFlight() // 行程规划阶段 0：规划循环一并急停
         TakeoverBorder.hide()
         setState(ctx, "idle")
         maybeStartWakeLoop()
@@ -266,6 +267,22 @@ object JarvisAgent {
             setState(ctx, "thinking")
             AuditLog.append(ctx, "任务路由", text, "命中写代码句式，进编码循环")
             com.jarvis.app.task.CodeLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
+                speakReply(ctx, mySeq, reply)
+            }
+            return
+        }
+        // 行程规划阶段 0（2026-11-05）：行程规划任务进规划循环（TripLoop），不走跨应用任务循环。
+        // 规划走 glm-4.5（聊天模型通道），动作是问清信息、出按天排的行程，不是点按屏幕。
+        // 放在 CodeLoop 之后、TaskLoop 之前：行程句式不该被当成跨应用任务；
+        // 待问问题未答时，下一句（非任务、非写代码）也当成回答接着排。
+        val tripHit = com.jarvis.app.task.TripLoop.looksLikeTripTask(text) ||
+            (com.jarvis.app.task.TripLoop.hasPendingQuestion(ctx) &&
+                !com.jarvis.app.task.TaskLoop.looksLikeTask(text) &&
+                !com.jarvis.app.task.CodeLoop.looksLikeCodeTask(text))
+        if (tripHit) {
+            setState(ctx, "thinking")
+            AuditLog.append(ctx, "任务路由", text, "命中行程规划句式，进规划循环")
+            com.jarvis.app.task.TripLoop.run(ctx, text, isAlive = { mySeq == genSeq }) { reply ->
                 speakReply(ctx, mySeq, reply)
             }
             return
