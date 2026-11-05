@@ -468,8 +468,10 @@ object CodeLoop {
      */
     private fun blockedReason(script: String): String? {
         val s = script.lowercase()
-        // 删根目录 / 家目录
-        if (Regex("rm\\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\\s+(/|/\\*|~|\\$home)").containsMatchIn(s)) {
+        // 删根目录 / 家目录。注意：$HOME 不能直接写进 Kotlin 字符串（$ 会触发插值），
+        // 所以用 "$" + "home" 拼出来。
+        val rmHome = s.contains("rm") && s.contains("$" + "home")
+        if (Regex("rm\\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\\s+(/|/\\*|~)").containsMatchIn(s) || rmHome) {
             return "rm -rf 根目录/家目录"
         }
         // 管道进 shell（curl|sh、wget|bash 这类远程代码执行）
@@ -572,7 +574,6 @@ object CodeLoop {
         return i
     }
 
-    companion object {
         /**
          * 编码循环的 system prompt：动作格式 + 规则。模型每步只输出一个 JSON 动作。
          * edit_file 的 SEARCH 必须与文件逐字一致（含缩进、空行）；不确定时先 read_file 看。
@@ -596,5 +597,4 @@ object CodeLoop {
             "写完代码要跑起来验证：先 run_python/run_termux 跑一遍，看输出和退出码，" +
             "报错就按报错改、再跑，直到跑通或确认做不下去；" +
             "做完了输出 done，做不下去输出 fail。"
-    }
 }
