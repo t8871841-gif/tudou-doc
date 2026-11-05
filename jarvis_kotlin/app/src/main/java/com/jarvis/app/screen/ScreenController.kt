@@ -277,6 +277,74 @@ class ScreenController(
         )
     }
 
+    /**
+     * 小窗展开（jk-v64，A 方案）：跨应用 openApp 要全屏，但 Flyme/Android 16 上
+     * setLaunchWindowingMode 反射不存在（NoSuchMethodException），回落普通启动后
+     * 支付宝/高德这类应用会开成小窗；任务循环整套按全屏做（坐标、网格、前台判断），
+     * 小窗里的东西点不到。打开后调这里：按包名找到目标应用的窗口，若未铺满屏幕，
+     * 就把它的顶栏拖到屏幕顶沿展开成全屏，再复核一次。成败都如实返回，不抛异常、
+     * 不阻塞任务——展开失败时任务照常继续，审计里能看到原因。
+     */
+    fun expandFloatingApp(targetPkg: String): JSONObject {
+        val out = JSONObject()
+        val before = appWindow(targetPkg)
+        if (before == null) {
+            out.put("expanded", false)
+            out.put("detail", "没找到应用窗口，可能还没打开")
+            return out
+        }
+        if (isFullscreen(before)) {
+            out.put("expanded", false)
+            out.put("detail", "已是全屏，不用展开")
+            return out
+        }
+        // 顶栏在窗口最上方：从顶栏中心拖到屏幕顶沿，自由窗口会吸附成全屏。
+        val startX = before.centerX()
+        val startY = before.top + 28
+        swipe(startX, startY, screenW / 2, 0, 400, fling = false)
+        try { Thread.sleep(900) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        val after = appWindow(targetPkg)
+        if (after != null && isFullscreen(after)) {
+            out.put("expanded", true)
+            out.put("detail", "小窗已展开成全屏")
+        } else {
+            out.put("expanded", false)
+            out.put("detail", "拖动后仍是小窗，展开失败")
+        }
+        return out
+    }
+
+    /** 该包名的应用窗口（取最大的一个）；没有返回 null。 */
+    private fun appWindow(targetPkg: String): Rect? {
+        val windows = runCatching { service.windows }.getOrNull() ?: return null
+        val r = Rect()
+        var best: Rect? = null
+        var bestArea = 0L
+        for (win in windows) {
+            val type = runCatching { win.type }.getOrNull() ?: continue
+            if (type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue
+            val root = runCatching { rootOf(win) }.getOrNull()
+            val pkg = runCatching { root?.packageName?.toString() }.getOrNull().orEmpty()
+            runCatching { root?.recycle() }
+            if (pkg != targetPkg) continue
+            if (!runCatching { win.getBoundsInScreen(r); true }.getOrDefault(false)) continue
+            if (r.width() <= 0 || r.height() <= 0) continue
+            val area = r.width().toLong() * r.height()
+            if (area > bestArea) {
+                bestArea = area
+                best = Rect(r)
+            }
+        }
+        return best
+    }
+
+    /** 是否铺满屏幕：面积 ≥ 屏幕 80% 即算全屏（留出状态栏/导航栏的余量）。 */
+    private fun isFullscreen(rect: Rect): Boolean {
+        val area = rect.width().toLong() * rect.height()
+        val screenArea = screenW.toLong() * screenH
+        return area >= screenArea * 80 / 100
+    }
+
     /** Was (nx,ny) covered by a zoom taken recently enough to still be true? */
     private fun zoomConfirms(nx: Int, ny: Int): Boolean {
         val z = zoomRegion ?: return false

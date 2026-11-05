@@ -355,6 +355,27 @@ object LocalCommands {
         "相册" to "com.android.gallery3d"
     )
 
+    /** 按应用名找包名（小窗展开用）：先查常用表，再枚举已装应用按 label 匹配；找不到返回 null。 */
+    fun packageForApp(ctx: Context, name: String): String? {
+        val key = name.trim().lowercase()
+        WELL_KNOWN_APPS[key]?.let { return it }
+        val pm = ctx.packageManager
+        var best: String? = null
+        try {
+            for (app in pm.getInstalledApplications(0)) {
+                val label = pm.getApplicationLabel(app).toString()
+                if (label == name.trim()) return app.packageName
+                if (best == null && label.length >= 2 &&
+                    (label.contains(name.trim()) || (name.trim().length >= 3 && name.trim().contains(label)))
+                ) {
+                    best = app.packageName
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return best
+    }
+
     // ---------- 打开应用：tryHandle 在 io 线程调进来，枚举/拉起在本线程，回报回主线程 ----------
 
     private fun openAppBg(ctx: Context, name: String, speak: (String) -> Unit) {
