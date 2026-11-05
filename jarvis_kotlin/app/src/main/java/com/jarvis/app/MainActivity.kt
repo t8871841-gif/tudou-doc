@@ -271,9 +271,13 @@ class MainActivity : Activity() {
 
     private fun buildStage(): FrameLayout {
         val stage = FrameLayout(this)
-        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f)
+        // 竖屏比例微调（2026-11-05）：舞台权重 2f→2.4f，多出来的空间给全息；
+        // 对话区权重仍是 1f，能滚，不用多给。舞台变高后纵横比变小，
+        // 全息 WebGL 的横向视野会收窄一点，但幅度小（约 7%），核心留有余量，不会裁到。
+        stage.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2.4f)
         stageImageView = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            // 静态图改 FIT_CENTER：舞台变高后整图仍完整显示，不裁剪（原 CENTER_CROP 会裁边）。
+            scaleType = ImageView.ScaleType.FIT_CENTER
         }.also {
             stage.addView(it, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
@@ -1794,7 +1798,8 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         // 竖屏精修：底色纯黑，与上面统一（见 chatScroll）；输入行与麦克风行本身的样式不动。
         setBackgroundColor(0xFF000000.toInt())
-        setPadding(dp(16), dp(4), dp(16), dp(14))
+        // 底栏收窄：下边距 14dp→6dp，麦克风那一行整体往下贴到底边，省出来的空间给上面的舞台。
+        setPadding(dp(16), dp(4), dp(16), dp(6))
 
         inputRow = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
