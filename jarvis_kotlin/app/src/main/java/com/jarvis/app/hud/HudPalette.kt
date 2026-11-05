@@ -34,6 +34,8 @@ object HudPalette {
         "thinking" -> PURPLE
         "speaking" -> AQUA
         "listening" -> ROSE
+        // L31：急停态原来回落成待命紫（BLUE2），急停红被吞掉；现在明确给停止红。
+        "stopped" -> 0xFFEF5350.toInt()
         else -> BLUE2 // idle / booting
     }
 

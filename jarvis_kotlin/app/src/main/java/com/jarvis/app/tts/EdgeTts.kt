@@ -71,7 +71,7 @@ object EdgeTts {
         io.execute { runSynthesis(ctx, seq, clean, voice, ratePct, pitchHz, onStart, onDone) }
     }
 
-    /** 急停/打断：关掉在飞的 socket（唤醒读写阻塞立即抛异常）和播放轨道，不回调 onDone——调用方自己知道是主动打断。 */
+    /** 急停/打断：关掉在飞的 socket（唤醒读写阻塞立即抛异常）和播放轨道；在飞的 runSynthesis 会在 finally 里回调 onDone(false)（L4），调用方状态机总能收敛。 */
     fun stop() {
         mySeq++
         runCatching { socket?.close() }
@@ -118,18 +118,47 @@ object EdgeTts {
         // 这里累计实际写入的帧数，播完后先等放音头追上再 stop。
         var totalFrames = 0L
         var abortedAt: Int? = null
+        // M4：会话式合成——每段回复只建一次连接，多句复用同一 socket；
+        // 建会话失败就全程走旧的逐句握手；会话中途任何一句失败就关会话、
+        // 该句及之后全改逐句握手，绝不哑火。
+        var session: EdgeSession? = null
         try {
             t.play()
+            try {
+                session = openSession()
+            } catch (e: Exception) {
+                Log.w(TAG, "edge tts session open failed, fallback to per-sentence", e)
+                session = null
+            }
             for ((i, sentence) in sentences.withIndex()) {
                 if (cancelled(seq)) break
                 try {
-                    val mp3 = fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+                    val mp3: ByteArray = if (session != null) {
+                        try {
+                            fetchMp3OnSession(session, seq, sentence, voice, ratePct, pitchHz)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "edge tts session sentence $i failed, fallback to per-sentence", e)
+                            closeSession(session)
+                            session = null
+                            if (cancelled(seq)) throw e
+                            fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+                        }
+                    } else {
+                        fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+                    }
                     if (cancelled(seq)) break
                     if (mp3.isEmpty()) {
                         if (i == 0) break // 第一句就没声音，当失败处理
                         continue
                     }
                     val pcms = decodeMp3(seq, mp3)
+                    if (pcms.isEmpty()) {
+                        // 解码失败（坏 MP3/超时放弃）：按句跳过，不卡住执行器。
+                        Log.w(TAG, "edge tts sentence $i decode empty, skipped")
+                        if (i == 0) { abortedAt = i; break }
+                        abortedAt = abortedAt ?: i
+                        continue
+                    }
                     for (pcm in pcms) {
                         if (cancelled(seq)) break
                         if (pcm.isEmpty()) continue
@@ -168,17 +197,115 @@ object EdgeTts {
             }
             runCatching { t.release() }
             if (track === t) track = null
-            if (!cancelled(seq)) main.post {
+            closeSession(session)
+            // L4：取消时也回调一次 onDone(false)，调用方状态机总能收敛；
+            // finally 只走一次，正常完成与取消只发一条，不会调两次。
+            // wasCancelled 在 post 前先定住，避免 post 执行前又被新的 stop 翻转。
+            val wasCancelled = cancelled(seq)
+            main.post {
                 // 中间有句子失败被跳过时留一条审计，否则“少播一句”从界面上看不见原因。
-                if (abortedAt != null) {
+                if (!wasCancelled && abortedAt != null) {
                     com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 中间句子失败已跳过", "第 ${abortedAt + 1}/${sentences.size} 句")
                 }
-                onDone(sawAny)
+                onDone(if (wasCancelled) false else sawAny)
             }
         }
     }
 
     // ---------- 协议部分：手写 TLS + WebSocket 帧，跟参考实现一致 ----------
+
+    // ---------- M4 会话式合成：一段回复只握手一次，多句复用同一连接 ----------
+    //
+    // Edge 协议本身按 turn 分句（每句 SSML 一个 X-RequestId，读到 turn.end 即该句结束），
+    // 服务端允许多 turn 复用同一 WebSocket；逐句握手只是旧实现的保守做法。
+    // 安全回落：建会话失败 → 全程逐句握手；会话中某句失败（发 SSML/读帧任一步抛异常，
+    // 或服务端没给 turn.end 就关连接）→ 关会话，该句及之后全改逐句握手继续念完本段。
+    // openSession 的握手 + config 与 fetchMp3 里的流程故意重复一份，不抽公共函数，
+    // 免得动到已验证的逐句回落路径。
+
+    /** 一次会话连接：握手 + speech.config 已发好，后续只发 SSML。 */
+    private class EdgeSession(val ssl: SSLSocket, val reader: FrameReader, val out: java.io.OutputStream)
+
+    private fun openSession(): EdgeSession {
+        val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
+        socket = ssl
+        try {
+            ssl.connect(InetSocketAddress(HOST, 443), 15_000)
+            ssl.soTimeout = 45_000
+            ssl.startHandshake()
+            val reader = FrameReader(ssl.inputStream)
+            val out = ssl.outputStream
+
+            val key = android.util.Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, android.util.Base64.NO_WRAP)
+            val path = "/consumer/speech/synthesize/readaloud/edge/v1" +
+                "?TrustedClientToken=$TOKEN" +
+                "&ConnectionId=${hexId()}" +
+                "&Sec-MS-GEC=${secMsGec()}" +
+                "&Sec-MS-GEC-Version=2-$CHROMIUM_MAJOR.0.3650.75"
+            val request = "GET $path HTTP/1.1\r\n" +
+                "Host: $HOST\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Pragma: no-cache\r\n" +
+                "Cache-Control: no-cache\r\n" +
+                "Sec-WebSocket-Key: $key\r\n" +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold\r\n" +
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/$CHROMIUM_MAJOR.0.0.0 Safari/537.36 Edg/$CHROMIUM_MAJOR.0.0.0\r\n" +
+                "\r\n"
+            out.write(request.toByteArray(Charsets.UTF_8))
+            out.flush()
+            val head = reader.readUntil(HEADER_END)
+            val statusLine = String(head, Charsets.UTF_8).lineSequence().firstOrNull().orEmpty()
+            check(statusLine.contains("101")) { "Edge 语音握手失败：$statusLine" }
+
+            val date = dateString()
+            val configMsg = "X-Timestamp:$date\r\n" +
+                "Content-Type:application/json; charset=utf-8\r\n" +
+                "Path:speech.config\r\n\r\n" +
+                "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":" +
+                "{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}," +
+                "\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}\r\n"
+            sendTextFrame(out, configMsg)
+            return EdgeSession(ssl, reader, out)
+        } catch (e: Exception) {
+            if (socket === ssl) socket = null
+            runCatching { ssl.close() }
+            throw e
+        }
+    }
+
+    private fun closeSession(session: EdgeSession?) {
+        if (session == null) return
+        if (socket === session.ssl) socket = null
+        runCatching { session.ssl.close() }
+    }
+
+    /** 会话连接上合成一句：新 X-RequestId 发 SSML，读帧读到该句 turn.end 才停；任一步失败抛异常，调用方回落逐句握手。 */
+    private fun fetchMp3OnSession(session: EdgeSession, seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): ByteArray {
+        val ssmlMsg = "X-RequestId:${hexId()}\r\n" +
+            "Content-Type:application/ssml+xml\r\n" +
+            "X-Timestamp:${dateString()}Z\r\n" +
+            "Path:ssml\r\n\r\n" +
+            ssml(sentence, voice, ratePct, pitchHz)
+        sendTextFrame(session.out, ssmlMsg)
+
+        val binAll = ByteArrayOutputStream()
+        var gotAudio = false
+        while (true) {
+            if (cancelled(seq)) break
+            val (opcode, payload) = session.reader.readFrame()
+            when (opcode) {
+                0x2 -> if (payload.isNotEmpty()) { binAll.write(payload); gotAudio = true }
+                0x1 -> { val msg = String(payload, Charsets.UTF_8); if (msg.contains("turn.end")) break }
+                // 服务端没给 turn.end 就关连接：当本次合成失败，调用方回落逐句握手重念该句。
+                0x8 -> throw java.io.IOException("Edge 语音连接已关闭")
+            }
+        }
+        if (!gotAudio) return ByteArray(0)
+        return extractAudio(binAll.toByteArray())
+    }
 
     private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): ByteArray {
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
@@ -392,6 +519,8 @@ object EdgeTts {
         val out = ArrayList<ByteArray>()
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
+        // M5：超时放弃标记（在 try 外声明，供最后 return 用）。
+        var timedOut = false
         try {
             extractor.setDataSource(object : MediaDataSource() {
                 override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
@@ -418,8 +547,17 @@ object EdgeTts {
             val info = MediaCodec.BufferInfo()
             var inputDone = false
             var outputDone = false
+            // M5：坏 MP3 不能无限循环卡死语音线程：总耗时上限 10 秒 + 迭代上限双保险，
+            // 超时即放弃该句（返回空，调用方按句跳过并记审计）。
+            val decodeDeadline = System.currentTimeMillis() + 10_000L
+            var iterations = 0
             while (!outputDone) {
                 if (cancelled(seq)) break
+                if (++iterations > 100_000 || System.currentTimeMillis() > decodeDeadline) {
+                    Log.e(TAG, "decodeMp3 timeout after $iterations iterations, abandon sentence")
+                    timedOut = true
+                    break
+                }
                 if (!inputDone) {
                     val inIdx = codec.dequeueInputBuffer(10_000)
                     if (inIdx >= 0) {
@@ -456,7 +594,8 @@ object EdgeTts {
             runCatching { codec?.release() }
             extractor.release()
         }
-        return out
+        // M5：超时放弃的句子返回空，不播残缺音频，调用方按句跳过。
+        return if (timedOut) emptyList() else out
     }
 
     private fun split(pending: String): List<String> =

@@ -78,6 +78,15 @@ object OrbController {
     // 收起/展开共用的一段位移动画。拖球时手指接管位置，必须能立刻停掉它——
     // 否则 220ms 的展开动画和手指同时写 lp.x，球会跟手指抢位置、跳来跳去。
     private var edgeAnimator: ValueAnimator? = null
+    // M51：拖动吸边动画（dragEnd 里 180ms 播完）的句柄。没有它时 180ms 内再拖，
+    // 吸边动画和手指同时写 lp.x，球跟手指抢位置；dragStart() 里一并 cancel()。
+    private var snapAnimator: ValueAnimator? = null
+    // M53：隐藏期间收到的气泡不启动销毁计时。气泡在 captureHidden/taskHidden
+    // 下是 GONE 的，计时照常跑会在恢复前就把气泡销毁、用户永远看不到。
+    // bubbleHidePending=true 表示销毁计时被推迟，恢复显示时在 applyVisibility()
+    // 里按 bubbleHideDelayMs 重新计时。
+    private var bubbleHidePending = false
+    private var bubbleHideDelayMs = 0L
     // 球处于收起状态时的这一次触摸，第一下只负责把球展开，不触发点击/长按的正常动作——
     // 不然用户好不容易找到那一小截露出来的球，一点就被当成"点一下开始听"，体验很突兀。
     private var revealOnlyThisGesture = false
@@ -205,6 +214,11 @@ object OrbController {
         val vis = if (captureHidden || taskHidden) View.GONE else View.VISIBLE
         orb?.visibility = vis
         bubble?.visibility = vis
+        // M53：恢复显示时，隐藏期间被推迟的气泡销毁计时重新启动。
+        if (vis == View.VISIBLE && bubble != null && bubbleHidePending) {
+            bubbleHidePending = false
+            main.postDelayed(hideBubbleRunnable, bubbleHideDelayMs)
+        }
     }
 
     fun setVisibleForCapture(visible: Boolean) {
@@ -270,6 +284,9 @@ object OrbController {
         dodgeX = lp.x
         dodgeY = lp.y
         dodged = true
+        // M50：让位会把球移到对侧边缘，气泡坐标是按旧位置算的、不会跟过去，
+        // 直接撤掉气泡（下次有新文字再按新位置重算），不要留一个悬空的气泡。
+        removeBubble()
         // 让位期间不排收起：1.6 秒的定时器若在让位中途触发，doCollapse 会把
         // 让位后的临时位置记成 dockedX，恢复后球就回不到原来那条边。
         cancelCollapseSchedule()
@@ -347,6 +364,9 @@ object OrbController {
         val hiddenAmount = (lp.width * (1f - COLLAPSED_VISIBLE_FRACTION)).toInt()
         val target = if (onLeft) -hiddenAmount else lp.x + hiddenAmount
         collapsed = true
+        // M50：收起会把球移出屏幕大半，气泡坐标是按展开位置算的、不会跟过去，
+        // 直接撤掉气泡（下次有新文字再按新位置重算）。
+        removeBubble()
         edgeAnimator?.cancel()
         edgeAnimator = ValueAnimator.ofInt(lp.x, target).apply {
             duration = COLLAPSE_ANIM_MS
@@ -435,6 +455,10 @@ object OrbController {
                 revealOnlyThisGesture = collapsed
                 if (collapsed) expandInstantly()
                 else cancelCollapseSchedule()
+                // M51：180ms 内再拖时，上一轮吸边动画还在播、会跟手指抢 lp.x，
+                // 必须先停掉它（edgeAnimator 已在 expandInstantly 里停过）。
+                snapAnimator?.cancel()
+                snapAnimator = null
                 startX = lp.x
                 startY = lp.y
                 removeBubble()
@@ -461,7 +485,12 @@ object OrbController {
                     lp.x // 自由摆放：不挪动，就停在松手的地方
                 }
                 if (target != lp.x) {
-                    ValueAnimator.ofInt(lp.x, target).apply {
+                    // M50：吸边动画会挪动球，气泡坐标是按松手位置算的、不会跟过去，
+                    // 先撤掉气泡（下次有新文字再按新位置重算）。
+                    removeBubble()
+                    // M51：吸边动画存成字段，180ms 内再拖时 dragStart() 里能停掉它。
+                    snapAnimator?.cancel()
+                    snapAnimator = ValueAnimator.ofInt(lp.x, target).apply {
                         duration = 180
                         addUpdateListener {
                             lp.x = it.animatedValue as Int
@@ -583,19 +612,31 @@ object OrbController {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            this.x = x.coerceAtLeast(0)
+            // M50：x 双向夹紧到屏幕内。原来只 coerceAtLeast(0)：球在左半屏偏右位置时
+            // 右侧公式 x = olp.x + olp.width + gap 可能超出右屏边，气泡被屏边裁掉。
+            this.x = x.coerceIn(0, (d.widthPixels - tv.measuredWidth).coerceAtLeast(0))
             this.y = y.coerceAtLeast(0)
         }
         try {
             w.addView(tv, lp)
             bubble = tv
             if (captureHidden || taskHidden) tv.visibility = View.GONE
-            main.postDelayed(hideBubbleRunnable, (3500L + text.length * 60L).coerceAtMost(12000L))
+            // M53：隐藏期间不启动销毁计时——气泡现在是 GONE 的，计时照常跑会在
+            // 恢复显示前就把气泡销毁、用户永远看不到。恢复显示时 applyVisibility()
+            // 按 bubbleHideDelayMs 重新计时。
+            val delayMs = (3500L + text.length * 60L).coerceAtMost(12000L)
+            if (captureHidden || taskHidden) {
+                bubbleHidePending = true
+                bubbleHideDelayMs = delayMs
+            } else {
+                main.postDelayed(hideBubbleRunnable, delayMs)
+            }
         } catch (_: Exception) {}
     }
 
     private fun removeBubble() {
         main.removeCallbacks(hideBubbleRunnable)
+        bubbleHidePending = false
         bubble?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
         bubble = null
     }
@@ -605,6 +646,8 @@ object OrbController {
         cancelCollapseSchedule()
         edgeAnimator?.cancel()
         edgeAnimator = null
+        snapAnimator?.cancel()
+        snapAnimator = null
         collapsed = false // 球都没了，收起状态没意义；下次 show() 重新按当前持久化坐标判定
         orb?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
         orb = null

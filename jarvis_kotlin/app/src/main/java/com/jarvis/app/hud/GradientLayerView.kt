@@ -20,16 +20,26 @@ class GradientLayerView(
     private val diagonal: Boolean
 ) : View(context) {
     private val paint = Paint()
+    // L30：LinearGradient 缓存到字段，只在尺寸变化时重建——原来每次 onDraw 都新建一个。
+    // colors/positions/diagonal 都是构造时定死的，不会变，所以只看宽高就够了。
+    private var cachedGradient: LinearGradient? = null
+    private var cachedW = 0f
+    private var cachedH = 0f
 
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-        paint.shader = if (diagonal) {
-            LinearGradient(0f, 0f, w, h, colors, positions, Shader.TileMode.CLAMP)
-        } else {
-            LinearGradient(0f, 0f, 0f, h, colors, positions, Shader.TileMode.CLAMP)
+        if (cachedGradient == null || cachedW != w || cachedH != h) {
+            cachedGradient = if (diagonal) {
+                LinearGradient(0f, 0f, w, h, colors, positions, Shader.TileMode.CLAMP)
+            } else {
+                LinearGradient(0f, 0f, 0f, h, colors, positions, Shader.TileMode.CLAMP)
+            }
+            cachedW = w
+            cachedH = h
         }
+        paint.shader = cachedGradient
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 }

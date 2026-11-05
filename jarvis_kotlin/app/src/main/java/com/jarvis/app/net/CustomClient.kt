@@ -63,10 +63,14 @@ object CustomClient {
      * 单轮调用，不进任何对话历史（任务循环 task/TaskLoop 与记忆提取用）。多模态格式：
      * jpegBase64 非空时按 image_url + data URL 附图（自定义模型走 OpenAI 兼容接口，带图问）。
      * 回调在后台线程。
+     * M11：与 ask/askStream 共用 cancelSeq——cancelInFlight() 能丢弃本次结果；
+     * [isAlive] 由调用方（任务循环）提供，发请求前与回调时检查，返回 false 即已急停/已换任务，
+     * 本次调用直接中止，不回调 onResult/onError（调用方靠自己的超时/短轮询返回 null）。
      */
     fun askOnce(
         ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
-        onResult: (String) -> Unit, onError: (String) -> Unit
+        onResult: (String) -> Unit, onError: (String) -> Unit,
+        isAlive: (() -> Boolean)? = null
     ) {
         val base = JarvisPrefs.getChatBaseUrl(ctx).trim().trimEnd('/')
         val model = JarvisPrefs.getChatModel(ctx)
@@ -79,6 +83,8 @@ object CustomClient {
             onError("未配置自定义大模型 API Key，请先去设置里填写")
             return
         }
+        val mySeq = ++cancelSeq
+        if (isAlive?.invoke() == false) return // 发请求前检查：已急停就不发
         val userContent: Any = if (jpegBase64.isNullOrBlank()) {
             userText
         } else {
@@ -107,11 +113,13 @@ object CustomClient {
             .build()
         client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃
                 onError("网络请求失败：${e.message}")
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
                 response.use { resp ->
+                    if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 已被急停/下一轮覆盖，丢弃结果
                     if (!resp.isSuccessful) {
                         onError("自定义大模型接口返回错误：HTTP ${resp.code}")
                         return
@@ -121,6 +129,7 @@ object CustomClient {
                         val json = JSONObject(text)
                         val reply = json.getJSONArray("choices")
                             .getJSONObject(0).getJSONObject("message").getString("content").trim()
+                        if (mySeq != cancelSeq || isAlive?.invoke() == false) return // 回调时再查一次
                         onResult(reply)
                     } catch (e: Exception) {
                         onError("解析自定义大模型返回内容失败：${e.message}")
@@ -213,10 +222,6 @@ object CustomClient {
             return
         }
         val mySeq = ++cancelSeq
-        synchronized(this) {
-            history.add("user" to userText)
-            while (history.size > MAX_TURNS * 2) history.removeAt(0)
-        }
 
         // 批三：长期记忆拼在系统提示词后面（memoryContext 为空时与原来完全一致）
         val fullSystemPrompt = if (memoryContext.isNotBlank()) SYSTEM_PROMPT + memoryContext else SYSTEM_PROMPT
@@ -227,6 +232,9 @@ object CustomClient {
                 messages.put(JSONObject().put("role", role).put("content", content))
             }
         }
+        // L6：本轮 user 先不进 history，只放进本次请求的 messages；拿到回复后再与 assistant 成对写入，
+        // 失败/被取消时不留孤儿 user 消息。
+        messages.put(JSONObject().put("role", "user").put("content", userText))
         val body = JSONObject()
             .put("model", model)
             .put("messages", messages)
@@ -262,7 +270,10 @@ object CustomClient {
                             .getString("content")
                             .trim()
                         synchronized(this@CustomClient) {
+                            // L6：user 与 assistant 成对写入（发请求前没写 history，失败/取消时不留孤儿 user）
+                            history.add("user" to userText)
                             history.add("assistant" to reply)
+                            while (history.size > MAX_TURNS * 2) history.removeAt(0)
                         }
                         onResult(reply)
                     } catch (e: Exception) {
@@ -296,10 +307,6 @@ object CustomClient {
             return
         }
         val mySeq = ++cancelSeq
-        synchronized(this) {
-            history.add("user" to userText)
-            while (history.size > MAX_TURNS * 2) history.removeAt(0)
-        }
         val fullSystemPrompt = if (memoryContext.isNotBlank()) SYSTEM_PROMPT + memoryContext else SYSTEM_PROMPT
         val messages = JSONArray()
         messages.put(JSONObject().put("role", "system").put("content", fullSystemPrompt))
@@ -308,6 +315,9 @@ object CustomClient {
                 messages.put(JSONObject().put("role", role).put("content", content))
             }
         }
+        // L6：本轮 user 先不进 history，只放进本次请求的 messages；流结束后再与 assistant 成对写入，
+        // 失败/被取消时不留孤儿 user 消息。
+        messages.put(JSONObject().put("role", "user").put("content", userText))
         val body = JSONObject()
             .put("model", model)
             .put("messages", messages)
@@ -362,7 +372,10 @@ object CustomClient {
                         }
                         val reply = full.toString().trim()
                         synchronized(this@CustomClient) {
+                            // L6：user 与 assistant 成对写入（发请求前没写 history，失败/取消时不留孤儿 user）
+                            history.add("user" to userText)
                             history.add("assistant" to reply)
+                            while (history.size > MAX_TURNS * 2) history.removeAt(0)
                         }
                         onDone(reply)
                     } catch (e: Exception) {

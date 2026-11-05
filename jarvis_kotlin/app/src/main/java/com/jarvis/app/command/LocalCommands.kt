@@ -40,18 +40,33 @@ object LocalCommands {
         "聊", "还是", "是不是", "会不会", "能不能", "应该", "可以", "模式", "状态", "心情",
         "怎么", "为什么", "多少", "干嘛", "干什么"
     )
-    private const val MAX_NAME_LEN = 6
+    private const val MAX_NAME_LEN = 10
+
+    /** 判名前先剥掉的口语前缀（L7）：否则"我的微信"会因"我的"里含"的"被当成聊天句。 */
+    private val NAME_PREFIXES = listOf("请帮我", "麻烦帮我", "我的", "帮我", "麻烦", "请")
 
     /** 捕获的内容是不是"像"一个真实的人名/应用名——不像就不拦截，交还给原来的聊天流程。 */
-    private fun looksLikeLiteralName(s: String): Boolean =
-        s.isNotBlank() && s.length <= MAX_NAME_LEN && NON_NAME_MARKERS.none { s.contains(it) }
+    private fun looksLikeLiteralName(s: String): Boolean {
+        var name = s.trim()
+        // L7：先剥前缀再判长度与虚词——"我的微信支付"剥掉"我的"后才是 4 字的真名；
+        // 剥完仍含"的/了/吧"等虚词或超长，才当成聊天句。
+        for (prefix in NAME_PREFIXES) {
+            if (name.startsWith(prefix)) {
+                name = name.removePrefix(prefix).trim()
+                break
+            }
+        }
+        return name.isNotBlank() && name.length <= MAX_NAME_LEN && NON_NAME_MARKERS.none { name.contains(it) }
+    }
 
-    private val CALL_WITH_NAME = Regex("^(?:打电话给|打个电话给|拨电话给|拨打|呼叫)\\s*(.+)$")
-    private val CALL_GIVE = Regex("^给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
+    // M12："帮我/麻烦/请"前缀在打电话/打开/关闭意图里也认（原来只在点按意图里认，
+    // "帮我打开微信"走不到本地指令）。另认常见的复合前缀"请帮我"。
+    private val CALL_WITH_NAME = Regex("^(?:请帮我|帮我|麻烦|请)?(?:打电话给|打个电话给|拨电话给|拨打|呼叫)\\s*(.+)$")
+    private val CALL_GIVE = Regex("^(?:请帮我|帮我|麻烦|请)?给\\s*(.+?)\\s*(?:打电话|打个电话|拨电话)$")
     private val CALL_BARE = Regex("^(?:打电话|拨电话|拨号)$")
-    private val OPEN_APP = Regex("^(?:打开|开启|启动|进入)\\s*(.+)$")
-    private val CLOSE_APP = Regex("^(?:关闭|关掉|退出)\\s*(.+)$")
-    private val CLOSE_APP_BA = Regex("^把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
+    private val OPEN_APP = Regex("^(?:请帮我|帮我|麻烦|请)?(?:打开|开启|启动|进入)\\s*(.+)$")
+    private val CLOSE_APP = Regex("^(?:请帮我|帮我|麻烦|请)?(?:关闭|关掉|退出)\\s*(.+)$")
+    private val CLOSE_APP_BA = Regex("^(?:请帮我|帮我|麻烦|请)?把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
 
     // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
     // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
@@ -190,6 +205,10 @@ object LocalCommands {
     private fun cleanName(raw: String): String =
         raw.trim()
             .removePrefix("一下")
+            .trim()
+            // L7：名字里的"我的"前缀也剥掉，判名与查通讯录/查应用都用剥后的真名
+            // （"打开我的微信"否则会按"我的微信"去枚举，精确匹配永远命中不了）。
+            .removePrefix("我的")
             .trim()
             .trimEnd('。', '！', '!', ' ', '吧', '啊', '啦', '呀', '呢', '嘛')
 
@@ -350,7 +369,9 @@ object LocalCommands {
                 }
             } catch (_: Exception) {
             }
-            return "正在打开$appName"
+            // S1：MainActivity 拉起失败、只走了普通启动兜底，没确认应用到前台，
+            // 不能报"正在打开"，否则任务循环会当成功继续、后面全点在错误屏幕上。
+            return "打开${appName}失败：前台拉起不可用"
         }
         // 等目标应用真正到前台（MainActivity 起来到 onResume 再拉目标，需要时间），最多等 5 秒
         val svc = com.jarvis.app.JarvisAccessibilityService.instance
@@ -378,14 +399,18 @@ object LocalCommands {
                 "?"
             }
             AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 5 秒内没到前台（当前前台：$cur）")
+            // S1：5 秒轮询超时，没确认到前台，不报"正在打开"。
+            return "打开${appName}后5秒还没到前台"
         } else {
             try {
                 Thread.sleep(1200)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
+            // S1：无障碍服务为空，无法确认前台包名，不报"正在打开"。
+            AuditLog.append(ctx, "本地指令", "前台拉起", "无障碍服务不可用，无法确认$appName 是否到前台")
+            return "打开${appName}失败：无障碍服务不可用"
         }
-        return "正在打开$appName"
     }
 
     /**
@@ -422,14 +447,21 @@ object LocalCommands {
         WELL_KNOWN_APPS[key]?.let { return it }
         val pm = ctx.packageManager
         var best: String? = null
+        var bestLabel: String? = null
         try {
             for (app in pm.getInstalledApplications(0)) {
                 val label = pm.getApplicationLabel(app).toString()
+                // M13：精确匹配优先，全枚举扫完才定（精确命中在后面出现也能抢过前面的模糊候选）。
                 if (label == name.trim()) return app.packageName
-                if (best == null && label.length >= 2 &&
+                if (label.length >= 2 &&
                     (label.contains(name.trim()) || (name.trim().length >= 3 && name.trim().contains(label)))
                 ) {
-                    best = app.packageName
+                    // M13：模糊匹配不再取枚举到的第一个，取 label 最短（最接近）的候选。
+                    val cur = bestLabel
+                    if (cur == null || label.length < cur.length) {
+                        best = app.packageName
+                        bestLabel = label
+                    }
                 }
             }
         } catch (_: Exception) {
@@ -463,7 +495,7 @@ object LocalCommands {
                 try {
                     if (fullscreen) {
                         val r = launchAppFullscreenViaActivity(ctx, direct, name.trim())
-                        AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
+                        AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "前台拉起结果：$r")
                         return r
                     }
                     ctx.startActivity(intent)
@@ -474,19 +506,23 @@ object LocalCommands {
                 }
             }
         }
-        var best: Pair<String, String>? = null // (label, package)
+        var best: Pair<String, String>? = null // (label, package)，模糊匹配取 label 最短者
         var enumError: String? = null
         try {
             for (app in pm.getInstalledApplications(0)) {
                 val label = pm.getApplicationLabel(app).toString()
+                // M13：精确匹配优先，命中即定（break）；模糊候选要扫完全部枚举再取最短。
                 if (label == name) {
                     best = label to app.packageName
                     break
                 }
-                if (best == null && label.length >= 2 &&
+                if (label.length >= 2 &&
                     (label.contains(name) || (name.length >= 3 && name.contains(label)))
                 ) {
-                    best = label to app.packageName
+                    val cur = best
+                    if (cur == null || label.length < cur.first.length) {
+                        best = label to app.packageName
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -506,7 +542,7 @@ object LocalCommands {
         try {
             if (fullscreen) {
                 val r = launchAppFullscreenViaActivity(ctx, found.second, found.first)
-                AuditLog.append(ctx, "本地指令", "打开${found.first}", "已启动")
+                AuditLog.append(ctx, "本地指令", "打开${found.first}", "前台拉起结果：$r")
                 return r
             }
             ctx.startActivity(intent)

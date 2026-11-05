@@ -68,6 +68,10 @@ object JarvisAgent {
     @Volatile
     private var genSeq = 0 // 每次状态切换/急停自增，老的异步回调靠这个号失效
 
+    /** L1：上一次已推到面板的收音中途文字（防刷屏：首现 ≥2 字推一次，之后每长出 ≥8 字再推）。 */
+    @Volatile
+    private var lastPartialShown = ""
+
     fun start(ctx: Context) {
         val app = ctx.applicationContext
         appCtx = app
@@ -129,6 +133,7 @@ object JarvisAgent {
         ScreenVisionAgent.cancelInFlight()
         com.jarvis.app.task.TaskLoop.cancelInFlight() // 批九：跨应用任务循环一并急停
         com.jarvis.app.task.TripLoop.cancelInFlight() // 行程规划阶段 0：规划循环一并急停
+        com.jarvis.app.skill.SkillRunner.cancelInFlight() // S19：技能一并急停
         TakeoverBorder.hide()
         setState(ctx, "idle")
         maybeStartWakeLoop()
@@ -140,16 +145,27 @@ object JarvisAgent {
         onStateChanged?.invoke(s)
     }
 
+    /**
+     * S25：失败反馈既走悬浮球气泡，也进对话面板（MainActivity 已把 onReplyText
+     * 接成 addBubble）。App 前台时悬浮球根本不存在，只调 showBubble 等于静默吞掉。
+     */
+    private fun showFailureBubble(msg: String) {
+        OrbController.showBubble(msg)
+        onReplyText?.invoke(msg)
+    }
+
     // ---------- 主流程：听 → 问 → 答 → 播 ----------
 
     private fun beginListening(ctx: Context, fromWake: Boolean, prefilledText: String?) {
         wakeLoopRunning = false // 正式进入对话流程，暂停唤醒词轮询
         val mySeq = genSeq
+        lastPartialShown = "" // L1：新一轮收音，中途文字从头开始累计
         // 真机反馈（jk-v11）：没录音权限时别默默失败，给一句看得见的明示（重装后权限会被清掉）。
         if (prefilledText.isNullOrBlank() &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
         ) {
-            OrbController.showBubble("麦克风没授权：打开 App 自检页，或去系统设置给 Jarvis 录音权限")
+            // S25：前台时悬浮球不存在，失败也要进对话面板。
+            showFailureBubble("麦克风没授权：打开 App 自检页，或去系统设置给 Jarvis 录音权限")
             setState(ctx, "idle")
             return
         }
@@ -160,12 +176,25 @@ object JarvisAgent {
         }
         OfflineAsrSession.listenOnce(
             ctx,
-            onPartial = { /* 本阶段不需要处理中途文字 */ },
+            // L1：收音中途也给面板实时反馈（“正在听”气泡），但不刷屏——首现 ≥2 字
+            // 推一次，之后每比上次多出 ≥8 字才再推；定稿仍由 onFinal 经 onUserUtterance 推。
+            // MainActivity 的 addBubble 没有“更新已有气泡”的接口，只能节流推送。
+            onPartial = { txt ->
+                main.post {
+                    if (mySeq != genSeq) return@post
+                    val t = txt.trim()
+                    if (t.length >= 2 && (lastPartialShown.isEmpty() || t.length - lastPartialShown.length >= 8)) {
+                        lastPartialShown = t
+                        onUserText?.invoke("🎤 $t")
+                    }
+                }
+            },
             onFinal = { text -> main.post { if (mySeq == genSeq) onUserUtterance(ctx, mySeq, text) } },
             onError = { msg ->
                 main.post {
                     if (mySeq != genSeq) return@post
-                    OrbController.showBubble(if (fromWake) "没听清，继续待命" else "没听清：$msg")
+                    // S25：前台时悬浮球不存在，失败也要进对话面板。
+                    showFailureBubble(if (fromWake) "没听清，继续待命" else "没听清：$msg")
                     if (fromWake) noteFalseWake() // 唤醒了但没等到有效指令，算一次疑似误唤醒
                     setState(ctx, "idle")
                     maybeStartWakeLoop()
@@ -192,7 +221,14 @@ object JarvisAgent {
         // 我没听清楚"。只认纯空白/纯标点，以及单个语气词——这些都不构成指令；
         // 丢弃后直接回 idle 并恢复唤醒轮询，别卡在 listening 状态。
         val norm = text.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
-        if (norm.isEmpty() || norm in setOf("啊", "嗯", "呃", "哦", "额")) {
+        if (norm.isEmpty()) {
+            setState(ctx, "idle")
+            maybeStartWakeLoop()
+            return
+        }
+        // L2：单个语气词也留一条输入气泡，面板里看得到“听到了”，而不是悄悄丢掉。
+        if (norm in setOf("啊", "嗯", "呃", "哦", "额")) {
+            onUserText?.invoke(text)
             setState(ctx, "idle")
             maybeStartWakeLoop()
             return
@@ -218,6 +254,13 @@ object JarvisAgent {
                 onUserText?.invoke(text)
                 setState(ctx, "thinking")
                 AuditLog.append(ctx, "任务续跑", resume.taskText, "从第 ${resume.stepsDone + 1} 步接着做")
+                if (resume.foregroundPkgMismatch) {
+                    // M22：续跑时前台已不是断点时的应用，现场可能变了，先提醒用户。
+                    // 只进面板气泡，不语音，避免与任务播报重叠。
+                    val pkgName = resume.foregroundPkg ?: "原来那个应用"
+                    onReplyText?.invoke("提醒：你现在不在$pkgName里，现场可能变了，我先按断点接着做，不对你就喊停。")
+                    AuditLog.append(ctx, "任务续跑", resume.taskText, "前台包名与断点时不符（断点：$pkgName），已提醒用户")
+                }
                 com.jarvis.app.task.TaskLoop.run(
                     ctx, resume.taskText, isAlive = { mySeq == genSeq },
                     onReply = { reply -> speakReply(ctx, mySeq, reply) },
@@ -262,18 +305,19 @@ object JarvisAgent {
         // 行程规划阶段 0（2026-11-05）：行程规划任务进规划循环（TripLoop），不走跨应用任务循环。
         // 规划走 glm-4.5（聊天模型通道），动作是问清信息、出按天排的行程，不是点按屏幕。
         // 放在 TaskLoop 之前：行程句式不该被当成跨应用任务；
-        // 待问问题未答时，下一句（非任务）也当成回答接着排。
         // 阶段 2（2026-11-05）：改行程 / 看行程也进 TripLoop（只改已存行程的指定部分、
         // 或读最新存档）。改行程句式带任务排除：跨应用任务里也可能出现
         // “第二天改…”（如“在微信上给桑田发信息：第二天改去华山吃饭”），那句必须
         // 归 TaskLoop，不能被改行程抢走。
+        // S13：待问问题未答时，只有像回答的下一句（非任务，见 looksLikeTripAnswer）
+        // 才当成回答接着排；问天气/打招呼等无关语句不再被吞，走正常路由。
         val notTask = !com.jarvis.app.task.TaskLoop.looksLikeTask(text)
         val tripHit = com.jarvis.app.task.TripLoop.looksLikeTripTask(text) ||
             (com.jarvis.app.task.TripLoop.looksLikeTripRevision(text) &&
                 com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTask) ||
             (com.jarvis.app.task.TripLoop.looksLikeTripView(text) &&
                 com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTask) ||
-            (com.jarvis.app.task.TripLoop.hasPendingQuestion(ctx) && notTask)
+            (com.jarvis.app.task.TripLoop.hasPendingQuestion(ctx) && notTask && com.jarvis.app.task.TripLoop.looksLikeTripAnswer(text))
         if (tripHit) {
             setState(ctx, "thinking")
             AuditLog.append(ctx, "任务路由", text, "命中行程规划句式，进规划循环")
@@ -407,7 +451,8 @@ object JarvisAgent {
             main.post {
                 if (mySeq != genSeq) return@post
                 if (fullText.isBlank()) {
-                    OrbController.showBubble("没听清，你再说一遍")
+                    // S25：前台时悬浮球不存在，失败也要进对话面板。
+                    showFailureBubble("没听清，你再说一遍")
                     setState(ctx, "idle")
                     maybeStartWakeLoop()
                     return@post
@@ -434,7 +479,8 @@ object JarvisAgent {
                     if (mySeq != genSeq) return@post
                     val canFallback = !localTried && JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
                     if (!canFallback) {
-                        OrbController.showBubble("出错了：$msg")
+                        // S25：前台时悬浮球不存在，失败也要进对话面板。
+                        showFailureBubble("出错了：$msg")
                         setState(ctx, "idle")
                         maybeStartWakeLoop()
                         return@post
@@ -449,7 +495,8 @@ object JarvisAgent {
                             speakReply(ctx, mySeq, local)
                             triggerMemoryExtraction(ctx, text, local)
                         } else {
-                            OrbController.showBubble("出错了：$msg")
+                            // S25：前台时悬浮球不存在，失败也要进对话面板。
+                            showFailureBubble("出错了：$msg")
                             setState(ctx, "idle")
                             maybeStartWakeLoop()
                         }
@@ -464,7 +511,8 @@ object JarvisAgent {
      * 第一句完整出来立刻开念，体感上“几乎没有延迟”。
      * 用法：askCustom 里建一个，onToken 喂增量，onStreamDone 标记流结束；
      * 队列念空且流已结束时调 onFinish（全文），由调用方做记忆提取与状态收尾。
-     * 打断监听只在第一句开念时启动一次（startBargeInWatch 自带 1200ms 延迟），
+     * 打断监听每句开念时重启一次（M3：只在第一句启动一次的话，只覆盖前约 7 秒，
+     * 后面的句子打断不了；startBargeInWatch 自带 1200ms 延迟），
      * 回声比对取的是实时全文（取数器），流式增长的文本也能过滤。
      */
     // 注意：JarvisAgent 是 object（单例），里面不能用 inner class（inner 要绑外层实例，
@@ -481,7 +529,6 @@ object JarvisAgent {
         private var speaking = false
         private var streamDone = false
         private var finished = false
-        private var bargeInStarted = false
 
         /** 流里来了一段增量：拼进全文，按句切分，完整句子进队列。 */
         fun onToken(token: String) {
@@ -548,8 +595,9 @@ object JarvisAgent {
                     main.post {
                         if (mySeq != genSeq) return@post
                         setState(ctx, "speaking")
-                        if (JarvisPrefs.isBargeInEnabled(ctx) && !bargeInStarted) {
-                            bargeInStarted = true
+                        // M3：每句开念都重启一次打断监听（旧监听会被 listenOnce 开头的
+                        // stop() 顶掉，不叠加），播报全程都能打断。
+                        if (JarvisPrefs.isBargeInEnabled(ctx)) {
                             startBargeInWatch(ctx, mySeq) { fullText.toString() }
                         }
                     }
@@ -622,23 +670,42 @@ object JarvisAgent {
      * 回复文本开头（回声后拖了尾巴），都当回声直接忽略，既不计数也不清零；
      * 只有回复里没有的话才计入打断。真插话仍能打断，只是要连续两次非回声结果。
      */
+    /** M3：短打断指令——一次命中即打断，不用凑满 3 次长片段，也不受回声过滤拦。 */
+    private val BARGE_IN_SHORT_COMMANDS = setOf("停", "停下", "别说了", "别说", "不要说了")
+
     private fun startBargeInWatch(ctx: Context, mySeq: Int, replyText: () -> String) {
         // 回声比对只看字本身：回复里的标点、空白都去掉，识别结果同样处理。
         // replyText 是个取数器（流式播报时全文还在长，每次比对都现取最新全文）。
+        // M3：每句开念都重启一次监听（流式播报有多句，首句那次只覆盖前约 7 秒）；
+        // listenOnce 开头自带 stop()，旧监听会被新监听顶掉，不会叠加。
         main.postDelayed({
             if (mySeq != genSeq || state != "speaking") return@postDelayed
             var strongHits = 0
+            // 打断动作抽出来：短指令与长句达标共用同一条收尾。
+            fun triggerBargeIn() {
+                main.post {
+                    if (mySeq != genSeq || state != "speaking") return@post
+                    TtsRouter.stop()
+                    OrbController.showBubble("打断了，在听…")
+                    beginListening(ctx, fromWake = false, prefilledText = null)
+                }
+            }
             OfflineAsrSession.listenOnce(
                 ctx,
                 onPartial = { txt ->
                     if (mySeq != genSeq || state != "speaking") return@listenOnce
                     val norm = txt.replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
                     val replyNorm = replyText().replace(Regex("[\\s，。！？、；：,.!?;:]"), "")
-                    // 回声：识别结果是正在播的回复里的一段，或以回复开头——忽略，
-                    // 并且清零打断计数（刚听到的是扬声器自己，不是用户插话）。
+                    // 回声过滤只对 ≥5 字的长片段做子串比对：短片段没法可信地比对，
+                    // 且“停/别说了”这类短打断指令必须放行，不能被回声过滤吞掉。
                     // replyNorm 为空（回复全是标点，不可能出现在正常回复里）时不过滤。
-                    if (replyNorm.isNotEmpty() && norm.isNotEmpty() && (replyNorm.contains(norm) || norm.startsWith(replyNorm))) {
+                    if (norm.length >= 5 && replyNorm.isNotEmpty() && (replyNorm.contains(norm) || norm.startsWith(replyNorm))) {
                         strongHits = 0
+                        return@listenOnce
+                    }
+                    // M3：短打断指令单独放行，一次命中即打断，不用凑满 3 次长片段。
+                    if (norm in BARGE_IN_SHORT_COMMANDS) {
+                        triggerBargeIn()
                         return@listenOnce
                     }
                     // 批三十调参（2026-10-26 用户真机确认：没点球、有打断气泡、开关开着——
@@ -647,14 +714,7 @@ object JarvisAgent {
                     // partial 就能凑够 2 次。改成连续 3 次 ≥5 字：真插话是持续成句的
                     // 话，轻松达标；零星误识别很难连凑 3 次长片段。功能本身不动。
                     if (txt.trim().length >= 5) strongHits++ else strongHits = 0
-                    if (strongHits >= 3) {
-                        main.post {
-                            if (mySeq != genSeq || state != "speaking") return@post
-                            TtsRouter.stop()
-                            OrbController.showBubble("打断了，在听…")
-                            beginListening(ctx, fromWake = false, prefilledText = null)
-                        }
-                    }
+                    if (strongHits >= 3) triggerBargeIn()
                 },
                 onFinal = { /* 播报期间的识别只用来判断"有没有在说话"，最终结果走 beginListening 重新识别一次 */ },
                 onError = { /* 播报期间识别拿不到结果很正常（本来就没人说话），忽略 */ }
@@ -694,10 +754,21 @@ object JarvisAgent {
             ctx,
             onPartial = { },
             onFinal = { text -> main.post { onWakeResult(ctx, mySeq, text) } },
-            onError = {
+            onError = { msg ->
                 main.post {
-                    // 静音超时很正常，短暂间隔后继续下一轮轮询
-                    main.postDelayed({ wakeTick(ctx, mySeq) }, 400)
+                    // L3：永久性错误（没权限/模型缺失）不能每 400ms 空转重试——退避到
+                    // 60 秒重试，并只提示一次；只有“没听清/静音超时”这类正常情况才 400ms 续跑。
+                    if (msg.contains("权限") || msg.contains("模型文件缺失")) {
+                        if (!wakePermErrorNoted) {
+                            wakePermErrorNoted = true
+                            // S25 同理：前台时悬浮球不存在，提示也要进对话面板。
+                            showFailureBubble("唤醒监听停了：$msg")
+                        }
+                        main.postDelayed({ wakeTick(ctx, mySeq) }, 60_000)
+                    } else {
+                        // 静音超时很正常，短暂间隔后继续下一轮轮询
+                        main.postDelayed({ wakeTick(ctx, mySeq) }, 400)
+                    }
                 }
             }
         )
@@ -705,6 +776,9 @@ object JarvisAgent {
 
     // 批二：10 分钟内 3 次"唤醒了但没等到有效指令"，临时把判定收紧到严格档，缓解误唤醒。
     private val falseWakeTimes = ArrayList<Long>()
+    /** L3：永久性唤醒错误（权限/模型缺失）是否已给过一次可见提示（成功识别一次后清零）。 */
+    @Volatile
+    private var wakePermErrorNoted = false
     private fun noteFalseWake() {
         val now = System.currentTimeMillis()
         falseWakeTimes.removeAll { now - it > 10 * 60_000L }
@@ -727,6 +801,7 @@ object JarvisAgent {
 
     private fun onWakeResult(ctx: Context, mySeq: Int, text: String) {
         if (mySeq != genSeq || state != "idle") return
+        wakePermErrorNoted = false // L3：识别器又出结果了，永久性错误提示位清零
         val idx = wakeHitIndex(text)
         val hit = when {
             idx < 0 -> false

@@ -162,6 +162,7 @@ class ScreenController(
 
     fun tapNorm(nx: Int, ny: Int, beforePx: FloatArray? = null): JSONObject {
         requireNorm(nx, "x"); requireNorm(ny, "y")
+        requireForeground()
         val w = screenW; val h = screenH
         val px = nx.toPixel(w); val py = ny.toPixel(h)
         guardPopup(px, py, nx, ny)
@@ -179,6 +180,8 @@ class ScreenController(
 
     fun longPressNorm(nx: Int, ny: Int, durationMs: Long): JSONObject {
         requireNorm(nx, "x"); requireNorm(ny, "y")
+        requireForeground()
+        val dur = durationMs.coerceIn(LONG_PRESS_MIN_MS, LONG_PRESS_MAX_MS)
         val w = screenW; val h = screenH
         val px = nx.toPixel(w); val py = ny.toPixel(h)
         guardPopup(px, py, nx, ny)
@@ -186,7 +189,7 @@ class ScreenController(
             GroundingLog.noteTapCoord(nx, ny, px, py, w, h, hold = true, refused = true, pkg = lastPkg())
         }
         GroundingLog.noteTapCoord(nx, ny, px, py, w, h, hold = true, refused = false, pkg = lastPkg())
-        return longPress(px, py, durationMs).put("norm", "$nx,$ny")
+        return longPress(px, py, dur).put("norm", "$nx,$ny")
     }
 
     // ---- the popup guard ---------------------------------------------------
@@ -222,31 +225,54 @@ class ScreenController(
     private fun popups(): List<Rect> {
         val windows = runCatching { service.windows }.getOrNull() ?: return emptyList()
         val screenArea = screenW.toLong() * screenH
+        // M26: 系统型窗口只有属于目标包（最近一次 dump 的包 / 前台包）时才算弹窗，
+        // 否则输入法、系统悬浮窗都会被当成菜单。
+        val targetPkg = lastPkg() ?: foregroundPkg()
         val out = mutableListOf<Rect>()
         val r = Rect()
-        for (win in windows) {
-            val type = runCatching { win.type }.getOrNull() ?: continue
-            // IMEs, status/navigation bars and our own overlay are not menus.
-            if (type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue
-            val root = runCatching { rootOf(win) }.getOrNull()
-            val pkg = runCatching { root?.packageName?.toString() }.getOrNull().orEmpty()
-            runCatching { root?.recycle() }
-            if (pkg == service.packageName) continue
-            // NOT filtered on isActive: a popup takes focus, so "the active
-            // window" is exactly what a menu is. Measured 2026-10-20 — the
-            // first cut skipped active windows and the guard never fired on
-            // WeChat's chat-list long-press menu, which is focused. Size is
-            // what separates a menu from the app: a main window covers the
-            // screen, a popup does not.
-            if (!runCatching { win.getBoundsInScreen(r); true }.getOrDefault(false)) continue
-            if (r.width() <= 0 || r.height() <= 0) continue
-            val area = r.width().toLong() * r.height()
-            // A menu is a fragment of the screen, not most of it.
-            if (area > screenArea * 45 / 100) continue
-            if (r.height() > screenH * 6 / 10) continue
-            out += Rect(r)
+        // 先收一遍各窗口的 bounds 与包名：主窗口是其中最大的应用窗口，弹窗是
+        // “非全屏且非主窗口”的那一个——不只看面积百分比（M26）。面积 ≥80% 即全屏。
+        data class WinInfo(val rect: Rect, val pkg: String, val type: Int)
+        val infos = ArrayList<WinInfo>()
+        try {
+            for (win in windows) {
+                val type = runCatching { win.type }.getOrNull() ?: continue
+                // IMEs, status/navigation bars and our own overlay are not menus.
+                if (type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    type != android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM
+                ) continue
+                val root = runCatching { rootOf(win) }.getOrNull()
+                val pkg = runCatching { root?.packageName?.toString() }.getOrNull().orEmpty()
+                runCatching { root?.recycle() }
+                if (pkg == service.packageName) continue
+                // NOT filtered on isActive: a popup takes focus, so "the active
+                // window" is exactly what a menu is. Measured 2026-10-20 — the
+                // first cut skipped active windows and the guard never fired on
+                // WeChat's chat-list long-press menu, which is focused. Size is
+                // what separates a menu from the app: a main window covers the
+                // screen, a popup does not.
+                if (!runCatching { win.getBoundsInScreen(r); true }.getOrDefault(false)) continue
+                if (r.width() <= 0 || r.height() <= 0) continue
+                infos.add(WinInfo(Rect(r), pkg, type))
+            }
+            val mainArea = infos
+                .filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+                .maxOfOrNull { it.rect.width().toLong() * it.rect.height() } ?: 0L
+            for (info in infos) {
+                val area = info.rect.width().toLong() * info.rect.height()
+                if (area >= screenArea * 80 / 100) continue // 全屏不是弹窗
+                if (info.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    area >= mainArea
+                ) continue // 主窗口不是弹窗
+                if (info.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    (targetPkg.isNullOrEmpty() || info.pkg != targetPkg)
+                ) continue // 系统窗口只有属于目标包时才算弹窗
+                out += Rect(info.rect)
+            }
+            return out
+        } finally {
+            windows.forEach { runCatching { it.recycle() } }
         }
-        return out
     }
 
     /**
@@ -311,7 +337,18 @@ class ScreenController(
         // 往上走是小窗缩小比例——之前往上拖的方向反了）。
         val startX = before.centerX()
         val startY = before.bottom - 12
-        swipe(startX, startY, screenW / 2, screenH - 5, 400, fling = false)
+        // 展开拖动只认目标包的前台（S2 的 expectedPkg）；目标还没到前台时
+        // swipe 会拒绝，展开如实报失败，不抛到任务循环里。
+        val dragged = runCatching {
+            swipe(startX, startY, screenW / 2, screenH - 5, 400, fling = false, expectedPkg = targetPkg)
+            true
+        }.onFailure { Log.w("Body", "expandFloatingApp: drag refused: ${it.message}") }
+            .getOrDefault(false)
+        if (!dragged) {
+            out.put("expanded", false)
+            out.put("detail", "展开拖动未执行（目标应用不在前台），展开失败")
+            return out
+        }
         try { Thread.sleep(900) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
         val after = appWindow(targetPkg)
         if (after != null && isFullscreen(after)) {
@@ -330,20 +367,24 @@ class ScreenController(
         val r = Rect()
         var best: Rect? = null
         var bestArea = 0L
-        for (win in windows) {
-            val type = runCatching { win.type }.getOrNull() ?: continue
-            if (type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue
-            val root = runCatching { rootOf(win) }.getOrNull()
-            val pkg = runCatching { root?.packageName?.toString() }.getOrNull().orEmpty()
-            runCatching { root?.recycle() }
-            if (pkg != targetPkg) continue
-            if (!runCatching { win.getBoundsInScreen(r); true }.getOrDefault(false)) continue
-            if (r.width() <= 0 || r.height() <= 0) continue
-            val area = r.width().toLong() * r.height()
-            if (area > bestArea) {
-                bestArea = area
-                best = Rect(r)
+        try {
+            for (win in windows) {
+                val type = runCatching { win.type }.getOrNull() ?: continue
+                if (type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val root = runCatching { rootOf(win) }.getOrNull()
+                val pkg = runCatching { root?.packageName?.toString() }.getOrNull().orEmpty()
+                runCatching { root?.recycle() }
+                if (pkg != targetPkg) continue
+                if (!runCatching { win.getBoundsInScreen(r); true }.getOrDefault(false)) continue
+                if (r.width() <= 0 || r.height() <= 0) continue
+                val area = r.width().toLong() * r.height()
+                if (area > bestArea) {
+                    bestArea = area
+                    best = Rect(r)
+                }
             }
+        } finally {
+            windows.forEach { runCatching { it.recycle() } }
         }
         return best
     }
@@ -484,6 +525,14 @@ class ScreenController(
                     "screenshot) and aim from that image instead of this one"
             )
         }
+        // M27: 只看时效不够——上次手势之后屏幕已经动过，zoom 再新也过期。
+        if (zoomAtMs <= screenMovedAtMs) {
+            throw IllegalStateException(
+                "the last zoom predates the last gesture, so it no longer shows this " +
+                    "screen (zoom 已过期）. Take a fresh zoom_screen_region and aim from " +
+                    "that image instead of this one"
+            )
+        }
         requireNorm(lx, "x"); requireNorm(ly, "y")
         return intArrayOf(
             r[0] + lx * (r[2] - r[0]) / NORM_MAX,
@@ -574,7 +623,7 @@ class ScreenController(
         val a = resolveAim(on, x, y, cell, part)
         val blind = treeBlind()
         if (blind) requireZoomedOnBlind(a)
-        requireAimedSend(on, cell)
+        requireAimedSend(a)
         val s = if (blind) snapToShape(a.nx, a.ny) else null
         val nx = s?.nx ?: a.nx
         val ny = s?.ny ?: a.ny
@@ -604,37 +653,74 @@ class ScreenController(
      * with that instruction. Expires after [SEND_AIM_WINDOW_MS] so a task that typed
      * and moved on is not haunted by it.
      */
-    private fun requireAimedSend(on: String?, cell: String?) {
+    private fun requireAimedSend(a: Aim) {
         val typed = typedBlindAt
         if (typed == 0L) return
-        typedBlindAt = 0L
-        if (SystemClock.uptimeMillis() - typed > SEND_AIM_WINDOW_MS) return
-        // The box is gone (sent, dismissed, app left): nothing to protect.
+        // 已过期：守卫自然解除，清掉。
+        if (SystemClock.uptimeMillis() - typed > SEND_AIM_WINDOW_MS) {
+            typedBlindAt = 0L
+            return
+        }
+        // M28: 输入框没了（已发送 / 已收起 / 应用切走）时不要清零——editing() 读不到
+        // 也可能是瞬时状态，先放行这一次点按，但守卫保持武装，下一次点按仍要查。
         if (!A11yIme.editing(service)) return
-        val fromZoom = on?.trim()?.lowercase() == "zoom" ||
-            (on.isNullOrBlank() && cell != null && cell.any { it.isLetter() } &&
-                cell.trim().all { it.isLowerCase() || !it.isLetter() })
-        if (fromZoom && zoomAtMs > typed) return
-        // Stays armed until a zoom-aimed tap clears it, or the next blind tap sails through.
-        typedBlindAt = typed
+        // M28 + M10-A: 放行只认“有 zoom 图背书”——zoom 区域包含目标点，且 zoom
+        // 新于打字、新于上次手势、且在确认时效内。on="zoom" 的标签不再是放行条件：
+        // 从 zoom 图上读的点换算后本来就在区域内；而 on="screen" 的坐标点只要落在
+        // 一张新鲜 zoom 的区域里，同样是看过放大图才点的，也放行。
+        val z = zoomRegion
+        val zoomOk = z != null && zoomAtMs > typed && zoomAtMs > screenMovedAtMs &&
+            SystemClock.uptimeMillis() - zoomAtMs <= ZOOM_CONFIRM_MS &&
+            a.nx in z[0]..z[2] && a.ny in z[1]..z[3]
+        if (zoomOk) {
+            typedBlindAt = 0L
+            return
+        }
+        // 不放行：typedBlindAt 保持原值，守卫继续武装，直到一次 zoom 背书的点按
+        // 通过、或过期、或输入框消失。
         throw IllegalStateException(
             "refused: you just typed into a box on an app that hides its tree, and this tap " +
                 "was not aimed off a fresh zoom. The Send button and the input sit in a thin " +
                 "strip right on top of the post/message below — a grid-cell tap here lands on " +
                 "that content and opens it, losing the send. NEXT: zoom_screen_region on the " +
-                "Send button (cell + part), then tap with on=\"zoom\" from THAT image. If you " +
+                "Send button (cell + part), then tap with on=\"zoom\" from THAT image — or tap " +
+                "a point inside that fresh zoom's region. If you " +
                 "meant to tap something other than Send, the same applies: zoom first."
         )
     }
 
     /** A tree of a handful of nodes says nothing about what is on screen — see [BLIND_TREE_NODES]. */
     private fun treeBlind(): Boolean {
-        val root = runCatching { activeRoot() }.getOrNull() ?: return false
+        // S7: 没有根节点就是全盲——之前返回 false 会跳过 zoom 守卫，在完全没树的
+        // 屏上放行盲目坐标点。
+        val root = runCatching { activeRoot() }.getOrNull() ?: return true
         return try {
-            countNodes(root, BLIND_TREE_NODES + 1) <= BLIND_TREE_NODES
+            // 节点数少还不够：只数节点会把“只有一个可点按钮的弹窗”也判成盲。
+            // ≤3 个节点且其中没有任何可操作节点（可点/可滑/带文本、描述或 id）
+            // 时才是盲树。
+            if (countNodes(root, BLIND_TREE_NODES + 1) > BLIND_TREE_NODES) false
+            else !hasActionableNode(root, 64)
         } finally {
             root.recycle()
         }
+    }
+
+    /** 树里有没有哪怕一个可操作节点（有界递归，节点数少时才调用）。 */
+    private fun hasActionableNode(node: AccessibilityNodeInfo, budget: Int): Boolean {
+        if (budget <= 0) return false
+        if (node.isClickable || node.isScrollable || node.isFocusable || node.isChecked ||
+            !node.text.isNullOrEmpty() || !node.contentDescription.isNullOrEmpty() ||
+            !node.viewIdResourceName.isNullOrEmpty()
+        ) return true
+        for (i in 0 until node.childCount) {
+            val c = runCatching { childOf(node, i) }.getOrNull() ?: continue
+            try {
+                if (hasActionableNode(c, budget - 1)) return true
+            } finally {
+                c.recycle()
+            }
+        }
+        return false
     }
 
     private fun countNodes(node: AccessibilityNodeInfo, cap: Int): Int {
@@ -959,14 +1045,15 @@ class ScreenController(
     ): JSONObject {
         requireNorm(nx1, "x1"); requireNorm(ny1, "y1")
         requireNorm(nx2, "x2"); requireNorm(ny2, "y2")
+        val dur = durationMs.coerceIn(SWIPE_DURATION_MIN_MS, SWIPE_DURATION_MAX_MS)
         // Not a sample, but it moves everything on screen: without it the
         // offline pairing would read a post-scroll retry as a correction of a
         // pre-scroll miss, at a point that no longer means the same thing.
-        GroundingLog.noteSwipe(nx1, ny1, nx2, ny2, durationMs, actor = "brain")
+        GroundingLog.noteSwipe(nx1, ny1, nx2, ny2, dur, actor = "brain")
         val px1 = nx1.toPixel(screenW); val py1 = ny1.toPixel(screenH)
         val px2 = nx2.toPixel(screenW); val py2 = ny2.toPixel(screenH)
-        if (screens != null) return swipeScreens(px1, py1, px2, py2, durationMs, screens)
-        return swipe(px1, py1, px2, py2, durationMs, fling)
+        if (screens != null) return swipeScreens(px1, py1, px2, py2, dur, screens)
+        return swipe(px1, py1, px2, py2, dur, fling)
     }
 
     /**
@@ -1109,6 +1196,77 @@ class ScreenController(
      */
     private fun lastPkg(): String? = lastDumpPkg
 
+    /**
+     * S2: 前台包——本文件内的等价取法。HEAD 的
+     * JarvisAccessibilityService.foregroundPackage() 仍是旧版（直接取
+     * rootInActiveWindow 的包名，会把 Jarvis 自身 / SystemUI / 输入法当成前台，
+     * 见审计 S9），所以这里不调它，自己扫窗口：优先取 isActive && isFocused 的
+     * TYPE_APPLICATION 窗口，退到任一 active 应用窗口，最后才看 active root。
+     * 返回原始包名（含自身/SystemUI，由调用方判定）；取不到返回 null。
+     */
+    private fun foregroundPkg(): String? {
+        val windows = runCatching { service.windows }.getOrNull()
+        if (windows != null) {
+            try {
+                for (onlyFocused in listOf(true, false)) {
+                    for (w in windows) {
+                        val type = runCatching { w.type }.getOrNull() ?: continue
+                        if (type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                        if (!runCatching { w.isActive }.getOrDefault(false)) continue
+                        if (onlyFocused && !runCatching { w.isFocused }.getOrDefault(false)) continue
+                        val root = runCatching { rootOf(w) }.getOrNull() ?: continue
+                        val pkg = runCatching { root.packageName?.toString() }.getOrNull().orEmpty()
+                        runCatching { root.recycle() }
+                        if (pkg.isNotEmpty()) return pkg
+                    }
+                }
+            } finally {
+                windows.forEach { runCatching { it.recycle() } }
+            }
+        }
+        val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return null
+        return try {
+            root.packageName?.toString().orEmpty().takeIf { it.isNotEmpty() }
+        } finally {
+            runCatching { root.recycle() }
+        }
+    }
+
+    /**
+     * S2: 所有手势/输入入口的统一前台校验。目标包默认取 [lastDumpPkg]（最近一次
+     * dump 的包）；还没 dump 过（null）时只校验“前台是一个真实应用”，不比对包名，
+     * 以免冷启动的坐标流（autoglm-phone 只出坐标）第一步就被拦住。自身 /
+     * SystemUI / 取不到前台时一律拒绝，不发手势。
+     */
+    private fun requireForeground(expectedPkg: String? = lastDumpPkg) {
+        val fg = foregroundPkg()
+        if (fg.isNullOrEmpty()) {
+            throw IllegalStateException(
+                "refused: cannot tell which app is in front (no foreground window) — " +
+                    "open the target app first, then dump its screen"
+            )
+        }
+        if (fg == service.packageName) {
+            throw IllegalStateException(
+                "refused: Jarvis itself is in front — switch to the target app first, " +
+                    "then dump its screen; this gesture was NOT sent"
+            )
+        }
+        if (fg == SYSTEM_UI_PKG) {
+            throw IllegalStateException(
+                "refused: only the system UI is in front (mid-transition?) — wait for the " +
+                    "target app to come up, then dump its screen; this gesture was NOT sent"
+            )
+        }
+        if (!expectedPkg.isNullOrEmpty() && fg != expectedPkg) {
+            throw IllegalStateException(
+                "refused: the app in front is $fg, not $expectedPkg — the target app is " +
+                    "not in front, so this gesture was NOT sent. Open $expectedPkg first " +
+                    "and dump its screen, then retry"
+            )
+        }
+    }
+
     // ---- element-index tapping ----------------------------------------------
     //
     // Coordinate math by the model is the top accuracy risk: models
@@ -1123,9 +1281,10 @@ class ScreenController(
     // after the page shifts (images load in, content settles) — e28 can
     // become a different view between the dump the brain read and the tap.
     // So the index keeps each entry's identity triple (pkg, viewId, bounds)
-    // and tapByEid RE-LOCATES live: find a node NOW matching that triple; only
-    // if none matches do we fall back to the remembered pixel center, and an
-    // empty index still fails loudly. Phone.sh never had this problem because
+    // and tapByEid RE-LOCATES live: find a node NOW matching that triple. S4:
+    // 活节点找不到时直接失败，要求重新 dump 再点——旧版静默用陈旧像素中心点，
+    // 页面滚动/切页后点错且不自知。S5: 每个条目还带 dump 代际 epoch，上一屏的
+    // e 号在新 dump 后直接拒掉。Phone.sh never had this problem because
     // its step loop dumps-and-acts in one breath; we let the brain think
     // between the two, so the tap has to catch up.
     //
@@ -1138,6 +1297,7 @@ class ScreenController(
         val pkg: String,         // owning app, from the node's root at dump time
         val viewId: String?,     // resource id if any
         val bounds: String,      // "l,t,r,b" in pixels at dump time
+        val epoch: Long,         // S5: 哪一次 dump 编的号；过期后 lookupEid 拒绝
     )
 
     private val eidLock = Any()
@@ -1145,45 +1305,51 @@ class ScreenController(
     // 稳定编号索引：紧凑表的 s<hex> 编号 → 同一个 EidEntry。tapByEid/longPressByEid
     // 同时认 e 数字和 s 编号，所以模型用稳定编号点、流里用稳定编号，都走同一条路。
     private val sidIndex = HashMap<String, EidEntry>()
+    /** S5: dump 代际计数，每次 rebuildIndexAndList 加一；上一屏的 e 号随即作废。 */
+    @Volatile private var eidEpoch = 0L
 
     /** Fresh dump in progress — see [tapByEid] for why taps must wait. */
     private val dumpLock = Object()
 
     fun tapByEid(eid: String): JSONObject {
         val entry = lookupEid(eid)
+        // S2: 目标包就是该元素所属的包；前台不是它就不发手势。
+        requireForeground(entry.pkg)
         // Re-locate live before touching anything: a match means the element
         // still exists where we found it; no match means either it scrolled
-        // away or the pane changed — remembered center, best effort.
+        // away or the pane changed — fail loudly and ask for a fresh dump
+        // instead of tapping remembered pixels that now belong to something else.
         val live = findLiveNode(entry)
-        val x: Int; val y: Int
-        if (live != null) {
-            x = (live[0] + live[2]) / 2
-            y = (live[1] + live[3]) / 2
-        } else {
-            x = entry.px[0]; y = entry.px[1]
-        }
-        GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = false, relocated = live != null, pkg = lastPkg())
-        return tap(x, y)
+            ?: throw IllegalStateException(
+                "element '$eid' is no longer on screen where the last dump put it " +
+                    "(scrolled away or page changed) — the remembered position is NOT " +
+                    "tapped. Call get_screen_element again and use an eid from the fresh list"
+            )
+        val x = (live[0] + live[2]) / 2
+        val y = (live[1] + live[3]) / 2
+        GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = false, relocated = true, pkg = lastPkg())
+        return tap(x, y, expectedPkg = entry.pkg)
             .put("eid", eid)
             .put("px", "$x,$y")
-            .put("relocated", live != null)
+            .put("relocated", true)
     }
 
     fun longPressByEid(eid: String, durationMs: Long): JSONObject {
         val entry = lookupEid(eid)
+        requireForeground(entry.pkg)
         val live = findLiveNode(entry)
-        val x: Int; val y: Int
-        if (live != null) {
-            x = (live[0] + live[2]) / 2
-            y = (live[1] + live[3]) / 2
-        } else {
-            x = entry.px[0]; y = entry.px[1]
-        }
-        GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = true, relocated = live != null, pkg = lastPkg())
-        return longPress(x, y, durationMs)
+            ?: throw IllegalStateException(
+                "element '$eid' is no longer on screen where the last dump put it " +
+                    "(scrolled away or page changed) — the remembered position is NOT " +
+                    "long-pressed. Call get_screen_element again and use an eid from the fresh list"
+            )
+        val x = (live[0] + live[2]) / 2
+        val y = (live[1] + live[3]) / 2
+        GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = true, relocated = true, pkg = lastPkg())
+        return longPress(x, y, durationMs, expectedPkg = entry.pkg)
             .put("eid", eid)
             .put("px", "$x,$y")
-            .put("relocated", live != null)
+            .put("relocated", true)
     }
 
     /**
@@ -1195,7 +1361,8 @@ class ScreenController(
      * 纪律：下次 dump 就清掉），所以 find 回来的编号下一轮能直接点。
      */
     fun findBySelector(sel: JSONObject): JSONObject {
-        val nodes = selectNodes(sel)
+        val found = selectNodes(sel)
+        val nodes = found.nodes
         val matches = JSONArray()
         val usedSids = HashSet<String>()
         try {
@@ -1216,13 +1383,18 @@ class ScreenController(
                 usedSids.add(sid)
                 val cxPx = (r.left + r.right) / 2
                 val cyPx = (r.top + r.bottom) / 2
-                synchronized(eidLock) {
-                    sidIndex[sid] = EidEntry(
-                        px = intArrayOf(cxPx, cyPx),
-                        pkg = lastPkg().orEmpty(),
-                        viewId = n.viewIdResourceName?.ifEmpty { null },
-                        bounds = bounds,
-                    )
+                // S5/S6: 登记当代际 epoch，与 dump 同锁（dumpLock → eidLock），
+                // 下次 dump 加代际后这批 sid 随即作废。
+                synchronized(dumpLock) {
+                    synchronized(eidLock) {
+                        sidIndex[sid] = EidEntry(
+                            px = intArrayOf(cxPx, cyPx),
+                            pkg = lastPkg().orEmpty(),
+                            viewId = n.viewIdResourceName?.ifEmpty { null },
+                            bounds = bounds,
+                            epoch = eidEpoch,
+                        )
+                    }
                 }
                 matches.put(JSONObject().apply {
                     put("sid", sid)
@@ -1235,7 +1407,9 @@ class ScreenController(
         } finally {
             nodes.forEach { it.recycle() }
         }
+        // M33: 预算耗尽 / 命中上限截断时如实标记 partial，total 只是已返回的个数。
         return JSONObject().put("total", nodes.size).put("matches", matches)
+            .apply { if (found.partial) put("partial", true) }
     }
 
     /**
@@ -1251,7 +1425,18 @@ class ScreenController(
         tapSelector(sel, index, hold = true, durationMs = durationMs)
 
     private fun tapSelector(sel: JSONObject, index: Int, hold: Boolean, durationMs: Long): JSONObject {
-        val nodes = selectNodes(sel)
+        requireForeground()
+        val found = selectNodes(sel)
+        val nodes = found.nodes
+        // M33: 预算耗尽时结果是截断的，按索引点可能点到“第 N 个”之外的元素——拒绝。
+        if (found.partial) {
+            nodes.forEach { it.recycle() }
+            throw IllegalStateException(
+                "selector search hit the walk budget — the match list is PARTIAL, so " +
+                    "tapping by index could hit the wrong element. Narrow the selector " +
+                    "or dump the screen and tap by eid instead"
+            )
+        }
         if (index < 0 || index >= nodes.size) {
             val total = nodes.size
             nodes.forEach { it.recycle() }
@@ -1291,8 +1476,10 @@ class ScreenController(
     }
 
     /** 按选择器在活树里找节点：命中条件全 AND；返回命中的节点（调用方负责 recycle）。 */
-    private fun selectNodes(sel: JSONObject): List<AccessibilityNodeInfo> {
-        val root = activeRoot() ?: return emptyList()
+    private class SelectResult(val nodes: List<AccessibilityNodeInfo>, val partial: Boolean)
+
+    private fun selectNodes(sel: JSONObject): SelectResult {
+        val root = activeRoot() ?: return SelectResult(emptyList(), false)
         val kept = ArrayList<AccessibilityNodeInfo>()
         val budget = WalkBudget(SEARCH_BUDGET_MS)
         val stack = ArrayDeque<AccessibilityNodeInfo>()
@@ -1304,29 +1491,53 @@ class ScreenController(
             runCatching { n.getBoundsInScreen(r) }
             if (!r.isEmpty && UiSelector.matches(n, sel)) kept.add(n) else n.recycle()
         }
+        // M33: 预算耗尽（栈里还剩没走完的节点）即截断，调用方如实标记/拒点；
+        // 只因命中满 50 个而停的不算截断——前 50 个仍是按文档序排好的有效匹配。
+        val partial = budget.spent()
         while (stack.isNotEmpty()) stack.removeFirst().recycle()
-        return kept
+        return SelectResult(kept, partial)
     }
 
+    /** S6: 索引读路径与重建互斥——同一把 dumpLock，见 [rebuildIndexAndList]。 */
     private fun lookupEid(eid: String): EidEntry {
+        synchronized(dumpLock) { return lookupEidLocked(eid) }
+    }
+
+    private fun lookupEidLocked(eid: String): EidEntry {
         // 稳定编号（紧凑表的 s<hex>）：同一元素跨轮不变，查 sidIndex。
         if (eid.startsWith("s")) {
             synchronized(eidLock) {
-                return sidIndex[eid]
+                val entry = sidIndex[eid]
                     ?: throw IllegalArgumentException(
                         "unknown element '$eid' — the stable id is not on the current screen. " +
                             "Use a stable id from the latest compact list, do not guess coordinates"
                     )
+                checkEpoch(eid, entry)
+                return entry
             }
         }
         val key = eid.removePrefix("e").toIntOrNull()
             ?: throw IllegalArgumentException("bad element id '$eid' — expected e<number> or a stable s<hex> id from the element list")
         synchronized(eidLock) {
-            return eidIndex[key]
+            val entry = eidIndex[key]
                 ?: throw IllegalArgumentException(
                     "unknown element '$eid' — the page has changed since your last get_screen_element. " +
                         "Call get_screen_element again and use an eid from the fresh list, do not guess coordinates"
                 )
+            checkEpoch(eid, entry)
+            return entry
+        }
+    }
+
+    /** S5: 上一屏的 e 号在新 dump 后不能再被用来点。 */
+    private fun checkEpoch(eid: String, entry: EidEntry) {
+        if (entry.epoch != eidEpoch) {
+            throw IllegalArgumentException(
+                "element '$eid' is from an older screen (元素表已过期，重新 dump) — " +
+                    "the element list has been rebuilt since this id was issued. " +
+                    "Call get_screen_element again and use an eid from the fresh list, " +
+                    "do not guess coordinates"
+            )
         }
     }
 
@@ -1335,12 +1546,17 @@ class ScreenController(
      * Matches on viewId when present (strongest), else on bounds-exact within
      * the entry's app, else null. Walking the whole tree per tap costs a few
      * ms on this hardware; correctness of "did I tap what I meant" is
-     * worth far more.
+     * worth far more. S4: 同 id 的候选必须同时满足两点才算找到——中心离 dump
+     * 时中心 ≤150px，且 bounds 与旧 bounds 至少部分重合；否则返回 null，
+     * 调用方直接失败，不用陈旧坐标兜底。
      */
     private fun findLiveNode(entry: EidEntry): IntArray? {
         val root = runCatching { activeRoot() }.getOrNull() ?: return null
         try {
             if (root.packageName?.toString() != entry.pkg) return null
+            val oldParts = entry.bounds.split(",").mapNotNull { it.toIntOrNull() }
+            val oldRect = if (oldParts.size == 4) Rect(oldParts[0], oldParts[1], oldParts[2], oldParts[3]) else null
+            val maxDistSq = LIVE_MAX_DIST_PX.toLong() * LIVE_MAX_DIST_PX
             // Strong path: resource id narrows it down, but WeChat reuses ids
             // across siblings (every bottom tab shares one id), so among the
             // matches pick the one CLOSEST to the remembered center — the
@@ -1356,6 +1572,8 @@ class ScreenController(
                         val r = Rect()
                         runCatching { m.getBoundsInScreen(r) }
                         if (r.width() > 0 && r.height() > 0) {
+                            // 旧 bounds 完全不重合的候选不是同一处元素（已滚动/切页）。
+                            if (oldRect != null && !Rect.intersects(r, oldRect)) continue
                             val cx = (r.left + r.right) / 2
                             val cy = (r.top + r.bottom) / 2
                             val dx = (cx - entry.px[0]).toLong()
@@ -1367,13 +1585,16 @@ class ScreenController(
                             }
                         }
                     }
+                    // 最近的候选离得太远（>150px）也视为未找到。
+                    if (bestDist > maxDistSq) return null
                     return bestArr
                 } finally {
                     matches.forEach { it.recycle() }
                 }
             }
             // Weak path: walk for a node with the exact same bounds. Budgeted:
-            // a miss falls back to the remembered centre, which is fine.
+            // a miss fails loudly upstream instead of falling back to the
+            // remembered centre.
             return findNodeByBounds(root, entry.bounds, WalkBudget(SEARCH_BUDGET_MS))
         } finally {
             root.recycle()
@@ -1399,7 +1620,12 @@ class ScreenController(
         return null
     }
 
-    fun tap(x: Int, y: Int, snapFrame: FloatArray? = null): JSONObject {
+    fun tap(x: Int, y: Int, snapFrame: FloatArray? = null, expectedPkg: String? = null): JSONObject {
+        // S2: 像素坐标必须落在屏幕内；前台必须是指定的目标包（默认最近一次 dump 的包）。
+        if (x !in 0 until screenW || y !in 0 until screenH) {
+            throw IllegalArgumentException("tap ($x,$y) is outside the screen ${screenW}x$screenH — refusing to send")
+        }
+        requireForeground(expectedPkg ?: lastDumpPkg)
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         // 150ms, not the classic 100ms: WeChat's Moments like/comment buttons
         // (and other touch-filtering surfaces) ignore injections shorter than
@@ -1422,6 +1648,10 @@ class ScreenController(
             }
         } finally {
             if (dodged) com.jarvis.app.OrbController.restoreDodge()
+        }
+        // M29: 手势没完成（被取消）就是没点下去——直接失败，不附效果快照。
+        if (!result.optBoolean("completed", false)) {
+            throw IllegalStateException("tap at ($x,$y) was NOT completed (gesture cancelled) — nothing was sent")
         }
         marker?.mark(x, y, TapMarkerUi.Kind.TAP)
         result.put("x", x).put("y", y)
@@ -1466,7 +1696,12 @@ class ScreenController(
             // changes nothing in the active window's node tree — measured in
             // the field: the bar appeared, screen_changed said false, and the
             // only honest signal was the window list growing by one.
-            val winCount = runCatching { service.windows.size }.getOrDefault(0)
+            // L15: 取到的窗口列表用完即回收。
+            val winCount = runCatching {
+                service.windows.let { wins ->
+                    try { wins.size } finally { wins.forEach { runCatching { it.recycle() } } }
+                }
+            }.getOrDefault(0)
             JSONObject()
                 .put("pkg", root.packageName?.toString().orEmpty())
                 .put("sig", f.sig() * 31 + winCount)
@@ -1754,6 +1989,9 @@ class ScreenController(
                 val tree = dumpOnce(false, WalkBudget(ATTACHED_TREE_MS))
                 if (tree.optInt("nodes_useful", 0) > 0) {
                     rebuildIndexAndList(tree)
+                    // S2: 点后切了应用时，目标包跟着新树走，否则下一次坐标点按
+                    // 还拿旧包校验会被误拦。
+                    tree.optString("pkg").takeIf { it.isNotEmpty() }?.let { lastDumpPkg = it }
                     val elements = tree.optString("elements")
                     if (elements.isNotEmpty()) {
                         result.put("elements", elements)
@@ -1816,11 +2054,27 @@ class ScreenController(
     }
 
     fun tapById(id: String): JSONObject {
+        requireForeground()
         val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
         try {
             val matches = root.findAccessibilityNodeInfosByViewId(id).orEmpty()
-            val target = matches.firstOrNull() ?: throw IllegalArgumentException("no node with id: $id")
             try {
+                if (matches.isEmpty()) throw IllegalArgumentException("no node with id: $id")
+                // L18: 只认可见且可点的节点；多个符合时报歧义，不取第一个。
+                val usable = matches.filter { it.isVisibleToUser && it.isClickable }
+                if (usable.isEmpty()) {
+                    throw IllegalStateException(
+                        "no visible clickable node with id: $id " +
+                            "(found ${matches.size} node(s), none visible+clickable)"
+                    )
+                }
+                if (usable.size > 1) {
+                    throw IllegalArgumentException(
+                        "ambiguous id: $id matches ${usable.size} visible clickable nodes — " +
+                            "use a more specific id or tap by eid"
+                    )
+                }
+                val target = usable[0]
                 val performed = target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 return JSONObject().put("performed", performed).put("id", id).put("matches", matches.size)
             } finally {
@@ -1840,7 +2094,9 @@ class ScreenController(
      * a longer duration because release velocity is distance/duration — slowing
      * the stroke shrinks the coast but never removes it.
      */
-    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long, fling: Boolean): JSONObject {
+    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long, fling: Boolean, expectedPkg: String? = null): JSONObject {
+        requireForeground(expectedPkg ?: lastDumpPkg)
+        val dur = durationMs.coerceIn(SWIPE_DURATION_MIN_MS, SWIPE_DURATION_MAX_MS)
         if (fling) guardFlingStreak(y2 > y1) else synchronized(loopLock) { flingStreak = 0 }
         val path = Path().apply {
             moveTo(x1.toFloat(), y1.toFloat())
@@ -1866,21 +2122,33 @@ class ScreenController(
         val result = try {
             guardedGesture(target) {
             if (fling) {
-                val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
-                runGesture(GestureDescription.Builder().addStroke(stroke).build(), durationMs + 2000)
+                val stroke = GestureDescription.StrokeDescription(path, 0L, dur)
+                runGesture(GestureDescription.Builder().addStroke(stroke).build(), dur + 2000)
             } else {
-                val move = GestureDescription.StrokeDescription(path, 0L, durationMs, true)
-                val moved = runGesture(GestureDescription.Builder().addStroke(move).build(), durationMs + 2000)
+                val move = GestureDescription.StrokeDescription(path, 0L, dur, true)
+                val moved = runGesture(GestureDescription.Builder().addStroke(move).build(), dur + 2000)
                 if (moved.optBoolean("completed")) {
                     val still = Path().apply { moveTo(x2.toFloat(), y2.toFloat()) }
                     // A cancelled hold still leaves the list where the finger put it:
                     // ACTION_CANCEL ends a scroll without a fling.
-                    runGesture(
+                    // L16: 第二段 hold 的结果不再丢弃——失败即在结果里注明。
+                    val holdResult = runGesture(
                         GestureDescription.Builder()
                             .addStroke(move.continueStroke(still, 0L, SWIPE_HOLD_MS, false))
                             .build(),
                         SWIPE_HOLD_MS + 2000,
                     )
+                    if (!holdResult.optBoolean("completed", false)) {
+                        moved.put("hold_completed", false)
+                            .put(
+                                "hold_note",
+                                "the end-hold stroke was cancelled — the list should still be " +
+                                    "where the finger put it (ACTION_CANCEL ends a scroll without " +
+                                    "a fling), but the hold itself did not complete"
+                            )
+                    } else {
+                        moved.put("hold_completed", true)
+                    }
                 }
                 moved
             }
@@ -1888,8 +2156,12 @@ class ScreenController(
         } finally {
             if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
+        // M29: 主手势没完成就是没滑下去——直接失败，不附 fling 快照。
+        if (!result.optBoolean("completed", false)) {
+            throw IllegalStateException("swipe from ($x1,$y1) to ($x2,$y2) was NOT completed (gesture cancelled) — nothing was sent")
+        }
         if (fling && before != null) attachFlingSnapshot(result, before, beforePx)
-        return result.put("from", "$x1,$y1").put("to", "$x2,$y2").put("duration_ms", durationMs)
+        return result.put("from", "$x1,$y1").put("to", "$x2,$y2").put("duration_ms", dur)
             .put("fling", fling)
     }
 
@@ -1968,32 +2240,56 @@ class ScreenController(
         }
     }
 
-    fun longPress(x: Int, y: Int, durationMs: Long): JSONObject {
+    fun longPress(x: Int, y: Int, durationMs: Long, expectedPkg: String? = null): JSONObject {
+        requireForeground(expectedPkg ?: lastDumpPkg)
+        val dur = durationMs.coerceIn(LONG_PRESS_MIN_MS, LONG_PRESS_MAX_MS)
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
+        val stroke = GestureDescription.StrokeDescription(path, 0L, dur)
         // Andee 对齐：上一圈还亮着时先藏起来。
         marker?.hideNow()
         // Andee 对齐：落点在球下时球先让开，手势完恢复。
         val dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x, y)
         val result = try {
             guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
-                runGesture(GestureDescription.Builder().addStroke(stroke).build(), durationMs + 2000)
+                runGesture(GestureDescription.Builder().addStroke(stroke).build(), dur + 2000)
             }
         } finally {
             if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
+        // M29: 手势没完成就是没按下去——直接失败，不附弹窗快照。
+        if (!result.optBoolean("completed", false)) {
+            throw IllegalStateException("long-press at ($x,$y) was NOT completed (gesture cancelled) — nothing was sent")
+        }
         marker?.mark(x, y, TapMarkerUi.Kind.HOLD)
         // A long-press menu appears a beat after the finger lifts.
-        Thread.sleep(POPUP_SETTLE_MS)
+        // L16: sleep 包 runCatching，中断时恢复中断位。
+        runCatching { Thread.sleep(POPUP_SETTLE_MS) }
+            .onFailure { if (it is InterruptedException) Thread.currentThread().interrupt() }
         putPopups(result)
-        return result.put("x", x).put("y", y).put("duration_ms", durationMs)
+        return result.put("x", x).put("y", y).put("duration_ms", dur)
     }
 
     fun longPressById(id: String): JSONObject {
+        requireForeground()
         val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
         try {
             val matches = root.findAccessibilityNodeInfosByViewId(id).orEmpty()
-            val target = matches.firstOrNull() ?: throw IllegalArgumentException("no node with id: $id")
+            if (matches.isEmpty()) throw IllegalArgumentException("no node with id: $id")
+            // L18: 只认可见且可长按的节点；多个符合时报歧义，不取第一个。
+            val usable = matches.filter { it.isVisibleToUser && it.isLongClickable }
+            if (usable.isEmpty()) {
+                throw IllegalStateException(
+                    "no visible long-clickable node with id: $id " +
+                        "(found ${matches.size} node(s), none visible+long-clickable)"
+                )
+            }
+            if (usable.size > 1) {
+                throw IllegalArgumentException(
+                    "ambiguous id: $id matches ${usable.size} visible long-clickable nodes — " +
+                        "use a more specific id or long-press by eid"
+                )
+            }
+            val target = usable[0]
             try {
                 val performed = target.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
                 return JSONObject().put("performed", performed).put("id", id)
@@ -2033,6 +2329,11 @@ class ScreenController(
         // 再 ACTION_PASTE,读回验证同款。SET_TEXT 平台调用返回过 true、但
         // 读回不对时,粘贴前先把框清空,免得新旧文字叠在一起。无论成功失败,
         // 粘贴完都清剪贴板。
+        // S2: 打字也要先确认前台是目标应用，否则文字可能进错应用。
+        requireForeground()
+        // S3: id != null 时先按 viewId 定位并聚焦该输入框，找不到就报错；
+        // 只有 id == null 才用当前焦点框。旧版全程忽略 id，文字会打进焦点框。
+        if (id != null) focusInputById(id)
         val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
         val focused = try {
             root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
@@ -2057,6 +2358,59 @@ class ScreenController(
         if (viaSet.optBoolean("performed", false)) return markBlindTyping(viaSet)
         return markBlindTyping(
             typeViaClipboardPaste(text, secret, viaSet.optBoolean("set_performed", false))
+        )
+    }
+
+    /**
+     * S3: 按 viewId 定位输入框并聚焦。多个同 id 时只认可见、可编辑/可聚焦的；
+     * 一个可见的都没有（或根本没有）就报错，不回落到当前焦点框。聚焦后轮询
+     * 核对焦点节点的 viewId，落不上就报错——否则文字仍会打进旧焦点框。
+     */
+    private fun focusInputById(id: String) {
+        val root = service.rootInActiveWindow ?: throw IllegalStateException("no active window")
+        try {
+            val matches = root.findAccessibilityNodeInfosByViewId(id).orEmpty()
+            try {
+                if (matches.isEmpty()) {
+                    throw IllegalArgumentException("no node with id: $id")
+                }
+                val visible = matches.filter { it.isVisibleToUser }
+                if (visible.isEmpty()) {
+                    throw IllegalStateException(
+                        "no visible node with id: $id (found ${matches.size} node(s), none visible)"
+                    )
+                }
+                // 可编辑优先，其次可聚焦；多个都符合时取第一个可见的（id 在
+                // 同屏复用时，焦点框本身应唯一可编辑）。
+                val target = visible.firstOrNull { it.isEditable }
+                    ?: visible.firstOrNull { it.isFocusable }
+                    ?: visible[0]
+                target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            } finally {
+                matches.forEach { it.recycle() }
+            }
+        } finally {
+            root.recycle()
+        }
+        // 焦点切换是异步的：短轮询核对，确认焦点确为该 id 再返回。
+        val deadline = SystemClock.uptimeMillis() + 500
+        while (SystemClock.uptimeMillis() < deadline) {
+            val r = service.rootInActiveWindow ?: break
+            try {
+                val f = r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                try {
+                    if (f != null && f.viewIdResourceName == id) return
+                } finally {
+                    if (f != null && f !== r) f.recycle()
+                }
+            } finally {
+                r.recycle()
+            }
+            runCatching { Thread.sleep(100) }
+        }
+        throw IllegalStateException(
+            "could not focus the input with id: $id — focus did not land there, " +
+                "so typing would go into the wrong field"
         )
     }
 
@@ -2332,16 +2686,22 @@ class ScreenController(
         if (want.isEmpty()) return ""
         val r = service.rootInActiveWindow ?: return ""
         val budget = WalkBudget(SEARCH_BUDGET_MS)
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(r)
         try {
-            val stack = ArrayDeque<AccessibilityNodeInfo>()
-            stack.add(r)
             while (stack.isNotEmpty() && !budget.spent()) {
                 val n = stack.removeFirst()
-                val t = n.text?.toString().orEmpty()
-                if (t == want) return t
-                for (i in 0 until n.childCount) childOf(n, i)?.let { stack.add(it) }
+                try {
+                    val t = n.text?.toString().orEmpty()
+                    if (t == want) return t
+                    for (i in 0 until n.childCount) childOf(n, i)?.let { stack.add(it) }
+                } finally {
+                    // L15: 弹出的节点逐个回收；根节点由外层 finally 回收。
+                    if (n !== r) n.recycle()
+                }
             }
         } finally {
+            while (stack.isNotEmpty()) stack.removeFirst().recycle()
             r.recycle()
         }
         return ""
@@ -2458,6 +2818,18 @@ class ScreenController(
         // internal capture (tap_after, fling_after, miss_shot) goes through
         // here too, and counting those would make the streak unbuildable.
         if (reason == "tool") synchronized(loopLock) { flingStreak = 0 }
+        // M34: 复用 S2 同一套前台校验——前台不是真实应用（自身/SystemUI/取不到）
+        // 时不截图；FLAG_SECURE 的失败在下面映射成 secure_window 结构化错误。
+        val fgPkg = foregroundPkg()
+        if (fgPkg.isNullOrEmpty()) {
+            throw IllegalStateException("screenshot refused: cannot tell which app is in front (unknown_app)")
+        }
+        if (fgPkg == service.packageName) {
+            throw IllegalStateException("screenshot refused: foreground is Jarvis itself (self)")
+        }
+        if (fgPkg == SYSTEM_UI_PKG) {
+            throw IllegalStateException("screenshot refused: only the system UI is in front (systemui)")
+        }
         // Settle before capture: images loading and lists settling MOVE the
         // things a screenshot is about to be used to aim at — a shot taken
         // mid-settle gives the brain targets that have already shifted by
@@ -2466,6 +2838,8 @@ class ScreenController(
         // agree. Cheap when still (one extra fingerprint pass), capped when
         // genuinely animated — the shot is taken anyway and `still_moving`
         // says so, rather than pretending.
+        // M34: 稳定失败（多次采样始终不一致）时结果里写 still_moving:true。
+        var stillMoving = false
         runCatching {
             val first = screenFingerprint()
             // A slow app cannot be fingerprinted to a stable answer, and each
@@ -2482,6 +2856,7 @@ class ScreenController(
                 prev = sig
                 tries++
             }
+            stillMoving = true
         }
         val latch = CountDownLatch(1)
         var pngBytes: ByteArray? = null
@@ -2550,8 +2925,14 @@ class ScreenController(
                 },
             )
             if (!latch.await(5, TimeUnit.SECONDS)) throw IllegalStateException("screenshot timeout")
-            val bytes = pngBytes
-                ?: throw IllegalStateException("screenshot failed with code $errCode")
+            val bytes = pngBytes ?: throw IllegalStateException(
+                if (errCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW) {
+                    "screenshot refused: secure_window — the foreground app ($fgPkg) " +
+                        "blocks screenshots (FLAG_SECURE); judge from the element list instead"
+                } else {
+                    "screenshot failed with code $errCode"
+                }
+            )
             val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
             // Hooked here, not in onSuccess: the PNG is already encoded at this
             // point, so logging costs no second capture and no second compress —
@@ -2632,6 +3013,8 @@ class ScreenController(
                         val tree = dumpOnce(false, WalkBudget(ATTACHED_TREE_MS))
                         if (tree.optInt("nodes_useful", 0) > 0) {
                             rebuildIndexAndList(tree)
+                            // S2: 截图时切了应用，目标包跟着新树走。
+                            tree.optString("pkg").takeIf { it.isNotEmpty() }?.let { lastDumpPkg = it }
                             val elements = tree.optString("elements")
                             if (elements.isNotEmpty()) {
                                 it.put("elements", elements)
@@ -2648,6 +3031,8 @@ class ScreenController(
                         }
                     }
                 }
+                // M34: 稳定失败时如实标记，模型别把一张还在动的截图当定稿来瞄准。
+                .also { if (stillMoving) it.put("still_moving", true) }
         } finally {
             com.jarvis.app.OrbController.setVisibleForCapture(true)
             lastCaptureAt.set(SystemClock.uptimeMillis())
@@ -2806,6 +3191,10 @@ class ScreenController(
     fun activeWindowVisible(): Boolean {
         val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return false
         return try {
+            // L22: 只看 isVisibleToUser 不够——根节点属于 Jarvis 自己或 SystemUI
+            // 时也算“可见”，调用方会误以为目标应用已就绪。
+            val pkg = runCatching { root.packageName?.toString() }.getOrNull().orEmpty()
+            if (pkg.isEmpty() || pkg == service.packageName || pkg == SYSTEM_UI_PKG) return false
             runCatching { root.isVisibleToUser }.getOrDefault(false)
         } finally {
             runCatching { root.recycle() }
@@ -2904,7 +3293,9 @@ class ScreenController(
         // Ahead of the shot block on purpose: `screenshot()` stamps its record
         // with [lastPkg], and the picture belongs to the screen we just read,
         // not to the one before it.
-        out.optString("pkg").takeIf { it.isNotEmpty() }?.let { lastDumpPkg = it }
+        // M30: 空 dump 时把 lastDumpPkg 置空，不保留旧包名——否则后来的 tap 会
+        // 拿上一个应用的包当目标包校验。
+        lastDumpPkg = out.optString("pkg").takeIf { it.isNotEmpty() }
         // Evidence for [reviveNote], recorded only on a dump that actually
         // worked. Our own package is excluded: our Activities read fine and
         // would be recorded as known-good, which is true and useless — nobody
@@ -3041,15 +3432,31 @@ class ScreenController(
         // window (WeChat's mini-program / web-view pannes do exactly this).
         // Also entered when the "active" window turned out to be a status-bar
         // or other system shell during an app transition.
-        if (!verbose && out.optInt("nodes_useful", 0) == 0 && !budget.spent()) tryOtherWindows(out, budget)
+        // M31: 只有 0 才查别的窗口太苛刻——≤3 个可用节点（基本等于盲树）时也查。
+        if (!verbose && out.optInt("nodes_useful", 0) <= BLIND_TREE_NODES && !budget.spent()) tryOtherWindows(out, budget)
         // A status bar (SystemUI) can be the active window mid-transition and
         // hand us ~27 "useful" status icons — real nodes, wrong screen. The
         // user-facing app is always a better source when it has ANY content.
         // Only run this correction when we did NOT just come from
         // tryOtherWindows with a genuinely better window.
-        if (!verbose && out.optString("pkg") == "com.android.systemui" && !budget.spent()) tryOtherWindows(out, budget)
+        // M31: 输入法窗口占优时同理——键盘弹起时 dump 读到的是键盘的键，不是应用。
+        if (!verbose && (out.optString("pkg") == "com.android.systemui" || activeWindowIsIme()) && !budget.spent()) tryOtherWindows(out, budget)
 
         return out
+    }
+
+    /** 当前顶在前面的窗口是不是输入法窗口（键盘弹起时它会占优）。 */
+    private fun activeWindowIsIme(): Boolean {
+        val windows = runCatching { service.windows }.getOrNull() ?: return false
+        try {
+            return windows.any {
+                runCatching { it.type }.getOrNull() == AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
+                    (runCatching { it.isActive }.getOrDefault(false) ||
+                        runCatching { it.isFocused }.getOrDefault(false))
+            }
+        } finally {
+            windows.forEach { runCatching { it.recycle() } }
+        }
     }
 
     /**
@@ -3130,20 +3537,17 @@ class ScreenController(
                         .put("nodes_total", stats.total)
                         .put("nodes_useful", stats.useful),
                 )
-                // Accept ANY window type that hands us useful nodes, not just
-                // TYPE_APPLICATION. WeChat hosts Moments' real content in a
-                // system-type window (layer 1) while the "application" window
-                // above it is an empty shell — filtering by type meant
-                // throwing away the only tree on the screen, which is exactly
-                // the "Moments taps are inaccurate" bug: the brain was forced
-                // onto screenshot-guessing while a perfectly good element list
-                // sat in a window we refused to read.
+                // S8: 只接受 TYPE_APPLICATION 且 isActive || isFocused 的窗口。
+                // 旧版接受任意类型窗口——键盘窗口、后台 App 的树会被当成当前
+                // App 的元素表。输入法/系统窗口一律排除，后台窗口即使节点多也
+                // 不采纳：宁可盲树走像素，也不错认一棵别人的树。
+                // （注：微信 Moments 曾把内容放在 system 型窗口里，旧版为此放开
+                // 过类型；代价是键盘/后台树混入元素表，点错的损失更大，故收紧。）
                 //
-                // Ranking: a user-app window (application type, or Moments'
-                // system shell owned by the same non-SystemUI package) with
-                // strictly more useful nodes beats anything SystemUI — the
-                // status bar never stops "having content" (clock, icons), so
-                // without this rule it wins every app transition.
+                // Ranking: a user-app window with strictly more useful nodes
+                // beats anything SystemUI — the status bar never stops "having
+                // content" (clock, icons), so without this rule it wins every
+                // app transition.
                 val isSystemUi = pkg == "com.android.systemui"
                 // Never us. [net.kuafuai.andee.ui.hideFromAccessibility] should
                 // already have left our overlays with nothing to find, but this
@@ -3157,9 +3561,13 @@ class ScreenController(
                 // app windows and are NOT overlays, so they are caught here and
                 // only here.
                 if (pkg == service.packageName) continue
+                val eligible = runCatching { w.type }.getOrNull() ==
+                    AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    (runCatching { w.isActive }.getOrDefault(false) ||
+                        runCatching { w.isFocused }.getOrDefault(false))
                 val beatsBest = stats.useful > bestUseful &&
                     (!isSystemUi || !outPkgIsApp)
-                if (body != null && root != null && beatsBest) {
+                if (body != null && root != null && eligible && beatsBest) {
                     bestUseful = stats.useful
                     best = withStats(body, pkg, stats, source = "other_window(${windowTypeName(w.type)})")
                 }
@@ -3237,8 +3645,18 @@ class ScreenController(
      * and say so in `elements_dropped`, rather than leaving it to whatever
      * the model's context happens to clip.
      */
+    /** S6: 索引重建与 [lookupEid] 用同一把 dumpLock 互斥，不读半建成的索引。 */
     private fun rebuildIndexAndList(out: JSONObject) {
-        synchronized(eidLock) { eidIndex.clear(); sidIndex.clear() }
+        synchronized(dumpLock) { rebuildIndexAndListLocked(out) }
+    }
+
+    private fun rebuildIndexAndListLocked(out: JSONObject) {
+        // S5: 新代际——旧 e 号随即作废；清表与加代际在同一把 eidLock 里完成。
+        val epoch = synchronized(eidLock) {
+            eidEpoch += 1
+            eidIndex.clear(); sidIndex.clear()
+            eidEpoch
+        }
         val w = screenW
         val h = screenH
         if (w <= 0 || h <= 0) return
@@ -3293,6 +3711,7 @@ class ScreenController(
                     pkg = pkg,
                     viewId = row.node.optString("id").ifEmpty { null },
                     bounds = row.bounds,
+                    epoch = epoch,
                 )
             }
             val indent = "  ".repeat(minOf(row.depth, MAX_INDENT))
@@ -3314,7 +3733,7 @@ class ScreenController(
         // 紧凑表（Phase 2）：只列可操作元素，一行一个，稳定编号 + 语义类型 +
         // 文字 + 中心坐标。同一批 rows、同一遍走，不另扫树。elements 的格式和
         // 编号原样不动，FlowRuntime 的 find/守卫继续按 elements 匹配。
-        val compact = buildCompactList(rows, pkg, w, h)
+        val compact = buildCompactList(rows, pkg, w, h, epoch)
         if (compact.lines.isNotEmpty()) out.put("compact", compact.lines.joinToString("\n"))
         if (compact.dropped > 0) out.put("compact_dropped", compact.dropped)
     }
@@ -3327,7 +3746,7 @@ class ScreenController(
      * 识别特征（resourceId + 类名 + 文字 + 取整后的 bounds），同一元素在
      * 同一屏态下每轮同一个编号；编号冲突时加 -2、-3 区分。
      */
-    private fun buildCompactList(rows: List<Row>, pkg: String, w: Int, h: Int): CompactResult {
+    private fun buildCompactList(rows: List<Row>, pkg: String, w: Int, h: Int, epoch: Long): CompactResult {
         val lines = ArrayList<String>()
         var dropped = 0
         val usedSids = HashSet<String>()
@@ -3360,6 +3779,7 @@ class ScreenController(
                     pkg = pkg,
                     viewId = row.node.optString("id").ifEmpty { null },
                     bounds = row.bounds,
+                    epoch = epoch,
                 )
             }
             lines.add("$sid|$type|${row.label}|[$normCx,$normCy]")
@@ -3814,7 +4234,10 @@ class ScreenController(
             null,
         )
         if (!ok) throw IllegalStateException("dispatchGesture returned false")
-        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        // M29: latch.await() 的返回值不能忽略——超时即抛，不返回假的 completed。
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            throw IllegalStateException("gesture timeout")
+        }
         return JSONObject().put("completed", completed)
     }
 
@@ -3837,9 +4260,9 @@ class ScreenController(
      * "there is no tree" apart from "we threw the tree away".
      */
     private fun buildNode(node: AccessibilityNodeInfo, verbose: Boolean, stats: Stats? = null): JSONObject? {
-        if (!verbose && !node.isVisibleToUser) return null
+        // M32: 先递归子节点，父级自身再按规则剪枝——零尺寸/不可见的父级只丢
+        // 自己，不丢孩子。旧版先判可见性/零尺寸再递归，整棵子树都被丢掉。
         val bounds = Rect().also { node.getBoundsInScreen(it) }
-        if (!verbose && (bounds.width() <= 0 || bounds.height() <= 0)) return null
         val st = stats
         if (st != null) st.total++
 
@@ -3852,6 +4275,17 @@ class ScreenController(
             } finally {
                 child.recycle()
             }
+        }
+
+        if (!verbose && (!node.isVisibleToUser || bounds.width() <= 0 || bounds.height() <= 0)) {
+            if (kids.isEmpty()) return null
+            if (kids.size == 1) return kids[0]
+            // 多个孩子：父级只留一个空壳挂孩子，不占 e 号（无 bounds 行会被跳过）。
+            val shell = JSONObject()
+            val arr = JSONArray()
+            for (k in kids) arr.put(k)
+            shell.put("children", arr)
+            return shell
         }
 
         val id = node.viewIdResourceName
@@ -4015,6 +4449,8 @@ class ScreenController(
 
         /** A withheld root is 1 node; a bare canvas a handful. */
         private const val BLIND_TREE_NODES = 3
+        /** tapByEid 重定位的最大容忍漂移（S4）：活节点中心离 dump 时中心超过它即视为已不在原处。 */
+        private const val LIVE_MAX_DIST_PX = 150
         private const val PX_COLS = 20
         private const val PX_ROWS = 32
         private const val PX_SAMPLE = 6
@@ -4047,6 +4483,15 @@ class ScreenController(
 
         /** How long a non-fling swipe holds at its end point — see [swipe]. */
         private const val SWIPE_HOLD_MS = 150L
+
+        /** 手势时长钳制（L17）：swipe 50..5000ms；长按 50..10000ms。 */
+        private const val SWIPE_DURATION_MIN_MS = 50L
+        private const val SWIPE_DURATION_MAX_MS = 5000L
+        private const val LONG_PRESS_MIN_MS = 50L
+        private const val LONG_PRESS_MAX_MS = 10000L
+
+        /** SystemUI 包名：前台校验与窗口筛选里排除它。 */
+        private const val SYSTEM_UI_PKG = "com.android.systemui"
 
         /**
          * Screenshot long side after downscale (generic_bridge value).

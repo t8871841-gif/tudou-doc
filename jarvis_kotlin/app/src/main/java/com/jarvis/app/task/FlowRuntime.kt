@@ -68,8 +68,10 @@ object FlowRuntime {
                 traces = JSONArray(), error = "流的 steps 必须是 1–$MAX_FLOW_STEPS 项的数组"
             )
         }
-        val timeoutMs = flow.optLong("timeoutMs", DEFAULT_FLOW_TIMEOUT_MS)
-            .coerceIn(1, MAX_FLOW_TIMEOUT_MS)
+        // L8：timeoutMs<=0（含显式传 0）用默认值，不钳成 1ms 立即超时。
+        val rawTimeoutMs = flow.optLong("timeoutMs", DEFAULT_FLOW_TIMEOUT_MS)
+        val timeoutMs = if (rawTimeoutMs <= 0) DEFAULT_FLOW_TIMEOUT_MS
+        else rawTimeoutMs.coerceIn(1, MAX_FLOW_TIMEOUT_MS)
         val deadline = started + timeoutMs
         val traces = JSONArray()
         var ok = true
@@ -175,9 +177,15 @@ object FlowRuntime {
                     val r = controller.findBySelector(sel)
                     val total = r.optInt("total", 0)
                     if (total == 0) return done("error", "找不到符合条件的元素")
-                    val first = r.optJSONArray("matches")?.optJSONObject(0)
-                    val note = if (first != null) {
-                        "找到 $total 个，第一个是 ${first.optString("sid")}|${first.optString("type")}|${first.optString("text")}"
+                    // L8：不只报第一个，列出前 3 个匹配，让模型能从中挑。
+                    val matches = r.optJSONArray("matches")
+                    val shown = (0 until minOf(3, matches?.length() ?: 0))
+                        .mapNotNull { matches?.optJSONObject(it) }
+                    val note = if (shown.isNotEmpty()) {
+                        val list = shown.mapIndexed { idx, m ->
+                            "${idx + 1}) ${m.optString("sid")}|${m.optString("type")}|${m.optString("text")}"
+                        }.joinToString("；")
+                        "找到 $total 个，前 ${shown.size} 个是：$list"
                     } else "找到 $total 个"
                     return done("ok", note = note)
                 }

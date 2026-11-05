@@ -30,6 +30,14 @@ object SystemTts {
     @Volatile
     private var currentStart: (() -> Unit)? = null
 
+    /**
+     * L5：本轮 speak 的独立收尾闭包。连续 speak() / stop() 时旧轮的回调持有在这里，
+     * 新 speak() 或 stop() 靠它把旧轮以 onDone(false) 收尾；doneFired 在闭包里，
+     * 正常完成与取消只走一条路，不会调两次。
+     */
+    @Volatile
+    private var currentFireDone: ((Boolean) -> Unit)? = null
+
     private val main = Handler(Looper.getMainLooper())
 
     /**
@@ -56,20 +64,47 @@ object SystemTts {
                 onDone(false)
                 return@ensureInit
             }
+            // L5：连续 speak() 时先把上一轮的回调以失败收尾——上一轮的 utterance 会被
+            // 新 speak 首句的 QUEUE_FLUSH 冲掉，onDone 永远等不到，不收尾调用方就收不到回调。
+            // 放在 ensureInit 回调里（而不是 speak() 入口）：引擎还在初始化、上一轮连监听
+            // 都没装上时，两次 speak 的回调会按初始化完成顺序先后到达，这里才能正确收尾旧轮。
+            val prevFire = currentFireDone
+            currentFireDone = null
+            currentDone = null
+            currentStart = null
+            if (prevFire != null) main.post { prevFire(false) }
             val base = "jarvis_sys_" + System.currentTimeMillis()
             val firstId = base + "_0"
             val lastId = base + "_" + (chunks.size - 1)
+            // L5：每轮 speak 用自己独立的回调持有（闭包捕获本轮的 onDone/onStart），
+            // 不再读共享的 currentDone/currentStart，避免连续 speak 时新旧回调串位丢回调。
+            val myDone = onDone
+            val myStart = onStart
             currentDone = onDone
             currentStart = onStart
             var failed = false
             var doneFired = false
-            val fireDone: (Boolean) -> Unit = { ok2 ->
+            var startFired = false
+            var fireDone: ((Boolean) -> Unit)? = null
+            fireDone = { ok2 ->
                 if (!doneFired) {
                     doneFired = true
-                    val cb = currentDone
-                    currentDone = null
-                    currentStart = null
-                    cb?.invoke(ok2)
+                    // 只清还属于本轮的共享持有：新一轮已经开始时不动它的。
+                    if (currentFireDone === fireDone) {
+                        currentFireDone = null
+                        currentDone = null
+                        currentStart = null
+                    }
+                    myDone(ok2)
+                }
+            }
+            currentFireDone = fireDone
+            // L5：中间 chunk 出错即收尾（出错后引擎未必再回调 onDone 等 lastId）。
+            val onUtteranceError: (String?) -> Unit = {
+                main.post {
+                    failed = true
+                    try { engine.stop() } catch (_: Exception) {}
+                    fireDone?.invoke(false)
                 }
             }
             try {
@@ -77,21 +112,25 @@ object SystemTts {
                     override fun onStart(utteranceId: String?) {
                         if (utteranceId != firstId) return
                         main.post {
-                            val cb = currentStart
-                            currentStart = null
-                            cb?.invoke()
+                            // 只认本轮：旧轮残留的 onStart 不再碰新轮的回调。
+                            if (currentFireDone === fireDone && !startFired) {
+                                startFired = true
+                                myStart()
+                            }
                         }
                     }
                     override fun onDone(utteranceId: String?) {
-                        if (utteranceId == lastId) main.post { fireDone(!failed) }
+                        if (utteranceId == lastId) main.post { fireDone?.invoke(!failed) }
                     }
 
                     @Deprecated("旧版回调")
                     override fun onError(utteranceId: String?) {
-                        main.post {
-                            failed = true
-                            if (utteranceId == lastId) fireDone(false)
-                        }
+                        onUtteranceError(utteranceId)
+                    }
+
+                    // L5：新签名，废弃的 onError(String) 在 Android 16 上可能不触发。
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        onUtteranceError(utteranceId)
                     }
                 })
                 val params = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1f) }
@@ -105,10 +144,10 @@ object SystemTts {
                 }
                 if (!queued) {
                     try { engine.stop() } catch (_: Exception) {}
-                    main.post { fireDone(false) }
+                    main.post { fireDone?.invoke(false) }
                 }
             } catch (_: Exception) {
-                main.post { fireDone(false) }
+                main.post { fireDone?.invoke(false) }
             }
         }
     }
@@ -155,7 +194,12 @@ object SystemTts {
             tts?.stop()
         } catch (_: Exception) {
         }
+        // L4：被取消的播报也回调一次 onDone(false)，调用方状态机总能收敛；
+        // 走本轮独立的 fireDone 闭包，doneFired 保证与正常完成只走一条路。
+        val fire = currentFireDone
+        currentFireDone = null
         currentDone = null
         currentStart = null
+        if (fire != null) main.post { fire(false) }
     }
 }

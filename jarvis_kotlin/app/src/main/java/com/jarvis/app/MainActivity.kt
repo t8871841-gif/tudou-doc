@@ -6,6 +6,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
@@ -31,6 +32,8 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.webkit.ConsoleMessage
@@ -94,14 +97,22 @@ class MainActivity : Activity() {
         // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
+        // S28：对话/面板状态进 onSaveInstanceState 的键。
+        const val KEY_CHAT_WHO = "chat_who"
+        const val KEY_CHAT_TEXT = "chat_text"
+        const val KEY_CHAT_TIME = "chat_time"
+        const val KEY_PANEL_OPEN = "panel_open"
+        const val KEY_SHOW_INPUT = "show_input"
     }
 
     private lateinit var statusView: TextView
     private lateinit var detailView: TextView
     private var orbSwitch: android.widget.Switch? = null
     private var orbSwitchUpdating = false
-    // jk-v66 前台拉起：待代开的包名 + 是否已 resumed（onResume 里才代开，保证是前台身份）。
-    private var pendingLaunchPkg: String? = null
+    // jk-v66 前台拉起：待代开的包名队列（M49：单个字段连续拉起会丢第一个）+ 是否已 resumed
+    // （onResume 里才代开，保证是前台身份）。L28：设置页开着时暂缓的 assist/晨报/提醒 intent。
+    private val pendingLaunchQueue = ArrayDeque<String>()
+    private var deferredAssistIntent: Intent? = null
     private var isResumed = false
     private lateinit var homePanel: LinearLayout
     private lateinit var contentView: LinearLayout
@@ -165,8 +176,16 @@ class MainActivity : Activity() {
     private var hudPanelOpen = false
     private var showInput = false
     private var chatInFlight = false
+    // S24 看门狗的代际号：每条受理的发送加一，看门狗只重置自己那一代，避免误清后一条。
+    private var chatFlightSeq = 0
 
     private val main = Handler(Looper.getMainLooper())
+
+    // M45：横屏前台低频刷新（8 秒，只推系统状态与 Agent 调度），onPause 时停掉。
+    private var hudPeriodicRunning = false
+    private val hudPeriodicRunnable = Runnable { runHudPeriodicRefresh() }
+    // L27：语音开关翻转的互斥锁（HudBridge 在桥接线程翻、底部按钮在主线程翻，快速连点会打架）。
+    private val voiceToggleLock = Any()
 
     // 彻底融合第 1 步：HUD WebView 从 HudActivity 搬进来，常驻只建一次；
     // 竖屏第 1 批：竖屏进舞台（上 2/3）继续渲染，横屏回根布局全屏显示。
@@ -189,6 +208,10 @@ class MainActivity : Activity() {
     // 原生竖屏面板的数据缓存：今日提醒行（渲染面板时现算现存）与天气（取数后缓存）。
     private var lastScheduleRows: List<Triple<Long, String, String>> = emptyList()
     private var lastWeatherInfo: com.jarvis.app.data.WeatherTool.WeatherInfo? = null
+    // M46：天气缓存带时间戳（30 分钟过期）与取数时的城市；L25：在途请求去重。
+    private var lastWeatherAtMs = 0L
+    private var lastWeatherCity = ""
+    private var weatherFetching = false
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -263,9 +286,42 @@ class MainActivity : Activity() {
         JarvisAgent.onRunHudJs = { js -> runOnUiThread { hudWebView.evaluateJavascript(js, null) } }
         onAgentStateChanged(JarvisAgent.currentState())
 
+        // S28：进程被杀/旋转后按保存的记录重建气泡与面板状态（再走 handleAssistIntent 追加新内容）。
+        restoreChatState(savedInstanceState)
         handleAssistIntent(intent)
         // 批二：常驻与否现在是"设置里记住的选择"，不再是每次开 App 都无条件偷偷启动。
         if (JarvisPrefs.isKeepAliveEnabled(this)) startKeepAlive(manual = false)
+    }
+
+    /** S28：保存最近 20 条对话 + 面板/输入行开关。只存内存里的 hudChatHistory，不另开存储。 */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        val recent = hudChatHistory.takeLast(20)
+        outState.putStringArrayList(KEY_CHAT_WHO, ArrayList(recent.map { it.first }))
+        outState.putStringArrayList(KEY_CHAT_TEXT, ArrayList(recent.map { it.second }))
+        outState.putLongArray(KEY_CHAT_TIME, recent.map { it.third }.toLongArray())
+        outState.putBoolean(KEY_PANEL_OPEN, hudPanelOpen)
+        outState.putBoolean(KEY_SHOW_INPUT, showInput)
+    }
+
+    /** S28：按保存的记录重建气泡（先清掉 buildChatPanel 加的那句问候语，避免重复）。 */
+    private fun restoreChatState(saved: Bundle?) {
+        if (saved == null) return
+        val whos = saved.getStringArrayList(KEY_CHAT_WHO) ?: return
+        val texts = saved.getStringArrayList(KEY_CHAT_TEXT) ?: return
+        if (whos.isEmpty() || whos.size != texts.size) return
+        val times = saved.getLongArray(KEY_CHAT_TIME)
+        chatList.removeAllViews()
+        hudChatHistory.clear()
+        whos.forEachIndexed { i, who ->
+            addBubble(texts[i], mine = who == "you")
+            if (times != null && i < times.size && hudChatHistory.isNotEmpty()) {
+                val last = hudChatHistory.lastIndex
+                hudChatHistory[last] = Triple(who, texts[i], times[i])
+            }
+        }
+        if (saved.getBoolean(KEY_PANEL_OPEN, false)) setNativePanel(true)
+        if (saved.getBoolean(KEY_SHOW_INPUT, false)) showInputRow()
     }
 
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
@@ -302,6 +358,11 @@ class MainActivity : Activity() {
      * 先停掉当前所有动效再起新的；回 idle 时只停不停留。onAgentStateChanged 里调用（主线程）。 */
     private fun updateMicFx(state: String) {
         if (!::micFxWrap.isInitialized) return
+        // L32：停止态指示——忙时麦克风钮变暗并改文案为“点按停止”，闲时恢复。
+        if (::micButton.isInitialized) {
+            micButton.contentDescription = if (state == "idle") "开始说话" else "点按停止"
+            micButton.alpha = if (state == "idle") 1f else 0.65f
+        }
         stopMicFx()
         when (state) {
             "listening" -> {
@@ -581,7 +642,8 @@ class MainActivity : Activity() {
                 swipeStartX = ev.x
                 swipeStartY = ev.y
                 swipeZone = swipeZoneAt(ev.rawX, ev.rawY)
-                if (swipeZone == SWIPE_ZONE_NONE) swipeTracking = false
+                // M54：起点落在输入行（输入框/发送按钮）上时不参与面板横滑，免得在输入框里横滑误开面板。
+                if (swipeZone == SWIPE_ZONE_NONE || isInInputRow(ev.rawX, ev.rawY)) swipeTracking = false
             }
             MotionEvent.ACTION_POINTER_DOWN -> swipeTracking = false
             MotionEvent.ACTION_UP -> {
@@ -614,6 +676,13 @@ class MainActivity : Activity() {
         return SWIPE_ZONE_NONE
     }
 
+    /** M54：触点是否落在底部输入行里（输入行收起时返回 false）。 */
+    private fun isInInputRow(rawX: Float, rawY: Float): Boolean {
+        if (!::inputRow.isInitialized || inputRow.visibility != View.VISIBLE) return false
+        val b = screenBounds(inputRow)
+        return rawX >= b[0] && rawX < b[2] && rawY >= b[1] && rawY < b[3]
+    }
+
     /** 返回 view 在屏幕上的 [left, top, right, bottom]。 */
     private fun screenBounds(v: View): IntArray {
         val loc = IntArray(2)
@@ -634,10 +703,10 @@ class MainActivity : Activity() {
             }
             return
         }
-        finishBackPress()
+        backAfterDemo()
     }
 
-    /** 浮层都关了之后再走原来的返回逻辑：横屏有演示在播先退演示，否则退出 App。 */
+    /** 浮层都关了之后再走原来的返回逻辑：横屏有演示在播先退演示，否则走返回优先级。 */
     private fun backAfterOverlay() {
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (landscape && ::hudWebView.isInitialized && hudPageLoaded) {
@@ -645,9 +714,26 @@ class MainActivity : Activity() {
                 if (r == "true") {
                     hudWebView.evaluateJavascript("if(typeof demoExit==='function')demoExit()", null)
                 } else {
-                    finishBackPress()
+                    backAfterDemo()
                 }
             }
+            return
+        }
+        backAfterDemo()
+    }
+
+    /** S26：返回优先级：设置页（关设置）→ 原生面板（回对话）→ 输入行/键盘（收起）→ 退出。 */
+    private fun backAfterDemo() {
+        if (showingSettings) {
+            toggleSettings()
+            return
+        }
+        if (hudPanelOpen) {
+            setNativePanel(false)
+            return
+        }
+        if (showInput) {
+            hideInputRow()
             return
         }
         finishBackPress()
@@ -767,8 +853,12 @@ class MainActivity : Activity() {
         /** 翻转原生朗读开关，返回翻转后“语音播报是否开着”（开 = 没静音）。 */
         @JavascriptInterface
         fun toggleVoice(): Boolean {
-            val nextMuted = !JarvisPrefs.isMuted(this@MainActivity)
-            JarvisPrefs.setMuted(this@MainActivity, nextMuted)
+            // L27：读+写放同一把锁里做成原子翻转（桥接线程与主线程的按钮会并发翻这个开关）。
+            val nextMuted = synchronized(voiceToggleLock) {
+                val next = !JarvisPrefs.isMuted(this@MainActivity)
+                JarvisPrefs.setMuted(this@MainActivity, next)
+                next
+            }
             main.post {
                 if (::muteButton.isInitialized) {
                     muteButton.setImageResource(if (nextMuted) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
@@ -812,11 +902,11 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 只在横屏且页面加载完时，把一句话推给 HUD 字幕（typeOut，js/subtitles.js:77）。
-     * 文本用 JSONObject.quote 转义，绝不直接拼进 JS。 */
+    /** 只在页面加载完时，把一句话推给 HUD 字幕（typeOut，js/subtitles.js:77）。
+     * 文本用 JSONObject.quote 转义，绝不直接拼进 JS。M42：竖屏舞台的 WebView 同样在渲染，
+     * 不再只限横屏推，竖屏字幕也同步。 */
     private fun pushHudSubtitle(who: String, text: String) {
         if (!::hudWebView.isInitialized || !hudPageLoaded) return
-        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
         if (showingSettings) return
         val speed = if (who == "jarvis") 40 else 12
         hudWebView.evaluateJavascript(
@@ -825,12 +915,13 @@ class MainActivity : Activity() {
         )
     }
 
-    /** 状态变化时推给 HUD（setState），页面加载完且设置页没开时推；横竖屏都推（竖屏舞台的 WebView 也要跟麦克风状态变）。替代已删的 500ms 轮询。 */
+    /** 状态变化时推给 HUD（setState），页面加载完且设置页没开时推；横竖屏都推（竖屏舞台的 WebView 也要跟麦克风状态变）。替代已删的 500ms 轮询。
+     * M41：守卫不通过时不写去重标记，否则设置页打开期间的状态变化会被记为“已推”而丢掉。 */
     private fun pushHudState(s: String) {
         if (s == hudLastPushedState) return
-        hudLastPushedState = s
         if (!::hudWebView.isInitialized || !hudPageLoaded) return
         if (showingSettings) return
+        hudLastPushedState = s
         hudWebView.evaluateJavascript(
             "try{if(typeof setState==='function')setState(" + JSONObject.quote(s) + ")}catch(e){}",
             null
@@ -870,6 +961,8 @@ class MainActivity : Activity() {
         for (r in reminders) {
             val at = (r["atMs"] as? Long) ?: continue
             if (at < dayStart || at >= dayEnd) continue
+            // M48：已过去的提醒（开始 30 分钟后）不再列出。
+            if (at + 30L * 60 * 1000 < nowMs) continue
             rows.add(Triple(at, (r["title"] as? String).orEmpty().ifEmpty { "提醒" }, (r["body"] as? String).orEmpty()))
         }
         if (ReminderScheduler.isBriefOn(this)) {
@@ -1034,12 +1127,22 @@ class MainActivity : Activity() {
      * （JarvisPrefs.getWeatherCity，默认新乡）。任何方向都取数并缓存到 lastWeatherInfo，
      * 只在横屏时才推给 HUD（pushHudWeather）；原生竖屏面板用缓存渲染。失败时缓存 null，
      * 面板显示“天气未更新”，不让上海假天气一直留在面板上。回调在 OkHttp 线程，
-     * 推页面必须回主线程。 */
+     * 推页面必须回主线程。M46：缓存 30 分钟过期并记取数时的城市，城市变了或过期了重新取；
+     * L25：在途请求直接返回，不重复发。 */
     private fun fetchHudWeather() {
         val city = JarvisPrefs.getWeatherCity(this)
+        val nowMs = System.currentTimeMillis()
+        if (lastWeatherInfo != null && city == lastWeatherCity && nowMs - lastWeatherAtMs < 30L * 60 * 1000) return
+        if (weatherFetching) return
+        weatherFetching = true
         com.jarvis.app.data.WeatherTool.fetchStructured(city) { info ->
             main.post {
+                weatherFetching = false
                 lastWeatherInfo = info
+                if (info != null) {
+                    lastWeatherAtMs = System.currentTimeMillis()
+                    lastWeatherCity = city
+                }
                 // 原生竖屏面板开着时，天气到货就刷新一次。
                 if (hudPanelOpen) renderNativePanel()
                 if (!::hudWebView.isInitialized || !hudPageLoaded) return@post
@@ -1302,8 +1405,8 @@ class MainActivity : Activity() {
         if (open == hudPanelOpen) return
         hudPanelOpen = open
         if (open) {
-            // 没取过天气就触发一次取数（到货后 fetchHudWeather 的回调会再刷新面板）。
-            if (lastWeatherInfo == null) fetchHudWeather()
+            // 天气按缓存 TTL/城市自己判断要不要重新取（M46），这里每次开面板都问一次，不贵。
+            fetchHudWeather()
             // LEARNING 行的记忆条数每次打开面板都重新取一次，保持新鲜。
             refreshMemoryCount()
             renderNativePanel()
@@ -1325,6 +1428,8 @@ class MainActivity : Activity() {
      * HUD 那边仍用 computeAgentRows 推送，不受影响。 */
     private fun renderNativePanel() {
         if (!::panelList.isInitialized) return
+        // M47：全量重建前记下滚动位置，重建完恢复，面板开着时状态变化不再把用户顶回顶部。
+        val savedScrollY = if (::panelScroll.isInitialized) panelScroll.scrollY else 0
         lastScheduleRows = todayScheduleRows(ReminderScheduler.list(this))
         panelList.removeAllViews()
         // 1. 天气
@@ -1352,6 +1457,9 @@ class MainActivity : Activity() {
             panelList.addView(panelLine("今天还没有安排"))
         } else {
             renderScheduleRows(lastScheduleRows)
+        }
+        if (::panelScroll.isInitialized && savedScrollY > 0) {
+            panelScroll.post { panelScroll.scrollTo(0, savedScrollY) }
         }
     }
 
@@ -1625,8 +1733,19 @@ class MainActivity : Activity() {
             }
         }
         chatList.addView(tv)
+        // M40：气泡数上限 100 条，超了从顶部移除旧气泡（hudChatHistory 另行保留 20 条）。
+        if (chatList.childCount > 100) chatList.removeViewAt(0)
         // 彻底融合第 1 步：竖屏不要任何动效——新消息滑入动画已删，气泡直接出现。
-        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+        // M40：只有用户已在底部附近时才自动滑到底，否则只在底部提示“有新消息”，不抢滚动位置。
+        chatScroll.post {
+            val nearBottom = chatScroll.scrollY + chatScroll.height >= chatList.height - dp(120)
+            if (nearBottom) {
+                chatScroll.fullScroll(View.FOCUS_DOWN)
+                if (::detailView.isInitialized && detailView.text.toString() == "↓ 有新消息") detailView.text = ""
+            } else if (::detailView.isInitialized) {
+                detailView.text = "↓ 有新消息"
+            }
+        }
         // 第 2 步：气泡同时推给 HUD 字幕（见 onCreate 注释——这是两条路的唯一汇合点）。
         pushHudSubtitle(if (mine) "you" else "jarvis", text)
         // 第 3 步：对话记进内存列表（上限 20 条），页面加载完后推给 HUD 字幕记录。
@@ -1644,23 +1763,35 @@ class MainActivity : Activity() {
         addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
     }
 
+    /** S23：只有 submitText 受理成功后才清输入框；被上一条占用时文字保留，并提示稍等。 */
     private fun sendChat() {
         val text = chatInput.text.toString().trim()
         if (text.isEmpty()) return
-        chatInput.text.clear()
-        submitText(text)
+        if (submitText(text)) chatInput.text.clear()
     }
 
     /** 打字与 HUD 桥接共用的提交入口（第 2 步抽出来）：记忆拦截→本地指令→天气→记忆注入→本地/云端。
-     * 行为与原来 sendChat 里那段一字不差，只是入口从输入框改成参数。 */
-    private fun submitText(text: String) {
+     * 行为与原来 sendChat 里那段一字不差，只是入口从输入框改成参数。
+     * 返回是否受理：空串或上一条还在回时返回 false（S23/S24，入口被拒时给提示）。 */
+    private fun submitText(text: String): Boolean {
         val q = text.trim()
-        if (q.isEmpty() || chatInFlight) return
+        if (q.isEmpty()) return false
+        if (chatInFlight) {
+            toast("上一条还在回，稍等")
+            return false
+        }
         chatInFlight = true
+        chatFlightSeq++
+        val mySeq = chatFlightSeq
         addBubble(q, mine = true)
         // 批三：打字对话与语音同路——先拦截显式记忆指令，未命中再带长期记忆提问。
         uiScope.launch {
-            val ack = MemoryService.processExplicitMemory(this@MainActivity, q)
+            // S24：try/finally 兜底，launch 体内任何环节抛异常都不会把 chatInFlight 永久锁死。
+            // 天气分支例外：回答还在 OkHttp 回调里，finally 提前放行会让下一条与它重叠，
+            // 所以那条分支把 releaseInFinally 置 false，改由回调自己清标志。
+            var releaseInFinally = true
+            try {
+                val ack = MemoryService.processExplicitMemory(this@MainActivity, q)
             if (ack != null) {
                 chatInFlight = false
                 addBubble(ack, mine = false)
@@ -1681,6 +1812,7 @@ class MainActivity : Activity() {
             // 批十：打字路径同路——天气走真数据工具，不进模型。
             if (com.jarvis.app.data.WeatherTool.looksLikeWeather(q)) {
                 val city = com.jarvis.app.data.WeatherTool.extractCity(q) ?: JarvisPrefs.getWeatherCity(this@MainActivity)
+                releaseInFinally = false
                 com.jarvis.app.data.WeatherTool.fetch(city, tomorrow = q.contains("明天")) { answer ->
                     runOnUiThread {
                         chatInFlight = false
@@ -1707,11 +1839,28 @@ class MainActivity : Activity() {
                     triggerMemoryExtraction(q, local)
                     return@launch
                 }
+                releaseInFinally = false
                 askChatCustom(q, mem, localTried = true)
                 return@launch
             }
+            releaseInFinally = false
             askChatCustom(q, mem, localTried = false)
+            } catch (e: Exception) {
+                chatInFlight = false
+                addBubble("出错了：${e.message}", mine = false)
+            } finally {
+                if (releaseInFinally) chatInFlight = false
+            }
         }
+        // S24：回调永不回的兜底——180 秒后仍在途就放行并提示（模型侧最长约 3 分钟超时）。
+        // 只认自己那一代，免得误清之后新发的那条。
+        main.postDelayed({
+            if (chatInFlight && chatFlightSeq == mySeq) {
+                chatInFlight = false
+                toast("上一条一直没回，已重置，你再发一次")
+            }
+        }, 180_000)
+        return true
     }
 
     /** 批十：界面问答的朗读出口——主界面「朗读」开关开着（未静音）才出声；语音路径由 Agent 自己播，不走这里，防双播。 */
@@ -1816,6 +1965,14 @@ class MainActivity : Activity() {
                 setTextColor(Color.WHITE)
                 setHintTextColor(0x61FFFFFF.toInt())
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                // M52：回车键变发送键，按下即发送。
+                imeOptions = EditorInfo.IME_ACTION_SEND
+                setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == EditorInfo.IME_ACTION_SEND) {
+                        sendChat()
+                        true
+                    } else false
+                }
             }
             addView(chatInput)
             addView(Button(this@MainActivity).apply {
@@ -1842,8 +1999,12 @@ class MainActivity : Activity() {
             background = null
             contentDescription = "回答朗读开关"
             setOnClickListener {
-                val next = !JarvisPrefs.isMuted(this@MainActivity)
-                JarvisPrefs.setMuted(this@MainActivity, next)
+                // L27：与 HudBridge.toggleVoice 共用同一把锁，翻转是原子的，文案不会跟状态打架。
+                val next = synchronized(voiceToggleLock) {
+                    val n = !JarvisPrefs.isMuted(this@MainActivity)
+                    JarvisPrefs.setMuted(this@MainActivity, n)
+                    n
+                }
                 setImageResource(if (next) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
                 toast(if (next) "回答朗读已关，只显示文字" else "回答朗读已开")
             }
@@ -1866,7 +2027,13 @@ class MainActivity : Activity() {
                 shape = GradientDrawable.OVAL
             }
             setOnClickListener {
-                JarvisAgent.triggerListenFromAssist(this@MainActivity)
+                // L32：聆听/思考/播报态时麦克风钮改为打断（调 stopAll），不再硬重置重听。
+                if (JarvisAgent.currentState() != "idle") {
+                    JarvisAgent.stopAll(this@MainActivity)
+                    toast("已打断")
+                } else {
+                    JarvisAgent.triggerListenFromAssist(this@MainActivity)
+                }
             }
         }
         micFxWrap.addView(micButton, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
@@ -1938,9 +2105,7 @@ class MainActivity : Activity() {
             setImageResource(android.R.drawable.ic_menu_edit)
             background = null
             setOnClickListener {
-                showInput = !showInput
-                inputRow.visibility = if (showInput) View.VISIBLE else View.GONE
-                if (showInput) chatInput.requestFocus()
+                if (showInput) hideInputRow() else showInputRow()
             }
         }
         micCenter.addView(keyboardToggle, LinearLayout.LayoutParams(dp(44), dp(44)))
@@ -1971,6 +2136,23 @@ class MainActivity : Activity() {
         addView(detailView)
     }
 
+    /** M52：输入行展开/收起的唯一入口，展开时显示键盘、收起时隐藏键盘（返回键也走这里）。 */
+    private fun showInputRow() {
+        showInput = true
+        inputRow.visibility = View.VISIBLE
+        chatInput.requestFocus()
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.showSoftInput(chatInput, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun hideInputRow() {
+        showInput = false
+        inputRow.visibility = View.GONE
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(chatInput.windowToken, 0)
+        chatInput.clearFocus()
+    }
+
     // ---------- 设置/自检二级页：内容跟之前交付的一样，没有改动 ----------
 
     private fun toggleSettings() {
@@ -1981,6 +2163,7 @@ class MainActivity : Activity() {
             contentView.visibility = View.GONE
             hudWebView.visibility = View.GONE
             hudWebView.onPause()
+            stopHudPeriodicRefresh()
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             closeSettingsPage()
             refresh()
@@ -1989,6 +2172,12 @@ class MainActivity : Activity() {
             refreshLocalStatus()
         } else {
             applyOrientationLayout()
+            // M41：设置页打开期间的状态变化没写过去重标记，关掉就无条件重推一次，不丢同步。
+            hudLastPushedState = null
+            pushHudState(JarvisAgent.currentState())
+            // M49/L28：关设置后把暂缓的拉起队列与 assist/晨报/提醒 intent 补执行。
+            maybeLaunchPendingApp()
+            runDeferredAssist()
         }
     }
 
@@ -3040,7 +3229,18 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // L24：先把新 intent 存下来，后面 getIntent() 才能拿到最新的 action/extra。
+        setIntent(intent)
         handleAssistIntent(intent)
+    }
+
+    /** M49：拿到窗口焦点时再试一次待开队列（没焦点时拉起会被系统拦，之前直接丢了）。 */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            maybeLaunchPendingApp()
+            runDeferredAssist()
+        }
     }
 
     override fun onResume() {
@@ -3051,17 +3251,53 @@ class MainActivity : Activity() {
         if (showingSettings) refresh()
         // 竖屏第 1 批：HUD WebView 竖屏也在舞台里渲染（上 2/3），回前台时恢复渲染并再推一次状态与面板；设置页开着时保持暂停。
         if (!showingSettings && ::hudWebView.isInitialized) {
-            hudWebView.onResume()
+            // M43：竖屏静态模式下 WebView 是特意暂停省电的，回前台也不恢复；其他情况才 onResume()。
+            val portraitStatic = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+                && JarvisPrefs.isPortraitUseStatic(this)
+            if (!portraitStatic) hudWebView.onResume()
             hudLastPushedState = null
             pushHudState(JarvisAgent.currentState())
             hudWebView.evaluateJavascript("try{if(window.__jarvisRefreshModel)__jarvisRefreshModel()}catch(e){}", null)
             // 第 3 步：回横屏时面板真数据再推一次。
             pushHudPanels()
+            // M44：原生面板开着回来，电量/日程/天气全是旧的，刷新一次（天气走 TTL，不会每次都发请求）。
+            if (hudPanelOpen) {
+                renderNativePanel()
+                fetchHudWeather()
+            }
+            // M45：横屏前台才启动低频刷新。
+            if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                scheduleHudPeriodicRefresh()
+            }
         }
+    }
+
+    /** M45：横屏前台每 8 秒只推系统状态与 Agent 调度（天气/日程不跟这个频率），切走/关设置即停。 */
+    private fun runHudPeriodicRefresh() {
+        hudPeriodicRunning = false
+        if (!isResumed || showingSettings) return
+        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
+        if (::hudWebView.isInitialized && hudPageLoaded) {
+            pushHudSys()
+            pushHudAgents()
+        }
+        scheduleHudPeriodicRefresh()
+    }
+
+    private fun scheduleHudPeriodicRefresh() {
+        if (hudPeriodicRunning) return
+        hudPeriodicRunning = true
+        main.postDelayed(hudPeriodicRunnable, 8000)
+    }
+
+    private fun stopHudPeriodicRefresh() {
+        hudPeriodicRunning = false
+        main.removeCallbacks(hudPeriodicRunnable)
     }
 
     override fun onPause() {
         isResumed = false
+        stopHudPeriodicRefresh()
         if (::hudWebView.isInitialized) {
             hudWebView.onPause()
         }
@@ -3071,14 +3307,17 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         stopMicFx()
+        stopHudPeriodicRefresh()
         if (::hudWebView.isInitialized) {
             // WebView 必须从父布局摘掉再 destroy，否则下次打开可能白屏。
             (hudWebView.parent as? android.view.ViewGroup)?.removeView(hudWebView)
             hudWebView.destroy()
         }
-        if (JarvisAgent.onStateChanged != null) JarvisAgent.onStateChanged = null
+        // L23/S27：四处回调统一无条件置 null（原来 onStateChanged 还写 if != null 才清，留竞态口子）。
+        JarvisAgent.onStateChanged = null
         JarvisAgent.onUserText = null
         JarvisAgent.onReplyText = null
+        JarvisAgent.onRunHudJs = null
         uiScope.cancel()
         super.onDestroy()
     }
@@ -3089,16 +3328,22 @@ class MainActivity : Activity() {
         if (intent?.getStringExtra(EXTRA_ACTION) == "launch_app") {
             val pkg = intent.getStringExtra(EXTRA_LAUNCH_PKG).orEmpty()
             if (pkg.isNotBlank()) {
-                pendingLaunchPkg = pkg
+                // M49：多个待开包进队列，不再用单个字段互相覆盖。
+                if (!pendingLaunchQueue.contains(pkg)) pendingLaunchQueue.addLast(pkg)
                 maybeLaunchPendingApp()
             }
         }
-        if (intent?.getStringExtra(EXTRA_ACTION) == "assist") {
+        val action = intent?.getStringExtra(EXTRA_ACTION)
+        // L28：设置页开着时 assist/晨报/提醒先暂存，等关设置回到对话再执行，不直接打断设置页。
+        if (showingSettings && (action == "assist" || action == "morning_brief" || action == "reminder")) {
+            deferredAssistIntent = intent
+            return
+        }
+        if (action == "assist") {
             if (::detailView.isInitialized) detailView.text = "已通过悬浮球/磁贴/数字助理唤起，已开始听。"
             JarvisAgent.triggerListenFromAssist(this)
         }
         // 批六：点开晨报/提醒/出发提醒的通知 → 正文进对话并朗读（静音时只显示）
-        val action = intent?.getStringExtra(EXTRA_ACTION)
         if (action == "morning_brief" || action == "reminder") {
             val body = intent.getStringExtra(EXTRA_TEXT).orEmpty()
             if (body.isNotBlank() && ::chatList.isInitialized) {
@@ -3110,22 +3355,41 @@ class MainActivity : Activity() {
         }
     }
 
-    /** jk-v66 前台拉起：MainActivity 已在前台时，代开待开的包（前台身份拉起，Flyme 给全屏）。 */
+    /** L28：设置页关掉/拿到焦点后，把暂存的那条 assist/晨报/提醒 intent 补执行一次。 */
+    private fun runDeferredAssist() {
+        val pending = deferredAssistIntent ?: return
+        deferredAssistIntent = null
+        handleAssistIntent(pending)
+    }
+
+    /** jk-v66 前台拉起：MainActivity 已在前台时，代开待开的包（前台身份拉起，Flyme 给全屏）。
+     * S1/M49：启动成功返回后才出队；没 launchIntent 或抛异常时不静默丢——记审计、给可见提示，
+     * 失败的保留在队首（下次 onResume/拿焦点再试）；没窗口焦点或设置页开着时暂缓，不硬拉。 */
     private fun maybeLaunchPendingApp() {
-        val pkg = pendingLaunchPkg ?: return
         if (!isResumed) return
-        pendingLaunchPkg = null
+        if (!hasWindowFocus()) return
+        if (showingSettings) return
+        val pkg = pendingLaunchQueue.firstOrNull() ?: return
+        val launch = try {
+            packageManager.getLaunchIntentForPackage(pkg)
+        } catch (e: Exception) {
+            null
+        }
+        if (launch == null) {
+            pendingLaunchQueue.removeFirst()
+            AuditLog.append(this, "本地指令", "前台拉起", "$pkg 没有能打开的界面，已丢弃")
+            toast("打不开 $pkg：没有能打开的界面")
+            maybeLaunchPendingApp()
+            return
+        }
         try {
-            val launch = packageManager.getLaunchIntentForPackage(pkg)
-            if (launch == null) {
-                AuditLog.append(this, "本地指令", "前台拉起", "$pkg 没有能打开的界面")
-                return
-            }
             launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(launch)
+            pendingLaunchQueue.removeFirst()
             AuditLog.append(this, "本地指令", "前台拉起", "$pkg 已以前台身份拉起")
         } catch (e: Exception) {
-            AuditLog.append(this, "本地指令", "前台拉起", "$pkg 拉起失败：${e.javaClass.simpleName}")
+            AuditLog.append(this, "本地指令", "前台拉起", "$pkg 拉起失败：${e.javaClass.simpleName}，已保留待重试")
+            toast("打开 $pkg 失败：${e.javaClass.simpleName}")
         }
     }
 

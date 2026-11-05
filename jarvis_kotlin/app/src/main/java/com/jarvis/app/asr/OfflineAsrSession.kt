@@ -21,7 +21,7 @@ import kotlin.math.abs
  *
  * 安静判断阈值是沙盒里写的，没有真机调校过：简单能量阈值 + 固定安静时长，
  * 如果真机上出现"该停的时候不停"或"还没说完就被打断"，优先调这里的
- * `VOICE_RMS_THRESHOLD` / `SILENCE_MS` / `MAX_WAIT_FOR_SPEECH_MS` 三个常量。
+ * `VOICE_RMS_THRESHOLD` / `SILENCE_MS` / `MAX_WAIT_FOR_SPEECH_MS` / `MAX_TURN_MS` 四个常量。
  */
 object OfflineAsrSession {
     private const val SAMPLE_RATE = OfflineAsr.SAMPLE_RATE // 16000，必须跟引擎声明的一致
@@ -34,8 +34,13 @@ object OfflineAsrSession {
      * jk-v66：原来 1600ms 太短，正常句间停顿就被掐断（“一句话没说完就开始了”，
      * 高德导航那半句就是这么丢的）。改成 3000ms，跟 OfflineAsr 声明的 silenceMs 一致。 */
     private const val SILENCE_MS = 3_000L
-    /** 从开始监听到现在，如果一直没检测到人声，等这么久就放弃（避免无限占着麦克风）。 */
-    private const val MAX_WAIT_FOR_SPEECH_MS = 6_000L
+    /** 从开始监听到现在，如果一直没检测到人声，等这么久就放弃（避免无限占着麦克风）。
+     * M2：原来 6 秒太短，刚开口慢一点就被掐断，放宽到 10 秒。
+     * VOICE_RMS_THRESHOLD=600 没有真机数据可调校，这次不改，仍需真机校准。 */
+    private const val MAX_WAIT_FOR_SPEECH_MS = 10_000L
+    /** M1：说过话之后的最长轮次上限——持续噪声下安静判断永远等不到，麦克风也必须收，
+     * 超时即收尾出结果（45 秒在审计给的 30–60 秒区间内）。 */
+    private const val MAX_TURN_MS = 45_000L
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -173,6 +178,7 @@ object OfflineAsrSession {
                     currentEngine?.sendAudio(chunk, false)
                     if (spokeAny && now - lastVoiceAt > SILENCE_MS) break
                     if (!spokeAny && now - startedAt > MAX_WAIT_FOR_SPEECH_MS) break
+                    if (spokeAny && now - startedAt > MAX_TURN_MS) break // M1：最长轮次上限
                 }
             } catch (_: Exception) {
                 // 采集异常直接走收尾逻辑，不单独报错——引擎那边 isLast=true 之后

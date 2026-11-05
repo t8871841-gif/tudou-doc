@@ -54,6 +54,9 @@ object TaskLoop {
     /** 步数上限：Andee 的 DEFAULT_MAX_STEPS。 */
     private const val MAX_STEPS = 25
 
+    /** 续跑累计步数上限（M20）：新跑 + 续跑加起来不超过 50 步，免得断点一直续下去。 */
+    private const val MAX_TOTAL_STEPS = 50
+
     /** 相同动作签名连续重复的容忍次数（LocalBrain MAX_REPEATS）：达到即判打转中止。 */
     private const val MAX_REPEATS = 3
 
@@ -114,28 +117,34 @@ object TaskLoop {
      * 执行一个多步任务。[isAlive] 由调用方给（Agent 的代次检查）；[onReply] 只会被
      * 调用一次，内容是给用户的一句结果（完成说明或卡在哪一步的如实说明）。
      * [resumeFrom] 非空时是从断点续跑：历史与步数接着上次的来（见 TaskResumeState）。
+     * [saveResume] 为 false 时不写断点（也不清旧断点）：内部子任务用，
+     * 免得顶掉用户断点（S16，如 TripLoop 的高德核验）。
      * 注意：onReply 必须放最后——调用方用尾随 lambda 传它，后面再加参数会
      * 让尾随 lambda 绑错（jk-v55 的教训）。
      */
     fun run(
         ctx: Context, taskText: String, isAlive: () -> Boolean,
         resumeFrom: TaskResumeState.ResumeInfo? = null,
+        saveResume: Boolean = true,
         onReply: (String) -> Unit
     ) {
         val mySeq = runSeq.incrementAndGet()
         val appCtx = ctx.applicationContext
         // 新任务开始清掉旧的断点（续跑的那次不调这里，resumeFrom 非空）；否则
         // 上次停下的任务会一直挂着等“继续”，用户说了新任务还会被误续。
-        if (resumeFrom == null) TaskResumeState.clear()
+        // saveResume=false 是内部子任务（TripLoop 高德核验）：不碰断点状态，
+        // 既不清除用户原来的断点，也不写自己的断点（S16）。
+        if (resumeFrom == null && saveResume) TaskResumeState.clear()
         executor.execute {
-            runBlocking(appCtx, taskText, mySeq, isAlive, onReply, resumeFrom)
+            runBlocking(appCtx, taskText, mySeq, isAlive, onReply, resumeFrom, saveResume)
         }
     }
 
     private fun runBlocking(
         ctx: Context, taskText: String, mySeq: Int,
         isAlive: () -> Boolean, onReply: (String) -> Unit,
-        resumeFrom: TaskResumeState.ResumeInfo? = null
+        resumeFrom: TaskResumeState.ResumeInfo? = null,
+        saveResume: Boolean = true
     ) {
         fun alive() = mySeq == runSeq.get() && isAlive()
         val svc = JarvisAccessibilityService.instance
@@ -182,20 +191,36 @@ object TaskLoop {
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
         var prevScreenSig = ""
+        // L14：最近一次观察到的前台包名——知识只在前台应用切换时注入一次，
+        // 同一个应用连着多步不再重复贴同一份。
+        var lastKnowledgePkg = ""
         running = true
         try {
             // 续跑时步数接着上次的编号（历史里的“第 N 步”才连贯），但新跑的
-            // 步数预算照样是 MAX_STEPS 步（上限 = 已做步数 + MAX_STEPS）。
+            // 步数预算照样是 MAX_STEPS 步；累计步数另有总上限 MAX_TOTAL_STEPS
+            // （M20）：上限 = min(已做步数 + MAX_STEPS, 50)，续跑不再每次续满 25 步。
             var step = resumeFrom?.stepsDone ?: 0
-            val stepLimit = step + MAX_STEPS
+            val stepLimit = minOf(step + MAX_STEPS, MAX_TOTAL_STEPS)
+            if (step >= MAX_TOTAL_STEPS) {
+                // 续跑进来时累计步数已到顶：拒绝再续，不写新断点、不空跑一轮。
+                finalReply = "这个任务累计已经做了 $step 步，达到 $MAX_TOTAL_STEPS 步的上限，不再续跑。"
+                AuditLog.append(ctx, "任务循环", "续跑被拒", "累计步数 $step 已达上限 $MAX_TOTAL_STEPS")
+                return
+            }
             stepLoop@ while (step < stepLimit) {
                 if (!alive()) {
                     // 急停：把断点记下来，让用户说“继续”接着做；播报不抢调用方的话，
                     // 只报一句断点（finally 里靠 stoppedWithResume 发出去）。
-                    TaskResumeState.offer(taskText, history.toList(), step)
-                    stoppedWithResume = true
-                    finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
-                    AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "断点已记，说继续可续跑")
+                    // saveResume=false（内部核验任务）：不记断点、也不发“说继续”那句，
+                    // onReply 不发，调用方（TripLoop）超时后自己收尾（S16）。
+                    if (saveResume) {
+                        TaskResumeState.offer(taskText, history.toList(), step)
+                        stoppedWithResume = true
+                        finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
+                        AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "断点已记，说继续可续跑")
+                    } else {
+                        AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "内部任务，不记断点")
+                    }
                     return
                 }
                 step++
@@ -237,21 +262,22 @@ object TaskLoop {
                 val screenSameAsPrev = prevScreenSig.isNotEmpty() && screenSig == prevScreenSig
                 prevScreenSig = screenSig
 
-                // ---------- 截图策略（Phase 2：每轮默认带图） ----------
-                // 紧凑表 + 截图一起给模型（get_screen_context 模式），让它点真实
-                // 存在的元素，不再只靠文字猜。needImage 仍是“图是必需的”信号
-                // （树空、上一步失败、界面没变、树太薄、无进展≥2），只用于下面
-                // “需要图但没拿到”的提示；截图本身每轮都尽量拍（黑名单包除外），
+                // ---------- 截图策略（M8：树够用且上一步成功时不拍） ----------
+                // 紧凑表是默认观察；截图只在“图是必需的”时才拍（树空、上一步失败、
+                // 界面没变、树太薄、无进展≥2），其它轮次只给树、不烧 token。
+                // needImage 就是这个信号（也用于下面“需要图但没拿到”的提示）。
                 // 拍不到就只给树、不卡住这一步。录屏通道仍是无障碍截图的兜底。
                 var image: String? = pendingImage
                 var imageFromProjection = false
+                // pendingImage 是上一轮 zoom 的放大图（坐标系不是全屏），OCR 不能复用它。
+                val imageIsZoom = pendingImage != null
                 pendingImage = null
                 val treeTooThin = nodesUseful >= 0 && nodesUseful < 3
                 val needImage =
                     !JarvisAccessibilityService.isShotBlocked(pkg) &&
                     (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false ||
                         treeTooThin || noProgressSteps >= 2)
-                if (image == null && pkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(pkg)) {
+                if (image == null && needImage && pkg.isNotEmpty()) {
                     image = accessibilityShot(controller, ctx)
                     if (image == null) {
                         image = projectionShot(ctx)
@@ -271,17 +297,23 @@ object TaskLoop {
                 val ocrNeeded = (treeTooThin || withheld || compact.isBlank()) &&
                     pkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(pkg)
                 if (ocrNeeded) {
-                    val ocrBmp = try {
-                        // 干净图（不画网格）+ 原分辨率：ML Kit 认小字需要原图，
-                        // 缩到一半后 14sp 的字只剩 20 来像素，认错/认不出。
-                        val shot = controller.screenshot(reason = "ocr", grid = false, fullRes = true)
-                        val b64 = shot.optString("png_base64")
-                        if (b64.isEmpty()) null
-                        else Base64.decode(b64, Base64.DEFAULT)
-                            .let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-                    } catch (e: Exception) {
-                        AuditLog.append(ctx, "OCR", "取干净图失败", e.message ?: e.javaClass.simpleName)
+                    // M8：OCR 复用本轮已拍的那张图，不再二次截图。本轮没图
+                    // （截图被拒/失败，或本轮图是 zoom 放大图）时跳过 OCR。
+                    // 注意：无障碍截图那张是带网格的 JPEG，网格字母可能被 OCR
+                    // 认成文字混进补字段；录屏通道的图无网格，不受影响。
+                    val ocrBmp = if (imageIsZoom) {
                         null
+                    } else {
+                        val b64 = image
+                        if (b64.isNullOrEmpty()) {
+                            null
+                        } else try {
+                            Base64.decode(b64, Base64.DEFAULT)
+                                .let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                        } catch (e: Exception) {
+                            AuditLog.append(ctx, "OCR", "复用本轮图失败", e.message ?: e.javaClass.simpleName)
+                            null
+                        }
                     }
                     if (ocrBmp != null) {
                         // 树已判不够用时放宽到 5 秒，树只是判不准时 2 秒（Mika 两档一致）。
@@ -322,9 +354,15 @@ object TaskLoop {
                     append("当前前台应用包名：").append(pkg.ifEmpty { "未知" }).append('\n')
                     // 分应用用法知识（Mika APP.md 思路）：前台应用有知识就追加，
                     // 让模型在微信这类难啃的应用里不用每步现猜。所有大脑通用。
-                    val appKnowledge = AppKnowledge.forPackage(pkg)
-                    if (appKnowledge != null) {
-                        append("这个应用的用法知识：\n").append(appKnowledge).append('\n')
+                    // L14：只在前台应用切换时注入一次，同一个应用连着多步不再
+                    // 重复贴同一份；带 ctx 的重载查不到知识时记审计（M25 接线），
+                    // 只在切换时查，免得每步都刷一条“查不到”。
+                    if (pkg != lastKnowledgePkg) {
+                        lastKnowledgePkg = pkg
+                        val appKnowledge = AppKnowledge.forPackage(ctx, pkg)
+                        if (appKnowledge != null) {
+                            append("这个应用的用法知识：\n").append(appKnowledge).append('\n')
+                        }
                     }
                     // 内置浏览器开着时，把当前页快照（地址/标题/正文/链接）也给模型，
                     // 它才能按链接编号点（browserTap）或决定下一步。
@@ -380,7 +418,8 @@ object TaskLoop {
                     if (prevOutcomeUnknown) append("上一步结果未知：不知道那个动作成没成，先看一眼界面（紧凑表和截图）确认成没成，再决定下一步，不要直接重做同样的动作。\n")
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
-                // 任务大脑（GLM / 自定义）都带图问；紧凑表空白且最终不带图时，
+                // 任务大脑（GLM / 自定义）需要时才带图问（M8：树够用且上一步成功时不拍图）；
+                // 紧凑表空白且最终不带图时，
                 // 明确告知模型它看不到可操作元素，别让它空转。
                 val sendImage = image
                 val askBase = if (compact.isBlank() && sendImage == null) {
@@ -409,7 +448,7 @@ object TaskLoop {
                     attempt++
                     // 每步问模型前固定停 1 秒，降速、别一分钟内连着发多次请求撞限流。
                     try { Thread.sleep(1000) } catch (_: InterruptedException) { /* 继续 */ }
-                    val (reply, err) = askModel(ctx, askText, sendImage)
+                    val (reply, err) = askModel(ctx, askText, sendImage) { alive() }
                     if (!alive()) return
                     if (err != null) {
                         // 2026-10-24 跨应用修复第 2 件：问模型失败不再直接判死。
@@ -540,9 +579,14 @@ object TaskLoop {
                 // 重试都不该被当成原地打转拦下；普通失败的重复照旧累计。
                 if (r.outcomeUnknown) repeats = (repeats - 1).coerceAtLeast(0)
             }
-            // 跑满步数也没完成：把断点记下来，用户说“继续”可以再给 MAX_STEPS 步接着做。
-            TaskResumeState.offer(taskText, history.toList(), step)
-            finalReply = "任务跑满了 $MAX_STEPS 步还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"
+            // 跑满步数也没完成：把断点记下来，用户说“继续”可以接着做（累计不超
+            // MAX_TOTAL_STEPS 步）；内部任务（saveResume=false）不记断点（S16）。
+            if (saveResume) TaskResumeState.offer(taskText, history.toList(), step)
+            finalReply = if (saveResume) {
+                "任务跑满了步数上限（累计 $step 步）还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"
+            } else {
+                "任务跑满了步数上限（累计 $step 步）还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。"
+            }
             AuditLog.append(ctx, "任务循环", "步数用完", history.lastOrNull() ?: "")
         } catch (e: Exception) {
             finalReply = "任务执行中出错：${e.message}"
@@ -737,8 +781,10 @@ object TaskLoop {
         )
     }
 
-/** 同步等一轮模型回复（askOnce 是回调式，这里用闩锁包成同步，跑在循环线程上）。 */
-private fun askModel(ctx: Context, userText: String, image: String?): Pair<String?, String?> {
+/** 同步等一轮模型回复（askOnce 是回调式，这里用闩锁包成同步，跑在循环线程上）。
+ * M11：不等满 200 秒——每 200ms 轮询一次闩锁，每轮检查任务是否还存活，
+ * 不存活就提前返回，急停不用等模型回话。askOnce 的调用签名不动（另一路加 isAlive 参数）。 */
+private fun askModel(ctx: Context, userText: String, image: String?, isAlive: () -> Boolean = { true }): Pair<String?, String?> {
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
@@ -758,12 +804,17 @@ onResult = { reply = it; latch.countDown()},
 onError = { error = it; latch.countDown()}
 )
 }
-val finished = try {
-latch.await(MODEL_TIMEOUT_SEC, TimeUnit.SECONDS)
+val deadlineMs = System.currentTimeMillis() + MODEL_TIMEOUT_SEC * 1000
+while (true) {
+val done = try {
+latch.await(200, TimeUnit.MILLISECONDS)
 } catch (_: InterruptedException) {
-false
+return null to "问模型时被打断"
 }
-if (!finished) return null to "模型 $MODEL_TIMEOUT_SEC 秒没有回复"
+if (done) break
+if (!isAlive()) return null to "任务已被取消，不再等模型回复"
+if (System.currentTimeMillis() >= deadlineMs) return null to "模型 $MODEL_TIMEOUT_SEC 秒没有回复"
+}
 return reply to error
 }
 
@@ -909,9 +960,15 @@ markTimeoutUnknown(kind, result, summarize(kind, result))
 "type" -> {
 val text = action.optString("text")
 if (text.isEmpty()) return StepResult("type 动作没有文字", false, null, null, "PARSE_ERROR")
-summarize(kind, controller.typeText(text, null))
+// M6：type 也包 markTimeoutUnknown，超时标“结果未知”，别让模型原样重发一遍。
+val rawType = controller.typeText(text, null)
+markTimeoutUnknown(kind, rawType, summarize(kind, rawType))
 }
-"submit" -> summarize(kind, controller.submitInput(null))
+"submit" -> {
+// M6：与 type 一致，超时标“结果未知”（submit 已进 MUTATING_KINDS）。
+val rawSubmit = controller.submitInput(null)
+markTimeoutUnknown(kind, rawSubmit, summarize(kind, rawSubmit))
+}
 "zoom" -> {
 val cell = action.optString("cell").ifEmpty {
 cellFromNorm(action.optInt("x", 500), action.optInt("y", 500))
@@ -949,16 +1006,55 @@ if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, nul
 // 跨应用任务循环：前台拉起，直接全屏（jk-v66：不要小窗；反射已死、拖展开靠不住）。
 // launchApp 里已等目标到前台（最多 5 秒），这里不再睡、不再展开。
 val r = LocalCommands.launchApp(ctx, app, fullscreen = true)
-StepResult(r, r.startsWith("正在打开"), null, null, if (r.startsWith("正在打开")) "" else "UNKNOWN")
+if (!r.startsWith("正在打开")) {
+return StepResult(r, false, null, null, "UNKNOWN")
+}
+// S1：光听“正在打开”不够——launchApp 超时也这么报。再复核一次前台包名
+// 必须真是目标应用才算成功；目标包名查不到时无法复核，沿用原判定。
+// 前台刚切过来可能有一瞬窗口未稳，最多等 1.5 秒（3 次 × 500ms）再判。
+val targetPkg = LocalCommands.packageForApp(ctx, app)
+if (targetPkg != null) {
+var fgPkg = ""
+var matched = false
+for (i in 0 until 3) {
+fgPkg = try {
+JarvisAccessibilityService.instance?.foregroundPackage().orEmpty()
+} catch (_: Exception) {
+""
+}
+if (fgPkg == targetPkg) { matched = true; break }
+if (i < 2) {
+try { Thread.sleep(500) } catch (_: InterruptedException) {
+Thread.currentThread().interrupt()
+break
+}
+}
+}
+if (!matched) {
+val detail = "打开 $app 后前台不是目标应用（目标 $targetPkg，当前前台 ${fgPkg.ifEmpty { "未知" }}），launchApp 回报：$r"
+AuditLog.append(ctx, "任务循环", "openApp 前台复核失败", detail)
+return StepResult(detail, false, null, null, "UNKNOWN")
+}
+}
+StepResult(r, true, null, null)
 }
 "browse" -> {
 // 内置浏览器开网页：不用切 Chrome。URL 缺 http(s) 前缀时补 https。
+// M7：不再无条件 ok=true——按实际结果判：浏览器没起来（isOpen false）
+// 就是失败；起来了但 3 秒内没拿到页面快照，也如实说明。
 val url = action.optString("url")
 if (url.isEmpty()) return StepResult("browse 没有网址", false, null, null, "PARSE_ERROR")
 val msg = BrowserController.open(ctx, url)
 Thread.sleep(1500) // 等浏览器起来、页面开始加载
 BrowserController.refreshSnapshot(3000)
-StepResult(msg, true, null, null)
+val snap = BrowserController.lastSnapshot()
+if (!BrowserController.isOpen()) return StepResult("$msg，但内置浏览器没能打开", false, null, null, "UNKNOWN")
+val snapNote = if (snap != null) {
+"（当前页：${snap.url}${if (snap.title.isNotEmpty()) "「${snap.title}」" else ""}）"
+} else {
+"（页面快照还没拿到，可能还在加载）"
+}
+StepResult("$msg$snapNote", true, null, null)
 }
 "browserBack" -> {
 val ok = BrowserController.goBack()
@@ -1137,7 +1233,7 @@ else -> "UNKNOWN"
 }
 
 /** 超时后“不知道成没成”的动作种类：只有变异动作才标 outcomeUnknown。 */
-private val MUTATING_KINDS = setOf("tap", "longPress", "type", "swipe", "zoom", "tap_sel", "scroll_to")
+private val MUTATING_KINDS = setOf("tap", "longPress", "type", "submit", "swipe", "zoom", "tap_sel", "scroll_to")
 
 /**
  * 手势超时判未知：控制层的手势结果带 completed=false，意思是手势发出去了、
@@ -1196,7 +1292,7 @@ return StepResult(parts.joinToString("，"), performed, changed, null)
 
 private const val SYSTEM_PROMPT =
 "你是 Jarvis 的跨应用任务执行器，在用户的安卓手机上一步一步完成任务。" +
-"每一轮你会看到：任务原文、当前前台应用、界面元素紧凑表（只列可操作元素，带稳定编号）、已执行步骤和上一步的结果。每轮还会附一张截图（全屏图带 A1–H12 网格标定；若提示词说明来自录屏通道，则那张图没有网格、只能看不能按图瞄准）。\n" +
+"每一轮你会看到：任务原文、当前前台应用、界面元素紧凑表（只列可操作元素，带稳定编号）、已执行步骤和上一步的结果。树不够用或上一步有问题时还会附一张截图（全屏图带 A1–H12 网格标定；若提示词说明来自录屏通道，则那张图没有网格、只能看不能按图瞄准；没有附图时只按紧凑表操作）。\n" +
 "紧凑表是默认且最准的观察：每行格式「稳定编号|类型|文字|[中心x,中心y]」，坐标是系统算好的 0-1000 相对值；稳定编号（s 开头，如 s3f9a2）跨轮不变，同一元素每轮同一个编号，点它就用这个编号；列表型界面（聊天列表、动态流、搜索结果）里同一形状会重复出现，要认准目标文字所在的那一行，只点那一行的编号，绝不把一行的名字配上另一行的按钮。" +
 "文字为 # 开头的是控件的内部 id，不是屏幕上印的字，只能用来区分控件，不许当可见文字。" +
 "有编号就用编号点（tap 的 eid，优先用紧凑表的稳定编号），绝不拿 [x,y] 或截图位置重算坐标去点一个有编号的元素。" +

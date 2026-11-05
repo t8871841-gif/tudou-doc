@@ -49,6 +49,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         private const val SCAN_INTERVAL_MS = 250L // 窗口内容事件很密集，节流
         private const val MAX_NODES = 800 // 单次遍历的节点上限，防止卡顿
         private const val TASK_TICK_MS = 300L
+        /** S12：目标 App 不在前台的单独失败阈值（步骤计时已暂停，不再混进步骤超时里）。 */
+        private const val NOT_FG_TIMEOUT_MS = 8_000L
 
         /** 任务模式的硬白名单（不含支付/银行/系统设置）。默认短信 App 由 MainActivity 动态补充。 */
         val HARD_WHITELIST: Set<String> = setOf(
@@ -88,7 +90,8 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         // ---- 任务结果（跨 Activity 重建也不丢）----
         @Volatile private var lastResult: Map<String, Any?>? = null
-        @Volatile private var awaiter: ((Map<String, Any?>) -> Unit)? = null
+        // L20：多个 awaiter 列表——后来登记的 awaiter 不再覆盖已登记的，任务结束时全部回调。
+        @Volatile private var awaiters = mutableListOf<(Map<String, Any?>) -> Unit>()
 
         // 按钮文字：整词匹配，避免把“发送人”“我发送了文件”之类的文字当成按钮
         private val SEND_TEXT = Regex("^(发送|发 送|send)$", RegexOption.IGNORE_CASE)
@@ -131,7 +134,9 @@ class JarvisAccessibilityService : AccessibilityService() {
             windowMs: Long
         ): String {
             val svc = instance ?: return "no_service"
-            val pkgs = packages.intersect(HARD_WHITELIST + svc.extraWhitelist)
+            // M37：任务模式的包交集也加上 userWhitelist（仍受 USER_DENY 约束：
+            // setUserWhitelist 入库时已按 USER_DENY 过滤）。
+            val pkgs = packages.intersect(HARD_WHITELIST + svc.extraWhitelist + userWhitelist)
             if (pkgs.isEmpty()) return "bad_package"
             val parsed = parseSteps(steps) ?: return "bad_steps"
             if (parsed.isEmpty()) return "bad_steps"
@@ -189,7 +194,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 cb(mapOf("status" to "idle", "step" to -1, "stepName" to "", "detail" to "没有任务"))
                 return
             }
-            awaiter = cb
+            synchronized(awaiters) { awaiters.add(cb) }
         }
 
         // ---------------- Agent 循环：看屏导出 + 通用动作（新增，任务引擎原样保留） ----------------
@@ -298,6 +303,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         var textAttempts = 0
         var sendClicked = false
         var baseCount = 0 // 点发送前，界面上已有几条同文本的气泡（防止把旧消息当成新发的）
+        var notFgSince = 0L // S12：目标包不在前台的起始时刻（0 = 当前在前台），步骤计时暂停期间用它单独计时
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -411,18 +417,32 @@ class JarvisAccessibilityService : AccessibilityService() {
     // ---------- v3：视觉通道（截图 / 坐标点击 / 滑动） ----------
     private val shotExecutor = Executors.newSingleThreadExecutor()
 
+    /**
+     * S9：优先看窗口列表里 isActive && isFocused 的应用窗口包名；rootInActiveWindow
+     * 只作兜底。SystemUI / 输入法窗口 / Jarvis 自身一律排除，不能再被当成前台包。
+     */
     fun foregroundPackage(): String {
-        val p = rootInActiveWindow?.packageName?.toString()
-        if (!p.isNullOrEmpty()) return p
+        val excluded = setOf(packageName, "com.android.systemui")
         try {
+            // 第一遍：真正获得焦点的前台应用窗口
+            for (w in windows) {
+                if (w.isActive && w.isFocused) {
+                    val pk = w.root?.packageName?.toString()
+                    if (!pk.isNullOrEmpty() && pk !in excluded) return pk
+                }
+            }
+            // 第二遍：退而求其次，任一活动窗口（仍排除自身与 SystemUI）
             for (w in windows) {
                 if (w.isActive) {
                     val pk = w.root?.packageName?.toString()
-                    if (!pk.isNullOrEmpty()) return pk
+                    if (!pk.isNullOrEmpty() && pk !in excluded) return pk
                 }
             }
         } catch (_: Exception) {
         }
+        // 兜底：活动窗口根节点，同样排除自身与 SystemUI
+        val p = rootInActiveWindow?.packageName?.toString()
+        if (!p.isNullOrEmpty() && p !in excluded) return p
         return ""
     }
 
@@ -455,9 +475,14 @@ class JarvisAccessibilityService : AccessibilityService() {
                 takeScreenshot(android.view.Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
                     override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
                         shotExecutor.execute {
+                            // L21：bmp/tiny/out 三张位图在 finally 里回收（与 hardwareBuffer.close() 同级），
+                            // out 与 bmp 同一对象时只回收一次。
+                            var bmp: Bitmap? = null
+                            var tiny: Bitmap? = null
+                            var out: Bitmap? = null
                             try {
                                 val hw = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
-                                val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
                                 result.hardwareBuffer.close()
                                 if (bmp == null) {
                                     lastCaptureError = "capture_failed"
@@ -466,10 +491,10 @@ class JarvisAccessibilityService : AccessibilityService() {
                                 val sw = bmp.width
                                 val sh = bmp.height
                                 val scale = minOf(1f, 1280f / maxOf(sw, sh))
-                                val out = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (sw * scale).toInt(), (sh * scale).toInt(), true) else bmp
+                                out = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (sw * scale).toInt(), (sh * scale).toInt(), true) else bmp
                                 val bos = ByteArrayOutputStream()
                                 out.compress(Bitmap.CompressFormat.JPEG, 70, bos)
-                                val tiny = Bitmap.createScaledBitmap(bmp, 16, 16, true)
+                                tiny = Bitmap.createScaledBitmap(bmp, 16, 16, true)
                                 val sig = StringBuilder()
                                 for (y in 0 until 16) for (x in 0 until 16) {
                                     val px = tiny.getPixel(x, y)
@@ -488,6 +513,9 @@ class JarvisAccessibilityService : AccessibilityService() {
                                 lastCaptureError = "capture_failed"
                                 done(mapOf("error" to "capture_failed", "detail" to (t.message ?: "")))
                             } finally {
+                                try { tiny?.recycle() } catch (_: Exception) { }
+                                try { if (out !== bmp) out?.recycle() } catch (_: Exception) { }
+                                try { bmp?.recycle() } catch (_: Exception) { }
                                 com.jarvis.app.OrbController.setVisibleForCapture(true)
                             }
                         }
@@ -508,15 +536,64 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * S10：轻量界面指纹（节点数 + 类名/文本/描述/坐标框哈希），tap 前后比对判是否命中。
+     * 本文件没有 ScreenController 那套 screen_changed 快照机制，这里只做一次简单的
+     * dump 后指纹比对。无树时返回 0（微信等 FLAG_SECURE 界面拿不到树，无法比对）。
+     */
+    private fun treeFingerprint(): Long {
+        val root = rootInActiveWindow ?: return 0L
+        try {
+            val obtained = ArrayList<AccessibilityNodeInfo>()
+            try {
+                var h = 0L
+                var count = 0
+                val queue = ArrayDeque<AccessibilityNodeInfo>()
+                queue.add(root)
+                while (queue.isNotEmpty() && count < 400) {
+                    val node = queue.removeFirst()
+                    count++
+                    h = h * 31 + (node.className?.toString()?.hashCode() ?: 0)
+                    h = h * 31 + (node.text?.toString()?.hashCode() ?: 0)
+                    h = h * 31 + (node.contentDescription?.toString()?.hashCode() ?: 0)
+                    val r = Rect().also { node.getBoundsInScreen(it) }
+                    h = h * 31 + r.left + r.top * 3L + r.right * 7L + r.bottom * 11L
+                    for (i in 0 until node.childCount) {
+                        val child = node.getChild(i) ?: continue
+                        obtained.add(child)
+                        queue.add(child)
+                    }
+                }
+                if (count == 0) return 0L
+                return h * 31 + count
+            } finally {
+                obtained.forEach { recycleCompat(it) }
+            }
+        } catch (_: Exception) {
+            return 0L
+        } finally {
+            recycleCompat(root)
+        }
+    }
+
     /** 按屏幕坐标点击。只在“非黑名单 且 在看屏白名单内”的前台 App 里允许。 */
     fun tapXY(x: Float, y: Float, done: (Boolean, String) -> Unit) {
         val pkg = foregroundPackage()
         if (isShotBlocked(pkg)) { done(false, "blocked_app"); return }
         if (pkg !in HARD_WHITELIST + extraWhitelist + userWhitelist) { done(false, "not_whitelisted"); return }
+        // S10：60ms 笔画在微信上是 no-op，改 150ms；点前先拍指纹，回调里复核。
+        val before = treeFingerprint()
         val path = Path().apply { moveTo(x, y) }
-        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build()
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 150)).build()
         val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
-            override fun onCompleted(d: GestureDescription?) { done(true, "") }
+            override fun onCompleted(d: GestureDescription?) {
+                // 给界面 300ms 落定再比对：指纹没变 = 手势发出去了但 App 没反应，报未命中而不是成功。
+                // 点前就没有树（before==0，如微信藏树）时无法比对，沿用旧行为报成功。
+                handler.postDelayed({
+                    if (before != 0L && treeFingerprint() == before) done(false, "no_change")
+                    else done(true, "")
+                }, 300)
+            }
             override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
         }, null)
         if (!ok) done(false, "dispatch_failed")
@@ -527,10 +604,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         val pkg = foregroundPackage()
         if (isShotBlocked(pkg)) { done(false, "blocked_app"); return }
         if (pkg !in HARD_WHITELIST + extraWhitelist + userWhitelist) { done(false, "not_whitelisted"); return }
-        val m = resources.displayMetrics
-        val x = m.widthPixels / 2f
-        val y1 = m.heightPixels * (if (down) 0.72f else 0.28f)
-        val y2 = m.heightPixels * (if (down) 0.28f else 0.72f)
+        // M38：用 ScreenController.displaySize()（maximumWindowMetrics，含导航栏）统一换算，
+        // 不再用 displayMetrics.heightPixels（不含导航栏，底部坐标会偏）。
+        val size = com.jarvis.app.screen.ScreenController.displaySize(this)
+        val x = size.x / 2f
+        val y1 = size.y * (if (down) 0.72f else 0.28f)
+        val y2 = size.y * (if (down) 0.28f else 0.72f)
         val path = Path().apply { moveTo(x, y1); lineTo(x, y2) }
         val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 320)).build()
         val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
@@ -551,7 +630,13 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     fun dismissRecentCard(label: String, done: (Boolean, String) -> Unit) {
         val root = rootInActiveWindow ?: run { done(false, "no_window"); return }
-        val rect = findTextNodeRect(root, label) ?: findLenientNodeRect(root, label)
+        // M39：精确匹配同样收集全部命中，!=1 即报 not_found，不猜；为 0 时才走宽松匹配兜底。
+        val exactHits = findTextNodeRects(root, label)
+        val rect = when {
+            exactHits.size == 1 -> exactHits.first()
+            exactHits.size > 1 -> { done(false, "not_found"); return }
+            else -> findLenientNodeRect(root, label)
+        }
         if (rect == null) { done(false, "not_found"); return }
         val cx = rect.centerX().toFloat()
         val cy = rect.centerY().toFloat()
@@ -584,14 +669,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         root.getBoundsInScreen(winRect)
         if (winRect.isEmpty) { done(false, "no_window"); return }
         val topLimit = winRect.top + (winRect.height() * 0.15f).toInt()
-        val hits = LinkedHashSet<Rect>()
+        val textHits = LinkedHashSet<Rect>()
+        val iconHits = LinkedHashSet<Rect>()
         fun walk(n: AccessibilityNodeInfo) {
             val t = n.text?.toString()?.trim().orEmpty()
             val d = n.contentDescription?.toString()?.trim().orEmpty()
-            if (t == "关闭" || d == "关闭") {
-                val r = Rect()
-                n.getBoundsInScreen(r)
-                if (!r.isEmpty && r.centerY() <= topLimit) hits.add(r)
+            val r = Rect()
+            n.getBoundsInScreen(r)
+            if (!r.isEmpty && r.centerY() <= topLimit) {
+                if (t == "关闭" || d == "关闭") {
+                    textHits.add(r)
+                } else if (isTitleBarIcon(n, r, winRect)) {
+                    // L19 兜底：标题栏右端的小尺寸图标节点（无“关闭”文字的关闭钮）
+                    iconHits.add(r)
+                }
             }
             for (i in 0 until n.childCount) {
                 val child = n.getChild(i) ?: continue
@@ -600,8 +691,13 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
         }
         walk(root)
-        if (hits.size != 1) { done(false, "not_found"); return }
-        val rect = hits.first()
+        // 文字命中优先；为 0 时才用图标兜底，各自仍要求唯一才点，不猜。
+        val rect = when {
+            textHits.size == 1 -> textHits.first()
+            textHits.isNotEmpty() -> { done(false, "not_found"); return }
+            iconHits.size == 1 -> iconHits.first()
+            else -> { done(false, "not_found"); return }
+        }
         val cx = rect.centerX().toFloat()
         val cy = rect.centerY().toFloat()
         val path = Path().apply { moveTo(cx, cy) }
@@ -611,6 +707,18 @@ class JarvisAccessibilityService : AccessibilityService() {
             override fun onCancelled(d: GestureDescription?) { done(false, "cancelled") }
         }, null)
         if (!ok) done(false, "dispatch_failed")
+    }
+
+    /**
+     * L19：标题栏右端的小尺寸图标节点判定（关闭钮无文字时的兜底）：
+     * 位于窗口宽度右端 15% 内、宽高各在 24..120px（图标尺寸）、是图片类或可点击节点。
+     * 仍由调用方要求唯一才点。
+     */
+    private fun isTitleBarIcon(node: AccessibilityNodeInfo, r: Rect, winRect: Rect): Boolean {
+        if (r.width() !in 24..120 || r.height() !in 24..120) return false
+        if (r.centerX() < winRect.right - (winRect.width() * 0.15f).toInt()) return false
+        val cls = node.className?.toString().orEmpty()
+        return node.isClickable || cls.contains("ImageView") || cls.contains("ImageButton")
     }
 
     /** 最近任务界面里所有带文本的节点去重后的标题（关卡片失败时记审计日志用，帮定位该 ROM 的卡片标题格式）。 */
@@ -647,6 +755,25 @@ class JarvisAccessibilityService : AccessibilityService() {
             if (found != null) return found
         }
         return null
+    }
+
+    /** M39：精确匹配的全部命中（去重后坐标框），供 dismissRecentCard 校验唯一性。 */
+    private fun findTextNodeRects(node: AccessibilityNodeInfo, label: String): List<Rect> {
+        val hits = LinkedHashSet<Rect>()
+        fun walk(n: AccessibilityNodeInfo) {
+            if (n.text?.toString() == label || n.contentDescription?.toString() == label) {
+                val r = Rect()
+                n.getBoundsInScreen(r)
+                if (!r.isEmpty) hits.add(r)
+            }
+            for (i in 0 until n.childCount) {
+                val child = n.getChild(i) ?: continue
+                walk(child)
+                child.recycle()
+            }
+        }
+        walk(node)
+        return hits.toList()
     }
 
     /**
@@ -757,20 +884,11 @@ class JarvisAccessibilityService : AccessibilityService() {
     private fun findAndClick(root: AccessibilityNodeInfo): Boolean {
         val obtained = ArrayList<AccessibilityNodeInfo>()
         try {
-            val queue = ArrayDeque<AccessibilityNodeInfo>()
-            queue.add(root)
-            var visited = 0
-            while (queue.isNotEmpty() && visited < MAX_NODES) {
-                val node = queue.removeFirst()
-                visited++
-                if (isSendCandidate(node) && clickNodeOrParent(node)) return true
-                for (i in 0 until node.childCount) {
-                    val child = node.getChild(i) ?: continue
-                    obtained.add(child)
-                    queue.add(child)
-                }
+            // M35：发送按钮在树尾部，自底向上找，截断时丢顶部而不是丢发送按钮。
+            val found = dfsBottomUp(root, obtained) { node ->
+                isSendCandidate(node) && clickNodeOrParent(node)
             }
-            return false
+            return found != null
         } finally {
             obtained.forEach { recycleCompat(it) }
         }
@@ -782,7 +900,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (task != null) return "busy"
         val ms = windowMs.coerceIn(5_000L, 90_000L)
         lastResult = null
-        awaiter = null
+        synchronized(awaiters) { awaiters.clear() }
         task = Task(pkgs, steps, SystemClock.elapsedRealtime() + ms)
         // 任务窗口 = 武装窗口：到点自动解除
         armedUntil = SystemClock.elapsedRealtime() + ms
@@ -810,9 +928,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         armedUntil = 0L // 任务结束立即解除武装
         state = if (status == "sent" || status == "unverified") "clicked" else "idle"
         lastResult = result
-        val cb = awaiter
-        awaiter = null
-        cb?.invoke(result)
+        val cbs = synchronized(awaiters) { awaiters.toList().also { awaiters.clear() } }
+        cbs.forEach { it.invoke(result) }
         Log.d(TAG, "task finished: $status @ $stepName ($detail)")
         // 第 2 条「操作审计日志」：跨应用任务引擎每结束一次任务，记一条完整链路（脱敏后落盘）。
         try {
@@ -848,8 +965,10 @@ class JarvisAccessibilityService : AccessibilityService() {
         try {
             root = rootInActiveWindow
             val pkg = root?.packageName?.toString()
-            // 前台不是白名单 App：什么都不做，只等（超时计时照常走）
-            if (root != null && pkg != null && pkg in t.pkgs && now >= t.settleUntil) {
+            val inTarget = root != null && pkg != null && pkg in t.pkgs
+            if (inTarget && now >= t.settleUntil) {
+                // 在目标包内：步骤超时只对“在目标包内但找不到节点”计时
+                t.notFgSince = 0L
                 val step = t.steps[t.idx]
                 if (now - t.stepStart > step.timeoutMs) {
                     when {
@@ -861,10 +980,18 @@ class JarvisAccessibilityService : AccessibilityService() {
                     val done = runStep(root, t, step)
                     if (done && task === t) advance(t)
                 }
-            } else if (now - t.stepStart > t.steps[t.idx].timeoutMs + 8_000L) {
-                // 长时间不在白名单 App 里：别空等到整体超时
-                finishTask("failed", "目标 App 没有出现在前台")
+            } else if (!inTarget) {
+                // S12：不在目标包（转场/冷启动/切走了）：步骤计时暂停——每轮重置 stepStart，
+                // 只对“不在前台”单独计时，超 NOT_FG_TIMEOUT_MS 立即失败，不再空等到整体超时。
+                if (t.notFgSince == 0L) t.notFgSince = now
+                t.stepStart = now
+                if (now - t.notFgSince > NOT_FG_TIMEOUT_MS) {
+                    finishTask("failed", "目标 App 没有出现在前台")
+                }
             }
+            // else：在目标包内但还在 settle 等待期，什么都不做，等下一轮。
+            // （已在目标包内，不在前台的计时清零，避免下次短暂切走沿用旧起点。）
+            else if (inTarget) t.notFgSince = 0L
         } catch (e: Exception) {
             Log.w(TAG, "tick failed", e)
         } finally {
@@ -1007,6 +1134,34 @@ class JarvisAccessibilityService : AccessibilityService() {
                 queue.add(child)
             }
         }
+        // M35：截断时明示——BFS 从顶部截断，后半段节点未扫描。
+        if (queue.isNotEmpty()) Log.w(TAG, "M35：BFS 截断于 MAX_NODES=$MAX_NODES，剩余节点未扫描")
+        return null
+    }
+
+    /**
+     * M35：自底向上（逆文档序）深度优先搜索。发送按钮与最新消息都在树尾部，
+     * BFS 从顶部截断会先丢它们；send/verifyText 改走这条路，截断时丢的是树顶部。
+     */
+    private fun dfsBottomUp(
+        root: AccessibilityNodeInfo,
+        obtained: MutableList<AccessibilityNodeInfo>,
+        pred: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        var visited = 0
+        while (stack.isNotEmpty() && visited < MAX_NODES) {
+            val node = stack.removeLast()
+            visited++
+            if (pred(node)) return node
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                obtained.add(child)
+                stack.add(child)
+            }
+        }
+        if (stack.isNotEmpty()) Log.w(TAG, "M35：自底向上搜索截断于 MAX_NODES=$MAX_NODES，树顶部剩余节点未扫描")
         return null
     }
 
@@ -1019,10 +1174,13 @@ class JarvisAccessibilityService : AccessibilityService() {
         m.classContains?.let { if (!(node.className?.toString().orEmpty().contains(it))) return false }
         val text = node.text?.toString()?.trim().orEmpty()
         m.textEquals?.let { if (text != it.trim()) return false }
-        m.textRegex?.let { if (text.length > 80 || !it.matches(text)) return false }
+        // M36：textRegex/descRegex/idRegex 三者统一为 containsMatchIn（之前 text/desc 用
+        // 全匹配、id 用包含匹配，同一份选择器在三处语义不一致）；去掉 80/40 字符硬上限，
+        // 不再因文字稍长就永远匹配不上。需要全匹配的选择器自己在模式里写 ^...$。
+        m.textRegex?.let { if (!it.containsMatchIn(text)) return false }
         m.descRegex?.let {
             val d = node.contentDescription?.toString()?.trim().orEmpty()
-            if (d.isEmpty() || d.length > 40 || !it.matches(d)) return false
+            if (d.isEmpty() || !it.containsMatchIn(d)) return false
         }
         m.idRegex?.let {
             val id = node.viewIdResourceName.orEmpty()
@@ -1043,19 +1201,21 @@ class JarvisAccessibilityService : AccessibilityService() {
         try {
             var count = 0
             val want = target.trim()
-            val queue = ArrayDeque<AccessibilityNodeInfo>()
-            queue.add(root)
+            // M35：verifyText 关心的是最新消息（树尾部），自底向上数，截断时丢顶部旧消息。
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
             var visited = 0
-            while (queue.isNotEmpty() && visited < MAX_NODES) {
-                val node = queue.removeFirst()
+            while (stack.isNotEmpty() && visited < MAX_NODES) {
+                val node = stack.removeLast()
                 visited++
                 if (!isEditNode(node) && node.text?.toString()?.trim() == want) count++
                 for (i in 0 until node.childCount) {
                     val child = node.getChild(i) ?: continue
                     obtained.add(child)
-                    queue.add(child)
+                    stack.add(child)
                 }
             }
+            if (stack.isNotEmpty()) Log.w(TAG, "M35：countPlainText 截断于 MAX_NODES=$MAX_NODES，树顶部剩余节点未计数")
             return count
         } finally {
             obtained.forEach { recycleCompat(it) }
@@ -1071,6 +1231,23 @@ class JarvisAccessibilityService : AccessibilityService() {
         return FORBIDDEN_CLICK.containsMatchIn(s)
     }
 
+    /**
+     * S11：父节点代点的前提——父节点 bounds 必须与目标 bounds 接近：面积比 <3 倍，
+     * 且中心距离 < 目标对角线的一半。否则等于点了整行/整页容器。目标本身无 bounds 时无法判断，
+     * 沿用旧行为（不校验）。
+     */
+    private fun boundsClose(target: Rect, parent: Rect): Boolean {
+        if (target.isEmpty || parent.isEmpty) return false
+        val tArea = target.width().toLong() * target.height()
+        val pArea = parent.width().toLong() * parent.height()
+        if (pArea >= tArea * 3) return false
+        val dx = parent.centerX() - target.centerX()
+        val dy = parent.centerY() - target.centerY()
+        val distSq = dx.toLong() * dx + dy.toLong() * dy
+        val diagSq = target.width().toLong() * target.width() + target.height().toLong() * target.height()
+        return distSq * 4 <= diagSq
+    }
+
     /** 带黑名单的点击：被点的节点（含向上找到的可点击父节点）命中黑名单就拒绝。 */
     private fun clickGuarded(node: AccessibilityNodeInfo): ClickResult {
         if (isForbiddenNode(node)) return ClickResult.BLOCKED
@@ -1078,6 +1255,7 @@ class JarvisAccessibilityService : AccessibilityService() {
             return if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) ClickResult.OK
             else ClickResult.FAILED
         }
+        val targetRect = Rect().also { node.getBoundsInScreen(it) }
         val climbed = ArrayList<AccessibilityNodeInfo>()
         try {
             var parent = node.parent
@@ -1086,6 +1264,11 @@ class JarvisAccessibilityService : AccessibilityService() {
                 climbed.add(parent)
                 if (parent.isClickable) {
                     if (isForbiddenNode(parent)) return ClickResult.BLOCKED
+                    // S11：父节点 bounds 与目标差太多（整行/整页容器）即失败，不代点。
+                    if (!targetRect.isEmpty) {
+                        val parentRect = Rect().also { parent.getBoundsInScreen(it) }
+                        if (!boundsClose(targetRect, parentRect)) return ClickResult.FAILED
+                    }
                     return if (parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) ClickResult.OK
                     else ClickResult.FAILED
                 }
@@ -1115,27 +1298,13 @@ class JarvisAccessibilityService : AccessibilityService() {
         return id.isNotEmpty() && SEND_ID.containsMatchIn(id)
     }
 
-    /** 点击节点本身，否则向上找可点击的父节点（旧模式用，只会点“发送”候选）。 */
+    /**
+     * 点击节点本身，否则向上找可点击的父节点（旧模式用，只会点“发送”候选）。
+     * S11：直接复用 clickGuarded——黑名单与父节点 bounds 校验与任务引擎同一套，
+     * 命中黑名单或父节点过大都返回 false，不再裸点。
+     */
     private fun clickNodeOrParent(node: AccessibilityNodeInfo): Boolean {
-        if (node.isClickable) {
-            return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        }
-        val climbed = ArrayList<AccessibilityNodeInfo>()
-        try {
-            var parent = node.parent
-            var depth = 0
-            while (parent != null && depth < 4) { // 最多往上 4 层，别点到整行/整页
-                climbed.add(parent)
-                if (parent.isClickable) {
-                    return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
-                parent = parent.parent
-                depth++
-            }
-            return false
-        } finally {
-            climbed.forEach { recycleCompat(it) }
-        }
+        return clickGuarded(node) == ClickResult.OK
     }
 
     /** API 33 起 recycle() 是空操作并已废弃；旧系统仍需要回收。 */

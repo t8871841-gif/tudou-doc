@@ -1,5 +1,8 @@
 package com.jarvis.app.task
 
+import android.content.Context
+import com.jarvis.app.AuditLog
+
 /**
  * 分应用用法知识（借鉴 Mika 的 knowledge/apps/<id>/APP.md）。
  * 每个应用一份简短知识：界面结构 + 容易踩的坑。TaskLoop 每步在前台应用
@@ -9,6 +12,8 @@ package com.jarvis.app.task
  * 支付宝/高德），内容改编自 Mika 的 knowledge/apps/<id>/APP.md（Apache-2.0），
  * 微信另加 Jarvis 在真机上踩过的专属教训；支付宝、高德是 Mika 也没有、从零写的。
  * 以后加应用只须在 KNOWLEDGE 里加一条：包名 -> 知识文本。
+ * 版本/核实日期见下面的 META（L14），只填已知信息，未知的留空、不编造；
+ * 家族/变体兜底见 resolveKey（M25），forPackage 先精确匹配、再按前缀/关键词兜底。
  */
 object AppKnowledge {
 
@@ -101,6 +106,55 @@ object AppKnowledge {
             "路线规划需要联网，没网时只能看已下载的离线地图。"
     )
 
+    /**
+     * L14：每条知识的适用版本 / 最后核实日期。只填已知信息，未知的留空、
+     * 不编造版本号和日期——目前只有支付宝、高德有确切的写入日期
+     * （2026-11-05 从零写，见上面注释）；其余 9 条的版本和核实日期未知，
+     * 待按真机版本逐条核实后再补。无条目时 metaFor 返回 null。
+     */
+    data class AppMeta(
+        val applicableVersion: String? = null,
+        val lastVerified: String? = null
+    )
+
+    private val META: Map<String, AppMeta> = mapOf(
+        "com.eg.android.AlipayGphone" to AppMeta(lastVerified = "2026-11-05"),
+        "com.autonavi.minimap" to AppMeta(lastVerified = "2026-11-05")
+    )
+
+    /**
+     * 把包名解析成 KNOWLEDGE 里的键：先精确匹配，再走家族/变体兜底
+     * （M25）：包名以已知包名 + "." 开头的是同家族变体
+     * （如抖音极速版 com.ss.android.ugc.aweme.lite）；含 autonavi 的
+     * 认作高德变体。都查不到返回 null。
+     */
+    private fun resolveKey(pkg: String): String? {
+        if (KNOWLEDGE.containsKey(pkg)) return pkg
+        for (knownPkg in KNOWLEDGE.keys) {
+            if (pkg.startsWith("$knownPkg.")) return knownPkg
+        }
+        if ("autonavi" in pkg && KNOWLEDGE.containsKey("com.autonavi.minimap")) {
+            return "com.autonavi.minimap"
+        }
+        return null
+    }
+
     /** 返回给定前台包名的用法知识，没有则返回 null。 */
-    fun forPackage(pkg: String): String? = KNOWLEDGE[pkg]
+    fun forPackage(pkg: String): String? = resolveKey(pkg)?.let { KNOWLEDGE[it] }
+
+    /** 返回给定前台包名的版本/核实日期，没有则返回 null。 */
+    fun metaFor(pkg: String): AppMeta? = resolveKey(pkg)?.let { META[it] }
+
+    /**
+     * 带审计的版本：查不到知识时记一条审计，而不是静默缺失。
+     * 无 Context 的 forPackage(pkg) 保持原样（TaskLoop.kt:325 仍在用它），
+     * 调用方有 Context 时改调这个重载，缺失才会被记下来。
+     */
+    fun forPackage(ctx: Context, pkg: String): String? {
+        val text = forPackage(pkg)
+        if (text == null) {
+            AuditLog.append(ctx, "应用知识", "无知识", "包名 $pkg 未命中精确/家族匹配")
+        }
+        return text
+    }
 }

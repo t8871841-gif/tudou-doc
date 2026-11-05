@@ -76,17 +76,41 @@ object AutoGLMClient {
         "4. 找不到目标（联系人、商品等）就 Swipe 滑动查找。\n" +
         "5. 每步前检查上一步是否生效：点了没反应先等一下，再调一下点击位置重试；还不生效就跳过这步继续，并在 finish 里说明。\n" +
         "6. 绝不输入密码、验证码；绝不点付款、转账、删除类按钮，除非任务原文明确要求；登录、验证码场景用 Take_over 交给用户。\n" +
-        "7. 一步只做一个动作；发消息这类任务要依次完成打开应用、找到联系人、点开会话、输入消息、点发送，发送完成才能 finish。"
+        "7. 一步只做一个动作；发消息这类任务要依次完成打开应用、找到联系人、点开会话、输入消息、点发送，发送完成才能 finish。\n" +
+        "8. 紧凑表里带稳定编号的元素优先点它：do(...) 只有坐标参数，取该编号元素的中心坐标填进 element=[x,y]，不要另算坐标、不要凭截图位置重算。\n" +
+        "9. 上一步若带错误码，按码换招，别对同一码重复同一动作：ELEMENT_NOT_FOUND 换目标或滑动找、TAP_REFUSED 先 zoom 再点、TIMEOUT 先看界面确认成没成再决定、NO_INPUT_FOCUS 先点输入框、NO_ACTIVE_WINDOW 先 Launch 目标应用、PARSE_ERROR 检查动作格式、UNKNOWN 换路线或 finish 说明；树被扣留的应用（如微信）先 zoom 再点，盲点会被拒绝。"
+
+    /** M11 急停序号：cancelInFlight() 自增，askOnce 回调凭序号丢弃已取消轮次的结果。 */
+    @Volatile
+    private var cancelSeq = 0
+
+    /** 正在问模型的那一次 OkHttp 调用，cancelInFlight() 连同网络一起取消。 */
+    @Volatile
+    private var inFlightCall: Call? = null
+
+    /** 急停：取消正在问模型的那一步（序号作废 + 断开网络），回调不再生效。 */
+    fun cancelInFlight() {
+        cancelSeq++
+        inFlightCall?.cancel()
+    }
 
     /**
      * 单轮调用，不进任何对话历史（任务循环 task/TaskLoop 用）。
      * onResult 收到的是转好的 Jarvis JSON 动作字符串（如 {"action":"tap","x":500,"y":800}），
      * 可直接交给 TaskLoop 的 parseAction；onError 是出错原因。回调在后台线程。
+     * M9：传入的 systemPrompt 不再丢弃，与 AUTO_GLM_SYSTEM_PROMPT 拼接后一起发。
+     * M11：isAlive 由调用方给（TaskLoop 的代次检查），false 即已取消；cancelInFlight()
+     * 也能取消本轮（序号作废 + 断开网络），已取消的回调静默丢弃、不再回调。
      */
     fun askOnce(
-        ctx: Context, @Suppress("UNUSED_PARAMETER") systemPrompt: String, userText: String, jpegBase64: String?,
+        ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
+        isAlive: (() -> Boolean)? = null,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
+        // M11：发请求前先检查急停。已取消时静默返回、不回调，TaskLoop 的短轮询
+        // 凭 alive 检查提前返回 null（与 CustomClient.ask 丢弃已取消回调的做法一致）。
+        val mySeq = cancelSeq
+        if (isAlive?.invoke() == false || mySeq != cancelSeq) return
         // GLM 模式专用：接口地址与模型名取内置 GLM 配置（智谱 + autoglm-phone），Key 用共用的 API Key 栏位。
         val base = JarvisPrefs.getTaskBaseUrl(ctx).trim().trimEnd('/')
         val model = JarvisPrefs.getTaskModel(ctx)
@@ -111,8 +135,19 @@ object AutoGLMClient {
                     )
                 )
         }
+        // M9：传入的 TaskLoop SYSTEM_PROMPT（错误码表、eid 优先、zoom 规则）与自带提示词
+        // 拼接后一起发，两份都不丢。输出格式只用 do(...)/finish(...) 这一套，不输出 JSON；
+        // eid 优先落到 do(...) 里就是取该编号元素的中心坐标填 element（见上面规则 8）。
+        val mergedSystemPrompt = buildString {
+            if (systemPrompt.isNotBlank()) {
+                append(systemPrompt)
+                append("\n\n")
+            }
+            append(AUTO_GLM_SYSTEM_PROMPT)
+            append("\n\n补充说明：上面两份提示词都要遵守；动作输出格式只用 <think>/<answer>do(...)/finish(...) 这一套，不输出 JSON 对象。")
+        }
         val messages = JSONArray()
-            .put(JSONObject().put("role", "system").put("content", AUTO_GLM_SYSTEM_PROMPT))
+            .put(JSONObject().put("role", "system").put("content", mergedSystemPrompt))
             .put(JSONObject().put("role", "user").put("content", userContent))
         val body = JSONObject()
             .put("model", model)
@@ -125,12 +160,19 @@ object AutoGLMClient {
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        client.newCall(req).enqueue(object : Callback {
+        val httpCall = client.newCall(req)
+        inFlightCall = httpCall
+        httpCall.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                if (call === inFlightCall) inFlightCall = null
+                // M11：等待回调时再检查一次急停，已取消就静默丢弃，不回调。
+                if (mySeq != cancelSeq || isAlive?.invoke() == false) return
                 onError("网络请求失败：${e.message}")
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
+                if (call === inFlightCall) inFlightCall = null
+                if (mySeq != cancelSeq || isAlive?.invoke() == false) return
                 response.use { resp ->
                     if (!resp.isSuccessful) {
                         onError("AutoGLM 接口返回错误：HTTP ${resp.code}")
