@@ -69,6 +69,17 @@ object TaskLoop {
     private const val MAX_COMPLETED_ITEMS = 20
     /** 第一批·连续失败升级阈值（MA-v3 err_to_manager_thresh=2）。 */
     private const val STUCK_THRESHOLD = 2
+    /** 第二批·Reflector 精简版：核验超时（短问答，不用等满 200 秒）。 */
+    private const val REFLECT_TIMEOUT_SEC = 60L
+    /** 第二批·核验提示词里前后界面摘要各自的上限（短调用，不塞全量历史）。 */
+    private const val REFLECT_COMPACT_CHARS = 1200
+    /** 第二批·(b) 信号只对“应当引起界面变化”的动作核验：wait/zoom/find 等本身就不指望界面变，不核验；浏览器类动作看的是网页快照、树 diff 不准，也不核验；flow 的 screenChanged 恒为 null，本来也不会触发。 */
+    private val REFLECT_CHANGE_KINDS = setOf("tap", "longPress", "type", "submit", "swipe", "scroll_to", "tap_sel", "openApp", "back", "home")
+    /** 第二批·核验员系统提示词（短问答专用，走 CustomClient.askOnce——GLM 模式下任务 client 只回 do(...)/finish(...) 动作串，问不出 A/B/C，聊天模型才能回自由文本）。 */
+    private const val REFLECT_SYSTEM_PROMPT =
+        "你是 Jarvis 任务核验员，只判断上一步动作到底成没成，不执行任何动作。" +
+        "只输出一个字母加一句说明：A 成功/符合期望；B 到了错误页面、点错了地方；C 界面没有任何变化、动作没生效。" +
+        "不要输出其他文字，不要解释推理过程。"
 
     /**
      * 无进展计数（Andee 对齐后不再熔断 abort）：原来这里有一层“连续 7 步无真交互
@@ -635,12 +646,33 @@ object TaskLoop {
                     // 注意：第一步就说 done 时 prevOutcomeUnknown 与 screenSameAsPrev
                     // 都是 false，不会误顶（任务可能本来就已做完）。
                     if (kind == "done" && !doneChallenged && (prevOutcomeUnknown || screenSameAsPrev)) {
-                        doneChallenged = true
-                        val reason = if (prevOutcomeUnknown) "上一步结果未知" else "界面自上一步起完全没变"
-                        history += "第 $step 步：模型说做完了，但$reason，已请它再确认一次"
-                        AuditLog.append(ctx, "任务循环", "done 待核验", reason)
-                        lastError = "你说做完了，但$reason——请再看一眼界面（紧凑表和截图），确认要找的东西/要发的内容真的在屏上，再决定是真的做完了还是继续做。不要只凭感觉说 done。"
-                        continue@stepLoop
+                        // 第二批·Reflector 精简版（done 宣称核验）：先取一次 fresh 界面状态问一次核验，
+                        // A 才放行；B/C 或核验失败时按原有顶回逻辑处理。图复用本轮已拍的全屏图
+                        // （zoom 放大图坐标系不是全屏，不用）。
+                        val afterDump = try { controller.dumpUiTree() } catch (_: Exception) { null }
+                        val doneVerdict = if (afterDump != null) {
+                            val doneImage = if (!imageIsZoom) sendImage else null
+                            askReflect(
+                                ctx,
+                                buildDoneReflectText(
+                                    taskText, action.optString("message"),
+                                    afterDump.optString("pkg"), afterDump.optString("compact")
+                                ),
+                                doneImage
+                            ) { alive() }
+                        } else null
+                        if (doneVerdict?.first == ReflectVerdict.SUCCESS) {
+                            AuditLog.append(ctx, "任务循环", "done 核验通过", doneVerdict.second.take(120))
+                            history += "第 $step 步：模型说做完了，核验通过（${doneVerdict.second.take(60)}）"
+                            // 不顶回，继续往下走正常 done 收尾。
+                        } else {
+                            doneChallenged = true
+                            val reason = if (prevOutcomeUnknown) "上一步结果未知" else "界面自上一步起完全没变"
+                            history += "第 $step 步：模型说做完了，但$reason，已请它再确认一次"
+                            AuditLog.append(ctx, "任务循环", "done 待核验", reason)
+                            lastError = "你说做完了，但$reason——请再看一眼界面（紧凑表和截图），确认要找的东西/要发的内容真的在屏上，再决定是真的做完了还是继续做。不要只凭感觉说 done。"
+                            continue@stepLoop
+                        }
                     }
                     val msg = if (kind == "done") {
                         action.optString("message").ifEmpty { "任务完成了" }
@@ -710,6 +742,59 @@ object TaskLoop {
                 // 结果未知的一步不计入重复：不知道它到底跑没跑成，模型换招或
                 // 重试都不该被当成原地打转拦下；普通失败的重复照旧累计。
                 if (r.outcomeUnknown) repeats = (repeats - 1).coerceAtLeast(0)
+                // 第二批·Reflector 精简版（R3）：只在不确定信号时核验——
+                // (a) 结果未知；(b) 应当引起界面变化的动作执行后界面纹丝没动。
+                // 确定成功绝不核验；核验失败（网络/解析/取不到 fresh 状态）当没验证过，不记失败、不阻塞。
+                val needReflect = r.outcomeUnknown ||
+                    (r.screenChanged == false && kind in REFLECT_CHANGE_KINDS)
+                if (needReflect && alive()) {
+                    // 取一次 fresh 界面状态（执行后）：只读树，不动界面；取不到就当没验证过。
+                    val afterDump = try { controller.dumpUiTree() } catch (_: Exception) { null }
+                    val verdict = if (afterDump != null) {
+                        val afterCompact = afterDump.optString("compact")
+                        val afterPkg = afterDump.optString("pkg")
+                        val afterWithheld = afterDump.optBoolean("withheld", false)
+                        val afterThin = afterDump.optInt("nodes_useful", -1).let { it >= 0 && it < 3 }
+                        // 截图只在 fresh 树不够用时才拍（树空/被扣留/太薄），树 diff 是主证据。
+                        val verifyImage = if ((afterCompact.isBlank() || afterWithheld || afterThin) &&
+                            afterPkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(afterPkg)
+                        ) {
+                            accessibilityShot(controller, ctx) ?: projectionShot(ctx)
+                        } else null
+                        askReflect(
+                            ctx,
+                            buildStepReflectText(
+                                taskText, describeAction(action), r.summary,
+                                pkg, compact, afterPkg, afterCompact
+                            ),
+                            verifyImage
+                        ) { alive() }
+                    } else null
+                    if (verdict != null && verdict.first != ReflectVerdict.SUCCESS) {
+                        val verdictText = if (verdict.first == ReflectVerdict.WRONG_PAGE) "B 错页" else "C 无变化"
+                        val desc = verdict.second
+                        history += "第 $step 步核验：$verdictText — ${desc.take(80)}"
+                        AuditLog.append(ctx, "任务循环", "核验$verdictText（第 $step 步）", desc.take(120))
+                        lastError = "上一步核验没通过（$verdictText）：$desc"
+                        prevStepFailed = true
+                        // 只在“本步还没被记为失败”时才计数，避免一次失败算两次：
+                        // r.ok=false 且结果明确的步，上面已经记过一次了。
+                        if (r.ok || r.outcomeUnknown) {
+                            consecutiveFailures++
+                            recentFailureNotes += "第 $step 步核验$verdictText：${desc.take(60)}"
+                            if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
+                        }
+                    } else if (verdict != null) {
+                        // 核验通过（A）：结果未知已被确认成真，下一轮不必再按未知处理；
+                        // 界面没变但动作已生效的，也记一笔，免得下一轮还盯着“没变化”纠结。
+                        if (r.outcomeUnknown) {
+                            prevOutcomeUnknown = false
+                            history += "第 $step 步核验：A 成功——上一步结果已确认"
+                        } else {
+                            history += "第 $step 步核验：A 成功——界面没变但动作已生效"
+                        }
+                    }
+                }
             }
             // 跑满步数也没完成：把断点记下来，用户说“继续”可以接着做（累计不超
             // MAX_TOTAL_STEPS 步）；内部任务（saveResume=false）不记断点（S16）。
@@ -981,6 +1066,100 @@ if (!isAlive()) return null to "任务已被取消，不再等模型回复"
 if (System.currentTimeMillis() >= deadlineMs) return null to "模型 $MODEL_TIMEOUT_SEC 秒没有回复"
 }
 return reply to error
+}
+
+/** 第二批·核验结论：A 成功、B 错页、C 无变化。 */
+private enum class ReflectVerdict { SUCCESS, WRONG_PAGE, NO_CHANGE }
+
+/**
+ * 第二批·从核验回复里抠结论：某行以字母 A/B/C 开头、后跟分隔符（.、。：:，、空格、- 等）即认，
+ * 余下文字是说明；单字母一行也认；抠不到返回 null（调用方当没验证过）。
+ * 字母后必须跟分隔符——裸单词 "Action..." 开头是 A 也不能误认。
+ * 注意：matchEntire 自带两端锚定，正则里不写 ^ 与 $（Kotlin 里 $ 会触发字符串插值）。
+ */
+private fun parseReflectVerdict(reply: String): Pair<ReflectVerdict, String>? {
+for (rawLine in reply.lineSequence()) {
+val line = rawLine.trim()
+if (line.isEmpty()) continue
+if (line.length == 1 && line[0].uppercaseChar() in "ABC") {
+val verdict = when (line[0].uppercaseChar()) {
+'A' -> ReflectVerdict.SUCCESS
+'B' -> ReflectVerdict.WRONG_PAGE
+else -> ReflectVerdict.NO_CHANGE
+}
+return verdict to ""
+}
+val m = Regex("""([ABCabc])[.、。：:，,\s\-—）\)]+(.*)""").matchEntire(line) ?: continue
+val verdict = when (m.groupValues[1].uppercase()) {
+"A" -> ReflectVerdict.SUCCESS
+"B" -> ReflectVerdict.WRONG_PAGE
+else -> ReflectVerdict.NO_CHANGE
+}
+return verdict to m.groupValues[2].trim()
+}
+return null
+}
+
+/**
+ * 第二批·核验调用：同步问一次短问答（走 CustomClient.askOnce，返回原始文本）。
+ * GLM 模式下任务 client（AutoGLMClient）只回转好的 JSON 动作串，问不出 A/B/C，
+ * 所以核验统一走聊天模型（GLM 模式 glm-4.5 / 自定义模式用户填的模型）。
+ * 返回 null = 没验证成（网络失败/解析失败/超时/被打断），调用方当没验证过。
+ */
+private fun askReflect(
+ctx: Context, userText: String, image: String?,
+isAlive: () -> Boolean = { true }
+): Pair<ReflectVerdict, String>? {
+// 降速 1 秒：与主循环问模型前同款，防一分钟内连发撞限流。
+try { Thread.sleep(1000) } catch (_: InterruptedException) { return null }
+val latch = CountDownLatch(1)
+var reply: String? = null
+var error: String? = null
+CustomClient.askOnce(
+ctx, REFLECT_SYSTEM_PROMPT, userText, image,
+onResult = { reply = it; latch.countDown() },
+onError = { error = it; latch.countDown() },
+isAlive = isAlive
+)
+val deadlineMs = System.currentTimeMillis() + REFLECT_TIMEOUT_SEC * 1000
+while (true) {
+val done = try {
+latch.await(200, TimeUnit.MILLISECONDS)
+} catch (_: InterruptedException) {
+return null
+}
+if (done) break
+if (!isAlive()) return null
+if (System.currentTimeMillis() >= deadlineMs) return null
+}
+if (error != null || reply == null) return null
+return parseReflectVerdict(reply.orEmpty())
+}
+
+/** 第二批·核验提示词（单步）：任务、动作、执行结果说辞、执行前/后界面摘要。 */
+private fun buildStepReflectText(
+taskText: String, actionDesc: String, resultSummary: String,
+beforePkg: String, beforeCompact: String, afterPkg: String, afterCompact: String
+): String = buildString {
+append("任务：").append(taskText).append('\n')
+append("刚才执行了：").append(actionDesc).append('\n')
+append("执行结果说：").append(resultSummary.take(120)).append('\n')
+append("执行前界面（").append(beforePkg.ifEmpty { "未知应用" }).append("）：\n")
+append(beforeCompact.take(REFLECT_COMPACT_CHARS).ifEmpty { "（无可操作元素）" }).append('\n')
+append("执行后界面（").append(afterPkg.ifEmpty { "未知应用" }).append("）：\n")
+append(afterCompact.take(REFLECT_COMPACT_CHARS).ifEmpty { "（无可操作元素）" }).append('\n')
+append("请判断这一步到底成没成，只输出一个字母加一句说明（A 成功 / B 错页 / C 无变化）。")
+}
+
+/** 第二批·核验提示词（done 宣称）：任务原文、模型说的完成理由、当前界面摘要。 */
+private fun buildDoneReflectText(
+taskText: String, doneMessage: String, pkg: String, compact: String
+): String = buildString {
+append("任务：").append(taskText).append('\n')
+append("执行者说任务做完了，理由是：").append(doneMessage.take(120)).append('\n')
+append("当前界面（").append(pkg.ifEmpty { "未知应用" }).append("）：\n")
+append(compact.take(REFLECT_COMPACT_CHARS).ifEmpty { "（无可操作元素）" }).append('\n')
+append("请判断任务是不是真的做完了，只输出一个字母加一句说明（A 确实完成了 / B 还没完成或到了错误页面 / C 界面无变化、无法确认）。")
 }
 
 /** 从模型回复里抠出第一个 JSON 对象；抠不到返回 null（调用方带原因重试）。 */
