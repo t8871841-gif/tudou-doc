@@ -3366,6 +3366,107 @@ class ScreenController(
     }
 
     /**
+     * 第七批·取树重试 + 恢复（DroidRun `fetch_state_with_retry` 的手机内版）：
+     * [dumpUiTreeAttempt] 是单次尝试；这里只在“瞬时读不到”时重试，仍失败
+     * 就返回最后一次的结果、绝不抛错，让调用方按“树不够用”走现有降级
+     * （截图/OCR/带图问模型），不要直接判死整轮任务。
+     *
+     * 只重试这三种瞬时情况（见 [isDumpUsable]）：
+     *   - 单次尝试抛错（无障碍层瞬时异常，如取根节点失败）；
+     *   - 返回缺关键字段（连 `nodes_useful` 都没有，如 no active window 的
+     *     `{empty, error}`）；
+     *   - 树里一个节点都没有（`nodes_useful`==0 且 `nodes_total`==0、未被
+     *     扣留）——窗口还没出现 / 正在过渡，值得再等一等。
+     * 不重试“稳定的盲树”：`nodes_total`>0（自绘界面/WebView，层级在、内容
+     * 在像素里）或 `withheld`（应用扣留了树）时重试也读不到，白白烧时间，
+     * 直接把结果交给调用方走截图/OCR。
+     *
+     * 参数（DroidRun 是 7 次、退避 [1,2,3,5,8,10] 秒、总计约 29 秒；手机内
+     * 单步观察不能这么拖——单次尝试里已有 1500ms settle 轮询，每多一次
+     * 尝试都是一次全量重读）：
+     *   - 最多 [DUMP_RETRY_ATTEMPTS] 次尝试（首次 + 2 次重试）；
+     *   - 退避 400ms、800ms（共 ≤1200ms）；
+     *   - 单次调用最坏约 6 秒：3 次尝试 × 每试至多 1500ms settle + 1200ms
+     *     退避（触发重试时树里一个节点都没有，walk 本身极快，不会撞上
+     *     8000ms 的 [TREE_BUDGET_MS]；walk 被预算截断又返回 0 节点的极端
+     *     情况除外，那时单试就可能吃满预算——今天不重试时单次调用也一样）。
+     * 重试在单次观察内完成，不占 TaskLoop 的 25 步额度。
+     *
+     * 诊断字段（只在重试过时才附加，现有字段一字不动）：
+     * `dump_retries` = 实际重试次数；`dump_last_error` = 最后一次抛错的
+     * 信息（只在抛过错时有）。TaskLoop 读它写“重试 N 次仍失败”的历史。
+     */
+    fun dumpUiTree(
+        verbose: Boolean = false,
+        withShot: Boolean = false,
+        capture: (String) -> JSONObject = { screenshot(it) },
+    ): JSONObject {
+        var last: JSONObject? = null
+        var lastError: Exception? = null
+        var attempts = 0
+        while (attempts < DUMP_RETRY_ATTEMPTS) {
+            attempts++
+            val out = try {
+                dumpUiTreeAttempt(verbose, withShot, capture)
+            } catch (e: Exception) {
+                lastError = e
+                null
+            }
+            if (out != null) {
+                last = out
+                lastError = null
+                if (isDumpUsable(out)) {
+                    if (attempts > 1) out.put("dump_retries", attempts - 1)
+                    return out
+                }
+            }
+            if (attempts < DUMP_RETRY_ATTEMPTS) {
+                try {
+                    Thread.sleep(DUMP_RETRY_BACKOFF_MS[attempts - 1])
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+        }
+        // 重试耗尽：返回最后一次的结果（而不是抛错）；一次都没拿到结果时
+        // 合成一张与正常空树同字段的 JSON，调用方的 optInt/optString 读法
+        // 不变，也就不用再为“我到底拿到没有”写分支。
+        val out = last ?: JSONObject()
+            .put("empty", true)
+            .put("error", "dump failed: ${lastError?.message ?: "unknown"}")
+            .put("nodes_total", 0)
+            .put("nodes_useful", 0)
+            .put("pkg", "")
+            .put("elements", "")
+            .put("compact", "")
+        out.put("dump_retries", attempts - 1)
+        if (lastError != null) {
+            out.put("dump_last_error", lastError.message ?: lastError.javaClass.simpleName)
+        }
+        return out
+    }
+
+    /**
+     * 这张树是不是“够格交给调用方”的结果——够格不等于“有可点元素”：
+     * 稳定的盲树（自绘/扣留）一样够格，调用方走截图/OCR；只有“瞬时
+     * 什么都没读到”才不够格、值得 [dumpUiTree] 再试一次。
+     */
+    private fun isDumpUsable(out: JSONObject): Boolean {
+        val useful = out.optInt("nodes_useful", -1)
+        // 关键字段缺失：连 nodes_useful 都没有（如 no active window 的
+        // {empty, error}），不是一张完整的树。
+        if (useful < 0) return false
+        if (useful > 0) return true
+        // useful == 0：有层级（nodes_total > 0）或被扣留（withheld）是稳定
+        // 的盲树——重试也读不到，走截图/OCR 才是正路，不重试。
+        if (out.optBoolean("withheld", false)) return true
+        if (out.optInt("nodes_total", 0) > 0) return true
+        // 一个节点都没有：窗口还没出现 / 正在过渡，瞬时情况，值得重试。
+        return false
+    }
+
+    /**
      * Dump the active window's UI tree, with enough diagnostics that an empty
      * tree can say *why* it is empty.
      *
@@ -3385,8 +3486,10 @@ class ScreenController(
      * is invisible to accessibility by construction — that is a property of the
      * Android view system, not of this service — so the answer there is never
      * "try harder", it's `take_screenshot` and tap by coordinate.
+     *
+     * 单次尝试本体：重试包装在 [dumpUiTree]，直接调这里会绕过重试。
      */
-    fun dumpUiTree(
+    private fun dumpUiTreeAttempt(
         verbose: Boolean = false,
         withShot: Boolean = false,
         capture: (String) -> JSONObject = { screenshot(it) },
@@ -4589,6 +4692,16 @@ class ScreenController(
         // 本就未被使用（是 Andee 其他模块的常量），移植时移除。
         private const val SETTLE_POLL_MS = 250L
         private const val SETTLE_BUDGET_MS = 1500L
+
+        /**
+         * 第七批·取树重试：最多尝试次数（首次 + 2 次重试）与每次重试前的
+         * 退避（首次重试前 400ms、第二次 800ms，共 ≤1200ms）。DroidRun 是
+         * 7 次、退避 [1,2,3,5,8,10] 秒；手机内单步观察不能这么拖，单次
+         * 尝试里已有 1500ms settle 轮询——3 次尝试已相当于 18 次以上的
+         * dumpOnce 轮询，再多只是拖慢每一步。退避数组长度须是次数减一。
+         */
+        private const val DUMP_RETRY_ATTEMPTS = 3
+        private val DUMP_RETRY_BACKOFF_MS = longArrayOf(400L, 800L)
 
         /**
          * Stability pass knobs — see the second loop in [dumpUiTree].

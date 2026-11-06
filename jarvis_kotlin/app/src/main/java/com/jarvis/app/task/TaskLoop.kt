@@ -361,24 +361,19 @@ object TaskLoop {
                     return
                 }
                 // ---------- 观察 ----------
+                // 第七批·取树重试 + 恢复：dumpUiTree 内已带退避重试（抛错/无窗口时
+                // 最多 3 次尝试，见 ScreenController），正常不再抛错；这里只留兜底，
+                // 万一抛了也合成一张空树走下面的“读不到界面”分支，不再 continue
+                // 烧步（旧做法：取树一抛错这一步就白白烧掉，模型连问都没问到）。
+                // 另：TaskLoop 原有的 1500ms/300ms 空树轮询已删——dumpUiTree 内
+                // 已有同样的 settle（SETTLE_BUDGET_MS=1500），两层叠加等于同一轮
+                // 观察里把树读 6 遍还多花 1.5 秒；settle 只留 ScreenController 一层。
                 var dump = try {
                     controller.dumpUiTree()
                 } catch (e: Exception) {
-                    lastError = "读取界面失败：${e.message}"
-                    history += "第 $step 步：$lastError"
-                    continue
-                }
-                // Andee 对齐（SETTLE_BUDGET_MS=1500）：树空时先等它长出来再往下走，
-                // 而不是立刻按“看不见”处理；300ms 轮询一次，上限 1500ms。
-                if (dump.optInt("nodes_useful", -1) == 0) {
-                    val settleStart = System.currentTimeMillis()
-                    while (System.currentTimeMillis() - settleStart < 1500) {
-                        try { Thread.sleep(300) } catch (_: InterruptedException) { break }
-                        val again = try { controller.dumpUiTree() } catch (_: Exception) { null }
-                        if (again == null) break
-                        dump = again
-                        if (dump.optInt("nodes_useful", -1) != 0) break
-                    }
+                    JSONObject().put("empty", true).put("error", e.message ?: "dump failed")
+                        .put("nodes_total", 0).put("nodes_useful", 0).put("pkg", "")
+                        .put("elements", "").put("compact", "")
                 }
                 val pkg = dump.optString("pkg")
                 // 第四批·断点升级：记下本步观察到的前台包名，供停下记断点时用。
@@ -412,9 +407,40 @@ object TaskLoop {
                 val nodesTotal = dump.optInt("nodes_total", -1)
                 val nodesUseful = dump.optInt("nodes_useful", -1)
                 val withheld = dump.optBoolean("withheld", false)
+                // 第七批·取树重试 + 恢复：这轮是不是“读不到界面”——包名读不到
+                // 且一个可用节点都没有。不是“盲树”：盲树有包名/层级（自绘界面、
+                // 树被扣留），走截图/OCR；这里是真的没读到窗口。
+                val treeUnreadable = pkg.isEmpty() && nodesUseful == 0
                 val screenSig = pkg + "\n" + elements
-                val screenSameAsPrev = prevScreenSig.isNotEmpty() && screenSig == prevScreenSig
+                // 两轮都读不到时 screenSig 都是空串、字面相同，但那说明不了
+                // “界面没变”，别让它触发“界面纹丝没动”的提示与 done 顶回。
+                val screenSameAsPrev = prevScreenSig.isNotEmpty() && screenSig == prevScreenSig && !treeUnreadable
                 prevScreenSig = screenSig
+                // 第七批·中途恢复：读不到也不 return/判死、不 continue 烧步——
+                // 记一笔历史与 lastError，照常问模型，让它下一轮决定 wait、
+                // back 还是 fail；连续多轮都读不到时，复用第一批的连续失败
+                // 计数与升级（STUCK_THRESHOLD=2 时提示词注入“Potentially
+                // Stuck!”），不另起一套计数/阈值/收尾。首轮读不到也一样走
+                // 这里（模型可决定先 wait 或 openApp），不为首轮单开逻辑。
+                // 跑满 25 步/模型说 fail 的收尾仍走现有逻辑。
+                if (treeUnreadable) {
+                    val retries = dump.optInt("dump_retries", 0)
+                    val retryDetail = dump.optString("dump_last_error").takeIf { it.isNotEmpty() }
+                        ?.let { "（${it.take(80)}）" }.orEmpty()
+                    val retryNote = if (retries > 0) {
+                        "这轮读不到界面，重试 ${retries} 次仍失败${retryDetail}"
+                    } else {
+                        "这轮读不到界面${retryDetail}"
+                    }
+                    history += "第 ${step} 步观察：${retryNote}"
+                    lastError = retryNote
+                    AuditLog.append(ctx, "任务循环", "读不到界面（第 ${step} 步）", retryNote)
+                    consecutiveFailures++
+                    recentFailureNotes += "第 ${step} 步：${retryNote}"
+                    if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
+                    prevStepFailed = true
+                    prevScreenChanged = null
+                }
 
                 // ---------- 截图策略（M8：树够用且上一步成功时不拍） ----------
                 // 紧凑表是默认观察；截图只在“图是必需的”时才拍（树空、上一步失败、
