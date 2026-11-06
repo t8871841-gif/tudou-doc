@@ -3349,6 +3349,13 @@ class MainActivity : Activity() {
         // 全屏时才算自家前台、藏球。
         OrbController.setAppForeground(!isInMultiWindowMode)
         isResumed = true
+        // jk-v66 小窗修复诊断：只在有待拉起队列时记一次（onResume 进来时），
+        // 真机验证中转是否落全屏；无队列的日常 onResume 不刷屏。
+        if (pendingLaunchQueue.isNotEmpty()) {
+            val diagW = window.decorView.width
+            val diagH = window.decorView.height
+            AuditLog.append(this, "本地指令", "前台拉起", "中转窗口诊断 onResume：小窗=${isInMultiWindowMode}，窗口=${diagW}x${diagH}，焦点=${hasWindowFocus()}")
+        }
         maybeLaunchPendingApp()
         if (showingSettings) refresh()
         // 竖屏第 1 批：HUD WebView 竖屏也在舞台里渲染（上 2/3），回前台时恢复渲染并再推一次状态与面板；设置页开着时保持暂停。
@@ -3499,6 +3506,10 @@ class MainActivity : Activity() {
         }
         try {
             launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            // jk-v66 小窗修复诊断：实际拉起目标前记一次窗口状态，真机验证中转是否落全屏。
+            val diagW = window.decorView.width
+            val diagH = window.decorView.height
+            AuditLog.append(this, "本地指令", "前台拉起", "中转窗口诊断拉起前：小窗=${isInMultiWindowMode}，窗口=${diagW}x${diagH}，焦点=${hasWindowFocus()}")
             startActivity(launch)
             pendingLaunchQueue.removeFirst()
             AuditLog.append(this, "本地指令", "前台拉起", "$pkg 已以前台身份拉起")

@@ -29,6 +29,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
@@ -62,6 +63,42 @@ object CallState {
 
     @Volatile private var inCall = false
     @Volatile private var started = false
+
+    /**
+     * 通话门超时复位：系统送了 RINGING/OFFHOOK 却再没送 IDLE 时（回调丢失、
+     * 双卡/Flyme 回调异常），inCall 会一直卡 true、播报/收音永久被门挡住。
+     * inCall=true 超过此时长且无状态变化，自动复位为 false。10 分钟：正常通话
+     * 也可能超过 10 分钟，但通话中途本来就不会播报，复位后下一次来电回调会
+     * 重新把门关上；卡住的假 true 则能自己恢复。
+     */
+    private const val IN_CALL_TIMEOUT_MS = 10L * 60L * 1000L
+
+    /** inCall 变为 true 的时刻（SystemClock.elapsedRealtime）；不在通话时为 0。 */
+    @Volatile private var inCallSinceMs = 0L
+
+    /** 超时复位检查：只在主线程跑；inCall 已变 false 或未超时时什么都不做。 */
+    private val inCallTimeoutCheck = Runnable {
+        if (!inCall) return@Runnable
+        val elapsed = SystemClock.elapsedRealtime() - inCallSinceMs
+        if (elapsed < IN_CALL_TIMEOUT_MS) {
+            main.postDelayed(inCallTimeoutCheck, IN_CALL_TIMEOUT_MS - elapsed)
+            return@Runnable
+        }
+        inCall = false
+        inCallSinceMs = 0L
+        Log.w(TAG, "inCall stuck true for ${elapsed}ms (> ${IN_CALL_TIMEOUT_MS}ms), auto reset to false")
+        main.post { listeners.forEach { l -> runCatching { l.onCallStateChanged(false) } } }
+    }
+
+    private fun scheduleInCallTimeout() {
+        main.removeCallbacks(inCallTimeoutCheck)
+        main.postDelayed(inCallTimeoutCheck, IN_CALL_TIMEOUT_MS)
+    }
+
+    private fun cancelInCallTimeout() {
+        main.removeCallbacks(inCallTimeoutCheck)
+        inCallSinceMs = 0L
+    }
 
     /** READ_PHONE_STATE 没给（或注册被系统拒绝）时为 true：监听未生效。 */
     @Volatile var permissionMissing = false
@@ -127,6 +164,19 @@ object CallState {
             Log.w(TAG, "call listener register failed (permission?): ${e.message}")
             return
         }
+        // 启动核对：注册回调只收之后的变化，注册前已在通话中时回调不会补发，
+        // 主动读一次当前通话状态做初始核对，避免门一开始就是错的。
+        // 无权限时上面已 return，这里读不到也不会抛到调用方（fail-open：恒 false）。
+        try {
+            val initialState = tm.callState
+            if (initialState == TelephonyManager.CALL_STATE_RINGING ||
+                initialState == TelephonyManager.CALL_STATE_OFFHOOK
+            ) {
+                updateState(initialState)
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "initial callState read failed (permission?): ${e.message}")
+        }
         telephonyManager = tm
         started = true
         Log.i(TAG, "call listener started")
@@ -136,6 +186,7 @@ object CallState {
     fun stop() {
         if (!started) return
         started = false
+        cancelInCallTimeout()
         val tm = telephonyManager
         telephonyManager = null
         telephonyCallback?.let { cb ->
@@ -157,6 +208,12 @@ object CallState {
             state == TelephonyManager.CALL_STATE_OFFHOOK
         if (nowInCall == inCall) return
         inCall = nowInCall
+        if (nowInCall) {
+            inCallSinceMs = SystemClock.elapsedRealtime()
+            scheduleInCallTimeout()
+        } else {
+            cancelInCallTimeout()
+        }
         Log.i(TAG, "call state changed: inCall=$nowInCall (telephony state=$state)")
         main.post { listeners.forEach { l -> runCatching { l.onCallStateChanged(nowInCall) } } }
     }

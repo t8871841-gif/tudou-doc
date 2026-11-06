@@ -871,10 +871,12 @@ object JarvisAgent {
         main.postDelayed({
             if (mySeq != genSeq || state != "speaking") return@postDelayed
             var strongHits = 0
-            // 打断动作抽出来：短指令与长句达标共用同一条收尾。
-            fun triggerBargeIn() {
+            // 打断动作抽出来：短指令与长句达标共用同一条收尾。reason 记进审计，便于回看触发原因。
+            fun triggerBargeIn(reason: String) {
                 main.post {
                     if (mySeq != genSeq || state != "speaking") return@post
+                    // 打断触发记审计（与现有审计同格式），只在真正要打断时记一条。
+                    AuditLog.append(ctx, "语音播报", "打断触发", reason)
                     // C6：先自增代次（旧轮次所有回调失效），再停播、再开听——
                     // 否则 TtsRouter.stop() 触发的 onDone(false) 会把打断本身顶掉、
                     // 或打断后继续念下一句。
@@ -897,18 +899,21 @@ object JarvisAgent {
                         strongHits = 0
                         return@listenOnce
                     }
-                    // M3：短打断指令单独放行，一次命中即打断，不用凑满 3 次长片段。
+                    // M3：短打断指令单独放行，一次命中即打断，不用凑满 5 次长片段。
                     if (norm in BARGE_IN_SHORT_COMMANDS) {
-                        triggerBargeIn()
+                        triggerBargeIn("短指令：${norm}")
                         return@listenOnce
                     }
                     // 批三十调参（2026-10-26 用户真机确认：没点球、有打断气泡、开关开着——
                     // 即扬声器自声被误判为插话）：回声过滤只认原样子串，识别错一两个字
                     // 就过不了滤；旧阈值（连续 2 次 ≥4 字）太灵敏，单句误识别的累计
-                    // partial 就能凑够 2 次。改成连续 3 次 ≥5 字：真插话是持续成句的
-                    // 话，轻松达标；零星误识别很难连凑 3 次长片段。功能本身不动。
+                    // partial 就能凑够 2 次。改成连续 3 次 ≥5 字仍不够：扬声器自声会
+                    // 源源不断地产生 ≥5 字的中间结果，3 次也很容易凑够。本批再收紧到
+                    // 连续 5 次 ≥5 字：真插话是持续成句的话，轻松达标；零星误识别
+                    // 很难连凑 5 次长片段。短指令仍一次即断（见上），本批不改短指令。
+                    // 功能本身不动。
                     if (txt.trim().length >= 5) strongHits++ else strongHits = 0
-                    if (strongHits >= 3) triggerBargeIn()
+                    if (strongHits >= 5) triggerBargeIn("连续 ${strongHits} 次非回声长片段，末次：${txt.trim()}")
                 },
                 onFinal = { /* 播报期间的识别只用来判断"有没有在说话"，最终结果走 beginListening 重新识别一次 */ },
                 onError = { /* 播报期间识别拿不到结果很正常（本来就没人说话），忽略 */ }

@@ -23,10 +23,12 @@ object TtsRouter {
     private var stopSeq = 0
 
     fun speak(ctx: Context, text: String, onStart: () -> Unit, onDone: (Boolean) -> Unit, onSentence: ((String) -> Unit)? = null) {
-        // 通话中不播报（移植自 Andee device/CallState）：直接 onDone(true) 吞掉，不重试、不兜底系统 TTS。
+        // 通话中不播报（移植自 Andee device/CallState）：记审计后 onDone(false)，
+        // 让调用方知道这次没播成（不要 onDone(true) 假装成功，否则静默吞掉无痕）。
         // 回复文字仍在气泡/历史里，不丢。CallState 未启动（没给电话权限）时 isInCall() 恒 false，门是惰性的。
         if (com.jarvis.app.device.CallState.isInCall()) {
-            onDone(true)
+            com.jarvis.app.AuditLog.append(ctx, "语音播报", "通话中，播报跳过", "失败：通话中未播报")
+            onDone(false)
             return
         }
         val myStopSeq = stopSeq
@@ -90,6 +92,11 @@ object TtsRouter {
         done: (Boolean) -> Unit
     ) {
         val voice = JarvisPrefs.getVoice(ctx).ifBlank { EdgeVoices.DEFAULT_ID }
+        // 续播锚点：本轮首个失败句的下标（0-based，与 EdgeTts.splitSentences 切分一致），
+        // 由 EdgeTts.speak 的 onSentenceFailed 回调记下；没回调说明不是按句失败
+        // （取消/失速/整段异常等），走旧的整段重试。
+        var failedIndex: Int? = null
+        var failedStoppedHere = false
         EdgeTts.speak(
             ctx, text, voice = voice,
             ratePct = JarvisPrefs.getRatePct(ctx), pitchHz = JarvisPrefs.getPitchHz(ctx),
@@ -98,11 +105,33 @@ object TtsRouter {
                 if (ok || attemptsLeft <= 1 || stopSeq != stopSeqAtStart) {
                     done(ok)
                 } else {
-                    speakEdge(ctx, text, attemptsLeft - 1, startOnce, stopSeqAtStart, onSentence, done)
+                    // 从失败句续播（仍只占一次重试，attemptsLeft 照常减一）：切不出尾巴时
+                    // （没拿到失败句下标）回落到旧的整段重试；续播再失败直接走 done(false)，
+                    // 外层 auto 档照常落系统 TTS，edge 档照常放弃，不静默丢掉。
+                    val tailText = resumeText(text, failedIndex, failedStoppedHere)
+                    speakEdge(ctx, tailText ?: text, attemptsLeft - 1, startOnce, stopSeqAtStart, onSentence, done)
                 }
             },
-            onSentence = onSentence
+            onSentence = onSentence,
+            onSentenceFailed = { index, _, stoppedHere ->
+                failedIndex = index
+                failedStoppedHere = stoppedHere
+            }
         )
+    }
+
+    /**
+     * 从失败句切续播文本（下标 0-based，与 EdgeTts.splitSentences 一致）：
+     * - stoppedHere=true（播到这句断了）：该句及之后都没播，全续上；
+     * - stoppedHere=false（这句被跳过、后面已播完）：只补这一句，不重播已播完的尾巴；
+     * - failedIndex 为空或越界（不是按句失败）：返回 null，调用方走旧的整段重试。
+     */
+    private fun resumeText(text: String, failedIndex: Int?, stoppedHere: Boolean): String? {
+        val index = failedIndex ?: return null
+        val sentences = EdgeTts.splitSentences(text)
+        if (index < 0 || index >= sentences.size) return null
+        val tail = if (stoppedHere) sentences.subList(index, sentences.size) else listOf(sentences[index])
+        return tail.joinToString(" ").trim().ifEmpty { null }
     }
 
     /** L8 Earcon：开麦/思考提示音，委托给 EdgeTts（不另起音频系统）。 */

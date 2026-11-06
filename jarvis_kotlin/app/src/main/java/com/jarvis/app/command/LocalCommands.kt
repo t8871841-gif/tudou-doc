@@ -364,8 +364,9 @@ object LocalCommands {
     }
 
     /** 批九：任务循环的 openApp 动作复用同一套按名找应用+拉起逻辑，返回结果描述（不播报）。 */
-    /** 打开应用。fullscreen=true 时全屏启动（跨应用任务循环用：截图干净、看图模型干扰少）；
-     * fullscreen=false 时普通启动（日常“打开应用”用：Flyme 默认给小窗，用户日常就用小窗）。 */
+    /** 打开应用。fullscreen=true 时走前台拉起全屏（跨应用任务循环用：截图干净、看图模型干扰少）；
+     * 日常“打开应用”也已统一走前台拉起全屏（jk-v66 小窗修复，用户 2026-11-05 原话“不要小窗，我要应用全屏”），
+     * 不再走 fullscreen=false 的后台直接启动（Flyme 默认给小窗）。 */
     fun launchApp(ctx: Context, name: String, fullscreen: Boolean = false): String =
         launchAppInternal(ctx, name.trim(), fullscreen)
 
@@ -572,7 +573,9 @@ object LocalCommands {
                 }
                 main.post {
                     PendingClarification.ask(options) { chosen ->
-                        val result = launchPackage(ctx, chosen.payload, name.trim())
+                        // jk-v66 小窗修复：日常打开统一走前台拉起全屏（与任务循环同一条路），
+                        // 不再走后台直接启动（Flyme 默认给小窗）。
+                        val result = launchPackage(ctx, chosen.payload, name.trim(), fullscreen = true)
                         AuditLog.append(ctx, "本地指令", "打开应用（澄清后选定）", "${chosen.label}：$result")
                         speak(result)
                     }
@@ -583,7 +586,10 @@ object LocalCommands {
                 return
             }
         }
-        val result = launchAppInternal(ctx, name)
+        // jk-v66 小窗修复：日常“打开应用”统一走前台拉起全屏（与任务循环同一条路，
+        // 用户 2026-11-05 原话“不要小窗，我要应用全屏”）；launchAppInternal /
+        // launchPackage 里 fullscreen=false 的后台直接启动分支，日常打开这条路不再走。
+        val result = launchAppInternal(ctx, name, fullscreen = true)
         main.post { speak(result) }
     }
 

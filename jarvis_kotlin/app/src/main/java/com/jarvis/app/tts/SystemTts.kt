@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import java.util.Locale
 
 /**
@@ -14,6 +15,20 @@ import java.util.Locale
  * 系统 TTS 不依赖网络，做 Edge 失败时的兜底。引擎懒初始化，首次调用稍慢。
  */
 object SystemTts {
+
+    private const val TAG = "SystemTts"
+
+    /**
+     * 初始化超时上限：TextToSpeech 构造是异步回调，无超时时引擎卡住，
+     * speak() 的 onDone 永远等不到、调用方一直以为在播。5 秒还没回调，
+     * 按初始化失败处理（走失败路径，不无限等）；迟到的回调若成功，
+     * 下一次 ensureInit 走 ready 快捷路即可，不影响本次失败判定。
+     */
+    private const val INIT_TIMEOUT_MS = 5000L
+
+    /** 本轮初始化的超时任务；回调到达时取消，超时触发后置空。 */
+    @Volatile
+    private var pendingInitTimeout: Runnable? = null
 
     private var tts: TextToSpeech? = null
 
@@ -171,18 +186,57 @@ object SystemTts {
             tts?.shutdown()
         } catch (_: Exception) {
         }
-        tts = TextToSpeech(ctx.applicationContext) { status ->
+        // 初始化超时：5 秒内没回调，所有等待中的 cb 按失败收尾，不无限等。
+        // 超时后迟到的引擎回调若成功，只置 ready 供下一次调用，不再补发本次回调。
+        val timeoutRunnable = Runnable {
             val cbs: List<(Boolean) -> Unit>
             synchronized(pendingInit) {
-                ready = status == TextToSpeech.SUCCESS
+                if (!initializing) return@Runnable
                 initializing = false
+                ready = false
+                pendingInitTimeout = null
                 cbs = pendingInit.toList()
                 pendingInit.clear()
             }
-            if (ready) {
-                try {
-                    tts?.language = Locale.CHINESE
+            Log.w(TAG, "SystemTts init timeout after ${INIT_TIMEOUT_MS}ms")
+            com.jarvis.app.AuditLog.append(
+                ctx, "语音播报", "系统 TTS 初始化超时",
+                "失败：${INIT_TIMEOUT_MS}ms 内未完成初始化"
+            )
+            cbs.forEach { it(false) }
+        }
+        pendingInitTimeout = timeoutRunnable
+        main.postDelayed(timeoutRunnable, INIT_TIMEOUT_MS)
+        tts = TextToSpeech(ctx.applicationContext) { status ->
+            main.removeCallbacks(timeoutRunnable)
+            val cbs: List<(Boolean) -> Unit>
+            val initOk: Boolean
+            synchronized(pendingInit) {
+                pendingInitTimeout = null
+                initializing = false
+                cbs = pendingInit.toList()
+                pendingInit.clear()
+                initOk = status == TextToSpeech.SUCCESS
+                ready = initOk
+            }
+            if (initOk) {
+                // 中文语音校验：setLanguage 返回值以前被忽略，无中文语音包的
+                // 机器上兜底也会无声。LANG_AVAILABLE(0)/LANG_COUNTRY_AVAILABLE(1)/
+                // LANG_COUNTRY_VAR_AVAILABLE(2) 都是可用；LANG_MISSING_DATA(-1)/
+                // LANG_NOT_SUPPORTED(-2) 按失败处理，不静默用缺语音的引擎。
+                val langResult = try {
+                    tts?.setLanguage(Locale.CHINESE)
                 } catch (_: Exception) {
+                    TextToSpeech.LANG_NOT_SUPPORTED
+                }
+                if (langResult == null || langResult < TextToSpeech.LANG_AVAILABLE) {
+                    ready = false
+                    val code = langResult ?: TextToSpeech.LANG_NOT_SUPPORTED
+                    Log.w(TAG, "SystemTts Chinese voice unavailable: setLanguage returned $code")
+                    com.jarvis.app.AuditLog.append(
+                        ctx, "语音播报", "系统 TTS 中文语音不可用",
+                        "失败：setLanguage 返回 ${code}，中文语音缺失或不支持"
+                    )
                 }
             }
             cbs.forEach { it(ready) }

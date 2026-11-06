@@ -76,8 +76,16 @@ object EdgeTts {
     // H4 失速看门狗（对齐 Andee TtsController.armStallWatchdog）：每 5 秒查一次，
     // 以 lastProgressAt 为准，20 秒无 PCM 进展即取消本次合成、停播、回 idle 并记可见报错。
     // lastProgressAt 每次收到二进制帧 / 解出 PCM / 写出音频时刷新（主线程与预取线程都会刷）。
+    // 计时起点不在 arm 时：握手成功（101）时 requireHandshake101 里重置一次，建连/握手/
+    // GEC 时间不计入 20 秒；会话建立失败回落时 runSynthesis 里也重置一次；流式解码器
+    // （MediaCodec）创建成功后同样重置一次。
     private const val STALL_CHECK_MS = 5_000L
     private const val STALL_AFTER_MS = 20_000L
+    // 预取等待上限：等下一句预取最多 5 秒，超时放弃预取、直接走当前句流式现取现播，不死等。
+    private const val PREFETCH_WAIT_TIMEOUT_MS = 5_000L
+    // 握手 429 退避：下次握手前等待至此时刻（elapsedRealtime），避免 429 后立刻重握手再被限流。
+    private const val HANDSHAKE_429_BACKOFF_MS = 2_000L
+    @Volatile private var handshakeRetryAfterMs = 0L
     @Volatile private var lastProgressAt = 0L
     @Volatile private var stallFired = false
     private var stallWatchdog: Runnable? = null
@@ -90,6 +98,9 @@ object EdgeTts {
     @Volatile private var focusManager: AudioManager? = null
     @Volatile private var focusHeld = false
     @Volatile private var focusSeq = -1
+    // 焦点暂失时暂停的标记：LOSS_TRANSIENT / CAN_DUCK 只暂停不断播，GAIN 到来时恢复；
+    // 只有 LOSS 才 stop()。stop() / 新一轮 acquire 时清零。
+    @Volatile private var focusPaused = false
 
     // L8 Earcon（对齐 Andee audio/Earcon.kt）：开麦上行五度、思考下行四度，
     // 峰值 0.20，尾部留 250ms 静默防抖（quietUntil），150ms 内不重复响。
@@ -101,23 +112,31 @@ object EdgeTts {
     @Volatile private var earconQuietUntil = 0L
     @Volatile private var earconLastPlayAt = 0L
 
+    /**
+     * onSentenceFailed：某句播报失败时回调一次（只报首个失败句，与 abortedAt 一致），
+     * 供 TtsRouter 从失败句续播。failedIndex 从 0 计，与 runSynthesis 内 sentences.withIndex()
+     * 的下标一致；stoppedHere=true 表示播到这句就断了（该句及之后都没播），false 表示
+     * 这句被跳过、后面的句子已播完（只缺这一句）。默认空，现有调用不用改。
+     */
     fun speak(
         ctx: Context, text: String, voice: String = DEFAULT_VOICE,
         ratePct: Int = DEFAULT_RATE_PCT, pitchHz: Int = DEFAULT_PITCH_HZ,
         onStart: () -> Unit, onDone: (Boolean) -> Unit,
-        onSentence: ((String) -> Unit)? = null
+        onSentence: ((String) -> Unit)? = null,
+        onSentenceFailed: ((failedIndex: Int, reason: String, stoppedHere: Boolean) -> Unit)? = null
     ) {
         attachCallState(ctx)
         stop()
         val seq = ++mySeq
-        val clean = text.replace(Regex("[\r\n]+"), " ").trim()
+        val clean = cleanText(text)
         if (clean.isEmpty()) { onDone(false); return }
-        io.execute { runSynthesis(ctx, seq, clean, voice, ratePct, pitchHz, onStart, onDone, onSentence) }
+        io.execute { runSynthesis(ctx, seq, clean, voice, ratePct, pitchHz, onStart, onDone, onSentence, onSentenceFailed) }
     }
 
     /** 急停/打断：关掉在飞的 socket（唤醒读写阻塞立即抛异常）和播放轨道；在飞的 runSynthesis 会在 finally 里回调 onDone(false)（L4），调用方状态机总能收敛。 */
     fun stop() {
         mySeq++
+        focusPaused = false
         runCatching { socket?.close() }
         socket = null
         runCatching { prefetchSocket?.close() }
@@ -170,17 +189,33 @@ object EdgeTts {
                     .build()
             )
             .setOnAudioFocusChangeListener { change ->
-                // 丢焦点（来电/别的 App 抢焦点）时停播；只认当前这一轮，旧轮的回调不碰新轮。
-                if (change == AudioManager.AUDIOFOCUS_LOSS ||
-                    change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
-                    change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
-                ) {
-                    if (focusSeq == mySeq) {
-                        Log.i(TAG, "audio focus lost ($change), stopping playback")
-                        focusHeld = false
-                        stop()
-                        // 系统兜底路径也在播时同样停掉（EdgeTts.stop() 只停 Edge）。
-                        SystemTts.stop()
+                // 焦点分级处理（只认当前这一轮，旧轮的回调不碰新轮）：
+                // LOSS 才停播；LOSS_TRANSIENT / CAN_DUCK 只暂停不断播，GAIN 到来时恢复——
+                // 一条通知音引发的短暂 duck 不再掐断整段播报；setWillPauseWhenDucked(true)
+                // 与此一致（duck 时暂停，而非停播）。
+                if (focusSeq == mySeq) {
+                    when (change) {
+                        AudioManager.AUDIOFOCUS_LOSS -> {
+                            Log.i(TAG, "audio focus lost ($change), stopping playback")
+                            focusHeld = false
+                            focusPaused = false
+                            stop()
+                            // 系统兜底路径也在播时同样停掉（EdgeTts.stop() 只停 Edge）。
+                            SystemTts.stop()
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                            Log.i(TAG, "audio focus transient loss ($change), pausing playback, will resume on gain")
+                            focusPaused = true
+                            runCatching { track?.pause() }
+                        }
+                        AudioManager.AUDIOFOCUS_GAIN -> {
+                            if (focusPaused) {
+                                focusPaused = false
+                                Log.i(TAG, "audio focus gained, resuming playback")
+                                runCatching { track?.play() }
+                            }
+                        }
                     }
                 }
             }
@@ -327,7 +362,7 @@ object EdgeTts {
 
     // M12：一段回复只建一次 AudioTrack（runSynthesis 内一个 track 用到底，不每句新建）；
     // M4 会话复用仍在：多句复用同一 EdgeSession，建会话失败或会话中途失败再逐句回落。
-    private fun runSynthesis(ctx: Context, seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit, onSentence: ((String) -> Unit)? = null) {
+    private fun runSynthesis(ctx: Context, seq: Int, text: String, voice: String, ratePct: Int, pitchHz: Int, onStart: () -> Unit, onDone: (Boolean) -> Unit, onSentence: ((String) -> Unit)? = null, onSentenceFailed: ((failedIndex: Int, reason: String, stoppedHere: Boolean) -> Unit)? = null) {
         val sentences = split(text)
         if (sentences.isEmpty()) { main.post { onDone(false) }; return }
         // H3：播报前申请音频焦点；H4：失速看门狗在合成开始时武装。
@@ -373,11 +408,15 @@ object EdgeTts {
         }
         // M10：中间句失败当时就记一次可见报错（带原因），不只在 finally 留一条审计；
         // abortedAt/firstFailureReason 让 finally 的 onDone(false) 告诉调用方这段缺了一句。
-        val recordFailure: (Int, String) -> Unit = { i, reason ->
+        // 失败句下标从 0 计（与 sentences.withIndex() 一致）；stoppedHere=true 表示播到
+        // 这句就断了（该句及之后都没播），false 表示这句被跳过、后面的句子已播完。
+        // 只回调首个失败（abortedAt == null 时），供 TtsRouter 从失败句续播。
+        val recordFailure: (Int, String, Boolean) -> Unit = { i, reason, stoppedHere ->
             Log.e(TAG, "edge tts sentence $i failed: $reason")
             if (abortedAt == null) {
                 abortedAt = i
                 firstFailureReason = reason
+                onSentenceFailed?.invoke(i, reason, stoppedHere)
             }
             com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句播报失败", reason)
         }
@@ -387,6 +426,12 @@ object EdgeTts {
                 session = openSession()
             } catch (e: Exception) {
                 Log.w(TAG, "edge tts session open failed, fallback to per-sentence", e)
+                // 握手失败的状态码已在异常消息里（见 requireHandshake101），记一条审计便于回看；
+                // 建连/握手耗时不计入看门狗：会话建立失败回落时也重置一次计时起点。
+                if ((e.message ?: "").contains("握手失败")) {
+                    com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 会话握手失败", e.message ?: "握手失败")
+                }
+                markProgress()
                 session = null
             }
             fireStartOnce()
@@ -417,11 +462,20 @@ object EdgeTts {
                     prefetchIndex = -1
                     var pref: PrefetchResult? = null
                     try {
+                        // 预取等待上限 5 秒：超时放弃预取、直接走当前句流式现取现播，不死等
+                        // （旧代码无上限，预取卡住会把整段拖到看门狗 20 秒误杀）。
+                        val prefetchDeadline = SystemClock.elapsedRealtime() + PREFETCH_WAIT_TIMEOUT_MS
+                        var prefetchTimedOut = false
                         while (!fut.isDone) {
                             if (cancelled(seq)) break
+                            if (SystemClock.elapsedRealtime() >= prefetchDeadline) {
+                                prefetchTimedOut = true
+                                Log.w(TAG, "edge tts prefetch wait timeout after ${PREFETCH_WAIT_TIMEOUT_MS}ms, streaming fallback")
+                                break
+                            }
                             try { Thread.sleep(50) } catch (_: InterruptedException) { break }
                         }
-                        if (!cancelled(seq)) pref = fut.get()
+                        if (!cancelled(seq) && !prefetchTimedOut) pref = fut.get()
                     } catch (e: Exception) {
                         Log.w(TAG, "edge tts prefetch wait failed, streaming fallback", e)
                     }
@@ -438,7 +492,8 @@ object EdgeTts {
                             sawAny = true
                         }
                         if (!writeOk) {
-                            recordFailure(i, "AudioTrack.write 失败")
+                            // 预取 PCM 写轨道失败即 break：这句及之后都没播，续播从这句开始。
+                            recordFailure(i, "AudioTrack.write 失败", true)
                             break
                         }
                         sentenceDone = true
@@ -487,9 +542,12 @@ object EdgeTts {
                 }
                 if (cancelled(seq)) break
                 if (!result.ok) {
-                    recordFailure(i, result.reason ?: "取音/解码失败")
+                    // 首句失败或写轨道失败会 break（该句及之后都没播）；其余失败只跳过这句、
+                    // 继续播后面的句子，续播时只补这一句、不重播已播完的尾巴。
+                    val stoppedHere = i == 0 || result.reason == "AudioTrack.write 失败"
+                    recordFailure(i, result.reason ?: "取音/解码失败", stoppedHere)
                     // 第一句就失败当整体失败；写轨道失败说明轨道已死，后面也不用再试。
-                    if (i == 0 || result.reason == "AudioTrack.write 失败") break
+                    if (stoppedHere) break
                     continue
                 }
             }
@@ -743,6 +801,8 @@ object EdgeTts {
             if (usePrefetchSocket) return StreamResult(false, "流式解码器不可用", false)
             return streamSentenceWhole(seq, sentence, voice, ratePct, pitchHz, session, onPcm)
         }
+        // MediaCodec 创建耗时不计入看门狗 20 秒：解码器建好后再重置一次计时起点。
+        markProgress()
         val parser = AudioSegmentParser()
         var sawPcm = false
         var gotAudio = false
@@ -845,8 +905,47 @@ object EdgeTts {
         return StreamResult(true, null, saw)
     }
 
+    /** 解析握手响应状态行里的 HTTP 状态码，如 "HTTP/1.1 403 Forbidden" -> 403，解析不到返回 -1。 */
+    private fun handshakeStatusCode(statusLine: String): Int {
+        val parts = statusLine.trim().split(Regex("\\s+"))
+        if (parts.size < 2) return -1
+        return parts[1].toIntOrNull() ?: -1
+    }
+
+    /** 下次握手前先等 429 退避到期（在 io / 预取线程上 sleep，不阻塞主线程）。 */
+    private fun waitHandshakeBackoff() {
+        val until = handshakeRetryAfterMs
+        if (until == 0L) return
+        val waitMs = until - SystemClock.elapsedRealtime()
+        if (waitMs > 0) {
+            Log.i(TAG, "edge tts handshake backoff: waiting ${waitMs}ms after 429 before next handshake")
+            try { Thread.sleep(waitMs) } catch (_: InterruptedException) { /* 中断即继续握手 */ }
+        }
+    }
+
+    /**
+     * 握手 101 校验：成功时重置看门狗计时起点（建连/握手/GEC 时间不计入 20 秒）；
+     * 非 101 时把实际状态码记进 Log，异常消息里也带状态码（调用方的按句审计/会话
+     * 审计会原样落盘）；429 时设 2 秒退避，下次握手前先等到期。
+     * 成功返回，失败抛 IllegalStateException。
+     */
+    private fun requireHandshake101(statusLine: String, site: String) {
+        if (statusLine.contains("101")) {
+            markProgress()
+            return
+        }
+        val code = handshakeStatusCode(statusLine)
+        Log.e(TAG, "edge tts handshake failed at ${site}: HTTP status ${code}, status line: $statusLine")
+        if (code == 429) {
+            handshakeRetryAfterMs = SystemClock.elapsedRealtime() + HANDSHAKE_429_BACKOFF_MS
+            Log.w(TAG, "edge tts handshake 429, backing off ${HANDSHAKE_429_BACKOFF_MS}ms before next handshake")
+        }
+        throw IllegalStateException("Edge 语音握手失败（${site}）：HTTP 状态码 ${code}：$statusLine")
+    }
+
     /** 流式逐句连接用的握手 + speech.config（与 openSession/fetchMp3 同流程，只供新流式路径用）。 */
     private fun openEdgeSocket(isPrefetch: Boolean): EdgeSession {
+        waitHandshakeBackoff()
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
         if (isPrefetch) prefetchSocket = ssl else socket = ssl
         try {
@@ -877,7 +976,7 @@ object EdgeTts {
             out.flush()
             val head = reader.readUntil(HEADER_END)
             val statusLine = String(head, Charsets.UTF_8).lineSequence().firstOrNull().orEmpty()
-            check(statusLine.contains("101")) { "Edge 语音握手失败：$statusLine" }
+            requireHandshake101(statusLine, "openEdgeSocket")
             val date = dateString()
             val configMsg = "X-Timestamp:$date\r\n" +
                 "Content-Type:application/json; charset=utf-8\r\n" +
@@ -913,6 +1012,7 @@ object EdgeTts {
     private class EdgeSession(val ssl: SSLSocket, val reader: FrameReader, val out: java.io.OutputStream)
 
     private fun openSession(): EdgeSession {
+        waitHandshakeBackoff()
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
         socket = ssl
         try {
@@ -944,7 +1044,7 @@ object EdgeTts {
             out.flush()
             val head = reader.readUntil(HEADER_END)
             val statusLine = String(head, Charsets.UTF_8).lineSequence().firstOrNull().orEmpty()
-            check(statusLine.contains("101")) { "Edge 语音握手失败：$statusLine" }
+            requireHandshake101(statusLine, "openSession")
 
             val date = dateString()
             val configMsg = "X-Timestamp:$date\r\n" +
@@ -994,6 +1094,7 @@ object EdgeTts {
     }
 
     private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): ByteArray {
+        waitHandshakeBackoff()
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
         socket = ssl
         try {
@@ -1025,7 +1126,7 @@ object EdgeTts {
             out.flush()
             val head = reader.readUntil(HEADER_END)
             val statusLine = String(head, Charsets.UTF_8).lineSequence().firstOrNull().orEmpty()
-            check(statusLine.contains("101")) { "Edge 语音握手失败：$statusLine" }
+            requireHandshake101(statusLine, "fetchMp3")
 
             val date = dateString()
             val configMsg = "X-Timestamp:$date\r\n" +
@@ -1288,6 +1389,16 @@ object EdgeTts {
         // M5：超时放弃的句子返回空，不播残缺音频，调用方按句跳过。
         return if (timedOut) emptyList() else out
     }
+
+    /** 与 speak() 同一套清洗（换行折成空格、去首尾空白），供 splitSentences 用。 */
+    private fun cleanText(text: String): String = text.replace(Regex("[\r\n]+"), " ").trim()
+
+    /**
+     * 对外切句：与 speak() → runSynthesis() 内 split() 的切分完全一致（先清洗再切），
+     * 供 TtsRouter 从失败句续播时切尾巴用；返回的下标从 0 计，与 onSentenceFailed
+     * 回调的 failedIndex 对齐。
+     */
+    fun splitSentences(text: String): List<String> = split(cleanText(text))
 
     private fun split(pending: String): List<String> =
         pending.split(Regex("(?<=[。！？!?\\n])|(?<=\\. )"))
