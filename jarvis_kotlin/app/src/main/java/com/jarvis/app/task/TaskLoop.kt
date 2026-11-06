@@ -745,6 +745,9 @@ object TaskLoop {
                 // 第二批·Reflector 精简版（R3）：只在不确定信号时核验——
                 // (a) 结果未知；(b) 应当引起界面变化的动作执行后界面纹丝没动。
                 // 确定成功绝不核验；核验失败（网络/解析/取不到 fresh 状态）当没验证过，不记失败、不阻塞。
+                // 第三批·记下核验前的失败计数：输入校验只在“本步还没被记为失败”时才计数，
+                // 核验已记过的（consecutiveFailures 已涨）不再重复记。
+                val failuresBeforeReflect = consecutiveFailures
                 val needReflect = r.outcomeUnknown ||
                     (r.screenChanged == false && kind in REFLECT_CHANGE_KINDS)
                 if (needReflect && alive()) {
@@ -792,6 +795,54 @@ object TaskLoop {
                             history += "第 $step 步核验：A 成功——上一步结果已确认"
                         } else {
                             history += "第 $step 步核验：A 成功——界面没变但动作已生效"
+                        }
+                    }
+                }
+                // 第三批·输入后校验（Minitap 文本输入六步校验的 TaskLoop 版，确定性代码、不调模型）：
+                // 只对 type 动作，且执行结果不是明确失败（r.ok 或结果未知）时校验。
+                // 执行层（ScreenController 四档输入通道）内部已有“焦点框精确读回”，
+                // 这里补它没有的两点：(a) 归一化比对，容忍输入框的正常变换；
+                // (b) 在 fresh 树里全量扫输入框，抓“打了一半、根本没打进去”。
+                // type 动作本身不带目标字段身份（协议只有 {"action":"type","text":...}，
+                // executeInner 传给 typeText 的 id 恒为 null），且紧凑表/元素大纲
+                // 都不标哪个是焦点框，所以按 fresh 树里所有输入框扫——字段一个都
+                // 找不到时（跳页、输入框已消失、树被扣留）当无法验证，什么都不做。
+                if (kind == "type" && (r.ok || r.outcomeUnknown) && alive()) {
+                    val afterDump = try { controller.dumpUiTree() } catch (_: Exception) { null }
+                    val expected = action.optString("text")
+                    val fieldTexts = if (afterDump != null) {
+                        extractInputFieldTexts(afterDump.optString("compact"), afterDump.optString("elements"))
+                    } else emptyList()
+                    if (fieldTexts.isNotEmpty() && normalizeTypedText(expected).isNotEmpty()) {
+                        // 第二批核验已把这一步记为失败时（B/C），输入校验只记证据、
+                        // 不再重复计数、不改 lastError（错页才是根因，重打解决不了）。
+                        val alreadyFailedThisStep = consecutiveFailures > failuresBeforeReflect
+                        val matched = fieldTexts.any { typedTextMatches(expected, it) }
+                        if (matched) {
+                            if (!alreadyFailedThisStep) {
+                                if (r.outcomeUnknown) {
+                                    prevOutcomeUnknown = false
+                                    history += "第 ${step} 步输入校验：框内文字与应打一致，结果已确认"
+                                } else {
+                                    history += "第 ${step} 步输入校验：框内文字与应打一致"
+                                }
+                            }
+                        } else {
+                            // 挑与应打文本最像的那个字段写进失败原因，让模型下一轮
+                            // 知道到底打成了什么样（空字段/打一半/多了字/对不上）。
+                            val actual = fieldTexts.maxByOrNull {
+                                commonPrefixLength(normalizeTypedText(expected), normalizeTypedText(it))
+                            }.orEmpty()
+                            val reason = describeTypeMismatch(expected, actual)
+                            history += "第 ${step} 步输入校验没通过：应打「${expected.take(40)}」，实际「${actual.take(40)}」"
+                            AuditLog.append(ctx, "任务循环", "输入校验没通过（第 ${step} 步）", "应打「${expected.take(60)}」，实际「${actual.take(60)}」")
+                            prevStepFailed = true
+                            if (!alreadyFailedThisStep) {
+                                lastError = "输入校验没通过（${reason}）：应打「${expected.take(80)}」，输入框实际是「${actual.take(80)}」。请先看一眼输入框，再决定是重打、补打还是换个框，不要原样重发 type。"
+                                consecutiveFailures++
+                                recentFailureNotes += "第 ${step} 步输入校验没通过（${reason}）：应打「${expected.take(60)}」"
+                                if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
+                            }
                         }
                     }
                 }
@@ -1160,6 +1211,99 @@ append("执行者说任务做完了，理由是：").append(doneMessage.take(120
 append("当前界面（").append(pkg.ifEmpty { "未知应用" }).append("）：\n")
 append(compact.take(REFLECT_COMPACT_CHARS).ifEmpty { "（无可操作元素）" }).append('\n')
 append("请判断任务是不是真的做完了，只输出一个字母加一句说明（A 确实完成了 / B 还没完成或到了错误页面 / C 界面无变化、无法确认）。")
+}
+
+/**
+ * 第三批·输入校验：归一化（Minitap 文本输入后校验的 TaskLoop 版，确定性代码、不调模型）。
+ *
+ * 归一化接受的变换（输入框的正常行为，判成一致不算失败）：
+ * - 全角转半角（含全角空格、全角数字字母标点）；
+ * - 所有空白字符（空格、换行、首尾空格、不间断空格）；
+ * - 手机号/金额自动加的分隔符：半角逗号（千分位，如 1,000）、连字符（电话分段，如 138-0000-0000）；
+ * - 大小写（输入法首字母自动大写）。
+ * 不接受的变换（判成失败）：
+ * - 字段比应打的短（打了一半、根本没打进去）；
+ * - 字段比应打的多出后缀（输入法联想补全多打了字、旧文字没清干净又叠了新的）；
+ * - 其他任何内容差异（打错地方、打错字）。
+ * 注意：大小写折叠会放过验证码这类大小写敏感文本里“只错大小写”的情况，
+ * 是为容忍输入法自动大写付的代价；小数点绝不去掉（1.5 与 15 是两回事）。
+ */
+private fun normalizeTypedText(s: String): String {
+    val sb = StringBuilder(s.length)
+    for (ch in s) {
+        val c = when {
+            ch.code in 0xFF01..0xFF5E -> (ch.code - 0xFF01 + 0x21).toChar()
+            ch == '\u3000' -> ' '
+            else -> ch
+        }
+        if (c.isWhitespace() || c == '\u00A0' || c == ',' || c == '-') continue
+        sb.append(c)
+    }
+    return sb.toString().lowercase()
+}
+
+/** 第三批·归一化后比对：相等才算一致；应打文本归一化后为空（纯空白/纯分隔符）时返回 false，调用方先拦下这种情况（树上看不出空白，无法验证）。 */
+private fun typedTextMatches(expected: String, actual: String): Boolean {
+    val e = normalizeTypedText(expected)
+    if (e.isEmpty()) return false
+    return e == normalizeTypedText(actual)
+}
+
+/** 第三批·两个字符串的最长公共前缀长度（输入校验挑“最像”的字段时用）。 */
+private fun commonPrefixLength(a: String, b: String): Int {
+    var i = 0
+    while (i < a.length && i < b.length && a[i] == b[i]) i++
+    return i
+}
+
+/**
+ * 第三批·输入校验失败的定性：给模型一句能指导下一轮的话。
+ * actual 是 fresh 树里与应打文本最像的那个字段的实际文字（归一化后比较）。
+ */
+private fun describeTypeMismatch(expected: String, actual: String): String {
+    val e = normalizeTypedText(expected)
+    val a = normalizeTypedText(actual)
+    return when {
+        a.isEmpty() -> "字段是空的，没打进去"
+        a.length < e.length && e.startsWith(a) -> "只打进去一部分"
+        a.length > e.length && a.startsWith(e) -> "框里多了多余文字"
+        else -> "框内文字对不上"
+    }
+}
+
+/**
+ * 第三批·从 fresh 树里抽所有输入框的当前文字（labelOf 语义：有文字就是文字，
+ * 没文字就是描述或 #内部 id——# 开头的当空字段处理）。
+ * 主源是紧凑表里类型为 Input 的行（行格式 sid|Input|标签|[x,y]，标签里没有 |）；
+ * 紧凑表里一个 Input 都没有（被 40 行上限截掉）时才扫元素大纲，按类名认 EditText
+ * （行格式 e3*|EditText|标签|[x,y]，可能有缩进）。返回空列表 = 一个输入框都没
+ * 找到（跳页、输入框已消失、树被扣留），调用方当无法验证。
+ * 局限：WebView 内嵌输入框在紧凑表里是 Text 类型、大纲里是 WebView 类，
+ * 认不出来，会返回空列表而跳过校验；SeekBar/Spinner 在紧凑表里也标 Input，
+ * 它们的标签极少会撞上应打文字，撞上时才会误判为一致。
+ */
+private fun extractInputFieldTexts(compact: String, elements: String): List<String> {
+    val fromCompact = compact.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull { line ->
+            val parts = line.split("|")
+            if (parts.size >= 3 && parts[1] == "Input") {
+                val label = parts[2]
+                if (label.startsWith("#")) "" else label
+            } else null
+        }.toList()
+    if (fromCompact.isNotEmpty()) return fromCompact
+    return elements.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull { line ->
+            val parts = line.split("|")
+            if (parts.size >= 3 && parts[1].contains("EditText")) {
+                val label = parts[2]
+                if (label.startsWith("#")) "" else label
+            } else null
+        }.toList()
 }
 
 /** 从模型回复里抠出第一个 JSON 对象；抠不到返回 null（调用方带原因重试）。 */
