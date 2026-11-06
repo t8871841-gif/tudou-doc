@@ -1762,6 +1762,11 @@ StepResult("找到 $total 个：\n" + lines.joinToString("\n"), true, null, null
 // 跑完把每步 trace 压成一句摘要回喂历史，模型据此决定下一步。
 // 流本身算一步（不额外占 25 步额度），成败按流的整体 ok 判定。
 // 流的 outcomeUnknown 原样透传：流里变异步超时，单步一样标未知。
+// 第五批·失败即停：流中途停下时整体 ok=false，TaskLoop 侧按一步失败计
+// （复用 consecutiveFailures，不按流内步数重复计）；结果未知时 ok=false
+// 但 outcomeUnknown=true，失败计数免计、走 Reflector 核验（与单步一致）。
+// 中途停下与跑完的区分在 summarizeFlow 的摘要文字里（停在哪一步、为什么、
+// 跳过了几步），不要只看 ok。
 val result = FlowRuntime.run(ctx, controller, action)
 val flowOk = result.optBoolean("ok", false)
 val flowUnknown = result.optBoolean("outcomeUnknown", false)
@@ -1788,16 +1793,38 @@ StepResult("执行 $kind 出错：$msg", false, null, null, code, unknown)
 /**
 * 本地流的结果压成一句给模型看的摘要：整体成败、完成几步、耗时、
 * 每步的动作与状态（✓ 成、✗ 败、跳过），失败的带一句原因。
-* 摘要本身要短，历史段还会再截断一次。
+* 第五批·失败即停：四种结局必须让模型一眼分清——
+* (a) 跑完且全成；(b) 中途停下（某步失败/结果未知/超时），剩余步骤一次没跑；
+* (c) 跑完全部步骤，但中间有一步失败过（只有 onError=continue 显式放行才有
+* 这种结局）；(d) 跑完全部步骤，但收尾时超时（最后一步跑完才发现时限已到）。
+* 尤其 (b) 要写明停在哪一步、为什么、跳过了几步，别让模型以为流程跑完了；
+* (b) 的下一轮按失败原因纠正（换瞄准方式、重读界面、或拆成单步做），不要
+* 原样重发整个流。摘要本身要短，历史段还会再截断一次。
 */
 private fun summarizeFlow(result: JSONObject): String {
 val total = result.optInt("totalSteps", 0)
 val done = result.optInt("completedSteps", 0)
 val elapsed = result.optLong("elapsedMs", 0)
 val ok = result.optBoolean("ok", false)
+val aborted = result.optBoolean("aborted", false)
+val failedStep = result.optInt("failedStep", -1)
+val skipped = result.optInt("skippedSteps", 0)
+val abortReason = result.optString("abortReason")
 val sb = StringBuilder()
-sb.append("本地流").append(if (ok) "完成" else "未完成")
-    .append("：完成 $done/$total 步，耗时 ${elapsed}ms")
+when {
+ok -> sb.append("本地流完成")
+aborted -> {
+sb.append("本地流中途失败停下")
+if (failedStep >= 0) sb.append("：第 ${failedStep + 1} 步失败")
+if (abortReason.isNotEmpty()) sb.append("（${abortReason.take(60)}）")
+if (skipped > 0) sb.append("，剩余 ${skipped} 步没跑（已跳过），不要以为流程跑完了")
+sb.append("。下一轮按失败原因纠正，不要原样重发整个流")
+}
+failedStep >= 0 -> sb.append("本地流跑完全部步骤，但中间第 ${failedStep + 1} 步失败过")
+result.optBoolean("timedOut", false) -> sb.append("本地流跑完全部步骤，但收尾时超时了")
+else -> sb.append("本地流未完成")
+}
+sb.append("：完成 $done/$total 步，耗时 ${elapsed}ms")
 if (result.optBoolean("timedOut", false)) sb.append("（超时）")
 if (result.optBoolean("outcomeUnknown", false)) sb.append("（有一步结果未知，别当它成功了）")
 val steps = result.optJSONArray("steps")
@@ -1937,7 +1964,7 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在当前列表里向下滑动找目标，找到就停；滑到底（连着两次滑完界面都不动）就停下来告诉你没找到；也可以加 \"direction\":\"up\" 往上滑，或 \"maxSwipes\":8 限制最多滑几次；也可以用 \"eid\":\"s3f9a2\" 按稳定编号找。" +
 "{\"action\":\"zoom\",\"cell\":\"D7\"} 放大某个网格格看清小字小图标（也可以给 x/y）；下一轮你会看到放大图，" +
 "若要按放大图点，动作里加 \"on\":\"zoom\"，坐标和格号都按放大图自身的 0-1000 与小写格号读。" +
-"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有七种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"wait_idle\",\"ms\":5000} 等到界面稳定，{\"action\":\"wait_change\",\"ms\":5000} 等到界面变化，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手（也可以给 \"sel\":{...} 按选择器查），{\"action\":\"observe\"} 重新读一遍界面，{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在列表里滑动找目标（可加 \"direction\":\"up\"、\"maxSwipes\":8，滑到底没找到就停），{\"action\":\"tap_sel\",\"sel\":{\"textContains\":\"发送\"}} 按选择器点第 N 个匹配（可加 \"index\":1）。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
+"{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有七种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"wait_idle\",\"ms\":5000} 等到界面稳定，{\"action\":\"wait_change\",\"ms\":5000} 等到界面变化，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手（也可以给 \"sel\":{...} 按选择器查），{\"action\":\"observe\"} 重新读一遍界面，{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在列表里滑动找目标（可加 \"direction\":\"up\"、\"maxSwipes\":8，滑到底没找到就停），{\"action\":\"tap_sel\",\"sel\":{\"textContains\":\"发送\"}} 按选择器点第 N 个匹配（可加 \"index\":1）。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。流里某步失败或结果未知会立刻停下，剩余步骤不跑，结果会告诉你停在哪一步、为什么、跳过了几步——不要以为流程跑完了，也不要原样重发整个流，先按失败原因纠正（换瞄准方式、重读界面、或拆成单步做）；守卫跳过的步不算失败，流会继续往下跑。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
 "{\"action\":\"fail\",\"reason\":\"卡在哪一步、什么原因\"} 做不下去时用，禁止假装完成。\n" +
 "做决定前先读已执行步骤，找重复失败和计划与现实的矛盾。硬规则：绝不重复失败的动作——先搞清它为什么失败，再换一种做法；只凭屏幕上观测到的证据判断子目标完成：紧凑表或截图里确实出现了目标内容才算完成，绝不凭感觉提前标完成；数据类任务（金额、账号、验证码、数量、日期）原文照抄，不改格式、不加标点。" +

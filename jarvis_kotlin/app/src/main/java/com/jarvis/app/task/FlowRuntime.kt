@@ -21,8 +21,18 @@ import org.json.JSONObject
  *
  * 安全线（照抄 mcp-android 那套纪律的精神，用自己的实现）：
  * - 步数上限 15、总时限上限 20 秒，超时即停，不谎报成功；
- * - 每步可带 ifPresent / ifAbsent 守卫（元素在不在才做）与 onError
- *   （缺省失败即停，显式 continue 才继续）；
+ * - 第五批·失败即停（Minitap“顺序执行失败即停”）：某步失败就中止整个流，
+ *   不跑剩余步骤，结果里写明停在哪一步、为什么、跳过了几步，让模型下一轮
+ *   据此纠正，而不是以为流程跑完了。失败分三类：
+ *   (a) 已知失败（执行回 ok=false 且结果明确）：缺省停；只有该步显式写了
+ *       onError=continue 才继续——继续的前提是“知道这一步没成、界面状态可信”；
+ *   (b) 结果未知（变异动作超时、不知道成没成）：不管 onError 写没写 continue，
+ *       一律停——这一步可能动了也可能没动，后面步骤的前提（界面状态）已不可信，
+ *       对着未知状态继续跑就是“失败静默向后传”；
+ *   (c) 守卫跳过（ifPresent 未命中 / ifAbsent 已命中 / 读界面失败跳过）：不是
+ *       失败，流继续往下跑，trace 里记 skipped，整体 ok 不受影响。
+ *   失败的定义复用现有结果语义，不另起一套；流中止在 TaskLoop 侧只记一步
+ *   失败（复用 consecutiveFailures），不按流内步数重复计。
  * - 变异动作（点/长按/输入/滑动/放大）在时限内没跑完，标 outcomeUnknown，
  *   绝不把“不知道成没成”说成成功；
  * - 流里不许 openApp / submit 这类越界动作，流外单步做。
@@ -54,7 +64,11 @@ object FlowRuntime {
      * 跑一段流。返回结果 JSON：
      * ok / timedOut / outcomeUnknown / elapsedMs / totalSteps / completedSteps /
      * steps（每步 trace：index、action、status ok|error|skipped、ok、error、
-     * durationMs、outcomeUnknown；observe 步另带 excerpt）。
+     * durationMs、outcomeUnknown；observe 步另带 excerpt）/
+     * aborted / failedStep / skippedSteps / abortReason（第五批·失败即停：
+     * aborted=没跑完所有步就停下；failedStep=第一个失败步的下标，没有失败步
+     * 时 -1；skippedSteps=一次都没跑的步数；abortReason=停下的原因一句话，
+     * 只在 aborted 时有。TaskLoop.summarizeFlow 按这四个字段写摘要）。
      * 顶层 steps 不合规时直接回一个带 error 的失败结果（TaskLoop.parseAction
      * 那层已经先拦过一次，这里是第二道防线）。
      */
@@ -77,10 +91,17 @@ object FlowRuntime {
         var ok = true
         var timedOut = false
         var outcomeUnknown = false
+        // 第五批·失败即停：aborted=没跑完所有步就停下；failedStep=第一个失败步的
+        // 下标（没有失败步时 -1）；abortReason=停下的原因（一句话，给模型看）。
+        var aborted = false
+        var failedStep = -1
+        var abortReason = ""
         for (i in 0 until stepsJson.length()) {
             if (System.currentTimeMillis() >= deadline) {
                 timedOut = true
                 ok = false
+                aborted = true
+                abortReason = "超时：做到第 ${i + 1} 步前时限已到"
                 break
             }
             val step = stepsJson.optJSONObject(i)
@@ -90,27 +111,70 @@ object FlowRuntime {
                 runStep(ctx, controller, step, i, deadline)
             }
             traces.put(trace)
-            if (trace.optBoolean("outcomeUnknown", false)) outcomeUnknown = true
+            val stepUnknown = trace.optBoolean("outcomeUnknown", false)
+            if (stepUnknown) outcomeUnknown = true
             if (trace.optString("status") == "error") {
                 ok = false
-                // 缺省失败即停；只有显式 onError=continue 才继续往下跑。
-                if (step?.optString("onError") != "continue") break
+                if (failedStep < 0) failedStep = i
+                // 第五批·失败即停（定义见文件头注释）：
+                // (a) 已知失败：缺省停；只有显式 onError=continue 才继续——
+                //     继续的前提是“知道这一步没成、界面状态可信”；
+                // (b) 结果未知：不管 onError 写没写 continue，一律停——这一步
+                //     可能动了也可能没动，后面步骤的前提（界面状态）已不可信，
+                //     对着未知状态继续跑就是“失败静默向后传”。
+                // 守卫跳过（status=skipped）不是失败，不进这个分支、继续跑。
+                val knownFailure = !stepUnknown
+                if (!knownFailure || step?.optString("onError") != "continue") {
+                    aborted = true
+                    // abortReason 只写原因本身，不重复步号——步号由调用方
+                    // （summarizeFlow 的“第 X 步失败”/审计的“失败步 X”）另行标出。
+                    abortReason = if (!knownFailure) {
+                        "结果未知：${trace.optString("error").ifEmpty { "不知道成没成" }}"
+                    } else {
+                        trace.optString("error").ifEmpty { "失败原因未知" }
+                    }
+                    break
+                }
+            } else if (stepUnknown) {
+                // 第五批·结果未知也停：这一步报 ok 但效果没来得及验证（目前只在
+                // 跑完才发现已过时限时出现，见 runStep），流整体不能算 ok——
+                // “不知道成没成”绝不当成功，后面步骤也不对着未验证的状态跑。
+                // 失败计数由 TaskLoop 侧按 outcomeUnknown 免计（见 TaskLoop），
+                // 这里只负责停下并如实上报。
+                ok = false
+                aborted = true
+                abortReason = "第 ${i + 1} 步结果未知：不知道成没成"
+                break
             }
             if (System.currentTimeMillis() >= deadline) {
                 timedOut = true
                 ok = false
+                // 只剩最后一步已跑完时不算中途停下（aborted 保持 false），只是收尾超时；
+                // 还有步没跑时才是中途停下。
+                if (i + 1 < stepsJson.length()) {
+                    aborted = true
+                    abortReason = "超时：第 ${i + 1} 步跑完时限已到，剩余步骤没跑"
+                }
                 break
             }
         }
         val elapsed = System.currentTimeMillis() - started
+        // 纯超时中止时没有失败步（failedStep=-1），审计里不写“失败步 0”。
+        val abortNote = if (aborted) {
+            val failedNote = if (failedStep >= 0) "失败步 ${failedStep + 1}，" else ""
+            "，中途停下（${failedNote}跳过 ${stepsJson.length() - traces.length()} 步）：$abortReason"
+        } else ""
         AuditLog.append(
             ctx, "任务循环", "本地流",
             "完成 ${traces.length()}/${stepsJson.length()} 步，耗时 ${elapsed}ms，" +
-                "ok=$ok，timedOut=$timedOut，outcomeUnknown=$outcomeUnknown"
+                "ok=$ok，timedOut=$timedOut，outcomeUnknown=$outcomeUnknown$abortNote"
         )
         return flowResult(
             ok = ok, timedOut = timedOut, outcomeUnknown = outcomeUnknown,
-            started = started, totalSteps = stepsJson.length(), traces = traces
+            started = started, totalSteps = stepsJson.length(), traces = traces,
+            aborted = aborted, failedStep = failedStep,
+            skippedSteps = stepsJson.length() - traces.length(),
+            abortReason = abortReason
         )
     }
 
@@ -278,7 +342,9 @@ object FlowRuntime {
 
     private fun flowResult(
         ok: Boolean, timedOut: Boolean, outcomeUnknown: Boolean,
-        started: Long, totalSteps: Int, traces: JSONArray, error: String = ""
+        started: Long, totalSteps: Int, traces: JSONArray, error: String = "",
+        aborted: Boolean = false, failedStep: Int = -1, skippedSteps: Int = 0,
+        abortReason: String = ""
     ): JSONObject {
         return JSONObject().apply {
             put("ok", ok)
@@ -288,6 +354,15 @@ object FlowRuntime {
             put("totalSteps", totalSteps)
             put("completedSteps", traces.length())
             put("steps", traces)
+            // 第五批·失败即停：aborted=没跑完所有步就停下；failedStep=第一个失败步
+            // 的下标（没有失败步时 -1）；skippedSteps=一次都没跑的步数；
+            // abortReason=停下的原因（一句话，只在 aborted 时有）。
+            // 结构不合规的早退路（steps 不是 1–15 项数组）不走中止语义：
+            // 流根本没启动，aborted=false、skippedSteps=0，原因在 error 里。
+            put("aborted", aborted)
+            put("failedStep", failedStep)
+            put("skippedSteps", skippedSteps)
+            if (abortReason.isNotEmpty()) put("abortReason", abortReason)
             if (error.isNotEmpty()) put("error", error)
         }
     }
