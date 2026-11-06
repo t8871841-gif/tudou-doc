@@ -251,10 +251,10 @@ object TaskLoop {
         // history 分开存，提示词里单独一段。模型某轮没给计划时保留旧状态。
         val plan = mutableListOf<String>()
         val completed = mutableListOf<String>()
-        // 第一批·计划回传只在自定义模型模式成立：GLM 模式下 AutoGLMClient
-        // 只把转好的 JSON 动作串交给循环，模型回复里的计划文本到不了这里，
-        // 那时 plan 恒为空、按无计划回落（见 parsePlan 与下面的计划段）。
-        val planSupported = JarvisPrefs.getModelMode(ctx) == "custom"
+        // 补丁·计划回传两模式都成立：AutoGLMClient 已把抠到的计划块附在
+        // JSON 动作串之后回传，GLM 模式同样能收到计划；抠不到时 plan 为空、
+        // 按无计划回落（见 parsePlan 与下面的计划段）。
+        val planSupported = true
         // 第一批·连续失败计数：最近连续失败的步数。执行失败（不含结果未知）
         // 与输出无法解析各 +1；确认成功清零；问模型网络失败不计（它有自己的
         // 连败规则）。达到 STUCK_THRESHOLD 时下一轮提示词注入升级段。
@@ -589,8 +589,8 @@ object TaskLoop {
                     action = parseAction(reply.orEmpty())
                     if (action != null) {
                         // 第一批·计划：回复里带计划块就更新 plan/completed；
-                        // 没带保留旧状态（宽容回落）。GLM 模式下这里的 reply
-                        // 只是转好的 JSON 动作串，parsePlan 恒返回 null。
+                        // 没带保留旧状态（宽容回落）。补丁后 GLM 模式的 reply
+                        // 是 JSON 动作串 + 附在其后的计划块，parsePlan 能抠到。
                         parsePlan(reply.orEmpty())?.let { parsed -> applyPlanUpdate(parsed, plan, completed) }
                     }
                     if (action == null) {

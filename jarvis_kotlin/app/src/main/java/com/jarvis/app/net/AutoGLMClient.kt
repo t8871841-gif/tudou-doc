@@ -132,6 +132,9 @@ object AutoGLMClient {
      * M9：传入的 systemPrompt 不再丢弃，与 AUTO_GLM_SYSTEM_PROMPT 拼接后一起发。
      * M11：isAlive 由调用方给（TaskLoop 的代次检查），false 即已取消；cancelInFlight()
      * 也能取消本轮（序号作废 + 断开网络），已取消的回调静默丢弃、不再回调。
+     * 补丁·计划回传：从原始回复里抠到的计划块附在 JSON 动作串之后一并返回
+     * （JSON 串 + 换行 + “计划：\n1. …”），TaskLoop 的 parsePlan 只看 JSON
+     * 对象之外的文本，能认到；抠不到时只返回 JSON 动作串，与原来一字不差。
      */
     fun askOnce(
         ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
@@ -220,7 +223,10 @@ object AutoGLMClient {
                             .getJSONObject(0).getJSONObject("message").getString("content").trim()
                         val actionJson = parseAutoGLMReply(reply)
                             ?: run { onError("AutoGLM 输出无法解析：${reply.take(200)}"); return }
-                        onResult(actionJson.toString())
+                        // 补丁·计划回传：抠到的计划块附在 JSON 动作串之后交回
+                        // TaskLoop；抠不到时与原来一字不差（只返回 JSON 动作串）。
+                        val planBlock = extractPlanBlock(reply)
+                        onResult(if (planBlock != null) actionJson.toString() + "\n" + planBlock else actionJson.toString())
                     } catch (e: Exception) {
                         onError("解析 AutoGLM 返回内容失败：${e.message}")
                     }
@@ -246,6 +252,70 @@ object AutoGLMClient {
         } catch (_: Exception) {
             null
         }
+    }
+
+    /** 补丁·计划块上限，与 TaskLoop 的 MAX_PLAN_ITEMS / 60 字截断一致。 */
+    private const val MAX_PLAN_ITEMS = 10
+    private const val MAX_PLAN_ITEM_CHARS = 60
+
+    /**
+     * 补丁·从 AutoGLM 原始回复里抠出子目标计划块（第一批补丁，让 GLM 模式的
+     * 计划机制生效）。先看 <think> 内容，再看 <answer> 标签之外的文本；找
+     * “计划：”标记头 + 其后编号行，格式与 TaskLoop.parsePlan 一致（1. 文字，
+     * ✓/[完成]/[已完成] 标完成）。抠到返回“计划：\n1. …”纯文本块（最多
+     * 10 条，每条截断 60 字，花括号已剔除，防 TaskLoop.parseAction 取 JSON
+     * 时越界）；抠不到返回 null。
+     * 注意：计划若写在 <answer> 内 do(...) 之前，本函数不抠——<answer> 只应
+     * 放动作调用，那部分文本按现有解析只用于动作提取（parseDo 用 find，
+     * 前导文字不影响动作解析，但计划本身会丢）。
+     */
+    private fun extractPlanBlock(reply: String): String? {
+        if (reply.contains("<think>")) {
+            val think = reply.substringAfter("<think>").substringBefore("</think>")
+            extractPlanFromText(think)?.let { return it }
+        }
+        val outsideAnswer = if (reply.contains("<answer>")) {
+            reply.substringBefore("<answer>") + "\n" + reply.substringAfter("</answer>", "")
+        } else {
+            reply
+        }
+        return extractPlanFromText(outsideAnswer)
+    }
+
+    /** 补丁·从一段文本里抠计划块：找“计划”开头的行，其后连续编号行即计划项。 */
+    private fun extractPlanFromText(text: String): String? {
+        val lines = text.lineSequence().map { it.trim() }.toList()
+        val headerIdx = lines.indexOfFirst { it.startsWith("计划") }
+        if (headerIdx < 0) return null
+        val numbered = Regex("""(\d{1,2})[.、)]\s*(.*)""")
+        val items = mutableListOf<String>()
+        for (i in headerIdx + 1 until lines.size) {
+            val line = lines[i]
+            if (line.isEmpty()) continue
+            val m = numbered.matchEntire(line) ?: break
+            var rest = m.groupValues[2].trim()
+            var done = false
+            when {
+                rest.startsWith("✓") -> { done = true; rest = rest.removePrefix("✓").trim() }
+                rest.startsWith("[完成]") -> { done = true; rest = rest.removePrefix("[完成]").trim() }
+                rest.startsWith("[已完成]") -> { done = true; rest = rest.removePrefix("[已完成]").trim() }
+            }
+            if (rest.isEmpty()) continue
+            // 剔除花括号：计划块附在 JSON 动作串之后，TaskLoop.parseAction
+            // 取第一个 { 到最后一个 }，花括号会让它越界、动作解析失败。
+            rest = rest.replace("{", "").replace("}", "").trim()
+            if (rest.isEmpty()) continue
+            val rendered = (if (done) "✓ " else "") + rest.take(MAX_PLAN_ITEM_CHARS)
+            if (!items.contains(rendered)) items += rendered
+            if (items.size >= MAX_PLAN_ITEMS) break
+        }
+        if (items.isEmpty()) return null
+        return buildString {
+            append("计划：\n")
+            for ((i, item) in items.withIndex()) {
+                append(i + 1).append(". ").append(item).append("\n")
+            }
+        }.trimEnd()
     }
 
     private fun parseFinish(call: String): JSONObject? {
