@@ -63,6 +63,13 @@ object TaskLoop {
     /** 相同动作签名连续重复的容忍次数（LocalBrain MAX_REPEATS）：达到即判打转中止。 */
     private const val MAX_REPEATS = 3
 
+    /** 第八批·遍历环检测：同一（界面指纹，动作签名）对第几次出现时停下任务（第 1 次只记录，
+     * 第 2 次命中警告并记一步失败，第 3 次直接停下、不再执行）。 */
+    private const val LOOP_STOP_OCCURRENCES = 3
+    /** 第八批·遍历环检测：本轮任务内记住的（界面，动作）对上限，超了丢最旧的，
+     * 别让长任务无限涨内存；单轮 runBlocking 最多 25 步，正常到不了这个数。 */
+    private const val MAX_LOOP_PAIRS = 64
+
     /** 第一批·计划：子目标列表上限（MA-v3 式计划，提示词预算内单独限小）。 */
     private const val MAX_PLAN_ITEMS = 10
     /** 第一批·已完成子目标保留上限，防列表无限长。 */
@@ -247,6 +254,14 @@ object TaskLoop {
         // 达到 MAX_REPEATS 时在执行前拦下中止。
         var lastSignature = ""
         var repeats = 0
+        // 第八批·遍历环检测：本轮任务内已走过的（界面指纹 screenSig，动作签名）对
+        // 到出现次数的映射（LinkedHashMap 插入顺序，超 MAX_LOOP_PAIRS 时丢最旧的）。
+        // 只放本轮任务内：新任务从空开始，续跑不继承（断点不存它，不改 TaskResumeState）；
+        // key 是 screenSig 全文 + '\u0000' + 签名全文，界面指纹按全量 elements 比，不用
+        // 哈希（哈希碰撞会误停任务）。只在“界面确实回到之前的状态”时算环：key 里含
+        // screenSig，同一签名在不同界面上做是不同的对；连续重复（签名连着上一步）
+        // 不进这里，仍归重复守卫（见执行前的 consecutiveSameSig）。
+        val loopSeen = LinkedHashMap<String, Int>()
         // 无进展计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
         // 见上方的说明。任何一步出现这几种动作就清零；计数只用于强制带图。
         var noProgressSteps = 0
@@ -303,6 +318,10 @@ object TaskLoop {
         var prevActionExpectedSwitch = false
         // 本轮观察算出的包名偏差说明（null = 本轮没跑偏）：观察段算好，提示词组装段贴进本轮提示词；每轮观察时重算。
         var pkgDriftNote: String? = null
+        // 第八批·遍历环检测：上一轮命中的环警告（第 2 次出现时写下），本轮提示词组装时
+        // 贴一次、贴完清掉，不让它每轮重复刷；历史里那笔记录还在，模型回头能对上号。
+        // 只在提示词组装段消费，不在观察段重算（它来自上一轮执行前的判定，不是本轮观察）。
+        var loopNote: String? = null
         running = true
         try {
             // 续跑时步数接着上次的编号（历史里的“第 N 步”才连贯），但新跑的
@@ -590,6 +609,13 @@ object TaskLoop {
                     if (screenSameAsPrev) {
                         append("注意：界面与上一步完全相同、纹丝没动——上一个动作没有生效或页面卡住了。不要重复同一个动作，换个做法（先 zoom 看清、滑动、返回或 wait 更久）。\n")
                     }
+                    // 第八批·遍历环检测：上一轮命中的环警告，本轮贴一次、贴完清掉。
+                    // 位置在“界面纹丝没动”之后：环警告本身就是“回到了做过动作的界面”，
+                    // 两句挨着，模型不用翻历史就能对上号。
+                    if (loopNote != null) {
+                        append("【遍历环警告】").append(loopNote).append('\n')
+                        loopNote = null
+                    }
                     if (pkgDriftNote != null) {
                         append("【前台应用跑偏】").append(pkgDriftNote).append("本轮先确认当前在哪个应用、要不要回上一个应用再继续，不要对着错的应用直接做下一步。\n")
                     }
@@ -772,6 +798,11 @@ object TaskLoop {
                 }
                 // ---------- 重复守卫：执行前判定（LocalBrain 在执行前拦） ----------
                 val sig = signatureOf(action)
+                // 第八批·先记下这一步是不是“连着上一步同一个签名”：遍历环检测只管
+                // 非连续的环（A→B→A→B，中间隔了别的动作），连着的重复仍归重复守卫，
+                // 环检测里不抢它的活、不重复计数。注意这里必须在下面的 if/else 更新
+                // lastSignature 之前记——更新完 lastSignature 就恒等于 sig 了。
+                val consecutiveSameSig = sig == lastSignature
                 if (sig == lastSignature) {
                     repeats++
                 } else {
@@ -783,6 +814,67 @@ object TaskLoop {
                         "当前停在${pkg.ifEmpty { "未知界面" }}。"
                     AuditLog.append(ctx, "任务循环", "重复守卫触发", "$kind 连续重复")
                     return
+                }
+                // ---------- 第八批·遍历环检测：执行前判定（Minitap 元认知“发现循环”的 TaskLoop 版，确定性代码、不调模型、不额外取树） ----------
+                // 环的定义：本轮任务内，同一（界面指纹 screenSig，动作签名）对再次出现，
+                // 即模型回到了之前做过同一动作的界面。只凭签名重复不算环（那是重复守卫的活）；
+                // 同一签名在不同界面上做（列表连续滑动翻页、每滑一屏界面都变）是不同的对，不算环；
+                // type 签名含文字（见 signatureOf），同一输入框连打不同文字是不同的对，不算环。
+                // 出现次数：第 1 次只记录；第 2 次命中警告——写一笔历史、下一轮提示词贴
+                // 【遍历环警告】、并复用第一批的连续失败计数记一步失败（走升级逻辑，
+                // STUCK_THRESHOLD=2 时下一轮提示词注入“Potentially Stuck!”），但这一步
+                // 不拦（模型还没看到警告，先让它做完这一次）；第 3 次（LOOP_STOP_OCCURRENCES）
+                // 直接停下、不再执行，收尾走现有断点那套（写断点、播报“说继续”）。
+                // 跳过的情况：读不到界面（treeUnreadable，screenSig 是空串、两轮都相同也说明不了
+                // 界面没变，与 screenSameAsPrev 同款 guard）、elements 为空（树被扣留到只剩包名，
+                // 光凭包名确认不了“回到了之前的状态”，宁可漏判、不误判）、连续重复
+                // （consecutiveSameSig，归重复守卫）。done/fail/输出无法解析/问模型失败
+                // 的轮次到不了这里（前面已 return/continue），不记对、不耗次数。
+                // 本步执行失败时执行层还会记一次失败，下面的 loopFailureCounted 会拦住，
+                // 一步失败只算一次（Reflector/输入校验同款防重复计数）；执行成功则按第一批
+                // 惯例清零（成功就是破局了，环警告作废）。
+                var loopFailureCounted = false
+                if (!treeUnreadable && elements.isNotEmpty() && !consecutiveSameSig) {
+                    val loopKey = screenSig + "\u0000" + sig
+                    val seenCount = loopSeen[loopKey] ?: 0
+                    when {
+                        seenCount == 0 -> {
+                            loopSeen[loopKey] = 1
+                            if (loopSeen.size > MAX_LOOP_PAIRS) {
+                                loopSeen.keys.firstOrNull()?.let { loopSeen.remove(it) }
+                            }
+                        }
+                        seenCount + 1 < LOOP_STOP_OCCURRENCES -> {
+                            loopSeen[loopKey] = seenCount + 1
+                            loopNote = "你已经在同一界面对同一目标做过「${describeAction(action)}」，界面又回到了当时的状态——不要原样重做这个动作，换个做法（换个入口、换个瞄准方式、或先确认目标到底在不在这屏上）。"
+                            history += "第 ${step} 步环检测：同一（界面，动作）对第 ${seenCount + 1} 次出现——${describeAction(action)}"
+                            AuditLog.append(ctx, "任务循环", "遍历环命中（第 ${step} 步）", "同一（界面，动作）对第 ${seenCount + 1} 次出现：${describeAction(action)}")
+                            consecutiveFailures++
+                            recentFailureNotes += "第 ${step} 步：遍历环——同一界面上对同一目标重复做 ${describeAction(action)}"
+                            if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
+                            loopFailureCounted = true
+                        }
+                        else -> {
+                            // 同一对第 LOOP_STOP_OCCURRENCES 次出现：模型看过环警告还照原样打转，
+                            // 直接停下，不再烧步数。收尾走现有断点那套（与锁屏一致）：写断点、
+                            // 播报“说继续”；内部任务（saveResume=false）不写断点、不发那句（S16）。
+                            history += "第 ${step} 步环检测：同一（界面，动作）对第 ${LOOP_STOP_OCCURRENCES} 次出现——${describeAction(action)}，已停下"
+                            AuditLog.append(ctx, "任务循环", "遍历环停下（第 ${step} 步）", "同一（界面，动作）对第 $LOOP_STOP_OCCURRENCES 次出现：${describeAction(action)}")
+                            if (saveResume) {
+                                TaskResumeState.offer(
+                                    taskText, history.toList(), step - 1,
+                                    foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                                    plan = plan.toList(), completed = completed.toList(),
+                                    screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                                )
+                                stoppedWithResume = true
+                                finalReply = "任务卡在第 $step 步：在${pkg.ifEmpty { "未知界面" }}对同一目标反复做「${describeAction(action)}」，在同一界面反复打转，已停下。说「继续」可以接着做。"
+                            } else {
+                                finalReply = "任务卡在第 $step 步：在${pkg.ifEmpty { "未知界面" }}对同一目标反复做「${describeAction(action)}」，在同一界面反复打转，已停下。"
+                            }
+                            return
+                        }
+                    }
                 }
                 // Andee 对齐：无进展熔断 abort 删除（Andee 只有重复守卫 + 25 步上限兜底）。
                 // 计数保留：连续 2 轮无真交互时强制带图（截图策略），让模型有图可破局。
@@ -824,10 +916,13 @@ object TaskLoop {
                 prevScreenChanged = r.screenChanged
                 // 第一批·连续失败计数：确认成功清零；确认失败 +1 并记一条；
                 // 结果未知不计（不知道成没成，既不算失败也不算成功）。
+                // 第八批·环检测已把这一步记过一次失败（同一对第二次出现，
+                // loopFailureCounted）时不再重复记，一步失败只算一次；
+                // 环检测的失败原因已在 history 与 recentFailureNotes 里。
                 if (r.ok) {
                     consecutiveFailures = 0
                     recentFailureNotes.clear()
-                } else if (!r.outcomeUnknown) {
+                } else if (!r.outcomeUnknown && !loopFailureCounted) {
                     consecutiveFailures++
                     recentFailureNotes += "第 ${step} 步：${describeAction(action)} → ${r.summary.take(80)}"
                     if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
