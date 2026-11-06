@@ -160,7 +160,8 @@ object TaskLoop {
      * 调用一次，内容是给用户的一句结果（完成说明或卡在哪一步的如实说明）。
      * [onProgress] 是 M18 的每步播报：每步执行前按动作种类推一句（如“正在点按……”），
      * 调用方拿它推字幕/气泡，不要只在最后调一次 onReply。
-     * [resumeFrom] 非空时是从断点续跑：历史与步数接着上次的来（见 TaskResumeState）。
+     * [resumeFrom] 非空时是从断点续跑：历史、步数与计划接着上次的来（见 TaskResumeState，
+     * 第四批·断点升级：plan/completed/screenSig 一起恢复）。
      * [saveResume] 为 false 时不写断点（也不清旧断点）：内部子任务用，
      * 免得顶掉用户断点（S16，如 TripLoop 的高德核验）。
      * 注意：onReply 必须放最后——调用方用尾随 lambda 传它，后面再加参数会
@@ -260,8 +261,11 @@ object TaskLoop {
         // 第一批·计划状态（MA-v3 Manager 式计划）：plan 是待做的编号子目标
         // （最多 MAX_PLAN_ITEMS 条），completed 是已完成的子目标；与文字历史
         // history 分开存，提示词里单独一段。模型某轮没给计划时保留旧状态。
-        val plan = mutableListOf<String>()
-        val completed = mutableListOf<String>()
+        // 第四批·断点升级：续跑时从断点恢复 plan/completed，超限只留最后 N 条
+        // （复用第一批的上限常量，不另起一套）；旧断点没有这两个字段时默认
+        // 空列表，按新任务从空开始，不报错、不丢断点。
+        val plan = resumeFrom?.plan?.takeLast(MAX_PLAN_ITEMS)?.toMutableList() ?: mutableListOf<String>()
+        val completed = resumeFrom?.completed?.takeLast(MAX_COMPLETED_ITEMS)?.toMutableList() ?: mutableListOf<String>()
         // 补丁·计划回传两模式都成立：AutoGLMClient 已把抠到的计划块附在
         // JSON 动作串之后回传，GLM 模式同样能收到计划；抠不到时 plan 为空、
         // 按无计划回落（见 parsePlan 与下面的计划段）。
@@ -273,7 +277,14 @@ object TaskLoop {
         val recentFailureNotes = mutableListOf<String>()
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
-        var prevScreenSig = ""
+        // 第四批·断点升级：续跑时从断点恢复上一次的界面指纹，首步就能判断界面
+        // 自断点起变没变（screenSameAsPrev 与 done 顶回都认它）；旧断点没有
+        // 该字段时为空，跟新任务一样从空开始。
+        var prevScreenSig = resumeFrom?.screenSig.orEmpty()
+        // 第四批·断点升级：最近一次观察到的前台包名（每步观察后更新）。停下记
+        // 断点时优先用它当 foregroundPkg，比停下瞬间现读更贴合任务当时所在的
+        // 应用；还没观察过（首步前就停下）为空，offer() 内回落到现读。
+        var lastObservedPkg = ""
         // L14：最近一次观察到的前台包名——知识只在前台应用切换时注入一次，
         // 同一个应用连着多步不再重复贴同一份。
         var lastKnowledgePkg = ""
@@ -297,7 +308,14 @@ object TaskLoop {
                     // saveResume=false（内部核验任务）：不记断点、也不发“说继续”那句，
                     // onReply 不发，调用方（TripLoop）超时后自己收尾（S16）。
                     if (saveResume) {
-                        TaskResumeState.offer(taskText, history.toList(), step)
+                        // 第四批·断点升级：断点连同当前计划与最后界面指纹一起记下，
+                        // 用户说“继续”时 plan/completed/prevScreenSig 一起恢复。
+                        TaskResumeState.offer(
+                            taskText, history.toList(), step,
+                            foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                            plan = plan.toList(), completed = completed.toList(),
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                        )
                         stoppedWithResume = true
                         finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
                         AuditLog.append(ctx, "任务循环", "第 ${step + 1} 步前被急停", "断点已记，说继续可续跑")
@@ -311,7 +329,13 @@ object TaskLoop {
                 // 锁屏了就停下记断点，不烧步数；播报里明说，解锁后说「继续」接着做。
                 if (isKeyguardLocked(ctx)) {
                     if (saveResume) {
-                        TaskResumeState.offer(taskText, history.toList(), step - 1)
+                        // 第四批·断点升级：同急停，断点连同计划与界面指纹一起记。
+                        TaskResumeState.offer(
+                            taskText, history.toList(), step - 1,
+                            foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                            plan = plan.toList(), completed = completed.toList(),
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                        )
                         stoppedWithResume = true
                         finalReply = "手机锁了，解锁后我再继续。已停在第 ${step - 1} 步，解锁后说「继续」可以接着做。"
                         AuditLog.append(ctx, "任务循环", "第 $step 步前发现锁屏", "断点已记，解锁后说继续可续跑")
@@ -342,6 +366,8 @@ object TaskLoop {
                     }
                 }
                 val pkg = dump.optString("pkg")
+                // 第四批·断点升级：记下本步观察到的前台包名，供停下记断点时用。
+                if (pkg.isNotEmpty()) lastObservedPkg = pkg
                 val hint = dump.optString("hint")
                 // elements 是文本大纲：每行「e3*|Button|发送|[540,2100]」——编号、
                 // 类名、文字、0-1000 相对中心坐标，带 * 的可点，缩进表示从属层级
@@ -849,7 +875,13 @@ object TaskLoop {
             }
             // 跑满步数也没完成：把断点记下来，用户说“继续”可以接着做（累计不超
             // MAX_TOTAL_STEPS 步）；内部任务（saveResume=false）不记断点（S16）。
-            if (saveResume) TaskResumeState.offer(taskText, history.toList(), step)
+            // 第四批·断点升级：同急停/锁屏，断点连同计划与界面指纹一起记。
+            if (saveResume) TaskResumeState.offer(
+                taskText, history.toList(), step,
+                foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                plan = plan.toList(), completed = completed.toList(),
+                screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+            )
             finalReply = if (saveResume) {
                 "任务跑满了步数上限（累计 $step 步）还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"
             } else {

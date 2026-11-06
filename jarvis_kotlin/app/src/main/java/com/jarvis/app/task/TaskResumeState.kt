@@ -20,6 +20,10 @@ import com.jarvis.app.JarvisAccessibilityService
  *   消耗的时间补回来（最多 2 分钟），且绝不超过从现在起的完整 TTL。
  * - M22：断点记下登记时的前台包名；tryResolve() 发现前台已是别家应用时，
  *   在返回的 ResumeInfo 上置 foregroundPkgMismatch，调用方据此先提醒用户。
+ * 第四批·断点升级（2026-11-07）：ResumeInfo 再记 plan/completed/screenSig，
+ * 续跑时计划与界面指纹一起恢复；三个字段都有默认值，旧断点按空回落。
+ * tryResolve() 的 copy(foregroundPkgMismatch = true) 会原样带上这三个字段，
+ * TripLoop 的 take()/restore() 只负责原样取走还回，都不用改。
  */
 object TaskResumeState {
 
@@ -30,7 +34,15 @@ object TaskResumeState {
         /** 断点登记时前台应用的包名（M22 现场校验用）；登记时取不到为 null。 */
         val foregroundPkg: String? = null,
         /** tryResolve() 置位：续跑时前台已不是断点那家应用，调用方应先提醒用户再续跑。 */
-        val foregroundPkgMismatch: Boolean = false
+        val foregroundPkgMismatch: Boolean = false,
+        /** 第四批·断点升级：断点时的待做子目标（第一批的 plan，最多 10 条）。 */
+        val plan: List<String> = emptyList(),
+        /** 第四批·断点升级：断点时已完成的子目标（第一批的 completed，最多 20 条）。 */
+        val completed: List<String> = emptyList(),
+        /** 第四批·断点升级：断点时最后一次观察到的界面指纹（pkg + "\n" + elements），
+         * 续跑时用来恢复 prevScreenSig，让首步就能判断界面自断点起变没变；
+         * 还没观察过（首步前就停下）为 null。只放内存，不落盘。 */
+        val screenSig: String? = null
     )
 
     private data class Pending(val info: ResumeInfo, val expiresAt: Long)
@@ -60,8 +72,14 @@ object TaskResumeState {
      * M20：已有未过期断点时不覆盖，保留旧断点并返回 false（调用方按需处理，
      * 例如先播报旧断点再决定）；没有待处理断点（或旧的已过期）才登记并返回 true。
      * [foregroundPkg] 不传时现取前台包名（取不到为 null，不阻塞登记）。
+     * 第四批·断点升级：[plan] / [completed] / [screenSig] 一并记下来，续跑时
+     * 恢复；调用方（TaskLoop）保证 plan/completed 已在第一批的上限内，
+     * 这里原样存、不另起一套上限常量。三个参数都有默认值，旧的 offer 调用
+     * （只传前三个参数）照旧能编，缺字段的旧断点按空列表/空指纹回落。
      */
-    fun offer(taskText: String, history: List<String>, stepsDone: Int, foregroundPkg: String? = null): Boolean {
+    fun offer(taskText: String, history: List<String>, stepsDone: Int, foregroundPkg: String? = null,
+              plan: List<String> = emptyList(), completed: List<String> = emptyList(),
+              screenSig: String? = null): Boolean {
         val now = System.currentTimeMillis()
         val existing = pending
         if (existing != null && now <= existing.expiresAt) {
@@ -70,7 +88,9 @@ object TaskResumeState {
         }
         val pkg = foregroundPkg?.takeIf { it.isNotEmpty() } ?: currentForegroundPkg()
         pending = Pending(
-            ResumeInfo(taskText, history.toList(), stepsDone, foregroundPkg = pkg),
+            ResumeInfo(taskText, history.toList(), stepsDone, foregroundPkg = pkg,
+                plan = plan.toList(), completed = completed.toList(),
+                screenSig = screenSig?.takeIf { it.isNotEmpty() }),
             now + TTL_MS
         )
         return true
