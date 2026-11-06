@@ -63,6 +63,13 @@ object TaskLoop {
     /** 相同动作签名连续重复的容忍次数（LocalBrain MAX_REPEATS）：达到即判打转中止。 */
     private const val MAX_REPEATS = 3
 
+    /** 第一批·计划：子目标列表上限（MA-v3 式计划，提示词预算内单独限小）。 */
+    private const val MAX_PLAN_ITEMS = 10
+    /** 第一批·已完成子目标保留上限，防列表无限长。 */
+    private const val MAX_COMPLETED_ITEMS = 20
+    /** 第一批·连续失败升级阈值（MA-v3 err_to_manager_thresh=2）。 */
+    private const val STUCK_THRESHOLD = 2
+
     /**
      * 无进展计数（Andee 对齐后不再熔断 abort）：原来这里有一层“连续 7 步无真交互
      * 就强制 fail”的熔断，是 2026-10-24 微信任务故障追查后加的；但 Andee 没有这层
@@ -239,6 +246,20 @@ object TaskLoop {
         var prevScreenChanged: Boolean? = null
         // R3 轻量核验（2026-11-05）：模型说“done”被顶回过没有，只顶回一次。
         var doneChallenged = false
+        // 第一批·计划状态（MA-v3 Manager 式计划）：plan 是待做的编号子目标
+        // （最多 MAX_PLAN_ITEMS 条），completed 是已完成的子目标；与文字历史
+        // history 分开存，提示词里单独一段。模型某轮没给计划时保留旧状态。
+        val plan = mutableListOf<String>()
+        val completed = mutableListOf<String>()
+        // 第一批·计划回传只在自定义模型模式成立：GLM 模式下 AutoGLMClient
+        // 只把转好的 JSON 动作串交给循环，模型回复里的计划文本到不了这里，
+        // 那时 plan 恒为空、按无计划回落（见 parsePlan 与下面的计划段）。
+        val planSupported = JarvisPrefs.getModelMode(ctx) == "custom"
+        // 第一批·连续失败计数：最近连续失败的步数。执行失败（不含结果未知）
+        // 与输出无法解析各 +1；确认成功清零；问模型网络失败不计（它有自己的
+        // 连败规则）。达到 STUCK_THRESHOLD 时下一轮提示词注入升级段。
+        var consecutiveFailures = 0
+        val recentFailureNotes = mutableListOf<String>()
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
         var prevScreenSig = ""
@@ -481,6 +502,30 @@ object TaskLoop {
                     }
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
                     if (prevOutcomeUnknown) append("上一步结果未知：不知道那个动作成没成，先看一眼界面（紧凑表和截图）确认成没成，再决定下一步，不要直接重做同样的动作。\n")
+                    // 第一批·计划段（只在计划回传成立的模式下出现；GLM 模式 plan 恒为空，
+                    // 不贴这段、也不催模型列计划）：
+                    if (planSupported) {
+                        if (plan.isNotEmpty() || completed.isNotEmpty()) {
+                            append("计划（子目标列表）：\n")
+                            for (c in completed) append("✓ ").append(c).append('\n')
+                            for ((i, p) in plan.withIndex()) {
+                                append(i + 1).append(". ").append(p).append('\n')
+                            }
+                            append("每轮回复里更新这个计划：做完的子目标标 ✓，没做完的照常列，卡住时修订计划（重排、改写、插入纠正步骤、换策略）。\n")
+                        } else {
+                            append("还没有计划：请在回复里先列出编号子目标列表（最多 10 条，每条一句话），再输出 JSON 动作。\n")
+                        }
+                    }
+                    // 第一批·连续失败升级（MA-v3 err_to_manager_thresh=2）：
+                    // 最近 STUCK_THRESHOLD 步都失败时，不再让模型原地重试，
+                    // 要求它修订计划（重排、改写、插入纠正步骤、换策略）。
+                    if (consecutiveFailures >= STUCK_THRESHOLD) {
+                        append("【Potentially Stuck!】最近 ${recentFailureNotes.size} 步都失败了：\n")
+                        for (note in recentFailureNotes) append(note).append('\n')
+                        append("不要原地重试同一个做法。请修订计划：重排子目标、改写卡住的步骤、插入纠正步骤、或换一条完全不同的策略")
+                        if (planSupported) append("；修订后的计划在回复里一并给出")
+                        append("。\n")
+                    }
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
                 // 任务大脑（GLM / 自定义）需要时才带图问（M8：树够用且上一步成功时不拍图）；
@@ -542,6 +587,12 @@ object TaskLoop {
                     }
                     askFails = 0
                     action = parseAction(reply.orEmpty())
+                    if (action != null) {
+                        // 第一批·计划：回复里带计划块就更新 plan/completed；
+                        // 没带保留旧状态（宽容回落）。GLM 模式下这里的 reply
+                        // 只是转好的 JSON 动作串，parsePlan 恒返回 null。
+                        parsePlan(reply.orEmpty())?.let { parsed -> applyPlanUpdate(parsed, plan, completed) }
+                    }
                     if (action == null) {
                         badReply = reply
                         lastError = "模型输出不是合法的 JSON 动作"
@@ -553,6 +604,10 @@ object TaskLoop {
                     // 按 Andee 的做法把错误当一步结果回喂（下一步提示词里带着），
                     // 模型有机会自纠；无法解析也算一种签名，连着来照样被守卫拦下。
                     history += "第 $step 步：输出无法解析 — ${badReply?.take(80) ?: "（空回复）"}"
+                    // 第一批·连续失败：输出无法解析也算一步失败。
+                    consecutiveFailures++
+                    recentFailureNotes += "第 ${step} 步：输出无法解析 — ${badReply?.take(60) ?: "（空回复）"}"
+                    if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
                     prevStepFailed = true
                     prevScreenChanged = null
                     if ("∅unparseable" == lastSignature) {
@@ -642,6 +697,16 @@ object TaskLoop {
                 prevStepFailed = !r.ok
                 prevOutcomeUnknown = r.outcomeUnknown
                 prevScreenChanged = r.screenChanged
+                // 第一批·连续失败计数：确认成功清零；确认失败 +1 并记一条；
+                // 结果未知不计（不知道成没成，既不算失败也不算成功）。
+                if (r.ok) {
+                    consecutiveFailures = 0
+                    recentFailureNotes.clear()
+                } else if (!r.outcomeUnknown) {
+                    consecutiveFailures++
+                    recentFailureNotes += "第 ${step} 步：${describeAction(action)} → ${r.summary.take(80)}"
+                    if (recentFailureNotes.size > STUCK_THRESHOLD) recentFailureNotes.removeAt(0)
+                }
                 // 结果未知的一步不计入重复：不知道它到底跑没跑成，模型换招或
                 // 重试都不该被当成原地打转拦下；普通失败的重复照旧累计。
                 if (r.outcomeUnknown) repeats = (repeats - 1).coerceAtLeast(0)
@@ -931,6 +996,64 @@ else obj
 } catch (_: Exception) {
 null
 }
+}
+
+/** 第一批·计划项：text 为子目标文字，done 为模型是否标了完成。 */
+private data class PlanItem(val text: String, val done: Boolean)
+
+/**
+ * 第一批·从模型回复里宽容抠出编号子目标列表。
+ * 格式（见 SYSTEM_PROMPT）：回复里先有一行“计划：”，其后每行“1. 文字”或
+ * “1. ✓ 文字”（✓ 或 [完成]/[已完成] 表示已完成）。只看 JSON 动作对象之外的
+ * 文本；没找到计划块返回 null（调用方保留旧计划，不失败、不报错）。
+ * 上限 MAX_PLAN_ITEMS 条，每条截断 60 字；同一条只取一次。
+ * 注意：matchEntire 自带两端锚定，正则里不写 ^ 与 $（Kotlin 里 $ 会触发
+ * 字符串插值，不能直接写进正则字面量）。
+ */
+private fun parsePlan(reply: String): List<PlanItem>? {
+    val start = reply.indexOf('{')
+    val end = reply.lastIndexOf('}')
+    val outside = if (start >= 0 && end > start) {
+        reply.substring(0, start) + "\n" + reply.substring(end + 1)
+    } else {
+        reply
+    }
+    val lines = outside.lineSequence().map { it.trim() }.toList()
+    val headerIdx = lines.indexOfFirst { it.startsWith("计划") }
+    if (headerIdx < 0) return null
+    val items = mutableListOf<PlanItem>()
+    val numbered = Regex("""(\d{1,2})[.、)]\s*(.*)""")
+    for (i in headerIdx + 1 until lines.size) {
+        val line = lines[i]
+        if (line.isEmpty()) continue
+        val m = numbered.matchEntire(line) ?: break
+        var rest = m.groupValues[2].trim()
+        var done = false
+        when {
+            rest.startsWith("✓") -> { done = true; rest = rest.removePrefix("✓").trim() }
+            rest.startsWith("[完成]") -> { done = true; rest = rest.removePrefix("[完成]").trim() }
+            rest.startsWith("[已完成]") -> { done = true; rest = rest.removePrefix("[已完成]").trim() }
+        }
+        if (rest.isEmpty()) continue
+        val item = PlanItem(rest.take(60), done)
+        if (!items.contains(item)) items += item
+        if (items.size >= MAX_PLAN_ITEMS) break
+    }
+    return if (items.isEmpty()) null else items
+}
+
+/**
+ * 第一批·把解析出的计划合并进循环状态：解析出的未完成项按顺序成为当前 plan；
+ * 标了完成的追加进 completed（去重、上限 MAX_COMPLETED_ITEMS）。
+ * 解析出的列表为准：旧 plan 里没再出现的项不再显示（模型修订计划时可删改步骤）。
+ */
+private fun applyPlanUpdate(parsed: List<PlanItem>, plan: MutableList<String>, completed: MutableList<String>) {
+    plan.clear()
+    plan.addAll(parsed.filter { !it.done }.map { it.text }.distinct().take(MAX_PLAN_ITEMS))
+    for (item in parsed.filter { it.done }) {
+        if (!completed.contains(item.text)) completed += item.text
+    }
+    while (completed.size > MAX_COMPLETED_ITEMS) completed.removeAt(0)
 }
 
 /** 本地流的结构校验：steps 必须是 1–15 项的数组，每项是带 action 的 JSON 对象。
@@ -1436,7 +1559,13 @@ private const val SYSTEM_PROMPT =
 "有编号就用编号点（tap 的 eid，优先用紧凑表的稳定编号），绝不拿 [x,y] 或截图位置重算坐标去点一个有编号的元素。" +
 "没文字没说明的图标按钮靠类型和中心坐标认领（比如某条动态下方的评论图标就是那条动态的），也可以先 zoom 看清再点。" +
 "稳定编号只对当前这一屏态有效：元素还在同一位置时每轮同一个编号；滚动或跳页面后编号会变，每轮只用最新紧凑表里的编号。e 数字编号（e3）只对当前这一轮的大纲有效，下一轮就作废了，优先用稳定编号。\n" +
-"你只能输出一个 JSON 对象表示下一步动作，不要输出任何其他文字、不要用代码块包裹。" +
+"每轮回复分两部分：先是计划（见下），再是下一步动作（一个 JSON 对象）；除计划和动作外不要输出其他文字、不要用代码块包裹。" +
+"计划（任务开始时列出，之后每轮更新；最多 10 条，每条一句话）：\n" +
+"计划：\n" +
+"1. 打开微信\n" +
+"2. 找到联系人\n" +
+"3. 输入消息并发送\n" +
+"已完成的子目标在行首标 ✓（如“1. ✓ 打开微信”）；没做完的照常列；卡住时修订计划（重排、改写、插入纠正步骤、换策略），修订后的计划在回复里一并给出。没有计划可列时可以不写计划，只输出下一步动作。" +
 "{\"action\":\"tap\",\"eid\":\"s3f9a2\"} 点紧凑表里的稳定编号（最优先、最稳；e 数字编号也认，但只对当轮有效）；" +
 "或 {\"action\":\"tap\",\"x\":540,\"y\":1200} 按 0-1000 相对坐标点你刚看到的全屏截图；" +
 "或 {\"action\":\"tap\",\"cell\":\"D7\",\"part\":\"tr\"} 按截图上的网格格号点（part 是格内九宫格部位，可省略）。" +
@@ -1456,6 +1585,7 @@ private const val SYSTEM_PROMPT =
 "{\"action\":\"flow\",\"steps\":[{\"action\":\"tap\",\"eid\":\"e3\"},{\"action\":\"type\",\"text\":\"你好\"},{\"action\":\"tap\",\"eid\":\"e5\"}]} 本地流：一段确定性的多步操作由手机在本地一口气跑完、中间不再问你，跑完一次把每步结果交回来，算一步、不额外占 25 步的额度。适合同一屏上的固定套路（比如点输入框→输文字→点发送按钮，或点一下→等界面变→再点一下），最多 15 步、总共最多 20 秒（可加 \"timeoutMs\"，但不许超过 20000）。流里的每一步用和单步动作一样的字段（tap/longPress 用 eid/cell/x/y，eid 优先用紧凑表的稳定编号、e 数字编号也认，type 用 text，swipe 用 x1/y1/x2/y2，back/home/zoom 照旧）；另外还有七种流内专用步：{\"action\":\"wait\",\"ms\":3000} 等到界面变化或等满时长，{\"action\":\"wait_idle\",\"ms\":5000} 等到界面稳定，{\"action\":\"wait_change\",\"ms\":5000} 等到界面变化，{\"action\":\"find\",\"text\":\"发送\"} 只检查元素在不在、不动手（也可以给 \"sel\":{...} 按选择器查），{\"action\":\"observe\"} 重新读一遍界面，{\"action\":\"scroll_to\",\"text\":\"目标文字\"} 在列表里滑动找目标（可加 \"direction\":\"up\"、\"maxSwipes\":8，滑到底没找到就停），{\"action\":\"tap_sel\",\"sel\":{\"textContains\":\"发送\"}} 按选择器点第 N 个匹配（可加 \"index\":1）。每一步可加 \"ifPresent\":{\"text\":\"…\"}（元素不在就跳过这步）或 \"ifAbsent\"（元素在就跳过），以及 \"onError\":\"continue\"（这步失败也继续往下跑，缺省是失败就停）。注意：稳定编号只对当前这一屏态有效，流里如果会跳到新页面（打开新应用、进新页面），编号就作废了——这种流要尽量短，或者拆成单步做；e 数字编号只对当轮有效，流里尽量用稳定编号；流里也可以 zoom，但放大图不会中途给你看，只能按你已经知道的格号点。" +
 "{\"action\":\"done\",\"message\":\"完成情况一句话\"} 任务真正完成时用。" +
 "{\"action\":\"fail\",\"reason\":\"卡在哪一步、什么原因\"} 做不下去时用，禁止假装完成。\n" +
+"做决定前先读已执行步骤，找重复失败和计划与现实的矛盾。硬规则：绝不重复失败的动作——先搞清它为什么失败，再换一种做法；只凭屏幕上观测到的证据判断子目标完成：紧凑表或截图里确实出现了目标内容才算完成，绝不凭感觉提前标完成；数据类任务（金额、账号、验证码、数量、日期）原文照抄，不改格式、不加标点。" +
 "一步只做一个动作。" +
 "输入文字：先用编号点输入框，下一个动作必须紧接着就是 type，不许在点框和输入之间插别的动作，也不许重复点同一个输入框；如果上一步的点击已经把回复框/评论框带起来并聚焦（结果会说明），直接 type，不要再点一次输入条（树被扣留的应用里输入条很薄，点它容易误点到下面的内容）。" +
 "开屏广告、会员弹窗、更新提示、权限请求这类挡路的弹窗，先处理掉再继续任务。" +
