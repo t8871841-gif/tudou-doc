@@ -75,6 +75,9 @@ object TaskLoop {
     private const val REFLECT_COMPACT_CHARS = 1200
     /** 第二批·(b) 信号只对“应当引起界面变化”的动作核验：wait/zoom/find 等本身就不指望界面变，不核验；浏览器类动作看的是网页快照、树 diff 不准，也不核验；flow 的 screenChanged 恒为 null，本来也不会触发。 */
     private val REFLECT_CHANGE_KINDS = setOf("tap", "longPress", "type", "submit", "swipe", "scroll_to", "tap_sel", "openApp", "back", "home")
+    /** 第六批·每轮核对前台包名：本来就会换前台应用的动作（openApp/back/home），包名变了是预期切换、不算跑偏。
+     * flow 不在这里：流内步骤混着切应用与屏内动作，单看 kind 分不出来，执行后按流内实际步骤另判（见 flowHasAppSwitch）。 */
+    private val EXPECTED_PKG_SWITCH_KINDS = setOf("openApp", "back", "home")
     /** 第二批·核验员系统提示词（短问答专用，走 CustomClient.askOnce——GLM 模式下任务 client 只回 do(...)/finish(...) 动作串，问不出 A/B/C，聊天模型才能回自由文本）。 */
     private const val REFLECT_SYSTEM_PROMPT =
         "你是 Jarvis 任务核验员，只判断上一步动作到底成没成，不执行任何动作。" +
@@ -288,6 +291,18 @@ object TaskLoop {
         // L14：最近一次观察到的前台包名——知识只在前台应用切换时注入一次，
         // 同一个应用连着多步不再重复贴同一份。
         var lastKnowledgePkg = ""
+        // 第六批·每轮核对前台包名（DroidRun/Minitap“每轮核对前台包名”的 TaskLoop 版，确定性代码、不调模型、不额外取树）：
+        // prevRoundPkg 是上一轮观察到的前台包名（只在循环顶部观察段更新；第二批核验、第三批输入校验里的 fresh 树是轮内重读，不更新它）；
+        // prevActionKind / prevActionExpectedSwitch 是上一步实际执行过的动作及其“本来就会换应用”判定。
+        // 与第四批的 lastObservedPkg 同源但用途不同，不复用：lastObservedPkg 是停下记断点用的“最后所在应用”，
+        // prevRoundPkg 是逐轮比对用的“上一轮所在应用”；续跑首轮 prevRoundPkg 为空，不核对（本轮没有上一轮）。
+        // 连续两轮跑偏每次都记（不去重）：每跳一次都是新信息（可能又跳去了第三家应用），去重会把第二次跳变藏起来；
+        // 同一应用内多轮不动不触发，跑偏轮里模型原地不动也不会重复刷。
+        var prevRoundPkg = ""
+        var prevActionKind = ""
+        var prevActionExpectedSwitch = false
+        // 本轮观察算出的包名偏差说明（null = 本轮没跑偏）：观察段算好，提示词组装段贴进本轮提示词；每轮观察时重算。
+        var pkgDriftNote: String? = null
         running = true
         try {
             // 续跑时步数接着上次的编号（历史里的“第 N 步”才连贯），但新跑的
@@ -368,6 +383,22 @@ object TaskLoop {
                 val pkg = dump.optString("pkg")
                 // 第四批·断点升级：记下本步观察到的前台包名，供停下记断点时用。
                 if (pkg.isNotEmpty()) lastObservedPkg = pkg
+                // 第六批·每轮核对前台包名：本轮观察到的包名与上一轮比对。
+                // 首轮（prevRoundPkg 为空）或本轮读不到包名（pkg 为空，树被扣留/读不到）时不核对；
+                // 同一应用内 Activity 跳转包名不变，不触发；核对不调模型、不额外取树，复用本轮已取的 dump。
+                // 跑偏本身不记失败、不触发升级（模型可能本来就想换应用，只是要让它知道换了）；
+                // 只有跑偏后模型继续盲动、动作失败时，才走现有的失败计数。
+                pkgDriftNote = null
+                if (pkg.isNotEmpty() && prevRoundPkg.isNotEmpty() && pkg != prevRoundPkg) {
+                    if (prevActionExpectedSwitch) {
+                        history += "第 ${step} 步观察：前台应用从 ${prevRoundPkg} 切换到 ${pkg}（上一步是 ${prevActionKind.ifEmpty { "未知动作" }}，预期的切换）"
+                    } else {
+                        pkgDriftNote = "前台应用从 ${prevRoundPkg} 变成了 ${pkg}，上一步是 ${prevActionKind.ifEmpty { "未知动作" }}（屏内动作，本不应换应用），可能是点到广告、跳到别家应用或系统弹窗抢了前台。"
+                        history += "第 ${step} 步观察：${pkgDriftNote}"
+                        AuditLog.append(ctx, "任务循环", "前台跑偏（第 ${step} 步）", "从 ${prevRoundPkg} 到 ${pkg}，上一步是 ${prevActionKind.ifEmpty { "未知动作" }}")
+                    }
+                }
+                if (pkg.isNotEmpty()) prevRoundPkg = pkg
                 val hint = dump.optString("hint")
                 // elements 是文本大纲：每行「e3*|Button|发送|[540,2100]」——编号、
                 // 类名、文字、0-1000 相对中心坐标，带 * 的可点，缩进表示从属层级
@@ -532,6 +563,9 @@ object TaskLoop {
                     }
                     if (screenSameAsPrev) {
                         append("注意：界面与上一步完全相同、纹丝没动——上一个动作没有生效或页面卡住了。不要重复同一个动作，换个做法（先 zoom 看清、滑动、返回或 wait 更久）。\n")
+                    }
+                    if (pkgDriftNote != null) {
+                        append("【前台应用跑偏】").append(pkgDriftNote).append("本轮先确认当前在哪个应用、要不要回上一个应用再继续，不要对着错的应用直接做下一步。\n")
                     }
                     val hist = historySection(history)
                     if (hist.isNotEmpty()) {
@@ -732,6 +766,13 @@ object TaskLoop {
                 onProgress(narrate(kind))
                 val r = execute(ctx, controller, action)
                 if (r.zoomImage != null) pendingImage = r.zoomImage
+                // 第六批·记下本步实际执行的动作，供下一轮观察时核对前台包名：
+                // 只有真正执行过的动作才更新（问模型失败/输出无法解析/done 顶回
+                // 的轮次没执行动作，沿用更早一步的执行记录——包名若在那几轮里变了，
+                // 仍按最后一次真实动作判预期与否）。
+                prevActionKind = kind
+                prevActionExpectedSwitch = kind in EXPECTED_PKG_SWITCH_KINDS ||
+                    action.optBoolean("handover", false) || flowHasAppSwitch(action)
                 // 固定等 600ms 改成等界面静止：连续两次读到的界面哈希相同才算稳，
                 // 下一步的大纲在界面真稳了之后再读，不盲等。超时没稳住也继续，
                 // 只是如实记一笔（历史里的“界面已稳定 / 仍在变”就是这句的来处）。
@@ -947,6 +988,21 @@ object TaskLoop {
         if (from > 0) sb.append("（更早的 $from 步已省略）\n")
         for (i in from until history.size) sb.append(history[i]).append('\n')
         return sb.toString()
+    }
+
+    /**
+     * 第六批·流内是否含有本来就会换前台应用的步骤（openApp/back/home，或带 handover 的步）：
+     * flow 的 kind 单看分不出来，执行后按流内实际步骤判——含切应用步骤的流，包名变了不算跑偏；
+     * 纯屏内动作的流，包名变了照样算跑偏。不是 flow、或 steps 不是数组/为空时返回 false。
+     */
+    private fun flowHasAppSwitch(action: JSONObject): Boolean {
+        if (action.optString("action") != "flow") return false
+        val steps = action.optJSONArray("steps") ?: return false
+        for (i in 0 until steps.length()) {
+            val s = steps.optJSONObject(i) ?: continue
+            if (s.optString("action") in EXPECTED_PKG_SWITCH_KINDS || s.optBoolean("handover", false)) return true
+        }
+        return false
     }
 
     /**
