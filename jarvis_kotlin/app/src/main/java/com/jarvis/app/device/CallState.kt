@@ -77,7 +77,7 @@ object CallState {
     @Volatile private var inCallSinceMs = 0L
 
     /** 超时复位检查：只在主线程跑；inCall 已变 false 或未超时时什么都不做。 */
-    private val inCallTimeoutCheck = Runnable {
+    private val inCallTimeoutCheck: Runnable = Runnable {
         if (!inCall) return@Runnable
         val elapsed = SystemClock.elapsedRealtime() - inCallSinceMs
         if (elapsed < IN_CALL_TIMEOUT_MS) {
