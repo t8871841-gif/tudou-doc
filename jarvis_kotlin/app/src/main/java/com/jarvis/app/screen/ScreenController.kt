@@ -1437,6 +1437,12 @@ class ScreenController(
         val epoch: Long,         // S5: 哪一次 dump 编的号；过期后 lookupEid 拒绝
     )
 
+    /**
+     * 第十批·tapBlockers：重定位到的活节点。node 是 obtain() 出来的独立副本，
+     * 调用方用完负责 recycle（walk 沿途的原节点照常回收，副本不受影响）。
+     */
+    private class LiveNode(val bounds: IntArray, val node: AccessibilityNodeInfo)
+
     private val eidLock = Any()
     private val eidIndex = HashMap<Int, EidEntry>()
     // 稳定编号索引：紧凑表的 s<hex> 编号 → 同一个 EidEntry。tapByEid/longPressByEid
@@ -1462,13 +1468,22 @@ class ScreenController(
                     "(scrolled away or page changed) — the remembered position is NOT " +
                     "tapped. Call get_screen_element again and use an eid from the fresh list"
             )
-        val x = (live[0] + live[2]) / 2
-        val y = (live[1] + live[3]) / 2
-        GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = false, relocated = true, pkg = lastPkg())
-        return tap(x, y, expectedPkg = entry.pkg, handover = handover)
-            .put("eid", eid)
-            .put("px", "$x,$y")
-            .put("relocated", true)
+        try {
+            // 第十批·tapBlockers：按活树算遮挡，点最大未遮挡子区域的中心；
+            // 全被盖住时 resolveTapPoint 直接抛错，绝不强点。
+            val point = resolveTapPoint(live.node, "'${eid}'")
+            val x = point.x
+            val y = point.y
+            GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = false, relocated = true, pkg = lastPkg())
+            val result = tap(x, y, expectedPkg = entry.pkg, handover = handover)
+                .put("eid", eid)
+                .put("px", "$x,$y")
+                .put("relocated", true)
+            point.divertedBy?.let { result.put("diverted_by", it) }
+            return result
+        } finally {
+            live.node.recycle()
+        }
     }
 
     fun longPressByEid(eid: String, durationMs: Long, handover: Boolean = false): JSONObject {
@@ -1480,13 +1495,281 @@ class ScreenController(
                     "(scrolled away or page changed) — the remembered position is NOT " +
                     "long-pressed. Call get_screen_element again and use an eid from the fresh list"
             )
-        val x = (live[0] + live[2]) / 2
-        val y = (live[1] + live[3]) / 2
-        GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = true, relocated = true, pkg = lastPkg())
-        return longPress(x, y, durationMs, expectedPkg = entry.pkg, handover = handover)
-            .put("eid", eid)
-            .put("px", "$x,$y")
-            .put("relocated", true)
+        try {
+            // 第十批·tapBlockers：与 tapByEid 同一道遮挡判定（长按点错地方一样糟）。
+            val point = resolveTapPoint(live.node, "'${eid}'")
+            val x = point.x
+            val y = point.y
+            GroundingLog.noteTapEid(eid, x, y, screenW, screenH, hold = true, relocated = true, pkg = lastPkg())
+            val result = longPress(x, y, durationMs, expectedPkg = entry.pkg, handover = handover)
+                .put("eid", eid)
+                .put("px", "$x,$y")
+                .put("relocated", true)
+            point.divertedBy?.let { result.put("diverted_by", it) }
+            return result
+        } finally {
+            live.node.recycle()
+        }
+    }
+
+    // ---- 第十批·tapBlockers（DroidRun _add_tap_blockers / get_element_coords 的 Jarvis 版） ----
+    //
+    // 问题：点一个 eid/sel 定位的元素时，旧代码永远点目标 bounds 的中心。
+    // 若中心正上方盖着弹窗、悬浮按钮、键盘按键等可交互覆盖物，这一 tap
+    // 实际落在覆盖物上——点错东西，比点不中更糟（可能误触删除/发送）。
+    //
+    // 做法（只在 eid/sel 点按的活树重定位处算：tapByEid/longPressByEid/
+    // tapSelector 调 resolveTapPoint；纯坐标点按 tapNorm/tapAim 不算——
+    // 坐标本来就是“你说哪就点哪”，不替模型改点；tapById 走节点自身的
+    // performAction，不经过坐标，也不算）：
+    //   1. 以目标节点为基准，在同一时刻的活树里找遮挡者：可见、已启用、
+    //      可点或可长按、bounds 与目标重叠、且确实画在目标上面。
+    //   2. “画在上面”的判定（drawingOrder/windowId 都现取自活节点，不存
+    //      dump、不预计算——dump 时的树到点按时可能已变）：
+    //      - 跨窗口：比 AccessibilityWindowInfo.layer（service.windows 现读），
+    //        层高者在上；任一层读不到就不认（证据不足，不改动）。跨窗口
+    //        的祖先链不在同一棵树里，绝不拿链的前缀关系比（链 [0] 在别
+    //        的窗口里不是目标的祖先）。
+    //      - 同窗口：drawingOrder 只在同父级内相对（Android 文档原话：
+    //        "Drawing order is determined only within the node's parent"），
+    //        跨分支直接比大小是错的；所以沿两条祖先链找到最低公共祖先，
+    //        比分叉处那一级的 drawingOrder，大者在上；相等视为证据不足，不认。
+    //      - 目标的祖先（链是目标链的真前缀）是包含关系不是遮挡，永不认；
+    //        目标的子孙（目标链是其前缀）画在目标里面、盖住目标的一部分，认。
+    //   3. 矩形减法：目标 bounds 减去全部遮挡者，取面积最大的剩余块，点其中心。
+    //      原中心没被盖住时最大块仍含中心附近，落点基本就是中心，不折腾。
+    //   4. 全被盖住：抛 IllegalStateException，文案以“目标被遮住”开头（TaskLoop
+    //      映射成 TAP_BLOCKED，记一步失败、写进 lastError），绝不强点。
+    //
+    // 证据不足时一律退回旧行为（点中心），不拒点、不改点：
+    //   - 遮挡 walk 被预算截断（SEARCH_BUDGET_MS，与重定位同级）、树太深、
+    //     目标在 walk 里没再找到、窗口层读不到——都只说明“这次算不清”，
+    //     不说明“被盖住了”。
+    // 代价：每次 eid/sel 点按多一次带预算的全树 walk，与重定位那次同量级
+    // （findLiveNode 本来就每点一走）；dump 不走这里，不影响读屏成本。
+
+    /** resolveTapPoint 的返回：落点像素 + 被改道时盖住原中心的那块遮挡物。 */
+    private data class TapPoint(val x: Int, val y: Int, val divertedBy: String?)
+
+    /** 遮挡 walk 里记下的一个候选：bounds、名字、祖先链、所在窗口。 */
+    private class Blocker(
+        val rect: Rect,
+        val label: String,
+        val chain: List<Int>,
+        val windowId: Int,
+    )
+
+    /** 遮挡 walk 的共享状态：目标链（找到目标时填）与是否被截断。 */
+    private class OcclusionWalk(
+        val targetRect: Rect,
+        val targetWindowId: Int,
+    ) {
+        val blockers = ArrayList<Blocker>()
+        var targetChain: List<Int>? = null
+        var cut = false
+    }
+
+    /**
+     * 对活树里的目标节点算一个能点下去的落点：最大未遮挡子区域的中心。
+     * [ref] 只进报错文案（如 "'s3f9a2'"、"选择器匹配的元素「发送」"）。
+     * 全被盖住抛 IllegalStateException（文案以“目标被遮住”开头）；
+     * 算不清（walk 截断/目标已不在 walk 里）退回目标中心，不拒点。
+     */
+    private fun resolveTapPoint(target: AccessibilityNodeInfo, ref: String): TapPoint {
+        val targetRect = Rect()
+        runCatching { target.getBoundsInScreen(targetRect) }
+        val cx = (targetRect.left + targetRect.right) / 2
+        val cy = (targetRect.top + targetRect.bottom) / 2
+        val center = TapPoint(cx, cy, null)
+        if (targetRect.isEmpty) return center
+        val targetWindowId = runCatching { target.windowId }.getOrNull() ?: -1
+        val walk = OcclusionWalk(targetRect, targetWindowId)
+        val budget = WalkBudget(SEARCH_BUDGET_MS)
+        // 各窗口的层 + 各窗口的根：同一批 windows 对象一次取完、用完回收。
+        val layers = HashMap<Int, Int>()
+        val windows = runCatching { service.windows }.getOrNull()
+        try {
+            if (windows != null) {
+                for (w in windows) {
+                    val id = runCatching { w.id }.getOrNull() ?: continue
+                    runCatching { w.layer }.getOrNull()?.let { layers[id] = it }
+                }
+                for (w in windows) {
+                    if (budget.spent()) {
+                        walk.cut = true
+                        break
+                    }
+                    val root = runCatching { rootOf(w) }.getOrNull() ?: continue
+                    val pkg = runCatching { root.packageName?.toString() }.getOrNull().orEmpty()
+                    if (pkg == service.packageName) {
+                        root.recycle()
+                        continue
+                    }
+                    try {
+                        walkOcclusion(root, emptyList(), walk, budget, 0)
+                    } finally {
+                        root.recycle()
+                    }
+                    if (walk.cut) break
+                }
+            }
+            if ((windows == null || windows.isEmpty()) && !walk.cut) {
+                // 窗口列表拿不到：退回只走活动窗口（同窗口遮挡仍能算）。
+                val root = runCatching { activeRoot() }.getOrNull()
+                if (root != null) {
+                    try {
+                        walkOcclusion(root, emptyList(), walk, budget, 0)
+                    } finally {
+                        root.recycle()
+                    }
+                }
+            }
+        } finally {
+            windows?.forEach { runCatching { it.recycle() } }
+        }
+        // 算不清不拒点：只退回旧行为点中心。
+        if (walk.cut) return center
+        val targetChain = walk.targetChain ?: return center
+        // 只留真正画在目标上面的遮挡者（跨窗口先比层，同窗口再比链）。
+        val blockers = walk.blockers.filter { b ->
+            if (b.windowId != targetWindowId) {
+                val bLayer = layers[b.windowId] ?: return@filter false
+                val tLayer = layers[targetWindowId] ?: return@filter false
+                bLayer > tLayer
+            } else if (isChainPrefix(b.chain, targetChain)) {
+                // 祖先是包含关系，不是遮挡。
+                false
+            } else if (isChainPrefix(targetChain, b.chain)) {
+                // 子孙画在目标里面、盖住目标的一部分。
+                true
+            } else {
+                // 同窗口：沿两条链找到分叉处，比那一级的 drawingOrder；
+                // 分不出来（链长不够/分叉处相等）视为证据不足，不认。
+                val d = firstDivergence(b.chain, targetChain) ?: return@filter false
+                b.chain[d] > targetChain[d]
+            }
+        }
+        if (blockers.isEmpty()) return center
+        val screen = Rect(0, 0, screenW, screenH)
+        val pieces = subtractRects(targetRect, blockers.map { it.rect })
+            .mapNotNull { p -> if (p.intersect(screen)) Rect(p) else null }
+            .filter { !it.isEmpty }
+        if (pieces.isEmpty()) {
+            val top = blockers.maxByOrNull { overlapArea(it.rect, targetRect) }
+            val name = top?.label ?: "遮挡物"
+            throw IllegalStateException(
+                "目标被遮住，点不下去：${ref}被「${name}」完全遮住，点原位置只会点到遮挡物。" +
+                    "请先把遮挡物处理掉（关弹窗、收起悬浮窗、滑开遮挡，或先点遮挡物本身），" +
+                    "再重新读屏点目标，不要原样重发这一步。"
+            )
+        }
+        val best = pieces.maxByOrNull { it.width().toLong() * it.height() } ?: return center
+        val x = (best.left + best.right) / 2
+        val y = (best.top + best.bottom) / 2
+        if (x == cx && y == cy) return center
+        val coveringCenter = blockers.firstOrNull { it.rect.contains(cx, cy) }
+            ?: blockers.maxByOrNull { overlapArea(it.rect, targetRect) }
+        return TapPoint(x, y, coveringCenter?.label)
+    }
+
+    /** 遮挡 walk：沿树下行，记下目标链与全部可能遮住目标的候选节点。 */
+    private fun walkOcclusion(
+        node: AccessibilityNodeInfo,
+        chain: List<Int>,
+        walk: OcclusionWalk,
+        budget: WalkBudget,
+        depth: Int,
+    ) {
+        if (walk.cut) return
+        if (budget.spent() || depth > OCCLUSION_MAX_DEPTH) {
+            walk.cut = true
+            return
+        }
+        val r = Rect()
+        runCatching { node.getBoundsInScreen(r) }
+        val order = runCatching { node.drawingOrder }.getOrNull() ?: 0
+        val myChain = chain + order
+        val wid = runCatching { node.windowId }.getOrNull() ?: -1
+        val isTarget = r == walk.targetRect &&
+            (walk.targetWindowId == -1 || wid == walk.targetWindowId)
+        if (isTarget) {
+            // 同 bounds 的包装层可能多层：留最深（最具体）的那条链。
+            val known = walk.targetChain
+            if (known == null || myChain.size > known.size) walk.targetChain = myChain
+        } else if (!r.isEmpty && Rect.intersects(r, walk.targetRect) &&
+            node.isVisibleToUser && node.isEnabled &&
+            (node.isClickable || node.isLongClickable)
+        ) {
+            val label = UiSelector.label(node).ifEmpty {
+                node.className?.toString()?.substringAfterLast('.') ?: "未命名元素"
+            }
+            walk.blockers.add(Blocker(Rect(r), label, myChain, wid))
+        }
+        for (i in 0 until node.childCount) {
+            if (walk.cut) break
+            if (budget.spent()) {
+                walk.cut = true
+                break
+            }
+            val child = childOf(node, i) ?: continue
+            try {
+                walkOcclusion(child, myChain, walk, budget, depth + 1)
+            } finally {
+                child.recycle()
+            }
+        }
+    }
+
+    /** [short] 是不是 [long] 的真前缀（祖先链关系）。 */
+    private fun isChainPrefix(short: List<Int>, long: List<Int>): Boolean =
+        short.size < long.size && long.subList(0, short.size) == short
+
+    /** 两条链第一个分叉处的下标；一条是另一条的前缀时返回 null。 */
+    private fun firstDivergence(a: List<Int>, b: List<Int>): Int? {
+        val n = minOf(a.size, b.size)
+        for (i in 0 until n) if (a[i] != b[i]) return i
+        return null
+    }
+
+    /** 两矩形重叠面积（像素²），算“谁盖得最多”与“盖住中心的是谁”用。 */
+    private fun overlapArea(a: Rect, b: Rect): Long {
+        val w = minOf(a.right, b.right) - maxOf(a.left, b.left)
+        val h = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+        if (w <= 0 || h <= 0) return 0L
+        return w.toLong() * h
+    }
+
+    /**
+     * 矩形减法：base 减去全部 cutters，返回剩余的不重叠小块（DroidRun
+     * find_uncovered_point 的同款思路，纯几何，不碰节点）。cutter 与某块
+     * 只碰边（零面积重叠）时那块原样保留。
+     */
+    private fun subtractRects(base: Rect, cutters: List<Rect>): List<Rect> {
+        var pieces = listOf(Rect(base))
+        for (c in cutters) {
+            if (pieces.isEmpty()) break
+            val next = ArrayList<Rect>()
+            for (p in pieces) {
+                if (!Rect.intersects(p, c)) {
+                    next.add(p)
+                    continue
+                }
+                val ixL = maxOf(p.left, c.left)
+                val ixT = maxOf(p.top, c.top)
+                val ixR = minOf(p.right, c.right)
+                val ixB = minOf(p.bottom, c.bottom)
+                if (ixL >= ixR || ixT >= ixB) {
+                    next.add(p)
+                    continue
+                }
+                if (p.left < ixL) next.add(Rect(p.left, p.top, ixL, p.bottom))
+                if (ixR < p.right) next.add(Rect(ixR, p.top, p.right, p.bottom))
+                if (p.top < ixT) next.add(Rect(ixL, p.top, ixR, ixT))
+                if (ixB < p.bottom) next.add(Rect(ixL, ixB, ixR, p.bottom))
+            }
+            pieces = next
+        }
+        return pieces.filter { it.width() > 0 && it.height() > 0 }
     }
 
     /**
@@ -1596,8 +1879,6 @@ class ScreenController(
             }
             val r = Rect()
             cur.getBoundsInScreen(r)
-            val cx = (r.left + r.right) / 2
-            val cy = (r.top + r.bottom) / 2
             val label = UiSelector.label(cur)
             val sid = stableId(
                 cur.viewIdResourceName?.ifEmpty { null },
@@ -1605,8 +1886,14 @@ class ScreenController(
                 label,
                 "${r.left},${r.top},${r.right},${r.bottom}",
             )
+            // 第十批·tapBlockers：与 tapByEid 同一道遮挡判定（点按前按活树算，
+            // 全被盖住直接抛错；纯坐标点按不走这里）。
+            val point = resolveTapPoint(cur, "选择器匹配的元素「${label.ifEmpty { sid }}」")
+            val cx = point.x
+            val cy = point.y
             GroundingLog.noteTapEid(sid, cx, cy, screenW, screenH, hold = hold, relocated = false, pkg = lastPkg())
             val result = if (hold) longPress(cx, cy, durationMs) else tap(cx, cy)
+            point.divertedBy?.let { result.put("diverted_by", it) }
             return result.put("sid", sid).put("via", "selector").put("climbed", climbed)
         } finally {
             nodes.forEach { it.recycle() }
@@ -1688,8 +1975,12 @@ class ScreenController(
      * worth far more. S4: 同 id 的候选必须同时满足两点才算找到——中心离 dump
      * 时中心 ≤150px，且 bounds 与旧 bounds 至少部分重合；否则返回 null，
      * 调用方直接失败，不用陈旧坐标兜底。
+     *
+     * 第十批·tapBlockers：返回活节点本身（LiveNode，obtain() 副本归调用方），
+     * 不只返回 bounds——遮挡判定要读目标节点的 windowId，bounds 里没有。
+     * 匹配逻辑与旧版一字不改，只多带回节点对象。
      */
-    private fun findLiveNode(entry: EidEntry): IntArray? {
+    private fun findLiveNode(entry: EidEntry): LiveNode? {
         val root = runCatching { activeRoot() }.getOrNull() ?: return null
         try {
             if (root.packageName?.toString() != entry.pkg) return null
@@ -1706,6 +1997,7 @@ class ScreenController(
                 }.getOrNull().orEmpty()
                 try {
                     var bestArr: IntArray? = null
+                    var bestNode: AccessibilityNodeInfo? = null
                     var bestDist = Long.MAX_VALUE
                     for (m in matches) {
                         val r = Rect()
@@ -1721,12 +2013,15 @@ class ScreenController(
                             if (dist < bestDist) {
                                 bestDist = dist
                                 bestArr = intArrayOf(r.left, r.top, r.right, r.bottom)
+                                bestNode = m
                             }
                         }
                     }
                     // 最近的候选离得太远（>150px）也视为未找到。
                     if (bestDist > maxDistSq) return null
-                    return bestArr
+                    val node = bestNode ?: return null
+                    // obtain() 在 finally 回收 matches 之前做：副本归调用方。
+                    return LiveNode(bestArr ?: return null, AccessibilityNodeInfo.obtain(node))
                 } finally {
                     matches.forEach { it.recycle() }
                 }
@@ -1734,17 +2029,23 @@ class ScreenController(
             // Weak path: walk for a node with the exact same bounds. Budgeted:
             // a miss fails loudly upstream instead of falling back to the
             // remembered centre.
-            return findNodeByBounds(root, entry.bounds, WalkBudget(SEARCH_BUDGET_MS))
+            val hit = findNodeByBounds(root, entry.bounds, WalkBudget(SEARCH_BUDGET_MS))
+                ?: return null
+            val r = Rect()
+            runCatching { hit.getBoundsInScreen(r) }
+            return LiveNode(intArrayOf(r.left, r.top, r.right, r.bottom), hit)
         } finally {
             root.recycle()
         }
     }
 
-    private fun findNodeByBounds(node: AccessibilityNodeInfo, bounds: String, budget: WalkBudget): IntArray? {
+    private fun findNodeByBounds(node: AccessibilityNodeInfo, bounds: String, budget: WalkBudget): AccessibilityNodeInfo? {
         val r = Rect()
         runCatching { node.getBoundsInScreen(r) }
         if (r.width() > 0 && r.height() > 0 && "${r.left},${r.top},${r.right},${r.bottom}" == bounds) {
-            return intArrayOf(r.left, r.top, r.right, r.bottom)
+            // 第十批·tapBlockers：返回 obtain() 副本归调用方——walk 的 finally
+            // 会回收沿途节点（包括命中节点本身），副本不受影响。
+            return AccessibilityNodeInfo.obtain(node)
         }
         for (i in 0 until node.childCount) {
             if (budget.spent()) return null
@@ -4877,6 +5178,8 @@ class ScreenController(
         private const val BLIND_TREE_NODES = 3
         /** tapByEid 重定位的最大容忍漂移（S4）：活节点中心离 dump 时中心超过它即视为已不在原处。 */
         private const val LIVE_MAX_DIST_PX = 150
+        /** 第十批·tapBlockers：遮挡 walk 的最大递归深度（防畸形深树栈溢出；正常树远不到 30 层）。 */
+        private const val OCCLUSION_MAX_DEPTH = 64
         private const val PX_COLS = 20
         private const val PX_ROWS = 32
         private const val PX_SAMPLE = 6

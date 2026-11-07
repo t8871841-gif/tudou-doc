@@ -2041,6 +2041,7 @@ return "${'A' + col}$row"
  * 认不出的统一 UNKNOWN，不硬编：
  * - refused: 开头的守卫拒绝（树被扣留的应用上盲点）→ TAP_REFUSED
  * - 坐标契约拒绝：开头的尺寸校验拒绝（尺寸未知/已变/换算后出屏）→ COORD_CONTRACT
+ * - 目标被遮住：开头的遮挡拒绝（目标被别的元素完全盖住，点原位置只会点到遮挡物）→ TAP_BLOCKED
  * - no input focus → NO_INPUT_FOCUS；no active window → NO_ACTIVE_WINDOW
  * - 只找到 N 个 / no node with id / bad element id → ELEMENT_NOT_FOUND
  * - 含 timeout（如 screenshot timeout、手势超时）→ TIMEOUT
@@ -2048,6 +2049,7 @@ return "${'A' + col}$row"
 private fun errorCodeFor(message: String): String {
 return when {
 message.startsWith("坐标契约拒绝") -> "COORD_CONTRACT"
+message.startsWith("目标被遮住") -> "TAP_BLOCKED"
 message.startsWith("refused:") -> "TAP_REFUSED"
 message.contains("no input focus") -> "NO_INPUT_FOCUS"
 message.contains("no active window") -> "NO_ACTIVE_WINDOW"
@@ -2109,6 +2111,10 @@ val snappedFrom = result.optString("snapped_from")
 if (snappedFrom.isNotEmpty()) {
 parts += "落点被吸附：从 $snappedFrom 吸到 ${result.optString("snapped_to")}"
 }
+val divertedBy = result.optString("diverted_by")
+if (divertedBy.isNotEmpty()) {
+parts += "落点被遮挡改道：原中心被「${divertedBy}」盖住，已改点未遮挡处"
+}
 val text = result.optString("text")
 if (text.isNotEmpty()) parts += "框内文字：${text.take(40)}"
 val eh = result.optString("elements_hint")
@@ -2155,7 +2161,7 @@ private const val SYSTEM_PROMPT =
 "输入文字：先用编号点输入框，下一个动作必须紧接着就是 type，不许在点框和输入之间插别的动作，也不许重复点同一个输入框；如果上一步的点击已经把回复框/评论框带起来并聚焦（结果会说明），直接 type，不要再点一次输入条（树被扣留的应用里输入条很薄，点它容易误点到下面的内容）。" +
 "开屏广告、会员弹窗、更新提示、权限请求这类挡路的弹窗，先处理掉再继续任务。" +
 "上一步结果说「界面没变化」就是大概率没点中：不要把同一个动作原样再发一遍（连着重复同一个动作会被判定为原地打转、任务直接中止），换瞄准方式（先 zoom 核对、改用编号、或先滑动把目标挪到清楚的位置）。" +
-"上一步的问题会带一个错误码：ELEMENT_NOT_FOUND（要找的元素不存在）、TAP_REFUSED（系统拒绝了这次点按，先 zoom 再点）、COORD_CONTRACT（坐标契约拒绝：屏幕尺寸未知或已变，坐标不可信，改走编号 eid 点目标，不要重发同一坐标）、TIMEOUT（动作超时，不知道成没成）、NO_INPUT_FOCUS（没有输入框获得焦点，先点输入框）、NO_ACTIVE_WINDOW（当前没有可操作的窗口）、PARSE_ERROR（你发的动作缺字段或格式不对）、UNKNOWN（其他原因）。按码换招，别对着同一个码重复同一个动作。" +
+"上一步的问题会带一个错误码：ELEMENT_NOT_FOUND（要找的元素不存在）、TAP_REFUSED（系统拒绝了这次点按，先 zoom 再点）、TAP_BLOCKED（目标被别的元素完全遮住，先把遮挡物处理掉——关弹窗、收起悬浮窗、滑开遮挡——再重新读屏点目标，不要原样重发）、COORD_CONTRACT（坐标契约拒绝：屏幕尺寸未知或已变，坐标不可信，改走编号 eid 点目标，不要重发同一坐标）、TIMEOUT（动作超时，不知道成没成）、NO_INPUT_FOCUS（没有输入框获得焦点，先点输入框）、NO_ACTIVE_WINDOW（当前没有可操作的窗口）、PARSE_ERROR（你发的动作缺字段或格式不对）、UNKNOWN（其他原因）。按码换招，别对着同一个码重复同一个动作。" +
 "上一步标「结果未知」时，那个动作可能动了也可能没动——不要直接重做同样的动作，先看紧凑表和截图确认成没成，再决定下一步。" +
 "屏幕下方有个「停止」按钮，用户随时可以点它停下任务；任务可能因此提前结束，不用你处理。" +
 "wait 只在页面真的在加载时用；需要连着等时，每次必须比上一次等得更久（如 1500→3000→6000），发相同毫秒数的 wait 同样会被判打转；等到了上限界面还是一动不动，那不是在加载，是卡住了或被弹窗/登录挡住了，换路线或 fail 说明。" +
