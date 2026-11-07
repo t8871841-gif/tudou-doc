@@ -1621,6 +1621,10 @@ val outcomeUnknown: Boolean = false
 * tapAim/longPressAim（x/y 是所看图片的 0–1000 相对坐标，on 指明读自全屏图
 * "screen" 还是放大图 "zoom"）；swipe 走 swipeNorm（0–1000 相对坐标直通，
 * 可带 screens 连滑多屏）；zoom 走 zoomAim（只吃 cell，x/y 先换算成 cell）。
+* 第九批·坐标契约：坐标类动作（tap/longPress 的 cell/x/y、swipe、zoom 中心点）
+* 进 ScreenController 前先过坐标契约（contractSize：范围 + 尺寸已知 + 与最近
+* 一次观察一致 + 换算后像素落屏内），不通过直接拒执行、错码 COORD_CONTRACT，
+* 记一步失败、模型下一轮改走 eid；eid/sel 不受此限（活树重定位）。
 * internal：FlowRuntime 的变异步复用这里的映射，单步行为不变。
 */
 /**
@@ -2036,12 +2040,14 @@ return "${'A' + col}$row"
  * 单步失败的错误码（回喂模型按码换招用）。分类只认控制层实际抛出的文案，
  * 认不出的统一 UNKNOWN，不硬编：
  * - refused: 开头的守卫拒绝（树被扣留的应用上盲点）→ TAP_REFUSED
+ * - 坐标契约拒绝：开头的尺寸校验拒绝（尺寸未知/已变/换算后出屏）→ COORD_CONTRACT
  * - no input focus → NO_INPUT_FOCUS；no active window → NO_ACTIVE_WINDOW
  * - 只找到 N 个 / no node with id / bad element id → ELEMENT_NOT_FOUND
  * - 含 timeout（如 screenshot timeout、手势超时）→ TIMEOUT
  */
 private fun errorCodeFor(message: String): String {
 return when {
+message.startsWith("坐标契约拒绝") -> "COORD_CONTRACT"
 message.startsWith("refused:") -> "TAP_REFUSED"
 message.contains("no input focus") -> "NO_INPUT_FOCUS"
 message.contains("no active window") -> "NO_ACTIVE_WINDOW"
@@ -2126,7 +2132,7 @@ private const val SYSTEM_PROMPT =
 "3. 输入消息并发送\n" +
 "已完成的子目标在行首标 ✓（如“1. ✓ 打开微信”）；没做完的照常列；卡住时修订计划（重排、改写、插入纠正步骤、换策略），修订后的计划在回复里一并给出。没有计划可列时可以不写计划，只输出下一步动作。" +
 "{\"action\":\"tap\",\"eid\":\"s3f9a2\"} 点紧凑表里的稳定编号（最优先、最稳；e 数字编号也认，但只对当轮有效）；" +
-"或 {\"action\":\"tap\",\"x\":540,\"y\":1200} 按 0-1000 相对坐标点你刚看到的全屏截图；" +
+"或 {\"action\":\"tap\",\"x\":540,\"y\":700} 按 0-1000 相对坐标点你刚看到的全屏截图；坐标只对本轮看到的那张屏有效，屏幕转了向、尺寸变了或还没读到过界面时坐标动作会被直接拒绝并告诉你改走编号 eid，不要重发同一坐标。" +
 "或 {\"action\":\"tap\",\"cell\":\"D7\",\"part\":\"tr\"} 按截图上的网格格号点（part 是格内九宫格部位，可省略）。" +
 "若这一步是在已跳到另一应用的界面上点的（点开分享面板/外部链接/权限弹窗之后，前台已不是原应用），加 \"handover\":true，否则前台校验会拦住；流里的交接步同样加这个字段。" +
 "{\"action\":\"longPress\",\"eid\":\"s3f9a2\"} 长按稳定编号，可加 \"ms\":800。" +
@@ -2149,7 +2155,7 @@ private const val SYSTEM_PROMPT =
 "输入文字：先用编号点输入框，下一个动作必须紧接着就是 type，不许在点框和输入之间插别的动作，也不许重复点同一个输入框；如果上一步的点击已经把回复框/评论框带起来并聚焦（结果会说明），直接 type，不要再点一次输入条（树被扣留的应用里输入条很薄，点它容易误点到下面的内容）。" +
 "开屏广告、会员弹窗、更新提示、权限请求这类挡路的弹窗，先处理掉再继续任务。" +
 "上一步结果说「界面没变化」就是大概率没点中：不要把同一个动作原样再发一遍（连着重复同一个动作会被判定为原地打转、任务直接中止），换瞄准方式（先 zoom 核对、改用编号、或先滑动把目标挪到清楚的位置）。" +
-"上一步的问题会带一个错误码：ELEMENT_NOT_FOUND（要找的元素不存在）、TAP_REFUSED（系统拒绝了这次点按，先 zoom 再点）、TIMEOUT（动作超时，不知道成没成）、NO_INPUT_FOCUS（没有输入框获得焦点，先点输入框）、NO_ACTIVE_WINDOW（当前没有可操作的窗口）、PARSE_ERROR（你发的动作缺字段或格式不对）、UNKNOWN（其他原因）。按码换招，别对着同一个码重复同一个动作。" +
+"上一步的问题会带一个错误码：ELEMENT_NOT_FOUND（要找的元素不存在）、TAP_REFUSED（系统拒绝了这次点按，先 zoom 再点）、COORD_CONTRACT（坐标契约拒绝：屏幕尺寸未知或已变，坐标不可信，改走编号 eid 点目标，不要重发同一坐标）、TIMEOUT（动作超时，不知道成没成）、NO_INPUT_FOCUS（没有输入框获得焦点，先点输入框）、NO_ACTIVE_WINDOW（当前没有可操作的窗口）、PARSE_ERROR（你发的动作缺字段或格式不对）、UNKNOWN（其他原因）。按码换招，别对着同一个码重复同一个动作。" +
 "上一步标「结果未知」时，那个动作可能动了也可能没动——不要直接重做同样的动作，先看紧凑表和截图确认成没成，再决定下一步。" +
 "屏幕下方有个「停止」按钮，用户随时可以点它停下任务；任务可能因此提前结束，不用你处理。" +
 "wait 只在页面真的在加载时用；需要连着等时，每次必须比上一次等得更久（如 1500→3000→6000），发相同毫秒数的 wait 同样会被判打转；等到了上限界面还是一动不动，那不是在加载，是卡住了或被弹窗/登录挡住了，换路线或 fail 说明。" +

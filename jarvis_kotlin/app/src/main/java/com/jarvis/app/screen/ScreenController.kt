@@ -161,10 +161,98 @@ class ScreenController(
         return v
     }
 
+    // ---- 第九批·坐标契约（DroidRun _require_active_coordinate_contract 的 Jarvis 版） ----
+    //
+    // 坐标的流向：模型输出的 x/y、cell/part、OCR 行里的 [x,y]、zoom 图里的
+    // 0-1000，都是“某张图上的相对值”，不是像素；执行层在这里统一换算
+    // （tapNorm/longPressNorm/swipeNorm/lookRegion），换算用的尺寸只从一个
+    // 地方来——displaySize()（WindowManager.maximumWindowMetrics.bounds），
+    // screenW/screenH 本就是每次现读的 getter，不缓存。
+    //
+    // 契约（校验集中在这一处，各坐标入口只调 contractSize，不各写一份）：
+    //   1. 范围：0-1000（旧 requireNorm，不钳制——静默钳到边是模型看不见的误点）。
+    //   2. 尺寸已知且没过期：执行时的现读尺寸必须等于最近一次观察时盖的戳
+    //      （observedSize，由 dumpUiTree/screenshot 盖戳）；没盖过戳、读不到
+    //      尺寸、或两次尺寸不一样（旋转/分屏/悬浮窗变了尺寸），都直接拒执行。
+    //   3. 换算后像素落屏内：1000 恰好换算成宽/高本身，已在屏外，拒（旧行为里
+    //      像素层 tap() 也拒，本批只是把话说清、把码统一）。
+    // 校验与换算用同一份现读尺寸（contractSize 把它返回给调用方），不让
+    // “校验时一个尺寸、换算时另一个尺寸”的竞态漏过去。
+    //
+    // 拒绝形态：IllegalStateException，文案以“坐标契约拒绝：”开头——刻意不用
+    // 守卫的 "refused:" 前缀：TaskLoop 的自动 zoom 重拍只认 "refused:"，契约
+    // 拒绝不要触发它——被拒的坐标动作不该再拍一张 zoom 去点，而该让模型下一轮
+    // 改走编号 eid。TaskLoop 外层 catch 按文案映射成错误码 COORD_CONTRACT，
+    // 记一步失败、写进 lastError（复用现有失败计数与升级逻辑，不静默跳过）。
+    //
+    // 不受此限：eid/sel（tapByEid/tapBySelector 按活树当场重定位，像素来自
+    // 当前树，不走本函数）；像素入口 tap()/swipe()/longPress()（内部调用方
+    // 按窗口 bounds 自己算像素，如 expandFloatingApp，也不走本函数）。
+    //
+    // zoom 图坐标系：zoom 图内的 0-1000 是图自身的空间，不直接套屏契约——
+    // zoomToScreen 先验 zoom 图的尺寸戳（zoomSize，拍图时与 zoomRegion 同批
+    // 记录），过期/尺寸变了就拒；换算出的屏坐标再过 tapNorm 的屏契约，两道门。
+    //
+    // 保留缺口：displaySize 是整屏最大窗口，不是目标应用的实际窗口；目标应用
+    // 在分屏/小窗里时映射本来就按全屏算，本批不改映射，只保证尺寸已知且没过期。
+
+    /** 最近一次观察（dumpUiTree/screenshot）时盖的屏幕尺寸戳；没观察过为 null。 */
+    @Volatile
+    private var observedSize: android.graphics.Point? = null
+
+    /** 盖一次观察戳：读不到尺寸时记 null（下次坐标动作按“尺寸未知”拒）。 */
+    private fun noteObservedSize() {
+        observedSize = runCatching { displaySize(service) }.getOrNull()
+            ?.takeIf { it.x > 0 && it.y > 0 }
+    }
+
+    /**
+     * 坐标契约校验：范围 + 尺寸已知 + 与最近一次观察一致 + 换算后像素落屏内。
+     * 通过时返回校验用的那份现读尺寸，调用方按它换算；不通过抛
+     * IllegalStateException（文案见上，不用 "refused:" 前缀）。
+     */
+    private fun contractSize(vararg pts: Pair<Int, Int>): android.graphics.Point {
+        for ((nx, ny) in pts) {
+            requireNorm(nx, "x")
+            requireNorm(ny, "y")
+        }
+        val expected = observedSize
+            ?: throw IllegalStateException(
+                "坐标契约拒绝：屏幕尺寸未知（本轮还没读到过界面/截图，或读尺寸失败），" +
+                    "坐标不可信，请改走编号 eid 点目标，不要盲点坐标。"
+            )
+        val now = runCatching { displaySize(service) }.getOrNull()
+            ?.takeIf { it.x > 0 && it.y > 0 }
+            ?: throw IllegalStateException(
+                "坐标契约拒绝：屏幕尺寸未知（现在读不到屏幕尺寸），坐标不可信，" +
+                    "请改走编号 eid 点目标，不要盲点坐标。"
+            )
+        if (now != expected) {
+            throw IllegalStateException(
+                "坐标契约拒绝：屏幕尺寸已变（观察时 ${expected.x}x${expected.y}，现在 " +
+                    "${now.x}x${now.y}，可能旋转/分屏/悬浮窗变了），坐标不可信，请改走编号 " +
+                    "eid 点目标，不要盲点坐标。"
+            )
+        }
+        for ((nx, ny) in pts) {
+            val px = nx.toPixel(now.x)
+            val py = ny.toPixel(now.y)
+            if (px !in 0 until now.x || py !in 0 until now.y) {
+                throw IllegalStateException(
+                    "坐标契约拒绝：坐标 ($nx,$ny) 换算后像素 ($px,$py) 落在当前屏幕 " +
+                        "${now.x}x${now.y} 之外，请改走编号 eid 点目标，不要盲点坐标。"
+                )
+            }
+        }
+        return now
+    }
+
     fun tapNorm(nx: Int, ny: Int, beforePx: FloatArray? = null, handover: Boolean = false): JSONObject {
-        requireNorm(nx, "x"); requireNorm(ny, "y")
+        // 第九批·坐标契约：范围 + 尺寸已知/未过期 + 像素落屏内，一处校验；
+        // 换算用校验返回的那份现读尺寸（contractSize 已含 requireNorm）。
+        val size = contractSize(nx to ny)
         requireForeground(handover = handover)
-        val w = screenW; val h = screenH
+        val w = size.x; val h = size.y
         val px = nx.toPixel(w); val py = ny.toPixel(h)
         guardPopup(px, py, nx, ny)
         // Logged at the four norm/eid entry points rather than in [tap], even
@@ -180,9 +268,10 @@ class ScreenController(
     }
 
     fun longPressNorm(nx: Int, ny: Int, durationMs: Long, handover: Boolean = false): JSONObject {
-        requireNorm(nx, "x"); requireNorm(ny, "y")
+        // 第九批·坐标契约：与 tapNorm 同一道门（contractSize 已含 requireNorm）。
+        val size = contractSize(nx to ny)
         requireForeground(handover = handover)
-        val w = screenW; val h = screenH
+        val w = size.x; val h = size.y
         val px = nx.toPixel(w); val py = ny.toPixel(h)
         guardPopup(px, py, nx, ny)
         guardRepetition(px, py) {
@@ -464,6 +553,14 @@ class ScreenController(
     private var zoomAtMs = 0L
 
     /**
+     * 第九批·坐标契约：拍 zoom 图时的屏幕尺寸，与 zoomRegion/zoomAtMs 同批记录
+     * （见 lookRegion）。zoomToScreen 换算前先比它：图是旧尺寸拍的，图上坐标
+     * 已不可信，直接拒，不换算。
+     */
+    @Volatile
+    private var zoomSize: android.graphics.Point? = null
+
+    /**
      * Set when [typeText] puts text into an editor on a tree-blind app; cleared by
      * the next tap. While set, a tap that was not aimed off a fresh zoom is
      * refused — see [requireAimedSend].
@@ -534,6 +631,26 @@ class ScreenController(
                 "the last zoom predates the last gesture, so it no longer shows this " +
                     "screen (zoom 已过期）. Take a fresh zoom_screen_region and aim from " +
                     "that image instead of this one"
+            )
+        }
+        // 第九批·坐标契约（zoom 图坐标系）：图内 0-1000 是图自身的空间，换算前先
+        // 验拍图时的尺寸戳——拍图后旋转/分屏/悬浮窗变了尺寸，图上读的点已对不上
+        // 现在的屏，直接拒（重拍 zoom 或改走编号 eid）。文案不用 "refused:"
+        // 前缀，免得 TaskLoop 的自动 zoom 重拍把它当盲点守卫接住。
+        val zoomedSize = zoomSize
+        val nowSize = runCatching { displaySize(service) }.getOrNull()
+            ?.takeIf { it.x > 0 && it.y > 0 }
+        if (zoomedSize == null || nowSize == null) {
+            throw IllegalStateException(
+                "坐标契约拒绝：放大图没有记录拍图时的屏幕尺寸（或现在读不到），图上坐标" +
+                    "不可信，请重新 zoom 再点，或改走编号 eid。"
+            )
+        }
+        if (nowSize != zoomedSize) {
+            throw IllegalStateException(
+                "坐标契约拒绝：放大图是旧屏幕尺寸拍的（拍时 ${zoomedSize.x}x${zoomedSize.y}，" +
+                    "现在 ${nowSize.x}x${nowSize.y}），图上坐标已不可信，请重新 zoom 再点，" +
+                    "或改走编号 eid。"
             )
         }
         requireNorm(lx, "x"); requireNorm(ly, "y")
@@ -1049,16 +1166,18 @@ class ScreenController(
         // H6：交接步的滑动同样要把标志带给 swipe，否则前台校验会拦。
         handover: Boolean = false,
     ): JSONObject {
-        requireNorm(nx1, "x1"); requireNorm(ny1, "y1")
-        requireNorm(nx2, "x2"); requireNorm(ny2, "y2")
+        // 第九批·坐标契约：起终两点同过一道门（contractSize 已含 requireNorm）；
+        // 换算用校验返回的那份现读尺寸。像素层 swipe() 本身没有落屏检查，
+        // 1000 这类边值以前会直接发出去，本批起在归一化层就拒。
+        val size = contractSize(nx1 to ny1, nx2 to ny2)
         // Not a sample, but it moves everything on screen: without it the
         // offline pairing would read a post-scroll retry as a correction of a
         // pre-scroll miss, at a point that no longer means the same thing.
         // L11：这里记原值；钳制只在 swipe/swipeScreens 里做一次，那里会把实际
         // 用的时长与原值一起返回给调用方。
         GroundingLog.noteSwipe(nx1, ny1, nx2, ny2, durationMs, actor = "brain")
-        val px1 = nx1.toPixel(screenW); val py1 = ny1.toPixel(screenH)
-        val px2 = nx2.toPixel(screenW); val py2 = ny2.toPixel(screenH)
+        val px1 = nx1.toPixel(size.x); val py1 = ny1.toPixel(size.y)
+        val px2 = nx2.toPixel(size.x); val py2 = ny2.toPixel(size.y)
         if (screens != null) return swipeScreens(px1, py1, px2, py2, durationMs, screens, handover)
         return swipe(px1, py1, px2, py2, durationMs, fling, handover = handover)
     }
@@ -2994,6 +3113,10 @@ class ScreenController(
         // 不拦截截图；是否拍得到只由系统 FLAG_SECURE 决定。
         // lookRegion/zoomAim 内部调 screenshot，这条链路也跟着通。
         val fgPkg = foregroundPkg().orEmpty()
+        // 第九批·坐标契约：拍图就是一次观察，盖戳——模型若对着这张图瞄准，
+        // 执行时比的就是拍图时的尺寸；旋转发生在 dump 与截图之间时，以这张
+        // 更晚的戳为准，不让旧 dump 的戳误拒一张新图上读的坐标。
+        noteObservedSize()
         // Settle before capture: images loading and lists settling MOVE the
         // things a screenshot is about to be used to aim at — a shot taken
         // mid-settle gives the brain targets that have already shifted by
@@ -3226,6 +3349,10 @@ class ScreenController(
      */
     fun lookRegion(nx: Int, ny: Int, w: Int, h: Int, mark: IntArray? = null): JSONObject {
         requireNorm(nx, "x"); requireNorm(ny, "y")
+        // 第九批·坐标契约：zoom 的中心点也是屏坐标，先过屏契约（尺寸未知/已变
+        // 就拒，不拍一张对不上现在屏幕的放大图）。中心点通过后，区域裁剪仍用
+        // 现读尺寸做钳制（见下），保证裁出的区域一定在屏内。
+        contractSize(nx to ny)
         if (w <= 0 || h <= 0 || w > 1000 || h > 1000) {
             throw IllegalArgumentException("w and h must be 1..1000 (relative), got w=$w h=$h")
         }
@@ -3276,6 +3403,11 @@ class ScreenController(
             // coordinates without the brain doing the arithmetic itself.
             zoomRegion = intArrayOf(relLeft, relTop, relRight, relBottom)
             zoomAtMs = SystemClock.uptimeMillis()
+            // 第九批·坐标契约：与 zoomRegion 同批记下拍图时的屏幕尺寸，供
+            // zoomToScreen 验图上坐标是否还对得上现在的屏；读不到记 null，
+            // 下次 on="zoom" 按“尺寸未知”拒（fail closed）。
+            zoomSize = runCatching { displaySize(service) }.getOrNull()
+                ?.takeIf { it.x > 0 && it.y > 0 }
             val gridded = withAimGrid(scaled, zoom = true)
             if (mark != null) {
                 drawCrosshair(
@@ -3417,6 +3549,9 @@ class ScreenController(
                 lastError = null
                 if (isDumpUsable(out)) {
                     if (attempts > 1) out.put("dump_retries", attempts - 1)
+                    // 第九批·坐标契约：读到一张树就盖一次观察戳（尺寸与树的好坏无关，
+                    // 只记“此刻的屏是这个尺寸”，供本轮坐标动作比对）。
+                    noteObservedSize()
                     return out
                 }
             }
@@ -3444,6 +3579,9 @@ class ScreenController(
         if (lastError != null) {
             out.put("dump_last_error", lastError.message ?: lastError.javaClass.simpleName)
         }
+        // 第九批·坐标契约：重试耗尽也盖戳——树没读到不代表尺寸未知，尺寸是
+        // 另一路读的；盖了戳，本轮按截图/OCR 坐标点的动作仍有尺寸可比对。
+        noteObservedSize()
         return out
     }
 
