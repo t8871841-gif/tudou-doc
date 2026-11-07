@@ -1625,6 +1625,10 @@ val outcomeUnknown: Boolean = false
 * 进 ScreenController 前先过坐标契约（contractSize：范围 + 尺寸已知 + 与最近
 * 一次观察一致 + 换算后像素落屏内），不通过直接拒执行、错码 COORD_CONTRACT，
 * 记一步失败、模型下一轮改走 eid；eid/sel 不受此限（活树重定位）。
+* 第十一批·定位回退：eid/sel 在活树里找不到时按 dump 时记下的三重信息回退
+* （resource_id 放宽 → bounds 位置 → 文字，多个同文字不乱点），三重都找不到
+* 才报 ELEMENT_NOT_FOUND；回退成功不算失败、但结果里写明走了回退，模型下轮
+* 用新编号；纯坐标动作（cell/x/y）不走回退。
 * internal：FlowRuntime 的变异步复用这里的映射，单步行为不变。
 */
 /**
@@ -2044,6 +2048,7 @@ return "${'A' + col}$row"
  * - 目标被遮住：开头的遮挡拒绝（目标被别的元素完全盖住，点原位置只会点到遮挡物）→ TAP_BLOCKED
  * - no input focus → NO_INPUT_FOCUS；no active window → NO_ACTIVE_WINDOW
  * - 只找到 N 个 / no node with id / bad element id → ELEMENT_NOT_FOUND
+ * - 找不到元素（三重回退也没找到、多个同文字分不清）→ ELEMENT_NOT_FOUND
  * - 含 timeout（如 screenshot timeout、手势超时）→ TIMEOUT
  */
 private fun errorCodeFor(message: String): String {
@@ -2054,7 +2059,8 @@ message.startsWith("refused:") -> "TAP_REFUSED"
 message.contains("no input focus") -> "NO_INPUT_FOCUS"
 message.contains("no active window") -> "NO_ACTIVE_WINDOW"
 message.contains("只找到") || message.contains("no node with id") ||
-message.contains("bad element id") -> "ELEMENT_NOT_FOUND"
+message.contains("bad element id") || message.contains("is no longer on screen") ||
+message.contains("多个同文字") || message.contains("三重回退") -> "ELEMENT_NOT_FOUND"
 message.contains("timeout", ignoreCase = true) -> "TIMEOUT"
 else -> "UNKNOWN"
 }
@@ -2115,6 +2121,12 @@ val divertedBy = result.optString("diverted_by")
 if (divertedBy.isNotEmpty()) {
 parts += "落点被遮挡改道：原中心被「${divertedBy}」盖住，已改点未遮挡处"
 }
+// 第十一批·定位回退：走了回退的成功也要明说——旧编号/旧选择器已过期，这次
+// 是按 dump 时记下的位置或文字找回的，下轮只用最新紧凑表里的编号。
+if (result.optBoolean("fallback", false)) {
+val how = if (result.optString("via") == "text") "文字" else "位置"
+parts += "定位回退：编号已过期，这次是按 dump 时记下的${how}在活树里找回的，下轮只用最新紧凑表里的编号，不要再用旧编号"
+}
 val text = result.optString("text")
 if (text.isNotEmpty()) parts += "框内文字：${text.take(40)}"
 val eh = result.optString("elements_hint")
@@ -2128,6 +2140,7 @@ private const val SYSTEM_PROMPT =
 "紧凑表是默认且最准的观察：每行格式「稳定编号|类型|文字|[中心x,中心y]」，坐标是系统算好的 0-1000 相对值；稳定编号（s 开头，如 s3f9a2）跨轮不变，同一元素每轮同一个编号，点它就用这个编号；列表型界面（聊天列表、动态流、搜索结果）里同一形状会重复出现，要认准目标文字所在的那一行，只点那一行的编号，绝不把一行的名字配上另一行的按钮。" +
 "文字为 # 开头的是控件的内部 id，不是屏幕上印的字，只能用来区分控件，不许当可见文字。" +
 "有编号就用编号点（tap 的 eid，优先用紧凑表的稳定编号），绝不拿 [x,y] 或截图位置重算坐标去点一个有编号的元素。" +
+"若某步结果说编号已过期、是按位置或文字找回的，那个编号就作废了，下轮只用最新紧凑表里的编号，不要再用旧编号。" +
 "没文字没说明的图标按钮靠类型和中心坐标认领（比如某条动态下方的评论图标就是那条动态的），也可以先 zoom 看清再点。" +
 "稳定编号只对当前这一屏态有效：元素还在同一位置时每轮同一个编号；滚动或跳页面后编号会变，每轮只用最新紧凑表里的编号。e 数字编号（e3）只对当前这一轮的大纲有效，下一轮就作废了，优先用稳定编号。\n" +
 "每轮回复分两部分：先是计划（见下），再是下一步动作（一个 JSON 对象）；除计划和动作外不要输出其他文字、不要用代码块包裹。" +

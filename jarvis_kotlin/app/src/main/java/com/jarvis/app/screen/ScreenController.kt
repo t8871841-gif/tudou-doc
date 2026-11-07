@@ -1435,13 +1435,21 @@ class ScreenController(
         val viewId: String?,     // resource id if any
         val bounds: String,      // "l,t,r,b" in pixels at dump time
         val epoch: Long,         // S5: 哪一次 dump 编的号；过期后 lookupEid 拒绝
+        // 第十一批·定位回退：dump 时的显示文字（UiSelector.label / 紧凑表 label，
+        // 与 stableId 里参与编号的那份文字同一份）。三重信息就存在这里——
+        // resource_id（viewId）+ bounds + text 全在 EidEntry 里，不另造索引。
+        // 空串或 "#" 开头的（只有内部 id、屏上无字）不参与文字回退。
+        val label: String = "",
     )
 
     /**
      * 第十批·tapBlockers：重定位到的活节点。node 是 obtain() 出来的独立副本，
      * 调用方用完负责 recycle（walk 沿途的原节点照常回收，副本不受影响）。
+     * 第十一批：via 记这一重定位是哪一重找到的——"eid"（resource_id 强匹配）、
+     * "bounds"（dump 时记下的位置：bounds 精确或放宽后的位置匹配）、"text"
+     * （dump 时记下的文字）。调用方把 via 写进结果，模型据此知道旧编号已过期。
      */
-    private class LiveNode(val bounds: IntArray, val node: AccessibilityNodeInfo)
+    private class LiveNode(val bounds: IntArray, val node: AccessibilityNodeInfo, val via: String = "eid")
 
     private val eidLock = Any()
     private val eidIndex = HashMap<Int, EidEntry>()
@@ -1460,14 +1468,9 @@ class ScreenController(
         requireForeground(entry.pkg, handover)
         // Re-locate live before touching anything: a match means the element
         // still exists where we found it; no match means either it scrolled
-        // away or the pane changed — fail loudly and ask for a fresh dump
-        // instead of tapping remembered pixels that now belong to something else.
-        val live = findLiveNode(entry)
-            ?: throw IllegalStateException(
-                "element '$eid' is no longer on screen where the last dump put it " +
-                    "(scrolled away or page changed) — the remembered position is NOT " +
-                    "tapped. Call get_screen_element again and use an eid from the fresh list"
-            )
+        // away or the pane changed — 第十一批·定位回退：先走三重回退链
+        // （见 locateLive），三重都找不到才失败，不用陈旧像素兜底。
+        val live = locateLive(entry, eid)
         try {
             // 第十批·tapBlockers：按活树算遮挡，点最大未遮挡子区域的中心；
             // 全被盖住时 resolveTapPoint 直接抛错，绝不强点。
@@ -1479,6 +1482,8 @@ class ScreenController(
                 .put("eid", eid)
                 .put("px", "$x,$y")
                 .put("relocated", true)
+                .put("via", live.via)
+            if (live.via != "eid") result.put("fallback", true)
             point.divertedBy?.let { result.put("diverted_by", it) }
             return result
         } finally {
@@ -1489,12 +1494,8 @@ class ScreenController(
     fun longPressByEid(eid: String, durationMs: Long, handover: Boolean = false): JSONObject {
         val entry = lookupEid(eid)
         requireForeground(entry.pkg, handover)
-        val live = findLiveNode(entry)
-            ?: throw IllegalStateException(
-                "element '$eid' is no longer on screen where the last dump put it " +
-                    "(scrolled away or page changed) — the remembered position is NOT " +
-                    "long-pressed. Call get_screen_element again and use an eid from the fresh list"
-            )
+        // 第十一批·定位回退：与 tapByEid 同一条 locateLive（三重回退链）。
+        val live = locateLive(entry, eid, verb = "long-pressed")
         try {
             // 第十批·tapBlockers：与 tapByEid 同一道遮挡判定（长按点错地方一样糟）。
             val point = resolveTapPoint(live.node, "'${eid}'")
@@ -1505,6 +1506,8 @@ class ScreenController(
                 .put("eid", eid)
                 .put("px", "$x,$y")
                 .put("relocated", true)
+                .put("via", live.via)
+            if (live.via != "eid") result.put("fallback", true)
             point.divertedBy?.let { result.put("diverted_by", it) }
             return result
         } finally {
@@ -1813,6 +1816,7 @@ class ScreenController(
                             viewId = n.viewIdResourceName?.ifEmpty { null },
                             bounds = bounds,
                             epoch = eidEpoch,
+                            label = label,
                         )
                     }
                 }
@@ -1837,6 +1841,8 @@ class ScreenController(
      * tap_sel 步）。匹配的节点本身不可点时，沿父链爬到最近的可点祖先再点；
      * 没有可点祖先就直说。index 超出会直说（“只找到 N 个，第 M 个不存在”），
      * 不点别的元素。
+     * 第十一批：全条件零命中且 index 为 0 时，若 sel 带文字条件，退到只按文字
+     * 找唯一匹配（多个同文字报歧义不乱点）；命中了几个但 index 超出时不回退。
      */
     // H6：交接步（分享面板/外部链接/权限弹窗后在另一应用上点）把标志带进来，
     // 否则 tapSelector 里 requireForeground() 会以前台包不对把手势拦住。
@@ -1849,7 +1855,8 @@ class ScreenController(
     private fun tapSelector(sel: JSONObject, index: Int, hold: Boolean, durationMs: Long, handover: Boolean = false): JSONObject {
         requireForeground(handover = handover)
         val found = selectNodes(sel)
-        val nodes = found.nodes
+        var nodes = found.nodes
+        var viaTextFallback = false
         // M33: 预算耗尽时结果是截断的，按索引点可能点到“第 N 个”之外的元素——拒绝。
         if (found.partial) {
             nodes.forEach { it.recycle() }
@@ -1860,9 +1867,23 @@ class ScreenController(
             )
         }
         if (index < 0 || index >= nodes.size) {
-            val total = nodes.size
-            nodes.forEach { it.recycle() }
-            throw IllegalArgumentException("只找到 $total 个，第 ${index + 1} 个不存在")
+            // 第十一批·定位回退（sel 侧）：全条件 AND 一个都没命中、且 index 为 0
+            // （缺省）时，若选择器带了文字条件，退到“只按文字”再找一次——选择器
+            // 里的 viewId/className 可能已过期，文字还在。只认唯一匹配，多个同
+            // 文字报歧义不乱点；命中了几个、但 index 超出时不回退（模型要的是
+            // 第 M 个，换一个点就是点错）；要第 N 个（N>0）时也不回退。
+            if (nodes.isEmpty() && index == 0) {
+                val fallbackNode = findSelectorTextFallback(sel)
+                if (fallbackNode != null) {
+                    nodes = listOf(fallbackNode)
+                    viaTextFallback = true
+                }
+            }
+            if (!viaTextFallback) {
+                val total = nodes.size
+                nodes.forEach { it.recycle() }
+                throw IllegalArgumentException("只找到 $total 个，第 ${index + 1} 个不存在")
+            }
         }
         val target = nodes[index]
         var cur: AccessibilityNodeInfo? = target
@@ -1894,10 +1915,49 @@ class ScreenController(
             GroundingLog.noteTapEid(sid, cx, cy, screenW, screenH, hold = hold, relocated = false, pkg = lastPkg())
             val result = if (hold) longPress(cx, cy, durationMs) else tap(cx, cy)
             point.divertedBy?.let { result.put("diverted_by", it) }
-            return result.put("sid", sid).put("via", "selector").put("climbed", climbed)
+            // 第十一批：文字回退命中的记 via "text" + fallback=true（与 eid 回退同款
+            // 词汇），TaskLoop 的 summarize 据此告诉模型旧选择器已过期、下轮重读屏。
+            if (viaTextFallback) result.put("fallback", true)
+            return result.put("sid", sid).put("via", if (viaTextFallback) "text" else "selector").put("climbed", climbed)
         } finally {
             nodes.forEach { it.recycle() }
             if (cur != null && cur !== target) cur.recycle()
+        }
+    }
+
+    /**
+     * sel 的文字回退：全条件 AND 零命中时，只按选择器里的文字条件（text /
+     * textContains / description / descriptionContains，取第一个有的）再找一次。
+     * 唯一匹配返回 obtain() 副本（归调用方）；多个匹配抛“多个同文字”不乱点；
+     * 没有文字条件、零匹配或列表被预算截断时返回 null，调用方按原错误处理。
+     */
+    private fun findSelectorTextFallback(sel: JSONObject): AccessibilityNodeInfo? {
+        val relaxed = JSONObject()
+        var key: String? = null
+        for (k in listOf("text", "textContains", "description", "descriptionContains")) {
+            if (sel.has(k) && sel.optString(k).isNotEmpty()) {
+                key = k
+                relaxed.put(k, sel.optString(k))
+                break
+            }
+        }
+        if (key == null) return null
+        val found = selectNodes(relaxed)
+        val matches = found.nodes
+        try {
+            // 截断的列表不可信：唯一匹配也可能是截断后剩下的假唯一。
+            if (found.partial) return null
+            if (matches.isEmpty()) return null
+            if (matches.size > 1) {
+                throw IllegalStateException(
+                    "选择器没命中，但按文字「${sel.optString(key)}」找到多个同文字的元素，" +
+                        "分不清是哪一个——只找到多个匹配、不乱点。Call get_screen_element again " +
+                        "and use an eid from the fresh list, do not guess coordinates"
+                )
+            }
+            return AccessibilityNodeInfo.obtain(matches[0])
+        } finally {
+            matches.forEach { it.recycle() }
         }
     }
 
@@ -2027,15 +2087,221 @@ class ScreenController(
                 }
             }
             // Weak path: walk for a node with the exact same bounds. Budgeted:
-            // a miss fails loudly upstream instead of falling back to the
-            // remembered centre.
+            // a miss falls through to the 第十一批 fallback chain (locateLive)
+            // instead of failing here — this rung is the "coordinates" rung
+            // (bounds 精确命中），via 记 "bounds" 以区别于 resource_id 强匹配。
             val hit = findNodeByBounds(root, entry.bounds, WalkBudget(SEARCH_BUDGET_MS))
                 ?: return null
             val r = Rect()
             runCatching { hit.getBoundsInScreen(r) }
-            return LiveNode(intArrayOf(r.left, r.top, r.right, r.bottom), hit)
+            return LiveNode(intArrayOf(r.left, r.top, r.right, r.bottom), hit, via = "bounds")
         } finally {
             root.recycle()
+        }
+    }
+
+    // ---- 第十一批·定位三重信息 + 回退链（Minitap focus_element_if_needed 的 Jarvis 版） ----
+    //
+    // 三重信息存在 EidEntry 里（不另造索引、不改 dump 格式、不改 JSON 动作协议）：
+    //   第 1 重 resource_id（viewId）+ 第 2 重 bounds + 第 3 重 text（label）。
+    //   stableId 本来就是 MD5(viewId|类名|label|取整 bounds），三重早就在编号里，
+    //   EidEntry 只是此前没把 label 单独留下来——本批只补了这一个字段。
+    //
+    // 回退顺序（只在 eid/sel 定位失败时触发，纯坐标动作 tapNorm/tapAim 不走）：
+    //   1. eid 强匹配（findLiveNode 原有）：viewId + bounds 相交 + 中心 ≤150px，
+    //      或 bounds 精确命中（via "eid" / "bounds"）。
+    //   2. 位置放宽（findFallbackNode 的坐标 rung，via "bounds"）：
+    //      (a) 同 viewId 但几何条件放宽（滚远了）：取离 dump 中心最近的；
+    //          微信会复用 id（如底部 tab 共用一个 id），最近中心是唯一判据，
+    //          这一点与强匹配的 S4 注释同款。(b) 与旧 bounds 重叠面积最大的节点，
+    //          须带文字或可点（滤掉无字大容器——旧 bounds 很大时整屏容器都会相交）。
+    //   3. 文字（via "text"）：label 与 dump 时完全相等（忽略大小写）、可见的节点。
+    //      歧义处理：多于 1 个匹配时取离 dump 中心最近的；但最近两个离 dump 中心的
+    //      距离差 ≤40px 时视为分不清——不乱点，报“多个同文字”失败，让模型重读屏
+    //      用新编号点。label 为空或以 "#" 开头（只有内部 id、屏上无字）时跳过本重。
+    //   三重都找不到才报失败（文案含“三重回退”，TaskLoop 映射 ELEMENT_NOT_FOUND）。
+    //
+    // 成本：回退只在主定位失败时多走一次带预算的全树 walk，与重定位同量级；
+    // 顺利的点按（主定位命中）零新增成本。回退找到的节点照常过第十批遮挡判定
+    // （调用方 tapByEid/longPressByEid 里 resolveTapPoint）与第九批坐标契约
+    // （契约只管纯坐标动作，eid 路径本就不受其限）——回退不绕过任何一道守卫。
+    // 回退成功不算失败，但结果里写 via + fallback=true，模型知道旧编号已过期，
+    // 下轮只用最新紧凑表里的编号；回退失败记一步失败（复用现有失败计数与升级）。
+
+    /** 回退结果：node 为 null 时 ambiguousText 区分“没找到”与“同文字太多分不清”。 */
+    private class FallbackOutcome(val node: LiveNode?, val ambiguousText: Boolean)
+
+    /**
+     * eid 定位的统一入口：先主定位（findLiveNode），失败再走三重回退链。
+     * 找不到时抛错（调用方 tapByEid/longPressByEid 共用，长按同款）。
+     */
+    private fun locateLive(entry: EidEntry, eid: String, verb: String = "tapped"): LiveNode {
+        findLiveNode(entry)?.let { return it }
+        val fb = findFallbackNode(entry)
+        if (fb.ambiguousText) {
+            throw IllegalStateException(
+                "找到多个同文字「${entry.label}」的元素，分不清是哪一个——只找到多个匹配、" +
+                    "不乱点。Call get_screen_element again and use an eid from the fresh list, " +
+                    "do not guess coordinates"
+            )
+        }
+        fb.node?.let { return it }
+        throw IllegalStateException(
+            "element '$eid' is no longer on screen where the last dump put it " +
+                "(scrolled away or page changed) — 三重回退（编号→位置→文字）都没找到它，" +
+                "the remembered position is NOT ${verb}. Call get_screen_element again " +
+                "and use an eid from the fresh list"
+        )
+    }
+
+    /**
+     * 三重回退链的第 2、3 重：一次 walk 同时收三类候选（同 viewId / 与旧 bounds
+     * 重叠 / 同文字），按“放宽的 resource_id → 位置 → 文字”顺序取用。
+     * 预算截断（walk 被 SEARCH_BUDGET_MS 截断）时算不清、不猜，直接报没找到。
+     */
+    private fun findFallbackNode(entry: EidEntry): FallbackOutcome {
+        val root = runCatching { activeRoot() }.getOrNull() ?: return FallbackOutcome(null, false)
+        try {
+            if (root.packageName?.toString() != entry.pkg) return FallbackOutcome(null, false)
+            val oldParts = entry.bounds.split(",").mapNotNull { it.toIntOrNull() }
+            val oldRect = if (oldParts.size == 4) Rect(oldParts[0], oldParts[1], oldParts[2], oldParts[3]) else null
+            val search = FallbackSearch(entry, oldRect)
+            walkFallback(root, search, WalkBudget(SEARCH_BUDGET_MS), 0)
+            if (search.cut) {
+                search.recycleAll()
+                return FallbackOutcome(null, false)
+            }
+            val idNode = search.bestIdNode
+            if (idNode != null) {
+                search.bestOverlapNode?.recycle()
+                search.bestTextNode?.recycle()
+                return FallbackOutcome(LiveNode(search.bestIdBounds, idNode, via = "bounds"), false)
+            }
+            val overlapNode = search.bestOverlapNode
+            if (overlapNode != null) {
+                search.bestTextNode?.recycle()
+                return FallbackOutcome(LiveNode(search.bestOverlapBounds, overlapNode, via = "bounds"), false)
+            }
+            val textNode = search.bestTextNode
+            if (textNode != null) {
+                if (search.secondTextDist - search.bestTextDist <= FALLBACK_TEXT_TIE_PX) {
+                    textNode.recycle()
+                    return FallbackOutcome(null, true)
+                }
+                return FallbackOutcome(LiveNode(search.bestTextBounds, textNode, via = "text"), false)
+            }
+            return FallbackOutcome(null, false)
+        } finally {
+            root.recycle()
+        }
+    }
+
+    /** 回退 walk 的候选收集：每类只留当前最优者的 obtain() 副本，换优时回收旧的。 */
+    private class FallbackSearch(val entry: EidEntry, val oldRect: Rect?) {
+        var cut = false
+        var bestIdNode: AccessibilityNodeInfo? = null
+        var bestIdDist = Long.MAX_VALUE
+        var bestIdBounds = intArrayOf(0, 0, 0, 0)
+        var bestOverlapNode: AccessibilityNodeInfo? = null
+        var bestOverlap = 0L
+        var bestOverlapDist = Long.MAX_VALUE
+        var bestOverlapBounds = intArrayOf(0, 0, 0, 0)
+        var bestTextNode: AccessibilityNodeInfo? = null
+        var bestTextDist = Double.MAX_VALUE
+        var bestTextBounds = intArrayOf(0, 0, 0, 0)
+        var secondTextDist = Double.MAX_VALUE
+        // 文字回退只认屏上印的字：空 label 或 "#内部 id" 不参与。
+        val useText = entry.label.isNotEmpty() && !entry.label.startsWith("#")
+
+        fun distSq(cx: Int, cy: Int): Long {
+            val dx = (cx - entry.px[0]).toLong()
+            val dy = (cy - entry.px[1]).toLong()
+            return dx * dx + dy * dy
+        }
+
+        fun recycleAll() {
+            bestIdNode?.recycle()
+            bestOverlapNode?.recycle()
+            bestTextNode?.recycle()
+            bestIdNode = null
+            bestOverlapNode = null
+            bestTextNode = null
+        }
+    }
+
+    /** 回退 walk：沿树下行，三类候选各记最优（同 viewId 取最近中心、重叠取最大面积、同文字取最近两个以便判歧义）。 */
+    private fun walkFallback(
+        node: AccessibilityNodeInfo,
+        search: FallbackSearch,
+        budget: WalkBudget,
+        depth: Int,
+    ) {
+        if (search.cut) return
+        if (budget.spent() || depth > OCCLUSION_MAX_DEPTH) {
+            search.cut = true
+            return
+        }
+        val r = Rect()
+        runCatching { node.getBoundsInScreen(r) }
+        if (r.width() > 0 && r.height() > 0) {
+            val cx = (r.left + r.right) / 2
+            val cy = (r.top + r.bottom) / 2
+            val distSq = search.distSq(cx, cy)
+            val label = UiSelector.label(node)
+            // 第 2 重 (a)：同 viewId，几何放宽——离 dump 中心最近的。
+            if (!search.entry.viewId.isNullOrEmpty() &&
+                node.viewIdResourceName == search.entry.viewId &&
+                distSq < search.bestIdDist
+            ) {
+                search.bestIdNode?.recycle()
+                search.bestIdNode = AccessibilityNodeInfo.obtain(node)
+                search.bestIdDist = distSq
+                search.bestIdBounds = intArrayOf(r.left, r.top, r.right, r.bottom)
+            }
+            // 第 2 重 (b)：与旧 bounds 重叠面积最大；须带文字或可点，滤无字大容器。
+            val old = search.oldRect
+            if (old != null && Rect.intersects(r, old) &&
+                (label.isNotEmpty() || node.isClickable || node.isLongClickable)
+            ) {
+                val overlap = overlapArea(r, old)
+                if (overlap > 0 && (overlap > search.bestOverlap ||
+                        (overlap == search.bestOverlap && distSq < search.bestOverlapDist))
+                ) {
+                    search.bestOverlapNode?.recycle()
+                    search.bestOverlapNode = AccessibilityNodeInfo.obtain(node)
+                    search.bestOverlap = overlap
+                    search.bestOverlapDist = distSq
+                    search.bestOverlapBounds = intArrayOf(r.left, r.top, r.right, r.bottom)
+                }
+            }
+            // 第 3 重：文字完全相等（忽略大小写）且可见；留最近两个，判歧义用。
+            if (search.useText && node.isVisibleToUser &&
+                label.equals(search.entry.label, ignoreCase = true)
+            ) {
+                val d = kotlin.math.sqrt(distSq.toDouble())
+                if (d < search.bestTextDist) {
+                    search.secondTextDist = search.bestTextDist
+                    search.bestTextNode?.recycle()
+                    search.bestTextNode = AccessibilityNodeInfo.obtain(node)
+                    search.bestTextDist = d
+                    search.bestTextBounds = intArrayOf(r.left, r.top, r.right, r.bottom)
+                } else if (d < search.secondTextDist) {
+                    search.secondTextDist = d
+                }
+            }
+        }
+        for (i in 0 until node.childCount) {
+            if (search.cut) break
+            if (budget.spent()) {
+                search.cut = true
+                break
+            }
+            val child = runCatching { childOf(node, i) }.getOrNull() ?: continue
+            try {
+                walkFallback(child, search, budget, depth + 1)
+            } finally {
+                child.recycle()
+            }
         }
     }
 
@@ -4422,6 +4688,7 @@ class ScreenController(
                     viewId = row.node.optString("id").ifEmpty { null },
                     bounds = row.bounds,
                     epoch = epoch,
+                    label = row.label,
                 )
             }
             val indent = "  ".repeat(minOf(row.depth, MAX_INDENT))
@@ -4490,6 +4757,7 @@ class ScreenController(
                     viewId = row.node.optString("id").ifEmpty { null },
                     bounds = row.bounds,
                     epoch = epoch,
+                    label = row.label,
                 )
             }
             lines.add("$sid|$type|${row.label}|[$normCx,$normCy]")
@@ -5178,6 +5446,8 @@ class ScreenController(
         private const val BLIND_TREE_NODES = 3
         /** tapByEid 重定位的最大容忍漂移（S4）：活节点中心离 dump 时中心超过它即视为已不在原处。 */
         private const val LIVE_MAX_DIST_PX = 150
+        /** 第十一批·定位回退：文字回退时最近两个同文字候选离 dump 中心的距离差 ≤ 它即视为分不清，不乱点。 */
+        private const val FALLBACK_TEXT_TIE_PX = 40
         /** 第十批·tapBlockers：遮挡 walk 的最大递归深度（防畸形深树栈溢出；正常树远不到 30 层）。 */
         private const val OCCLUSION_MAX_DEPTH = 64
         private const val PX_COLS = 20
