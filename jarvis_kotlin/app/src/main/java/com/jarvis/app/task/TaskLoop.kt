@@ -7,10 +7,8 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
-import com.jarvis.app.JarvisPrefs
 import com.jarvis.app.command.LocalCommands
-import com.jarvis.app.net.AutoGLMClient
-import com.jarvis.app.net.CustomClient
+import com.jarvis.app.net.LlmRegistry
 import com.jarvis.app.screen.ScreenCapture
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
@@ -88,14 +86,14 @@ object TaskLoop {
     /** 第六批·每轮核对前台包名：本来就会换前台应用的动作（openApp/back/home），包名变了是预期切换、不算跑偏。
      * flow 不在这里：流内步骤混着切应用与屏内动作，单看 kind 分不出来，执行后按流内实际步骤另判（见 flowHasAppSwitch）。 */
     private val EXPECTED_PKG_SWITCH_KINDS = setOf("openApp", "back", "home")
-    /** 第二批·核验员系统提示词（短问答专用，走 CustomClient.askOnce——GLM 模式下任务 client 只回 do(...)/finish(...) 动作串，问不出 A/B/C，聊天模型才能回自由文本）。 */
+    /** 第二批·核验员系统提示词（短问答专用，走注册表的聊天 client——GLM 模式下任务 client 只回 do(...)/finish(...) 动作串，问不出 A/B/C，聊天模型才能回自由文本）。 */
     private const val REFLECT_SYSTEM_PROMPT =
         "你是 Jarvis 任务核验员，只判断上一步动作到底成没成，不执行任何动作。" +
         "只输出一个字母加一句说明：A 成功/符合期望；B 到了错误页面、点错了地方；C 界面没有任何变化、动作没生效。" +
         "不要输出其他文字，不要解释推理过程。"
 
     /** 第十四批·Manager 系统提示词（短问答专用，与第二批 Reflector 同款调用方式：
-     * 走 CustomClient.askOnce，聊天模型回自由文本——GLM 模式下任务 client 只回
+     * 走注册表的聊天 client，聊天模型回自由文本——GLM 模式下任务 client 只回
      * do(...)/finish(...) 动作串，问不出计划块。Manager 只规划、不执行动作，
      * 只回计划块（第一批的计划段同款格式），不回 JSON 动作。 */
     private const val MANAGER_SYSTEM_PROMPT =
@@ -613,7 +611,7 @@ object TaskLoop {
                 // 只借角色分工、不照搬每步 3 次调用）：默认每步仍只有 Executor 那一次模型
                 // 调用（下面的 askModel），Manager 的活仍由那一次调用里的计划段兼任
                 // （第一批机制不动）；只在需要（重新）规划时才单独问一次 Manager（短问答，
-                // 复用 CustomClient.askOnce，走聊天模型，与第二批 Reflector 同款）：
+                // 经注册表取聊天 client，走聊天模型，与第二批 Reflector 同款）：
                 // (a) 计划为空（任务开头，还没有子目标）；(b) 连续失败升级首次触发
                 // （consecutiveFailures 首次达到 STUCK_THRESHOLD，本次升级只问一次）；
                 // (c) 模型说 done 但核验没通过、被顶回后的下一轮。三种触发各有“已尝试”
@@ -1426,30 +1424,22 @@ object TaskLoop {
 
 /** 同步等一轮模型回复（askOnce 是回调式，这里用闩锁包成同步，跑在循环线程上）。
  * M11：不等满 200 秒——每 200ms 轮询一次闩锁，每轮检查任务是否还存活，
- * 不存活就提前返回，急停不用等模型回话。L2：isAlive 同时传给两个任务 client
- * （签名都已接受 isAlive），不要只靠外层闩锁轮询兜底。 */
+ * 不存活就提前返回，急停不用等模型回话。L2：isAlive 同时传给任务 client
+ * （接口的 askOnce 接受 isAlive，见 net/LlmClient.kt），不要只靠外层闩锁轮询兜底。 */
 private fun askModel(ctx: Context, userText: String, image: String?, isAlive: () -> Boolean = { true }): Pair<String?, String?> {
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-// 按模型开关路由任务大脑：自定义走用户填的 OpenAI 兼容接口、带图问；
-// GLM 走手机专用模型 autoglm-phone（do(...) 格式由 AutoGLMClient 转成 JSON 动作串）。
-// 默认即 GLM。
-if (JarvisPrefs.getModelMode(ctx) == "custom") {
-CustomClient.askOnce(
-ctx, SYSTEM_PROMPT, userText, image,
-onResult = { reply = it; latch.countDown()},
-onError = { error = it; latch.countDown()},
-isAlive = isAlive
-)
-} else {
-AutoGLMClient.askOnce(
+// 第十五批·LLM 注册表：任务大脑经注册表按模型开关取（自定义 → CustomClient
+// 适配、GLM → AutoGLMClient 适配），分发在 LlmRegistry.taskClient 里；这里
+// 只认 LlmClient 接口，不再硬编码用哪个 client。行为与改前一字不变：同一模式
+// 下还是原来那个 client、同一回调、同一超时（MODEL_TIMEOUT_SEC 闩锁在下面）。
+LlmRegistry.taskClient(ctx).askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
 isAlive = isAlive,
-onResult = { reply = it; latch.countDown()},
-onError = { error = it; latch.countDown()}
+onResult = { reply = it; latch.countDown() },
+onError = { error = it; latch.countDown() }
 )
-}
 val deadlineMs = System.currentTimeMillis() + MODEL_TIMEOUT_SEC * 1000
 while (true) {
 val done = try {
@@ -1497,8 +1487,8 @@ return null
 }
 
 /**
- * 第二批·核验调用：同步问一次短问答（走 CustomClient.askOnce，返回原始文本）。
- * GLM 模式下任务 client（AutoGLMClient）只回转好的 JSON 动作串，问不出 A/B/C，
+ * 第二批·核验调用：同步问一次短问答（经注册表取聊天 client，返回原始文本）。
+ * GLM 模式下任务 client（AutoGLMClient 适配）只回转好的 JSON 动作串，问不出 A/B/C，
  * 所以核验统一走聊天模型（GLM 模式 glm-4.5 / 自定义模式用户填的模型）。
  * 返回 null = 没验证成（网络失败/解析失败/超时/被打断），调用方当没验证过。
  */
@@ -1511,11 +1501,11 @@ try { Thread.sleep(1000) } catch (_: InterruptedException) { return null }
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-CustomClient.askOnce(
+LlmRegistry.chatClient().askOnce(
 ctx, REFLECT_SYSTEM_PROMPT, userText, image,
+isAlive = isAlive,
 onResult = { reply = it; latch.countDown() },
-onError = { error = it; latch.countDown() },
-isAlive = isAlive
+onError = { error = it; latch.countDown() }
 )
 val deadlineMs = System.currentTimeMillis() + REFLECT_TIMEOUT_SEC * 1000
 while (true) {
@@ -1533,7 +1523,7 @@ return parseReflectVerdict(reply.orEmpty())
 }
 
 /**
- * 第十四批·Manager 短问答：同步问一次规划（走 CustomClient.askOnce，不带图——
+ * 第十四批·Manager 短问答：同步问一次规划（经注册表取聊天 client，不带图——
  * 规划不需要截图，任务原文 + 界面摘要 + 最近进展 + 失败记录就够了，省 token）。
  * 与第二批 askReflect 同款调用方式（降速 1 秒、短问答超时 60 秒、急停提前返回；
  * 超时复用 REFLECT_TIMEOUT_SEC，不另起常量）。
@@ -1547,11 +1537,11 @@ try { Thread.sleep(1000) } catch (_: InterruptedException) { return null }
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-CustomClient.askOnce(
+LlmRegistry.chatClient().askOnce(
 ctx, MANAGER_SYSTEM_PROMPT, userText, null,
+isAlive = isAlive,
 onResult = { reply = it; latch.countDown() },
-onError = { error = it; latch.countDown() },
-isAlive = isAlive
+onError = { error = it; latch.countDown() }
 )
 val deadlineMs = System.currentTimeMillis() + REFLECT_TIMEOUT_SEC * 1000
 while (true) {
