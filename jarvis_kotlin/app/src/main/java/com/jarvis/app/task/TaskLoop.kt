@@ -94,6 +94,26 @@ object TaskLoop {
         "只输出一个字母加一句说明：A 成功/符合期望；B 到了错误页面、点错了地方；C 界面没有任何变化、动作没生效。" +
         "不要输出其他文字，不要解释推理过程。"
 
+    /** 第十四批·Manager 系统提示词（短问答专用，与第二批 Reflector 同款调用方式：
+     * 走 CustomClient.askOnce，聊天模型回自由文本——GLM 模式下任务 client 只回
+     * do(...)/finish(...) 动作串，问不出计划块。Manager 只规划、不执行动作，
+     * 只回计划块（第一批的计划段同款格式），不回 JSON 动作。 */
+    private const val MANAGER_SYSTEM_PROMPT =
+        "你是 Jarvis 任务规划员（Manager），只负责规划，不执行任何动作。" +
+        "只输出一个计划块，不要输出 JSON 动作、不要解释推理过程。格式：\n" +
+        "计划：\n" +
+        "1. 第一步（一句话）\n" +
+        "2. ✓ 已完成的子目标\n" +
+        "3. 下一步\n" +
+        "已完成的子目标在行首标 ✓，没做完的照常列；卡住时修订计划（重排、改写、插入纠正步骤、换策略）。最多 10 条，每条一句话。"
+
+    /** 第十四批·Manager 单独问一次的触发原因（只用于审计日志里的中文说明）。 */
+    private enum class ManagerTrigger(val label: String) {
+        EMPTY_PLAN("计划为空"),
+        STUCK("连续失败升级"),
+        DONE_CHALLENGED("done 核验没通过")
+    }
+
     /**
      * 无进展计数（Andee 对齐后不再熔断 abort）：原来这里有一层“连续 7 步无真交互
      * 就强制 fail”的熔断，是 2026-10-24 微信任务故障追查后加的；但 Andee 没有这层
@@ -321,6 +341,17 @@ object TaskLoop {
         // FAILURE（一次升级只标一次，成功清零失败计数时复位；见计划段的升级块
         // 与下面的 r.ok 分支）。
         var subgoalStuckEpisodeMarked = false
+        // 第十四批·Manager/Executor 分工：Manager 单独问一次的“已尝试”旗子（成本护栏，
+        // 每种触发每轮任务最多单独问一次，失败也不重试——失败就当没规划过，按原流程继续）：
+        // - 计划为空：只在任务开头问一次（首步计划为空时）；问完无论成败不再因“空计划”重问，
+        //   Executor 那一次调用里的计划段（第一批机制）仍会请模型列计划。
+        // - 连续失败升级：每次连续失败升级（consecutiveFailures 首次达到 STUCK_THRESHOLD）
+        //   问一次；成功清零失败计数时复位（见下面的 r.ok 分支），下一轮升级可再问一次。
+        // - done 核验没通过：done 被顶回后的下一轮问一次；doneChallenged 本身只置位一次，
+        //   这旗子是双保险（Manager 失败时不让它每步都重问）。
+        var managerEmptyPlanTried = false
+        var managerStuckEpisodeAttempted = false
+        var managerDoneReplanAttempted = false
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
         // 第四批·断点升级：续跑时从断点恢复上一次的界面指纹，首步就能判断界面
@@ -578,6 +609,36 @@ object TaskLoop {
                     }
                 }
 
+                // 第十四批·Manager/Executor 分工（MA-v3 Manager/Executor 的 TaskLoop 版，
+                // 只借角色分工、不照搬每步 3 次调用）：默认每步仍只有 Executor 那一次模型
+                // 调用（下面的 askModel），Manager 的活仍由那一次调用里的计划段兼任
+                // （第一批机制不动）；只在需要（重新）规划时才单独问一次 Manager（短问答，
+                // 复用 CustomClient.askOnce，走聊天模型，与第二批 Reflector 同款）：
+                // (a) 计划为空（任务开头，还没有子目标）；(b) 连续失败升级首次触发
+                // （consecutiveFailures 首次达到 STUCK_THRESHOLD，本次升级只问一次）；
+                // (c) 模型说 done 但核验没通过、被顶回后的下一轮。三种触发各有“已尝试”
+                // 旗子，每轮任务每种最多问一次；Manager 的输出只进子目标状态机
+                // （applyPlanUpdate，与第一批的计划段同款格式），不直接发动作；
+                // Manager 调用失败（网络/解析/超时）时当没规划过、按原流程继续，
+                // 不记失败、不阻塞；Manager 不参与 Reflector 核验与输入校验。
+                // 调用点在提示词组装之前：问到的新计划直接进本轮 Executor 提示词的计划段。
+                val managerTrigger = when {
+                    subgoals.isEmpty() && !managerEmptyPlanTried -> ManagerTrigger.EMPTY_PLAN
+                    consecutiveFailures >= STUCK_THRESHOLD && !managerStuckEpisodeAttempted -> ManagerTrigger.STUCK
+                    doneChallenged && !managerDoneReplanAttempted -> ManagerTrigger.DONE_CHALLENGED
+                    else -> null
+                }
+                if (managerTrigger != null) {
+                    when (managerTrigger) {
+                        ManagerTrigger.EMPTY_PLAN -> managerEmptyPlanTried = true
+                        ManagerTrigger.STUCK -> managerStuckEpisodeAttempted = true
+                        ManagerTrigger.DONE_CHALLENGED -> managerDoneReplanAttempted = true
+                    }
+                    runManagerPlanning(
+                        ctx, managerTrigger, taskText, pkg, compact,
+                        history, recentFailureNotes, subgoals
+                    ) { alive() }
+                }
                 val userText = buildString {
                     append("任务：").append(taskText).append('\n')
                     append("当前前台应用包名：").append(pkg.ifEmpty { "未知" }).append('\n')
@@ -994,6 +1055,8 @@ object TaskLoop {
                     recentFailureNotes.clear()
                     // 第十三批·子目标状态机：成功即破局，下一次连续失败升级可再标一次 FAILURE。
                     subgoalStuckEpisodeMarked = false
+                    // 第十四批·Manager/Executor 分工：成功即破局，下一轮连续失败升级可再单独问一次 Manager。
+                    managerStuckEpisodeAttempted = false
                 } else if (!r.outcomeUnknown && !loopFailureCounted) {
                     consecutiveFailures++
                     recentFailureNotes += "第 ${step} 步：${describeAction(action)} → ${r.summary.take(80)}"
@@ -1467,6 +1530,105 @@ if (System.currentTimeMillis() >= deadlineMs) return null
 }
 if (error != null || reply == null) return null
 return parseReflectVerdict(reply.orEmpty())
+}
+
+/**
+ * 第十四批·Manager 短问答：同步问一次规划（走 CustomClient.askOnce，不带图——
+ * 规划不需要截图，任务原文 + 界面摘要 + 最近进展 + 失败记录就够了，省 token）。
+ * 与第二批 askReflect 同款调用方式（降速 1 秒、短问答超时 60 秒、急停提前返回；
+ * 超时复用 REFLECT_TIMEOUT_SEC，不另起常量）。
+ * 返回 null = 没问到计划（网络失败/解析失败/超时/被打断），调用方当没规划过。
+ */
+private fun askManager(
+ctx: Context, userText: String,
+isAlive: () -> Boolean = { true }
+): String? {
+try { Thread.sleep(1000) } catch (_: InterruptedException) { return null }
+val latch = CountDownLatch(1)
+var reply: String? = null
+var error: String? = null
+CustomClient.askOnce(
+ctx, MANAGER_SYSTEM_PROMPT, userText, null,
+onResult = { reply = it; latch.countDown() },
+onError = { error = it; latch.countDown() },
+isAlive = isAlive
+)
+val deadlineMs = System.currentTimeMillis() + REFLECT_TIMEOUT_SEC * 1000
+while (true) {
+val done = try {
+latch.await(200, TimeUnit.MILLISECONDS)
+} catch (_: InterruptedException) {
+return null
+}
+if (done) break
+if (!isAlive()) return null
+if (System.currentTimeMillis() >= deadlineMs) return null
+}
+if (error != null || reply == null) return null
+return reply
+}
+
+/** 第十四批·Manager 提示词（短问答）：任务原文、当前应用与界面摘要、当前计划、
+ * 最近进展（最多 5 步，每步截断 300 字）、最近失败记录、触发原因。只问计划，
+ * 不问动作；不带图、不带全量历史（短调用，防 token 膨胀）。 */
+private fun buildManagerText(
+trigger: ManagerTrigger, taskText: String, pkg: String, compact: String,
+history: List<String>, failureNotes: List<String>, subgoals: List<Subgoal>
+): String = buildString {
+append("任务：").append(taskText).append('\n')
+append("当前前台应用：").append(pkg.ifEmpty { "未知" }).append('\n')
+append("当前界面（紧凑表前 1200 字）：\n")
+append(compact.take(REFLECT_COMPACT_CHARS).ifEmpty { "（无可操作元素）" }).append('\n')
+val completedTexts = subgoalCompletedTexts(subgoals)
+val planTexts = subgoalActiveTexts(subgoals)
+if (planTexts.isNotEmpty() || completedTexts.isNotEmpty()) {
+append("当前计划：\n")
+for (c in completedTexts) append("✓ ").append(c).append('\n')
+for ((i, p) in planTexts.withIndex()) append(i + 1).append(". ").append(p).append('\n')
+}
+if (history.isNotEmpty()) {
+append("最近进展（最多 5 步）：\n")
+for (h in history.takeLast(5)) append(h.take(300)).append('\n')
+}
+if (failureNotes.isNotEmpty()) {
+append("最近失败：\n")
+for (n in failureNotes) append(n).append('\n')
+}
+append(
+when (trigger) {
+ManagerTrigger.EMPTY_PLAN -> "任务刚开始，还没有子目标计划，请按任务原文列出编号子目标列表。"
+ManagerTrigger.STUCK -> "最近连续失败，当前做法卡住了，请修订计划（重排、改写、插入纠正步骤、或换一条完全不同的策略）。"
+ManagerTrigger.DONE_CHALLENGED -> "执行者刚才说任务做完了，但核验没通过（上一步结果未知或界面没变），任务其实还没做完，请按剩余工作修订计划。"
+}
+).append("只输出计划块，不输出动作、不解释。")
+}
+
+/**
+ * 第十四批·跑一次 Manager 规划：问一次短问答，问到的计划块经 applyPlanUpdate
+ * 进子目标状态机（第十三批，与第一批 Executor 回复里的计划段同款语义：
+ * ✓ 的项 → SUCCESS，重列的 FAILURE 项 → NOT_STARTED，没重列的 FAILURE 项保留）。
+ * Manager 的输出只改 subgoals，不直接发动作、不碰失败计数、不碰历史与笔记。
+ * 问不到（网络/解析/超时/被打断）或回复里抠不到计划块时当没规划过、按原流程
+ * 继续：只记一条审计，不记失败、不阻塞、不重试（重试由触发旗子拦住，
+ * 下一轮 Executor 仍会按第一批机制自己列计划/修订计划）。
+ */
+private fun runManagerPlanning(
+ctx: Context, trigger: ManagerTrigger, taskText: String, pkg: String, compact: String,
+history: List<String>, failureNotes: List<String>, subgoals: MutableList<Subgoal>,
+isAlive: () -> Boolean = { true }
+) {
+val reply = askManager(ctx, buildManagerText(trigger, taskText, pkg, compact, history, failureNotes, subgoals), isAlive)
+if (reply == null) {
+AuditLog.append(ctx, "任务循环", "Manager 规划没问到（${trigger.label}）", "网络/解析/超时，按原流程继续")
+return
+}
+val parsed = parsePlan(reply)
+if (parsed == null) {
+AuditLog.append(ctx, "任务循环", "Manager 规划无结果（${trigger.label}）", "回复里没抠到计划块，按原流程继续")
+return
+}
+applyPlanUpdate(parsed, subgoals)
+AuditLog.append(ctx, "任务循环", "Manager 规划已更新（${trigger.label}）", "新计划 ${parsed.size} 条")
 }
 
 /** 第二批·核验提示词（单步）：任务、动作、执行结果说辞、执行前/后界面摘要。 */
