@@ -74,6 +74,9 @@ object TaskLoop {
     private const val MAX_PLAN_ITEMS = 10
     /** 第一批·已完成子目标保留上限，防列表无限长。 */
     private const val MAX_COMPLETED_ITEMS = 20
+    /** 第十二批·Scratchpad 持久笔记：笔记条数上限与单条字数上限（与第一批的计划段同款上限，防提示词膨胀）。 */
+    private const val MAX_NOTE_ITEMS = 10
+    private const val MAX_NOTE_CHARS = 60
     /** 第一批·连续失败升级阈值（MA-v3 err_to_manager_thresh=2）。 */
     private const val STUCK_THRESHOLD = 2
     /** 第二批·Reflector 精简版：核验超时（短问答，不用等满 200 秒）。 */
@@ -284,6 +287,12 @@ object TaskLoop {
         // 空列表，按新任务从空开始，不报错、不丢断点。
         val plan = resumeFrom?.plan?.takeLast(MAX_PLAN_ITEMS)?.toMutableList() ?: mutableListOf<String>()
         val completed = resumeFrom?.completed?.takeLast(MAX_COMPLETED_ITEMS)?.toMutableList() ?: mutableListOf<String>()
+        // 第十二批·Scratchpad 持久笔记（Minitap scratchpad / MA-v3 important_notes 的 TaskLoop 版）：
+        // notes 是模型可写的跨步持久笔记（账号、位置、已确认的事实），与 plan/completed
+        // 同款恢复方式：续跑时从断点恢复，超限只留最后 MAX_NOTE_ITEMS 条、每条截断
+        // MAX_NOTE_CHARS 字；旧断点没有该字段时默认空列表。笔记只进提示词，不参与
+        // 失败计数、不触发升级、不影响 done 判定。
+        val notes = resumeFrom?.notes?.takeLast(MAX_NOTE_ITEMS)?.map { it.take(MAX_NOTE_CHARS) }?.toMutableList() ?: mutableListOf<String>()
         // 补丁·计划回传两模式都成立：AutoGLMClient 已把抠到的计划块附在
         // JSON 动作串之后回传，GLM 模式同样能收到计划；抠不到时 plan 为空、
         // 按无计划回落（见 parsePlan 与下面的计划段）。
@@ -342,13 +351,14 @@ object TaskLoop {
                     // saveResume=false（内部核验任务）：不记断点、也不发“说继续”那句，
                     // onReply 不发，调用方（TripLoop）超时后自己收尾（S16）。
                     if (saveResume) {
-                        // 第四批·断点升级：断点连同当前计划与最后界面指纹一起记下，
-                        // 用户说“继续”时 plan/completed/prevScreenSig 一起恢复。
+                        // 第四批·断点升级：断点连同当前计划、笔记与最后界面指纹一起记下，
+                        // 用户说“继续”时 plan/completed/notes/prevScreenSig 一起恢复。
                         TaskResumeState.offer(
                             taskText, history.toList(), step,
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                             plan = plan.toList(), completed = completed.toList(),
-                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                            notes = notes.toList()
                         )
                         stoppedWithResume = true
                         finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
@@ -363,12 +373,13 @@ object TaskLoop {
                 // 锁屏了就停下记断点，不烧步数；播报里明说，解锁后说「继续」接着做。
                 if (isKeyguardLocked(ctx)) {
                     if (saveResume) {
-                        // 第四批·断点升级：同急停，断点连同计划与界面指纹一起记。
+                        // 第四批·断点升级：同急停，断点连同计划、笔记与界面指纹一起记。
                         TaskResumeState.offer(
                             taskText, history.toList(), step - 1,
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                             plan = plan.toList(), completed = completed.toList(),
-                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                            notes = notes.toList()
                         )
                         stoppedWithResume = true
                         finalReply = "手机锁了，解锁后我再继续。已停在第 ${step - 1} 步，解锁后说「继续」可以接着做。"
@@ -639,6 +650,18 @@ object TaskLoop {
                             append("还没有计划：请在回复里先列出编号子目标列表（最多 10 条，每条一句话），再输出 JSON 动作。\n")
                         }
                     }
+                    // 第十二批·Scratchpad 持久笔记：单独一段、贴在计划段附近（计划段
+                    // 之后、失败升级段之前）。有笔记就列出来并告诉模型怎么写新段；
+                    // 没笔记就只给一句写法提示（没有可记的可以不写，不强求）。
+                    // 笔记只来自模型回复，不自动从界面里抽；不参与失败计数、不触发
+                    // 升级、不影响 done 判定。
+                    if (notes.isNotEmpty()) {
+                        append("笔记（已确认的关键信息，跨步保留）：\n")
+                        for (n in notes) append("- ").append(n).append('\n')
+                        append("需要更新笔记时在回复里重写整个“笔记：”段（最多 10 条，每条一句话）；没新内容时不用重写，旧笔记会一直保留。\n")
+                    } else {
+                        append("需要记住的关键信息（账号、位置、已确认的事实）可以写在“笔记：”段里（与“计划：”段并列，每条一行以 - 开头，最多 10 条）；没有可记的可以不写。\n")
+                    }
                     // 第一批·连续失败升级（MA-v3 err_to_manager_thresh=2）：
                     // 最近 STUCK_THRESHOLD 步都失败时，不再让模型原地重试，
                     // 要求它修订计划（重排、改写、插入纠正步骤、换策略）。
@@ -715,6 +738,11 @@ object TaskLoop {
                         // 没带保留旧状态（宽容回落）。补丁后 GLM 模式的 reply
                         // 是 JSON 动作串 + 附在其后的计划块，parsePlan 能抠到。
                         parsePlan(reply.orEmpty())?.let { parsed -> applyPlanUpdate(parsed, plan, completed) }
+                        // 第十二批·Scratchpad 持久笔记：回复里带笔记段就以新段为准
+                        // 全量替换旧笔记；没带保留旧笔记（宽容回落，与计划同款）。
+                        // GLM 模式的 reply 是 JSON 动作串 + 附在其后的计划块与笔记块，
+                        // parseNotes 能抠到（见 AutoGLMClient.extractNotesBlock）。
+                        parseNotes(reply.orEmpty())?.let { parsed -> applyNotesUpdate(parsed, notes) }
                     }
                     if (action == null) {
                         badReply = reply
@@ -865,7 +893,8 @@ object TaskLoop {
                                     taskText, history.toList(), step - 1,
                                     foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                                     plan = plan.toList(), completed = completed.toList(),
-                                    screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                                    screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                                    notes = notes.toList()
                                 )
                                 stoppedWithResume = true
                                 finalReply = "任务卡在第 $step 步：在${pkg.ifEmpty { "未知界面" }}对同一目标反复做「${describeAction(action)}」，在同一界面反复打转，已停下。说「继续」可以接着做。"
@@ -1037,12 +1066,13 @@ object TaskLoop {
             }
             // 跑满步数也没完成：把断点记下来，用户说“继续”可以接着做（累计不超
             // MAX_TOTAL_STEPS 步）；内部任务（saveResume=false）不记断点（S16）。
-            // 第四批·断点升级：同急停/锁屏，断点连同计划与界面指纹一起记。
+            // 第四批·断点升级：同急停/锁屏，断点连同计划、笔记与界面指纹一起记。
             if (saveResume) TaskResumeState.offer(
                 taskText, history.toList(), step,
                 foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                 plan = plan.toList(), completed = completed.toList(),
-                screenSig = prevScreenSig.takeIf { it.isNotEmpty() }
+                screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                notes = notes.toList()
             )
             finalReply = if (saveResume) {
                 "任务跑满了步数上限（累计 $step 步）还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"
@@ -1586,6 +1616,58 @@ private fun applyPlanUpdate(parsed: List<PlanItem>, plan: MutableList<String>, c
         if (!completed.contains(item.text)) completed += item.text
     }
     while (completed.size > MAX_COMPLETED_ITEMS) completed.removeAt(0)
+}
+
+/**
+ * 第十二批·从模型回复里宽容抠出持久笔记段，复用第一批 parsePlan 的解析套路：
+ * 只看 JSON 动作对象之外的文本；找一行“笔记”开头的标题头，其后每行以 - 开头
+ * （也认 • / * / · 开头，或编号行）即一条笔记；遇到既不是笔记行也不是空行的
+ * 行就停（下一段的标题头、其他文字都到此为止）。没找到笔记块、或块里一条都
+ * 抠不到时返回 null（调用方保留旧笔记，不失败、不报错）。上限 MAX_NOTE_ITEMS
+ * 条，每条截断 MAX_NOTE_CHARS 字；花括号已剔除（笔记块附在 JSON 动作串之后时
+ * 花括号会让 parseAction 取 JSON 越界，GLM 侧同款处理）；同一条只取一次。
+ * 注意：标题头当行带的内容（如“笔记：账号尾号 1393”）不认，与 parsePlan
+ * 同款——模型须把每条笔记写在标题头之后的行上。
+ */
+private fun parseNotes(reply: String): List<String>? {
+    val start = reply.indexOf('{')
+    val end = reply.lastIndexOf('}')
+    val outside = if (start >= 0 && end > start) {
+        reply.substring(0, start) + "\n" + reply.substring(end + 1)
+    } else {
+        reply
+    }
+    val lines = outside.lineSequence().map { it.trim() }.toList()
+    val headerIdx = lines.indexOfFirst { it.startsWith("笔记") }
+    if (headerIdx < 0) return null
+    val items = mutableListOf<String>()
+    val numbered = Regex("""(\d{1,2})[.、)]\s*(.*)""")
+    for (i in headerIdx + 1 until lines.size) {
+        val line = lines[i]
+        if (line.isEmpty()) continue
+        val rest = when {
+            line.startsWith("- ") || line.startsWith("• ") || line.startsWith("* ") || line.startsWith("· ") -> line.substring(2).trim()
+            line.startsWith("-") || line.startsWith("•") || line.startsWith("*") || line.startsWith("·") -> line.substring(1).trim()
+            else -> numbered.matchEntire(line)?.groupValues?.get(2)?.trim() ?: break
+        }
+        if (rest.isEmpty()) continue
+        val cleaned = rest.replace("{", "").replace("}", "").trim()
+        if (cleaned.isEmpty()) continue
+        val item = cleaned.take(MAX_NOTE_CHARS)
+        if (!items.contains(item)) items += item
+        if (items.size >= MAX_NOTE_ITEMS) break
+    }
+    return if (items.isEmpty()) null else items
+}
+
+/**
+ * 第十二批·把解析出的笔记合并进循环状态：以新段为准全量替换旧笔记
+ * （与第一批的 applyPlanUpdate 同款语义）；调用方只在 parseNotes 非空时调，
+ * 没写笔记段的轮次保留旧笔记。笔记不参与失败计数、不触发升级、不影响 done 判定。
+ */
+private fun applyNotesUpdate(parsed: List<String>, notes: MutableList<String>) {
+    notes.clear()
+    notes.addAll(parsed.distinct().take(MAX_NOTE_ITEMS))
 }
 
 /** 本地流的结构校验：steps 必须是 1–15 项的数组，每项是带 action 的 JSON 对象。
@@ -2143,13 +2225,18 @@ private const val SYSTEM_PROMPT =
 "若某步结果说编号已过期、是按位置或文字找回的，那个编号就作废了，下轮只用最新紧凑表里的编号，不要再用旧编号。" +
 "没文字没说明的图标按钮靠类型和中心坐标认领（比如某条动态下方的评论图标就是那条动态的），也可以先 zoom 看清再点。" +
 "稳定编号只对当前这一屏态有效：元素还在同一位置时每轮同一个编号；滚动或跳页面后编号会变，每轮只用最新紧凑表里的编号。e 数字编号（e3）只对当前这一轮的大纲有效，下一轮就作废了，优先用稳定编号。\n" +
-"每轮回复分两部分：先是计划（见下），再是下一步动作（一个 JSON 对象）；除计划和动作外不要输出其他文字、不要用代码块包裹。" +
+"每轮回复先是计划（见下），再是下一步动作（一个 JSON 对象）；需要记关键信息时在计划后加一段“笔记：”（见下），没有可记的可以不写。除计划、笔记和动作外不要输出其他文字、不要用代码块包裹。" +
 "计划（任务开始时列出，之后每轮更新；最多 10 条，每条一句话）：\n" +
 "计划：\n" +
 "1. 打开微信\n" +
 "2. 找到联系人\n" +
 "3. 输入消息并发送\n" +
 "已完成的子目标在行首标 ✓（如“1. ✓ 打开微信”）；没做完的照常列；卡住时修订计划（重排、改写、插入纠正步骤、换策略），修订后的计划在回复里一并给出。没有计划可列时可以不写计划，只输出下一步动作。" +
+"笔记（与“计划：”段并列，记跨步关键信息——账号、位置、已确认的事实；最多 10 条，每条一句话）：\n" +
+"笔记：\n" +
+"- 账号尾号 1393\n" +
+"- 收款人在支付宝通讯录第 3 个\n" +
+"每条一行以 - 开头；需要更新笔记时重写整个“笔记：”段（以新段为准全量替换旧笔记），没新内容时不用重写，旧笔记会一直保留；没有可记的可以不写笔记。" +
 "{\"action\":\"tap\",\"eid\":\"s3f9a2\"} 点紧凑表里的稳定编号（最优先、最稳；e 数字编号也认，但只对当轮有效）；" +
 "或 {\"action\":\"tap\",\"x\":540,\"y\":700} 按 0-1000 相对坐标点你刚看到的全屏截图；坐标只对本轮看到的那张屏有效，屏幕转了向、尺寸变了或还没读到过界面时坐标动作会被直接拒绝并告诉你改走编号 eid，不要重发同一坐标。" +
 "或 {\"action\":\"tap\",\"cell\":\"D7\",\"part\":\"tr\"} 按截图上的网格格号点（part 是格内九宫格部位，可省略）。" +

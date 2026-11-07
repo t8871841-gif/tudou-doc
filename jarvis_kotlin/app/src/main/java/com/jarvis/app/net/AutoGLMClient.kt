@@ -135,6 +135,9 @@ object AutoGLMClient {
      * 补丁·计划回传：从原始回复里抠到的计划块附在 JSON 动作串之后一并返回
      * （JSON 串 + 换行 + “计划：\n1. …”），TaskLoop 的 parsePlan 只看 JSON
      * 对象之外的文本，能认到；抠不到时只返回 JSON 动作串，与原来一字不差。
+     * 第十二批·笔记回传：同款做法，抠到的笔记块也附在计划块之后返回
+     * （JSON 串 + 换行 + “计划：\n…” + 换行 + “笔记：\n- …”），TaskLoop
+     * 的 parseNotes 只看 JSON 对象之外的文本，能认到；抠不到时不附。
      */
     fun askOnce(
         ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
@@ -225,8 +228,12 @@ object AutoGLMClient {
                             ?: run { onError("AutoGLM 输出无法解析：${reply.take(200)}"); return }
                         // 补丁·计划回传：抠到的计划块附在 JSON 动作串之后交回
                         // TaskLoop；抠不到时与原来一字不差（只返回 JSON 动作串）。
+                        // 第十二批·笔记回传：同款做法，抠到的笔记块也附在后面
+                        // （计划块之后）；两块都抠不到时与原来一字不差。
                         val planBlock = extractPlanBlock(reply)
-                        onResult(if (planBlock != null) actionJson.toString() + "\n" + planBlock else actionJson.toString())
+                        val notesBlock = extractNotesBlock(reply)
+                        val extraBlocks = listOfNotNull(planBlock, notesBlock)
+                        onResult(if (extraBlocks.isNotEmpty()) actionJson.toString() + "\n" + extraBlocks.joinToString("\n") else actionJson.toString())
                     } catch (e: Exception) {
                         onError("解析 AutoGLM 返回内容失败：${e.message}")
                     }
@@ -257,6 +264,10 @@ object AutoGLMClient {
     /** 补丁·计划块上限，与 TaskLoop 的 MAX_PLAN_ITEMS / 60 字截断一致。 */
     private const val MAX_PLAN_ITEMS = 10
     private const val MAX_PLAN_ITEM_CHARS = 60
+
+    /** 第十二批·笔记块上限，与 TaskLoop 的 MAX_NOTE_ITEMS / MAX_NOTE_CHARS 一致。 */
+    private const val MAX_NOTE_ITEMS = 10
+    private const val MAX_NOTE_ITEM_CHARS = 60
 
     /**
      * 补丁·从 AutoGLM 原始回复里抠出子目标计划块（第一批补丁，让 GLM 模式的
@@ -314,6 +325,61 @@ object AutoGLMClient {
             append("计划：\n")
             for ((i, item) in items.withIndex()) {
                 append(i + 1).append(". ").append(item).append("\n")
+            }
+        }.trimEnd()
+    }
+
+    /**
+     * 第十二批·从 AutoGLM 原始回复里抠出持久笔记块（与补丁 extractPlanBlock
+     * 同款做法，让 GLM 模式的笔记机制生效）。先看 <think> 内容，再看 <answer>
+     * 标签之外的文本；找“笔记：”标记头 + 其后 - 开头的行，格式与
+     * TaskLoop.parseNotes 一致（- 文字，也认 • / * / · 开头或编号行）。抠到
+     * 返回“笔记：\n- …”纯文本块（最多 10 条，每条截断 60 字，花括号已剔除，
+     * 防 TaskLoop.parseAction 取 JSON 时越界）；抠不到返回 null。
+     * 注意：笔记若写在 <answer> 内 do(...) 之前，本函数不抠——与计划块同款局限。
+     */
+    private fun extractNotesBlock(reply: String): String? {
+        if (reply.contains("<think>")) {
+            val think = reply.substringAfter("<think>").substringBefore("</think>")
+            extractNotesFromText(think)?.let { return it }
+        }
+        val outsideAnswer = if (reply.contains("<answer>")) {
+            reply.substringBefore("<answer>") + "\n" + reply.substringAfter("</answer>", "")
+        } else {
+            reply
+        }
+        return extractNotesFromText(outsideAnswer)
+    }
+
+    /** 第十二批·从一段文本里抠笔记块：找“笔记”开头的行，其后连续 - 开头的行即笔记项。 */
+    private fun extractNotesFromText(text: String): String? {
+        val lines = text.lineSequence().map { it.trim() }.toList()
+        val headerIdx = lines.indexOfFirst { it.startsWith("笔记") }
+        if (headerIdx < 0) return null
+        val numbered = Regex("""(\d{1,2})[.、)]\s*(.*)""")
+        val items = mutableListOf<String>()
+        for (i in headerIdx + 1 until lines.size) {
+            val line = lines[i]
+            if (line.isEmpty()) continue
+            var rest = when {
+                line.startsWith("- ") || line.startsWith("• ") || line.startsWith("* ") || line.startsWith("· ") -> line.substring(2).trim()
+                line.startsWith("-") || line.startsWith("•") || line.startsWith("*") || line.startsWith("·") -> line.substring(1).trim()
+                else -> numbered.matchEntire(line)?.groupValues?.get(2)?.trim() ?: break
+            }
+            if (rest.isEmpty()) continue
+            // 剔除花括号：笔记块附在 JSON 动作串之后，TaskLoop.parseAction
+            // 取第一个 { 到最后一个 }，花括号会让它越界、动作解析失败。
+            rest = rest.replace("{", "").replace("}", "").trim()
+            if (rest.isEmpty()) continue
+            val rendered = rest.take(MAX_NOTE_ITEM_CHARS)
+            if (!items.contains(rendered)) items += rendered
+            if (items.size >= MAX_NOTE_ITEMS) break
+        }
+        if (items.isEmpty()) return null
+        return buildString {
+            append("笔记：\n")
+            for (item in items) {
+                append("- ").append(item).append("\n")
             }
         }.trimEnd()
     }

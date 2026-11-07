@@ -22,7 +22,9 @@ import com.jarvis.app.JarvisAccessibilityService
  *   在返回的 ResumeInfo 上置 foregroundPkgMismatch，调用方据此先提醒用户。
  * 第四批·断点升级（2026-11-07）：ResumeInfo 再记 plan/completed/screenSig，
  * 续跑时计划与界面指纹一起恢复；三个字段都有默认值，旧断点按空回落。
- * tryResolve() 的 copy(foregroundPkgMismatch = true) 会原样带上这三个字段，
+ * 第十二批·Scratchpad 持久笔记（2026-11-07）：ResumeInfo 再记 notes，
+ * 续跑时笔记一起恢复；字段有默认值，旧断点按空回落。
+ * tryResolve() 的 copy(foregroundPkgMismatch = true) 会原样带上这几个字段，
  * TripLoop 的 take()/restore() 只负责原样取走还回，都不用改。
  */
 object TaskResumeState {
@@ -42,7 +44,10 @@ object TaskResumeState {
         /** 第四批·断点升级：断点时最后一次观察到的界面指纹（pkg + "\n" + elements），
          * 续跑时用来恢复 prevScreenSig，让首步就能判断界面自断点起变没变；
          * 还没观察过（首步前就停下）为 null。只放内存，不落盘。 */
-        val screenSig: String? = null
+        val screenSig: String? = null,
+        /** 第十二批·Scratchpad 持久笔记：断点时的持久笔记列表（TaskLoop 的 notes，
+         * 最多 10 条）；续跑时恢复，旧断点没有该字段时默认空列表。只放内存，不落盘。 */
+        val notes: List<String> = emptyList()
     )
 
     private data class Pending(val info: ResumeInfo, val expiresAt: Long)
@@ -76,10 +81,13 @@ object TaskResumeState {
      * 恢复；调用方（TaskLoop）保证 plan/completed 已在第一批的上限内，
      * 这里原样存、不另起一套上限常量。三个参数都有默认值，旧的 offer 调用
      * （只传前三个参数）照旧能编，缺字段的旧断点按空列表/空指纹回落。
+     * 第十二批·Scratchpad 持久笔记：[notes] 一并记下来，续跑时恢复；调用方
+     * （TaskLoop）保证 notes 已在第十二批的上限内，这里原样存。参数有默认值，
+     * 旧的 offer 调用照旧能编，缺字段的旧断点按空列表回落。
      */
     fun offer(taskText: String, history: List<String>, stepsDone: Int, foregroundPkg: String? = null,
               plan: List<String> = emptyList(), completed: List<String> = emptyList(),
-              screenSig: String? = null): Boolean {
+              screenSig: String? = null, notes: List<String> = emptyList()): Boolean {
         val now = System.currentTimeMillis()
         val existing = pending
         if (existing != null && now <= existing.expiresAt) {
@@ -90,7 +98,8 @@ object TaskResumeState {
         pending = Pending(
             ResumeInfo(taskText, history.toList(), stepsDone, foregroundPkg = pkg,
                 plan = plan.toList(), completed = completed.toList(),
-                screenSig = screenSig?.takeIf { it.isNotEmpty() }),
+                screenSig = screenSig?.takeIf { it.isNotEmpty() },
+                notes = notes.toList()),
             now + TTL_MS
         )
         return true
