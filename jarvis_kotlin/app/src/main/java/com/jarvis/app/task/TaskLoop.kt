@@ -279,22 +279,37 @@ object TaskLoop {
         var prevScreenChanged: Boolean? = null
         // R3 轻量核验（2026-11-05）：模型说“done”被顶回过没有，只顶回一次。
         var doneChallenged = false
-        // 第一批·计划状态（MA-v3 Manager 式计划）：plan 是待做的编号子目标
-        // （最多 MAX_PLAN_ITEMS 条），completed 是已完成的子目标；与文字历史
-        // history 分开存，提示词里单独一段。模型某轮没给计划时保留旧状态。
+        // 第十三批·子目标状态机（Minitap Orchestrator 生命周期 NOT_STARTED /
+        // PENDING / SUCCESS / FAILURE 的 TaskLoop 版，轻量实现、不照搬 LangGraph）：
+        // 第一批的 plan/completed 两个字符串列表合并成一个 subgoals 列表，每项带
+        // 状态（见文件底部的 SubgoalStatus / Subgoal）。与文字历史 history 分开存，
+        // 提示词里单独一段；模型某轮没给计划时保留旧状态。状态只服务于计划段渲染
+        // 与升级逻辑，不参与失败计数、不影响 done 判定（done 仍走现有顶回与核验）。
         // 第四批·断点升级：续跑时从断点恢复 plan/completed，超限只留最后 N 条
         // （复用第一批的上限常量，不另起一套）；旧断点没有这两个字段时默认
         // 空列表，按新任务从空开始，不报错、不丢断点。
-        val plan = resumeFrom?.plan?.takeLast(MAX_PLAN_ITEMS)?.toMutableList() ?: mutableListOf<String>()
-        val completed = resumeFrom?.completed?.takeLast(MAX_COMPLETED_ITEMS)?.toMutableList() ?: mutableListOf<String>()
+        // 恢复时重建状态：断点格式只有 plan/completed 两列，分不出“从来没做过”
+        // 还是“做过但失败了”——plan 里的一律重建为 NOT_STARTED（含断点前已标
+        // FAILURE 的项：续跑就是一次换招重试的机会），completed 里的一律重建为
+        // SUCCESS；两列都出现同一条时 SUCCESS 优先（只留一项，不重复显示）。
+        // 失败经过本身仍留在断点恢复的文字历史里，模型看得到，不丢信息。
+        val subgoals = mutableListOf<Subgoal>().also { list ->
+            val seen = mutableSetOf<String>()
+            for (text in resumeFrom?.completed?.takeLast(MAX_COMPLETED_ITEMS) ?: emptyList()) {
+                if (seen.add(text)) list += Subgoal(text, SubgoalStatus.SUCCESS)
+            }
+            for (text in resumeFrom?.plan?.takeLast(MAX_PLAN_ITEMS) ?: emptyList()) {
+                if (seen.add(text)) list += Subgoal(text, SubgoalStatus.NOT_STARTED)
+            }
+        }
         // 第十二批·Scratchpad 持久笔记（Minitap scratchpad / MA-v3 important_notes 的 TaskLoop 版）：
-        // notes 是模型可写的跨步持久笔记（账号、位置、已确认的事实），与 plan/completed
+        // notes 是模型可写的跨步持久笔记（账号、位置、已确认的事实），与断点 plan/completed 字段
         // 同款恢复方式：续跑时从断点恢复，超限只留最后 MAX_NOTE_ITEMS 条、每条截断
         // MAX_NOTE_CHARS 字；旧断点没有该字段时默认空列表。笔记只进提示词，不参与
         // 失败计数、不触发升级、不影响 done 判定。
         val notes = resumeFrom?.notes?.takeLast(MAX_NOTE_ITEMS)?.map { it.take(MAX_NOTE_CHARS) }?.toMutableList() ?: mutableListOf<String>()
         // 补丁·计划回传两模式都成立：AutoGLMClient 已把抠到的计划块附在
-        // JSON 动作串之后回传，GLM 模式同样能收到计划；抠不到时 plan 为空、
+        // JSON 动作串之后回传，GLM 模式同样能收到计划；抠不到时子目标列表为空、
         // 按无计划回落（见 parsePlan 与下面的计划段）。
         val planSupported = true
         // 第一批·连续失败计数：最近连续失败的步数。执行失败（不含结果未知）
@@ -302,6 +317,10 @@ object TaskLoop {
         // 连败规则）。达到 STUCK_THRESHOLD 时下一轮提示词注入升级段。
         var consecutiveFailures = 0
         val recentFailureNotes = mutableListOf<String>()
+        // 第十三批·子目标状态机：本次连续失败升级里是否已把进行中的子目标标过
+        // FAILURE（一次升级只标一次，成功清零失败计数时复位；见计划段的升级块
+        // 与下面的 r.ok 分支）。
+        var subgoalStuckEpisodeMarked = false
         // 界面指纹（pkg + 大纲）：和上一步一字不差时在提示词里点明，防模型对着
         // 同一张屏反复下同样的动作。
         // 第四批·断点升级：续跑时从断点恢复上一次的界面指纹，首步就能判断界面
@@ -356,7 +375,7 @@ object TaskLoop {
                         TaskResumeState.offer(
                             taskText, history.toList(), step,
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
-                            plan = plan.toList(), completed = completed.toList(),
+                            plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                             notes = notes.toList()
                         )
@@ -377,7 +396,7 @@ object TaskLoop {
                         TaskResumeState.offer(
                             taskText, history.toList(), step - 1,
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
-                            plan = plan.toList(), completed = completed.toList(),
+                            plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                             notes = notes.toList()
                         )
@@ -636,13 +655,18 @@ object TaskLoop {
                     }
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
                     if (prevOutcomeUnknown) append("上一步结果未知：不知道那个动作成没成，先看一眼界面（紧凑表和截图）确认成没成，再决定下一步，不要直接重做同样的动作。\n")
-                    // 第一批·计划段（只在计划回传成立的模式下出现；GLM 模式 plan 恒为空，
+                    // 第一批·计划段（只在计划回传成立的模式下出现；GLM 模式子目标列表恒为空，
                     // 不贴这段、也不催模型列计划）：
+                    // 第十三批·子目标状态机：渲染格式与第一批一字不差（先 ✓ 已完成行、再
+                    // 编号待做行），只换数据源——✓ 行是 SUCCESS 项，编号行是 NOT_STARTED /
+                    // PENDING 项；FAILURE 项不渲染（模型没重列 = 不再做，失败经过在历史里）。
                     if (planSupported) {
-                        if (plan.isNotEmpty() || completed.isNotEmpty()) {
+                        val completedTexts = subgoalCompletedTexts(subgoals)
+                        val planTexts = subgoalActiveTexts(subgoals)
+                        if (planTexts.isNotEmpty() || completedTexts.isNotEmpty()) {
                             append("计划（子目标列表）：\n")
-                            for (c in completed) append("✓ ").append(c).append('\n')
-                            for ((i, p) in plan.withIndex()) {
+                            for (c in completedTexts) append("✓ ").append(c).append('\n')
+                            for ((i, p) in planTexts.withIndex()) {
                                 append(i + 1).append(". ").append(p).append('\n')
                             }
                             append("每轮回复里更新这个计划：做完的子目标标 ✓，没做完的照常列，卡住时修订计划（重排、改写、插入纠正步骤、换策略）。\n")
@@ -666,6 +690,15 @@ object TaskLoop {
                     // 最近 STUCK_THRESHOLD 步都失败时，不再让模型原地重试，
                     // 要求它修订计划（重排、改写、插入纠正步骤、换策略）。
                     if (consecutiveFailures >= STUCK_THRESHOLD) {
+                        // 第十三批·子目标状态机：首次进入本次连续失败升级时，把进行中的
+                        // 子目标标 FAILURE（NOT_STARTED→PENDING→FAILURE 的失败转移；
+                        // 没有进行中的项时什么都不做）。只标一次：同一轮升级里不重复标，
+                        // 成功清零失败计数时复位（见下面的 r.ok 分支）；标 FAILURE 不参与
+                        // 失败计数、不影响 done 判定，只是状态。
+                        if (!subgoalStuckEpisodeMarked) {
+                            subgoalStuckEpisodeMarked = true
+                            markSubgoalFailed(subgoals)
+                        }
                         append("【Potentially Stuck!】最近 ${recentFailureNotes.size} 步都失败了：\n")
                         for (note in recentFailureNotes) append(note).append('\n')
                         append("不要原地重试同一个做法。请修订计划：重排子目标、改写卡住的步骤、插入纠正步骤、或换一条完全不同的策略")
@@ -734,10 +767,13 @@ object TaskLoop {
                     askFails = 0
                     action = parseAction(reply.orEmpty())
                     if (action != null) {
-                        // 第一批·计划：回复里带计划块就更新 plan/completed；
+                        // 第一批·计划：回复里带计划块就更新子目标状态机；
                         // 没带保留旧状态（宽容回落）。补丁后 GLM 模式的 reply
                         // 是 JSON 动作串 + 附在其后的计划块，parsePlan 能抠到。
-                        parsePlan(reply.orEmpty())?.let { parsed -> applyPlanUpdate(parsed, plan, completed) }
+                        // 第十三批·子目标状态机：✓ 的项 → SUCCESS（模型看屏后凭观测
+                        // 证据标完成，见元认知规则）；重列的 FAILURE 项 → NOT_STARTED
+                        // （换招重试）；没重列的 FAILURE 项留在 FAILURE 里不再做。
+                        parsePlan(reply.orEmpty())?.let { parsed -> applyPlanUpdate(parsed, subgoals) }
                         // 第十二批·Scratchpad 持久笔记：回复里带笔记段就以新段为准
                         // 全量替换旧笔记；没带保留旧笔记（宽容回落，与计划同款）。
                         // GLM 模式的 reply 是 JSON 动作串 + 附在其后的计划块与笔记块，
@@ -892,7 +928,7 @@ object TaskLoop {
                                 TaskResumeState.offer(
                                     taskText, history.toList(), step - 1,
                                     foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
-                                    plan = plan.toList(), completed = completed.toList(),
+                                    plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                                     screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                                     notes = notes.toList()
                                 )
@@ -911,6 +947,11 @@ object TaskLoop {
                 // ---------- 执行 ----------
                 // M18：每步执行前推一句播报（Andee narrate(toolName) 同款），不要只在最后调一次 onReply。
                 onProgress(narrate(kind))
+                // 第十三批·子目标状态机：真正执行动作时才算“开始做”——把最早的待做
+                // 子目标标 PENDING（NOT_STARTED→PENDING）。同一时间最多一个 PENDING
+                // （Minitap Orchestrator 同款：一次只做一个子目标）；done/fail、
+                // 输出无法解析、重复守卫/环检测拦下的轮次到不了这里，不标。
+                markSubgoalStarted(subgoals)
                 val r = execute(ctx, controller, action)
                 if (r.zoomImage != null) pendingImage = r.zoomImage
                 // 第六批·记下本步实际执行的动作，供下一轮观察时核对前台包名：
@@ -951,6 +992,8 @@ object TaskLoop {
                 if (r.ok) {
                     consecutiveFailures = 0
                     recentFailureNotes.clear()
+                    // 第十三批·子目标状态机：成功即破局，下一次连续失败升级可再标一次 FAILURE。
+                    subgoalStuckEpisodeMarked = false
                 } else if (!r.outcomeUnknown && !loopFailureCounted) {
                     consecutiveFailures++
                     recentFailureNotes += "第 ${step} 步：${describeAction(action)} → ${r.summary.take(80)}"
@@ -1070,7 +1113,7 @@ object TaskLoop {
             if (saveResume) TaskResumeState.offer(
                 taskText, history.toList(), step,
                 foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
-                plan = plan.toList(), completed = completed.toList(),
+                plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                 screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                 notes = notes.toList()
             )
@@ -1605,17 +1648,112 @@ private fun parsePlan(reply: String): List<PlanItem>? {
 }
 
 /**
- * 第一批·把解析出的计划合并进循环状态：解析出的未完成项按顺序成为当前 plan；
- * 标了完成的追加进 completed（去重、上限 MAX_COMPLETED_ITEMS）。
- * 解析出的列表为准：旧 plan 里没再出现的项不再显示（模型修订计划时可删改步骤）。
+ * 第十三批·子目标状态（Minitap SubgoalStatus 的 TaskLoop 版）：
+ * NOT_STARTED 待做、PENDING 进行中、SUCCESS 已完成、FAILURE 失败。
+ * 转移（只在 TaskLoop 的 runBlocking 循环状态里，不另起文件）：
+ * - NOT_STARTED → PENDING：真正执行动作时（markSubgoalStarted），一次只做一个；
+ * - PENDING → SUCCESS：模型在计划块里标 ✓（applyPlanUpdate），证据是模型看屏后的
+ *   观测（元认知规则“只凭观测证据标完成”）；模型标 ✓ 时 NOT_STARTED 也可直接进
+ *   SUCCESS（一步做掉多项、或计划到达时已带 ✓）；PENDING → FAILURE：连续失败
+ *   升级首次触发时（markSubgoalFailed，每次升级只标一次）；
+ * - FAILURE → NOT_STARTED：模型修订计划时重列该项（applyPlanUpdate，换招重试）；
+ *   没重列的 FAILURE 项留在 FAILURE 里不再做，提示词里不渲染、断点保存时并入 plan 列。
+ * 状态只服务于计划段渲染与升级逻辑，不参与失败计数、不影响 done 判定。
  */
-private fun applyPlanUpdate(parsed: List<PlanItem>, plan: MutableList<String>, completed: MutableList<String>) {
-    plan.clear()
-    plan.addAll(parsed.filter { !it.done }.map { it.text }.distinct().take(MAX_PLAN_ITEMS))
-    for (item in parsed.filter { it.done }) {
-        if (!completed.contains(item.text)) completed += item.text
+private enum class SubgoalStatus { NOT_STARTED, PENDING, SUCCESS, FAILURE }
+
+/** 第十三批·一个子目标：文字 + 状态（文字是唯一身份，同一条只留一项）。 */
+private data class Subgoal(val text: String, val status: SubgoalStatus)
+
+/**
+ * 第十三批·提示词里编号待做行用的文字：NOT_STARTED / PENDING 项（FAILURE 项
+ * 不渲染——模型没重列 = 不再做；失败经过在文字历史与升级段里）。
+ */
+private fun subgoalActiveTexts(subgoals: List<Subgoal>): List<String> =
+    subgoals.filter { it.status == SubgoalStatus.NOT_STARTED || it.status == SubgoalStatus.PENDING }.map { it.text }
+
+/** 第十三批·提示词里 ✓ 已完成行用的文字：SUCCESS 项。 */
+private fun subgoalCompletedTexts(subgoals: List<Subgoal>): List<String> =
+    subgoals.filter { it.status == SubgoalStatus.SUCCESS }.map { it.text }
+
+/**
+ * 第十三批·断点保存时 plan 列用的文字：SUCCESS 之外的全部（NOT_STARTED /
+ * PENDING / FAILURE）。TaskResumeState 仍只存 plan/completed 两个字符串列表，
+ * 不改断点格式；恢复时见 runBlocking 开头的注释（plan 列一律重建为 NOT_STARTED）。
+ */
+private fun subgoalResumePlanTexts(subgoals: List<Subgoal>): List<String> =
+    subgoals.filter { it.status != SubgoalStatus.SUCCESS }.map { it.text }
+
+/**
+ * 第十三批·NOT_STARTED → PENDING：把最早的待做子目标标为进行中。同一时间
+ * 最多一个 PENDING（已有 PENDING 时不另起一个）；没有待做项时什么都不做。
+ */
+private fun markSubgoalStarted(subgoals: MutableList<Subgoal>) {
+    if (subgoals.any { it.status == SubgoalStatus.PENDING }) return
+    val idx = subgoals.indexOfFirst { it.status == SubgoalStatus.NOT_STARTED }
+    if (idx >= 0) subgoals[idx] = subgoals[idx].copy(status = SubgoalStatus.PENDING)
+}
+
+/**
+ * 第十三批·PENDING → FAILURE：把进行中的子目标标失败。没有进行中的项时
+ * 什么都不做；不碰失败计数（调用方只在连续失败升级首次触发时调一次）。
+ */
+private fun markSubgoalFailed(subgoals: MutableList<Subgoal>) {
+    val idx = subgoals.indexOfFirst { it.status == SubgoalStatus.PENDING }
+    if (idx >= 0) subgoals[idx] = subgoals[idx].copy(status = SubgoalStatus.FAILURE)
+}
+
+/**
+ * 第十三批·把解析出的计划合并进子目标状态机（第一批 applyPlanUpdate 的同款语义，
+ * 只是 plan/completed 两个列表换成带状态的 subgoals 一项）：
+ * - 解析出的列表为准（模型修订计划时可删改步骤）：✓ 的项 → SUCCESS；
+ *   未标 ✓ 的项重列时，旧状态是 FAILURE → NOT_STARTED（换招重试），是 PENDING →
+ *   PENDING（还在做），是 SUCCESS → SUCCESS（已完成的不因少个 ✓ 就打回），
+ *   全新 → NOT_STARTED；同一条在解析列表里出现两次时 ✓ 的那次说了算。
+ * - 旧表里没再出现的项：SUCCESS 照旧累积（第一批语义：completed 只增不减，
+ *   只受 MAX_COMPLETED_ITEMS 上限裁剪）；FAILURE 保留（不再做，等模型重列才
+ *   回 NOT_STARTED）；NOT_STARTED / PENDING 删掉（计划修订删步）。
+ * - 上限：SUCCESS 超 MAX_COMPLETED_ITEMS 时裁最旧的；非 SUCCESS 项超
+ *   MAX_PLAN_ITEMS 时裁最旧的 FAILURE（解析出的未完成项本身不超过上限）。
+ */
+private fun applyPlanUpdate(parsed: List<PlanItem>, subgoals: MutableList<Subgoal>) {
+    val oldByText = subgoals.associateBy { it.text }
+    val next = mutableListOf<Subgoal>()
+    for (item in parsed) {
+        val old = oldByText[item.text]
+        val status = when {
+            item.done -> SubgoalStatus.SUCCESS
+            old?.status == SubgoalStatus.FAILURE -> SubgoalStatus.NOT_STARTED
+            old?.status == SubgoalStatus.PENDING -> SubgoalStatus.PENDING
+            old?.status == SubgoalStatus.SUCCESS -> SubgoalStatus.SUCCESS
+            else -> SubgoalStatus.NOT_STARTED
+        }
+        val at = next.indexOfFirst { it.text == item.text }
+        if (at < 0) {
+            next += Subgoal(item.text, status)
+        } else if (status == SubgoalStatus.SUCCESS) {
+            next[at] = next[at].copy(status = SubgoalStatus.SUCCESS)
+        }
     }
-    while (completed.size > MAX_COMPLETED_ITEMS) completed.removeAt(0)
+    val parsedTexts = parsed.map { it.text }.toSet()
+    for (old in subgoals) {
+        if (old.text !in parsedTexts &&
+            (old.status == SubgoalStatus.SUCCESS || old.status == SubgoalStatus.FAILURE)
+        ) {
+            next += old
+        }
+    }
+    while (next.count { it.status == SubgoalStatus.SUCCESS } > MAX_COMPLETED_ITEMS) {
+        val at = next.indexOfFirst { it.status == SubgoalStatus.SUCCESS }
+        next.removeAt(at)
+    }
+    while (next.count { it.status != SubgoalStatus.SUCCESS } > MAX_PLAN_ITEMS) {
+        val at = next.indexOfFirst { it.status == SubgoalStatus.FAILURE }
+        if (at < 0) break
+        next.removeAt(at)
+    }
+    subgoals.clear()
+    subgoals.addAll(next)
 }
 
 /**
