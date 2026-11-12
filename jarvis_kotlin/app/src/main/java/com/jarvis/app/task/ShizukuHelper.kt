@@ -58,6 +58,22 @@ object ShizukuHelper {
         }
     }
 
+    /** 配对状态四档：未装应用 / 应用已装但服务没启动 / 服务运行中但未授权 / 已授权。
+     * isShizukuAvailable 把前两档混在一起（都是 false），设置页要分开显示才加的。 */
+    enum class PairingState { NOT_INSTALLED, NOT_RUNNING, NOT_GRANTED, GRANTED }
+
+    /** 设置页「Shizuku 配对」的状态：复用已有的 isAppInstalled + pingBinder，
+     * 不在别处重写包名检查；pingBinder 抛异常按服务没启动算。 */
+    fun pairingState(ctx: Context): PairingState {
+        return try {
+            if (!isAppInstalled(ctx, SHIZUKU_PACKAGE)) return PairingState.NOT_INSTALLED
+            if (!Shizuku.pingBinder()) return PairingState.NOT_RUNNING
+            if (hasPermission()) PairingState.GRANTED else PairingState.NOT_GRANTED
+        } catch (_: Exception) {
+            PairingState.NOT_RUNNING
+        }
+    }
+
     /**
      * 弹一次 Shizuku 授权框（不阻塞等结果——结果由注册好的监听器记进审计日志，
      * 下次关应用时再看 hasPermission()）。返回 true = 请求确实发出去了。

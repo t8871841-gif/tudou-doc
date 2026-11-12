@@ -63,6 +63,7 @@ import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
+import com.jarvis.app.task.ShizukuHelper
 // 真液态玻璃第 1 批：QWEA0 Liquid-Glass-Android v2.0.11（MIT；包名是
 // com.example.liquidglass，见库源码 LiquidGlassView.kt:35 / GlassMaterial.kt:14）。
 import com.example.liquidglass.GlassMaterial
@@ -177,6 +178,9 @@ class MainActivity : Activity() {
     // onActivityResult 与设置按钮都能刷新。
     private var dialogueBgImageView: ImageView? = null
     private lateinit var dialogueBgStatusText: TextView
+    // Shizuku 配对：状态行 + 配对按钮，字段化以便进页与点按钮后都能刷新。
+    private lateinit var shizukuStatusText: TextView
+    private lateinit var shizukuPairButton: Button
     // 长期记忆条数（原生面板 Agent 调度 LEARNING 行的真实信号），null=还没取到。
     private var lastMemoryCount: Int? = null
     private var memoryCountLoading = false
@@ -2550,6 +2554,7 @@ class MainActivity : Activity() {
             Triple("🖼️", "主界面", { v -> buildHomeScreenSection(v) }),
             Triple("👁️", "视觉看屏", { v -> buildVisionSection(v) }),
             Triple("🚀", "常驻与入口", { v -> buildEntrySection(v) }),
+            Triple("🔗", "Shizuku 配对", { v -> buildShizukuSection(v) }),
             Triple("🧠", "记忆", { v -> buildMemorySection(v) }),
             Triple("🧩", "技能", { v -> buildSkillSection(v) }),
             Triple("🤖", "本地模型", { v -> buildLocalLlmSection(v) }),
@@ -2580,6 +2585,7 @@ class MainActivity : Activity() {
             refreshPortraitBgStatus()
             refreshStageModeStatus()
         }
+        if (title == "Shizuku 配对") refreshShizukuStatus()
     }
 
     private fun closeSettingsPage() {
@@ -2919,6 +2925,53 @@ class MainActivity : Activity() {
                 "暂时只能靠悬浮球/磁贴唤起。"
             textSize = 11f; setTextColor(0x8AFFFFFF.toInt()); setPadding(0, dp(4), 0, 0)
         })
+    }
+
+    /** Shizuku 配对：状态行 + 配对按钮。状态分四档，未装/服务没起时不弹框，
+     * 只改状态行提示；服务运行中、未授权时点按钮才弹授权框（已有监听器把结果
+     * 记进审计）。进页时算一次，点按钮后重算一次；不轮询、不定时。 */
+    private fun buildShizukuSection(root: LinearLayout) {
+        root.addView(TextView(this).apply {
+            text = "Shizuku 配对"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        shizukuStatusText = TextView(this).apply {
+            textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        }
+        root.addView(shizukuStatusText)
+        shizukuPairButton = btn("配对 Shizuku") {
+            onShizukuPairClicked()
+        }
+        root.addView(shizukuPairButton)
+        refreshShizukuStatus()
+    }
+
+    /** Shizuku 配对状态行 + 按钮：四档文案 + 已授权时按钮置灰、不再弹框。 */
+    private fun refreshShizukuStatus() {
+        if (!::shizukuStatusText.isInitialized) return
+        val state = ShizukuHelper.pairingState(this)
+        shizukuStatusText.text = when (state) {
+            ShizukuHelper.PairingState.NOT_INSTALLED -> "Shizuku：没装 Shizuku 应用（先装上它）"
+            ShizukuHelper.PairingState.NOT_RUNNING -> "Shizuku：已装，但服务没启动（先打开 Shizuku 应用，启动服务）"
+            ShizukuHelper.PairingState.NOT_GRANTED -> "Shizuku：服务运行中，还没授权（点下面按钮配对）"
+            ShizukuHelper.PairingState.GRANTED -> "Shizuku：已配对授权，小窗展开与关应用强停都能用"
+        }
+        if (::shizukuPairButton.isInitialized) {
+            shizukuPairButton.isEnabled = state != ShizukuHelper.PairingState.GRANTED
+            shizukuPairButton.text = if (state == ShizukuHelper.PairingState.GRANTED) "已配对" else "配对 Shizuku"
+        }
+    }
+
+    /** 配对按钮按状态分流：未装/服务没起只提示、不弹框；未授权才弹授权框；已授权不再弹。 */
+    private fun onShizukuPairClicked() {
+        when (ShizukuHelper.pairingState(this)) {
+            ShizukuHelper.PairingState.NOT_INSTALLED -> toast("没装 Shizuku 应用")
+            ShizukuHelper.PairingState.NOT_RUNNING -> toast("先打开 Shizuku 应用，启动服务")
+            ShizukuHelper.PairingState.NOT_GRANTED -> {
+                if (!ShizukuHelper.requestPermission(this)) toast("授权框没弹起来")
+            }
+            ShizukuHelper.PairingState.GRANTED -> toast("Shizuku 已配对")
+        }
+        refreshShizukuStatus()
     }
 
     /** 彻底融合第 1 步：「主界面」分区——竖屏舞台背景图（图库自选，未选时用内置默认静帧）。 */
