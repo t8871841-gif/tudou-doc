@@ -8,7 +8,7 @@ room = "2.6.1"
 coroutines = "1.7.3"
 mediapipeGenai = "0.10.24"
 webkit = "1.9.0"
-shizuku = "12.2.0"
+shizuku = "13.1.5"
 mlkitTextRecognition = "16.0.1"
 liquidglass = "2.0.11"
 
