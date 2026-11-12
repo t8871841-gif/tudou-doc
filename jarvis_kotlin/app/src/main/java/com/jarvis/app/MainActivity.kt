@@ -63,6 +63,7 @@ import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
+import com.jarvis.app.ui.LiquidGlass
 import com.jarvis.app.wake.WakeWordEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -1794,15 +1795,21 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(12))
             background = if (mine) {
-                GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f))).apply {
-                    cornerRadii = floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                }
+                // 第 1 批·液态玻璃：底色与圆角与旧版一字不差（当前状态色的 38%→30% 对角渐变），
+                // 只把背景层换成共用组件——高光边 + 顶部柔光 + 底部内阴影由组件加。
+                LiquidGlass.bubble(
+                    this,
+                    HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f),
+                    floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
+                )
             } else {
-                GradientDrawable().apply {
-                    setColor(0x0FFFFFFF)
-                    setStroke(dp(1), 0x14FFFFFF)
-                    cornerRadii = floatArrayOf(dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                }
+                // 第 1 批·液态玻璃：旧版是白 6% 平色 + 1dp 白 8% 描边；改成白 14%→5% 的
+                // 微透渐变底（顶部稍亮，平均透度与旧版相近），高光边与柔光由组件加。
+                LiquidGlass.bubble(
+                    this,
+                    0x24FFFFFF, 0x0DFFFFFF,
+                    floatArrayOf(dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
+                )
             }
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 gravity = if (mine) Gravity.END else Gravity.START
