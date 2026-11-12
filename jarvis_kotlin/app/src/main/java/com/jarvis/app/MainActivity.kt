@@ -18,7 +18,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.StateListDrawable
 import android.util.Base64
 import android.util.Log
 import android.net.TrafficStats
@@ -2197,16 +2196,10 @@ class MainActivity : Activity() {
             })
     }
 
-    // 第 2 批·液态玻璃按钮：静音/手写/设置三个圆钮共用的按压态背景与按压缩放。
-    // 背景是 StateListDrawable：常态白 2%→0% 微透渐变（与第 1 批气泡底色协调），
-    // 按下时底色提亮到白 4%→2%（高光边与柔光由组件给，同一套）；圆角取按钮高度的一半、做药丸形。
     // 按压缩放只在视觉层（0.97 倍，80ms），OnTouchListener 返回 false，不吞点击、不改长按行为。
-    private fun liquidGlassButtonBg(radiusDp: Float): StateListDrawable =
-        StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), LiquidGlass.rounded(this@MainActivity, 0x0AFFFFFF, 0x05FFFFFF, radiusDp))
-            addState(intArrayOf(), LiquidGlass.rounded(this@MainActivity, 0x05FFFFFF, 0x00000000, radiusDp))
-        }
-
+    // （第 2 批的按压态背景 liquidGlassButtonBg 已随真玻璃第 3 批删掉：最后一处调用者是
+    // 设置行，换真玻璃后无人再用；attachPressScale 仍在用——底部三个圆钮 + 目录行 +
+    // 分段按钮都贴着它。）
     private fun attachPressScale(v: View) {
         v.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -2237,6 +2230,26 @@ class MainActivity : Activity() {
             enableDynamicBackground = true
             backdropSource = rootLayout
             addView(btn, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+    }
+
+    // 真液态玻璃第 3 批：设置行三类（目录行 / 开关行 / 分段按钮）的玻璃壳——把行内容
+    // 包进 LiquidGlassView。参数与第 1、2 批同一套（CLEAR 材质、白 8%、折射 80/
+    // 斜面 32/色散 0.05），行比气泡还矮，adaptiveLensScale 会再钳一档；设置页会
+    // 滚动，动态背景开、背景来源定死根布局。库自带的按压效果不要开（见第 2 批）。
+    private fun glassWrapRow(v: View, radiusDp: Float): LiquidGlassView {
+        val r = dp(radiusDp.toInt()).toFloat()
+        return LiquidGlassView(this).apply {
+            setCornerRadii(r, r, r, r)
+            material = GlassMaterial.CLEAR
+            refractionHeight = 80f
+            bevelWidth = 32f
+            dispersionStrength = 0.05f
+            enableSensorHighlight = true
+            enablePressEffect = false
+            enableDynamicBackground = true
+            backdropSource = rootLayout
+            addView(v, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         }
     }
 
@@ -3837,22 +3850,19 @@ class MainActivity : Activity() {
     private val SETTING_STROKE = 0x2EFFFFFF
 
     /** 目录行：图标 + 标题 + 右箭头。 */
-    // 第 3 批·液态玻璃：目录行改成玻璃卡片（可点：复用第 2 批的按压态背景 + 按压缩放）。
-    // 圆角 14dp；底色白 2%→0%，按下提亮到白 4%→2%（与第 1、2 批协调）。
-    // 旧版行底是 1dp 分隔细线：卡片化后细线不要了，行间改留 8dp 间距，卡片才看得出来。
-    // 横向内边距 4dp→16dp：旧版无底色、4dp 也够；玻璃卡要留边，文字贴边会压到高光边——
-    // 这是本批唯一动内边距的地方，竖向内边距（14dp）、文字字号颜色一律不动。
+    // 真液态玻璃第 3 批：目录行改成真玻璃卡片（可点：行内容包进 LiquidGlassView，
+    // 按压缩放仍贴在行上，0.97x/80ms——库自带的按压效果对包着的可点子视图不起作用，
+    // 见第 2 批）。圆角 14dp（均匀，旧版就是单圆角）；行间 8dp 间距、横向内边距
+    // 16dp、竖向内边距 14dp、文字字号颜色一律不动。
     private fun settingRow(icon: String, title: String, onClick: (View) -> Unit): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = liquidGlassButtonBg(14f)
+            // 背景改透明，玻璃由外面的 LiquidGlassView 给（见 glassWrapRow）。
+            background = null
             setOnClickListener(onClick)
             attachPressScale(this)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(8)
-            }
         }
         row.addView(TextView(this).apply { text = icon; textSize = 24f })
         row.addView(TextView(this).apply {
@@ -3861,7 +3871,12 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
         row.addView(TextView(this).apply { text = "›"; textSize = 20f; setTextColor(0x8AFFFFFF.toInt()) })
-        return row
+        // 玻璃壳拿行原来的位置参数（整行宽 + 行间 8dp 间距），行内容在壳里 MATCH_PARENT 宽。
+        return glassWrapRow(row, 14f).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        }
     }
 
     /** 分组小标题：13sp 旋臂紫。 */
@@ -3898,18 +3913,15 @@ class MainActivity : Activity() {
         title: String, desc: String, initial: Boolean,
         onCreated: ((android.widget.Switch) -> Unit)? = null, onChecked: (Boolean) -> Unit
     ): View {
-        // 第 3 批·液态玻璃：开关行改成玻璃卡片（静态底：行本身不可点，只有 Switch 能拨，
-        // 不加按压反馈）。圆角 14dp，底色白 2%→0%（与目录行、气泡同一套）。
-        // 横向内边距 0→16dp：旧版无底色、0 也够；玻璃卡要留边，文字贴边会压到高光边——
-        // 竖向内边距（10dp）、文字字号颜色、Switch 本身一律不动。行间留 8dp 间距。
+        // 真液态玻璃第 3 批：开关行改成真玻璃卡片（行本身不可点，只有 Switch 能拨，
+        // 不加按压反馈——行为不变）。圆角 14dp（均匀）；横向内边距 16dp、竖向内边距
+        // 10dp、文字字号颜色、Switch 本身一律不动。行间留 8dp 间距。
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = LiquidGlass.rounded(this@MainActivity, 0x05FFFFFF, 0x00000000, 14f)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(8)
-            }
+            // 背景改透明，玻璃由外面的 LiquidGlassView 给（见 glassWrapRow）。
+            background = null
         }
         val texts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3934,7 +3946,12 @@ class MainActivity : Activity() {
         onCreated?.invoke(sw)
         sw.setOnCheckedChangeListener { _, checked -> onChecked(checked) }
         row.addView(sw)
-        return row
+        // 玻璃壳拿行原来的位置参数（整行宽 + 行间 8dp 间距），行内容在壳里 MATCH_PARENT 宽。
+        return glassWrapRow(row, 14f).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
+        }
     }
 
     /** 分段选择行：标题 + 一排等宽按钮，选中不透明、未选中半透明（沿用唤醒严格度那排的做法）。 */
@@ -3944,26 +3961,28 @@ class MainActivity : Activity() {
             text = title; textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, dp(4))
         })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val buttons = ArrayList<Button>()
+        // 选中态 alpha 现在落玻璃壳上（整颗药丸一起淡/亮，与旧版一致）；原 buttons 列表
+        // 只用来改 alpha，改存壳列表。
+        val wraps = ArrayList<LiquidGlassView>()
         options.forEachIndexed { i, label ->
             val b = styleBtn(Button(this).apply {
                 text = label
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (i > 0) marginStart = dp(8)
-                }
                 setOnClickListener {
                     onSelect(i)
-                    buttons.forEachIndexed { j, bb -> bb.alpha = if (j == i) 1f else 0.5f }
+                    wraps.forEachIndexed { j, w -> w.alpha = if (j == i) 1f else 0.5f }
                 }
             }, false)
-            // 第 3 批·液态玻璃：分段按钮是分页里的可点取值项，底色改走第 2 批的按压态玻璃背景
-            // （常态白 2%→0%，按下提亮；圆角 12dp，与 styleBtn 原来的 12dp 一致），取代
-            // styleBtn 的实色深底；文字色/内边距、选中态 alpha（1f/0.5f）一律不动。
-            b.background = liquidGlassButtonBg(12f)
+            // 真液态玻璃第 3 批：分段按钮是分页里的可点取值项，包进 LiquidGlassView
+            // （圆角 12dp，与 styleBtn 原来的 12dp 一致）；文字色/内边距、选中态
+            // alpha（1f/0.5f）一律不动；按压反馈仍走 attachPressScale。
+            b.background = null
             attachPressScale(b)
-            b.alpha = if (i == selected) 1f else 0.5f
-            buttons.add(b)
-            row.addView(b)
+            val wrap = glassWrapRow(b, 12f)
+            wrap.alpha = if (i == selected) 1f else 0.5f
+            wraps.add(wrap)
+            row.addView(wrap, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (i > 0) marginStart = dp(8)
+            })
         }
         col.addView(row)
         return col
