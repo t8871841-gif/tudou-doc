@@ -2,6 +2,8 @@ package com.jarvis.app.net
 
 import android.content.Context
 import com.jarvis.app.JarvisPrefs
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * 第十五批·LLM 注册表（DroidRun llama-index LLM 抽象 + provider 注册表的
@@ -27,12 +29,12 @@ import com.jarvis.app.JarvisPrefs
  *    用流式，假实现只会藏错。
  *
  * 注册表只做接线，不改任何一个 client 内部的请求构造、解析、重试、限流
- * 逻辑；不改模型选择（GLM / 自定义开关）本身；不新增模型、不改默认模型。
+ * 逻辑；模型选择（GLM / 自定义 / DeepSeek 三选一）由 JarvisPrefs 管；默认模型仍是 GLM。
  * 适配器是薄透传：只调换参数顺序、原样转发回调，不包逻辑、不改超时。
  */
 interface LlmClient {
 
-    /** 注册表里的名字（"custom" / "autoglm"，见 LlmRegistry）。 */
+    /** 注册表里的名字（"custom" / "autoglm" / "deepseek"，见 LlmRegistry）。 */
     val name: String
 
     /**
@@ -103,13 +105,73 @@ private object AutoGlmLlmClient : LlmClient {
 }
 
 /**
+ * DeepSeek 的适配器：Andee LlmClient（DeepSeekLlmClient，本包内 1:1 移植）
+ * 的薄包装，只做两件事——把 askOnce 的文本问答包成一次阻塞式 complete
+ * （空工具表），以及把回调跑在后台线程上。思考默认开、强度默认 high
+ * （Andee 默认同款）。
+ *
+ * 注意：这是文本模式（tools 为空），任务循环仍按 do(...) 文本解析——原生
+ * 工具调用（complete 带工具表、按 tool_calls 分发）是下一批的活，不在这里。
+ * 每轮调用现建 client（Key/地址/模型从设置现读，改了设置下一轮就生效；
+ * 任务循环一次只调一轮，建一个 OkHttpClient 的开销可接受）。
+ */
+private object DeepSeekAdapter : LlmClient {
+    override val name: String = LlmRegistry.NAME_DEEPSEEK
+
+    override fun askOnce(
+        ctx: Context, systemPrompt: String, userText: String, jpegBase64: String?,
+        isAlive: (() -> Boolean)?,
+        onResult: (String) -> Unit, onError: (String) -> Unit
+    ) {
+        val base = JarvisPrefs.getTaskBaseUrl(ctx)
+        val model = JarvisPrefs.getTaskModel(ctx)
+        val key = JarvisPrefs.getTaskKey(ctx)
+        if (base.isBlank() || model.isBlank()) {
+            onError("未配置 DeepSeek 接口地址或模型名，内置默认值丢失")
+            return
+        }
+        if (key.isBlank()) {
+            onError("未配置 DeepSeek API Key，请先去设置里填写")
+            return
+        }
+        val userContent: Any = if (jpegBase64.isNullOrBlank()) {
+            DeepSeekLlmClient.textBlock(userText)
+        } else {
+            JSONArray()
+                .put(DeepSeekLlmClient.textBlock(userText))
+                .put(DeepSeekLlmClient.imageBlock(jpegBase64, "image/jpeg"))
+        }
+        val messages = listOf(
+            JSONObject().put("role", "system").put("content", systemPrompt),
+            JSONObject().put("role", "user").put("content", userContent)
+        )
+        val client = DeepSeekLlmClient(
+            base, key, model,
+            thinking = true, reasoningEffort = JarvisPrefs.DEEPSEEK_REASONING_EFFORT
+        )
+        Thread {
+            if (isAlive?.invoke() == false) return@Thread
+            try {
+                val reply = client.complete(messages, JSONArray())
+                if (isAlive?.invoke() == false) return@Thread
+                onResult(reply.content)
+            } catch (e: Exception) {
+                if (isAlive?.invoke() == false) return@Thread
+                onError("DeepSeek 调用失败：${e.message}")
+            }
+        }.also { it.isDaemon = true; it.start() }
+    }
+}
+
+/**
  * 模型 client 注册表：按名字 / 模式登记，TaskLoop 只认接口、不再硬编码
  * 用哪个 client。行为与改前一字不变（见各函数的“改前对应”）：
  *
- * - 任务大脑 taskClient：改前 askModel 的 if/else 原样搬过来——模型开关
- *   为 "custom" 走 Custom 适配（用户填的 OpenAI 兼容接口、带图问），其余
- *   （默认 GLM，含开关值异常时）走 AutoGLM 适配（autoglm-phone，do(...)
- *   由 AutoGLMClient 转成 JSON 动作串，计划/笔记块回传也在它内部）。
+ * - 任务大脑 taskClient：改前 askModel 的 if/else 原样搬过来，再加 DeepSeek
+ *   分支——模型开关为 "custom" 走 Custom 适配（用户填的 OpenAI 兼容接口、带图问），
+ *   为 "deepseek" 走 DeepSeek 适配（Andee LlmClient 的 1:1 移植，Andee 默认同款，
+ *   文本模式），其余（默认 GLM，含开关值异常时）走 AutoGLM 适配（autoglm-phone，
+ *   do(...) 由 AutoGLMClient 转成 JSON 动作串，计划/笔记块回传也在它内部）。
  * - 聊天 client chatClient：改前 askReflect / askManager 统一走
  *   CustomClient.askOnce——核验要 A/B/C 自由文本、规划要计划块自由文本，
  *   GLM 模式的任务 client 只回 JSON 动作串、问不出来。聊天 client 与模式
@@ -127,9 +189,15 @@ object LlmRegistry {
     /** 任务专用模型 client（AutoGLMClient 适配）：只回 JSON 动作串的短问答。 */
     const val NAME_AUTOGLM = "autoglm"
 
-    /** 任务大脑：按模型开关取，与改前 askModel 的 if/else 一一对应。 */
-    fun taskClient(ctx: Context): LlmClient =
-        if (JarvisPrefs.getModelMode(ctx) == "custom") CustomLlmClient else AutoGlmLlmClient
+    /** 任务大脑 client（DeepSeekLlmClient 适配）：Andee 同款原生调用，文本模式。 */
+    const val NAME_DEEPSEEK = "deepseek"
+
+    /** 任务大脑：按模型开关取，与改前 askModel 的 if/else 一一对应（加 DeepSeek 分支）。 */
+    fun taskClient(ctx: Context): LlmClient = when (JarvisPrefs.getModelMode(ctx)) {
+        "custom" -> CustomLlmClient
+        "deepseek" -> DeepSeekAdapter
+        else -> AutoGlmLlmClient
+    }
 
     /** 聊天 client（Reflector 核验 / Manager 规划用）：恒为 Custom 适配，与模式开关无关。 */
     fun chatClient(): StreamingLlmClient = CustomLlmClient
@@ -138,11 +206,12 @@ object LlmRegistry {
     fun client(name: String): LlmClient = when (name) {
         NAME_CUSTOM -> CustomLlmClient
         NAME_AUTOGLM -> AutoGlmLlmClient
+        NAME_DEEPSEEK -> DeepSeekAdapter
         else -> throw IllegalArgumentException(
-            "未登记的模型：${name}（已登记：${NAME_CUSTOM}、${NAME_AUTOGLM}）"
+            "未登记的模型：${name}（已登记：${NAME_CUSTOM}、${NAME_AUTOGLM}、${NAME_DEEPSEEK}）"
         )
     }
 
     /** 已登记的名字集合（新模型接进来时在这里加名、加分支即可，TaskLoop 不用改）。 */
-    fun registeredNames(): Set<String> = setOf(NAME_CUSTOM, NAME_AUTOGLM)
+    fun registeredNames(): Set<String> = setOf(NAME_CUSTOM, NAME_AUTOGLM, NAME_DEEPSEEK)
 }

@@ -937,7 +937,7 @@ class MainActivity : Activity() {
 
         /**
          * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
-         * Key 本身绝不返回。provider 跟模型开关走（getModelMode：glm 默认 / custom）。
+         * Key 本身绝不返回。provider 跟模型开关走（getModelMode：glm 默认 / custom / deepseek）。
          */
         @JavascriptInterface
         fun getModelInfo(): String {
@@ -949,6 +949,12 @@ class MainActivity : Activity() {
                         o.put("base_url", JarvisPrefs.getCustomBaseUrl(this@MainActivity))
                         o.put("model", JarvisPrefs.getCustomModel(this@MainActivity))
                         o.put("has_key", JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank())
+                    }
+                    "deepseek" -> {
+                        o.put("provider", "deepseek")
+                        o.put("base_url", JarvisPrefs.DEEPSEEK_BASE_URL)
+                        o.put("model", JarvisPrefs.DEEPSEEK_MODEL)
+                        o.put("has_key", JarvisPrefs.getDeepSeekKey(this@MainActivity).isNotBlank())
                     }
                     else -> {
                         o.put("provider", "glm")
@@ -2671,14 +2677,15 @@ class MainActivity : Activity() {
         }
         root.addView(section)
 
-        // 模型开关：GLM（默认，内置智谱）/ 自定义（下面三项自己填）。聊天、任务、看屏都跟着走。
-        root.addView(segmentedRow("模型", listOf("GLM", "自定义"),
-            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; else -> 0 }) { i ->
-            val next = when (i) { 1 -> "custom"; else -> "glm" }
+        // 模型开关：GLM（默认，内置智谱）/ 自定义（下面三项自己填）/ DeepSeek（内置 deepseek-flash）。聊天、任务、看屏都跟着走。
+        root.addView(segmentedRow("模型", listOf("GLM", "自定义", "DeepSeek"),
+            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; "deepseek" -> 2; else -> 0 }) { i ->
+            val next = when (i) { 1 -> "custom"; 2 -> "deepseek"; else -> "glm" }
             JarvisPrefs.setModelMode(this, next)
             toast(
                 when (next) {
                     "custom" -> "改用自定义模型"
+                    "deepseek" -> "改用 DeepSeek（deepseek-flash）"
                     else -> "改用 GLM（内置智谱）"
                 }
             )
@@ -2692,6 +2699,18 @@ class MainActivity : Activity() {
         root.addView(customKeyInput)
         root.addView(primaryBtn("保存 Key") {
             JarvisPrefs.setCustomKey(this, customKeyInput.text.toString())
+            toast("已保存")
+        })
+
+        // DeepSeek 的 Key 单独一个栏位（不顶掉上面共用的 Key）；地址和模型是内置的，不用填。
+        root.addView(sectionTitle("DeepSeek Key（仅 DeepSeek 模式使用）"))
+        val deepSeekKeyInput = EditText(this).apply {
+            hint = "DeepSeek API Key（sk-…）"; setTextColor(Color.WHITE)
+            setText(JarvisPrefs.getDeepSeekKey(this@MainActivity))
+        }
+        root.addView(deepSeekKeyInput)
+        root.addView(primaryBtn("保存 DeepSeek Key") {
+            JarvisPrefs.setDeepSeekKey(this, deepSeekKeyInput.text.toString())
             toast("已保存")
         })
 

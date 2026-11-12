@@ -9,12 +9,13 @@ import android.content.SharedPreferences
  */
 object JarvisPrefs {
     private const val FILE = "jarvis_settings"
-    // 模型开关：GLM（默认，内置智谱）/ 自定义（用户自己填的三项）。聊天、任务、看屏都跟着走。
+    // 模型开关：GLM（默认，内置智谱）/ 自定义（用户自己填的三项）/ DeepSeek（内置 deepseek-flash）。聊天、任务、看屏都跟着走。
     private const val KEY_MODEL_MODE = "model_mode"
     private const val KEY_TASK_BRAIN = "task_brain" // 旧键，仅用于迁移
     private const val KEY_CUSTOM_BASE_URL = "custom_base_url"
     private const val KEY_CUSTOM_MODEL = "custom_model"
     private const val KEY_CUSTOM_API_KEY = "custom_api_key"
+    private const val KEY_DEEPSEEK_API_KEY = "deepseek_api_key"
     private const val KEY_WAKE_ENABLED = "wake_enabled"
     private const val KEY_BARGE_IN_ENABLED = "barge_in_enabled"
 
@@ -24,13 +25,18 @@ object JarvisPrefs {
     const val GLM_TASK_MODEL = "autoglm-phone"
     const val GLM_VISION_MODEL = "glm-4v-plus"
 
+    // DeepSeek 内置配置（Andee 默认同款）：聊天、任务、视觉都走 deepseek-flash（V4.1 Flash，带视觉）。
+    const val DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+    const val DEEPSEEK_MODEL = "deepseek-flash"
+    const val DEEPSEEK_REASONING_EFFORT = "high"
+
     private fun p(ctx: Context): SharedPreferences =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    /** 模型开关：返回 "glm" 或 "custom"，默认 "glm"。旧的 task_brain 值自动迁移。 */
+    /** 模型开关：返回 "glm"、"custom" 或 "deepseek"，默认 "glm"。旧的 task_brain 值自动迁移。 */
     fun getModelMode(ctx: Context): String {
         val saved = p(ctx).getString(KEY_MODEL_MODE, null)
-        if (saved == "glm" || saved == "custom") return saved
+        if (saved == "glm" || saved == "custom" || saved == "deepseek") return saved
         // 旧版迁移：task_brain 里 autoglm/agnes 都算 GLM，custom 保持自定义。
         val old = p(ctx).getString(KEY_TASK_BRAIN, "autoglm") ?: "autoglm"
         val mode = if (old == "custom") "custom" else "glm"
@@ -38,7 +44,7 @@ object JarvisPrefs {
         return mode
     }
     fun setModelMode(ctx: Context, v: String) {
-        val mode = if (v == "custom") "custom" else "glm"
+        val mode = if (v == "custom") "custom" else if (v == "deepseek") "deepseek" else "glm"
         p(ctx).edit().putString(KEY_MODEL_MODE, mode).apply()
     }
 
@@ -62,29 +68,49 @@ object JarvisPrefs {
         p(ctx).edit().putString(KEY_CUSTOM_API_KEY, key.trim()).apply()
     }
 
+    /** DeepSeek 的 Key：单独栏位，不顶掉 GLM/自定义共用的 Key。 */
+    fun getDeepSeekKey(ctx: Context): String = p(ctx).getString(KEY_DEEPSEEK_API_KEY, "") ?: ""
+    fun setDeepSeekKey(ctx: Context, key: String) {
+        p(ctx).edit().putString(KEY_DEEPSEEK_API_KEY, key.trim()).apply()
+    }
+
     // ---------- 按模型开关解析出的实际配置（聊天 / 任务 / 视觉共用这套） ----------
 
-    /** 对话用的接口地址：GLM 模式走智谱内置地址，自定义模式走用户填的地址。 */
-    fun getChatBaseUrl(ctx: Context): String =
-        if (getModelMode(ctx) == "custom") getCustomBaseUrl(ctx) else GLM_BASE_URL
+    /** 对话用的接口地址：GLM 模式走智谱内置地址，自定义模式走用户填的地址，DeepSeek 模式走 DeepSeek 内置地址。 */
+    fun getChatBaseUrl(ctx: Context): String = when (getModelMode(ctx)) {
+        "custom" -> getCustomBaseUrl(ctx)
+        "deepseek" -> DEEPSEEK_BASE_URL
+        else -> GLM_BASE_URL
+    }
 
-    /** 对话用的模型名：GLM 模式用 glm-4.5，自定义模式用用户填的模型。 */
-    fun getChatModel(ctx: Context): String =
-        if (getModelMode(ctx) == "custom") getCustomModel(ctx) else GLM_CHAT_MODEL
+    /** 对话用的模型名：GLM 模式用 glm-4.5，自定义模式用用户填的模型，DeepSeek 模式用 deepseek-flash。 */
+    fun getChatModel(ctx: Context): String = when (getModelMode(ctx)) {
+        "custom" -> getCustomModel(ctx)
+        "deepseek" -> DEEPSEEK_MODEL
+        else -> GLM_CHAT_MODEL
+    }
 
-    /** 对话用的 Key：两种模式共用同一个 Key 栏位。 */
-    fun getChatKey(ctx: Context): String = getCustomKey(ctx)
+    /** 对话用的 Key：DeepSeek 模式用 DeepSeek 单独的 Key 栏位，其余两种模式共用同一个 Key 栏位。 */
+    fun getChatKey(ctx: Context): String =
+        if (getModelMode(ctx) == "deepseek") getDeepSeekKey(ctx) else getCustomKey(ctx)
 
-    /** 任务用的模型名：GLM 模式用 autoglm-phone，自定义模式用用户填的模型。 */
-    fun getTaskModel(ctx: Context): String =
-        if (getModelMode(ctx) == "custom") getCustomModel(ctx) else GLM_TASK_MODEL
+    /** 任务用的模型名：GLM 模式用 autoglm-phone，自定义模式用用户填的模型，DeepSeek 模式用 deepseek-flash。 */
+    fun getTaskModel(ctx: Context): String = when (getModelMode(ctx)) {
+        "custom" -> getCustomModel(ctx)
+        "deepseek" -> DEEPSEEK_MODEL
+        else -> GLM_TASK_MODEL
+    }
 
-    /** 任务用的接口地址：GLM 模式走智谱内置地址，自定义模式走用户填的地址。 */
-    fun getTaskBaseUrl(ctx: Context): String =
-        if (getModelMode(ctx) == "custom") getCustomBaseUrl(ctx) else GLM_BASE_URL
+    /** 任务用的接口地址：GLM 模式走智谱内置地址，自定义模式走用户填的地址，DeepSeek 模式走 DeepSeek 内置地址。 */
+    fun getTaskBaseUrl(ctx: Context): String = when (getModelMode(ctx)) {
+        "custom" -> getCustomBaseUrl(ctx)
+        "deepseek" -> DEEPSEEK_BASE_URL
+        else -> GLM_BASE_URL
+    }
 
-    /** 任务用的 Key：两种模式共用同一个 Key 栏位。 */
-    fun getTaskKey(ctx: Context): String = getCustomKey(ctx)
+    /** 任务用的 Key：DeepSeek 模式用 DeepSeek 单独的 Key 栏位，其余两种模式共用同一个 Key 栏位。 */
+    fun getTaskKey(ctx: Context): String =
+        if (getModelMode(ctx) == "deepseek") getDeepSeekKey(ctx) else getCustomKey(ctx)
 
     fun isWakeEnabled(ctx: Context): Boolean = p(ctx).getBoolean(KEY_WAKE_ENABLED, false)
     fun setWakeEnabled(ctx: Context, on: Boolean) {
@@ -318,14 +344,18 @@ object JarvisPrefs {
     }
 
     fun getVisionModel(ctx: Context): String {
-        if (getModelMode(ctx) != "custom") return GLM_VISION_MODEL
+        val mode = getModelMode(ctx)
+        if (mode == "deepseek") return DEEPSEEK_MODEL // deepseek-flash 自带视觉
+        if (mode != "custom") return GLM_VISION_MODEL
         val v = p(ctx).getString(KEY_VISION_MODEL, "") ?: ""
         return v.ifBlank { getCustomModel(ctx) }.ifBlank { GLM_VISION_MODEL }
     }
     fun setVisionModel(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_MODEL, v.trim()).apply() }
 
     fun getVisionBaseUrl(ctx: Context): String {
-        if (getModelMode(ctx) != "custom") return GLM_BASE_URL
+        val mode = getModelMode(ctx)
+        if (mode == "deepseek") return DEEPSEEK_BASE_URL
+        if (mode != "custom") return GLM_BASE_URL
         val v = p(ctx).getString(KEY_VISION_BASE, "") ?: ""
         return v.ifBlank { getCustomBaseUrl(ctx) }.ifBlank { GLM_BASE_URL }
     }
@@ -333,7 +363,8 @@ object JarvisPrefs {
 
     fun getVisionApiKey(ctx: Context): String {
         val v = p(ctx).getString(KEY_VISION_KEY, "") ?: ""
-        return v.ifBlank { getCustomKey(ctx) }
+        // 回落到按模式开关取的 Key：DeepSeek 模式是 DeepSeek 的 Key，其余是共用 Key（行为与改前一致）。
+        return v.ifBlank { getTaskKey(ctx) }
     }
     fun setVisionApiKey(ctx: Context, v: String) { p(ctx).edit().putString(KEY_VISION_KEY, v.trim()).apply() }
 
