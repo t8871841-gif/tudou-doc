@@ -585,6 +585,15 @@ object EdgeTts {
                         Log.w(TAG, "edge tts streaming decoder dead, sentence $i fallback to whole-mp3")
                         result = streamSentenceWhole(seq, sentence, voice, ratePct, pitchHz, null, writePcm)
                         if (result.ok) continue
+                        // 回落也失败了：审计里同时留解码器死因和取音失败原因，
+                        // 别只剩后者（原来只剩“取音为空”，死因只在 Logcat 里）。
+                        // 注意：这里只补记一条审计，不改 result.reason——
+                        // 下面的 stoppedHere 判据（reason == "AudioTrack.write 失败"）必须原样。
+                        com.jarvis.app.AuditLog.append(
+                            ctx, "语音播报",
+                            "Edge 第 ${i + 1}/${sentences.size} 句流式解码器已死",
+                            "${DECODER_DEAD_REASON}，整段回落又失败（${result.reason ?: "取音/解码失败"}）"
+                        )
                     }
                     // 首句失败或写轨道失败会 break（该句及之后都没播）；其余失败只跳过这句、
                     // 继续播后面的句子，续播时只补这一句、不重播已播完的尾巴。
@@ -643,6 +652,48 @@ object EdgeTts {
 
     private data class PrefetchResult(val pcms: List<ByteArray>, val ok: Boolean, val reason: String?)
     private data class StreamResult(val ok: Boolean, val reason: String?, val sawAudio: Boolean)
+
+    /**
+     * 整段取音的结果：mp3 为空时 failure 一定非空；“取音为空”只留给真正
+     * turn.end 到达且零音频帧的情况，其他失败一律记真实原因。
+     */
+    private data class FetchResult(val mp3: ByteArray, val failure: String?)
+
+    /**
+     * 服务端文本帧里的合成错误：正常帧（turn.start / response 元数据 / 空体
+     * turn.end）的体里都没有 error/code 键；含这些键即认为是服务端报错，
+     * 返回体文本（单行化、截断）供调用方直接报错——不等 turn.end 再判“取音为空”。
+     * 注意：错误体的具体 JSON 结构以服务端实发为准，这里只认键名，未实测过。
+     */
+    private fun serverErrorIn(msg: String): String? {
+        val body = msg.substringAfter(String(HEADER_END, Charsets.UTF_8), "")
+        if (body.isBlank()) return null
+        if (!body.contains("\"error\"") && !body.contains("\"code\"")) return null
+        return body.lines().joinToString(" ").take(300)
+    }
+
+    /**
+     * 取音失败原因分类：握手状态码 / 超时 / TLS / 连接关闭 / GEC / 发 SSML /
+     * 服务端合成错误 / 其他。握手失败的消息里已带 HTTP 状态码
+     * （requireHandshake101），原样返回；其余一律带上原始异常消息，不再吞成空字节。
+     */
+    private fun classifyFetchFailure(e: Exception): String {
+        val msg = e.message ?: ""
+        val detail = msg.ifEmpty { e.javaClass.simpleName }
+        return when {
+            msg.startsWith("Edge 语音握手失败") -> msg
+            msg.startsWith("Edge 语音合成失败") -> msg
+            msg.startsWith("取音 GEC 生成失败") -> msg
+            msg.startsWith("发 SSML 失败") -> msg
+            e is java.net.SocketTimeoutException ->
+                if (msg.contains("connect", ignoreCase = true)) "取音连接超时（建连 15 秒）：$detail"
+                else "取音读取超时（45 秒无响应）：$detail"
+            e is javax.net.ssl.SSLHandshakeException -> "取音 TLS 握手失败：$detail"
+            e is javax.net.ssl.SSLException -> "取音 TLS 失败：$detail"
+            e is java.io.IOException && msg.contains("连接已关闭") -> "取音连接已关闭"
+            else -> "取音失败：$detail"
+        }
+    }
 
     // L7：AudioTrack.write 的返回值必须检查，<= 0 即停；返回实际写入的帧数（失败返回 -1），
     // 调用方按返回值累加帧数，不再丢弃返回值后按 pcm.size/2 硬算。
@@ -876,6 +927,9 @@ object EdgeTts {
         var sawPcm = false
         var gotAudio = false
         var writeFailed = false
+        // 收到 turn.end 才算合成正常结束：没等到 turn.end 就断开（0x8）且零音频时，
+        // 不再冒充“取音为空”，而是记连接已关闭。
+        var sawTurnEnd = false
         try {
             val ssmlMsg = "X-RequestId:${hexId()}\r\n" +
                 "Content-Type:application/ssml+xml\r\n" +
@@ -901,7 +955,11 @@ object EdgeTts {
                         }
                         0x1 -> {
                             val msg = String(payload, Charsets.UTF_8)
-                            if (msg.contains("turn.end")) break
+                            // 服务端文本帧里报合成失败时直接抛，带上服务端原文，
+                            // 不等 turn.end 再判空。
+                            val err = serverErrorIn(msg)
+                            if (err != null) throw java.io.IOException("Edge 语音合成失败：$err")
+                            if (msg.contains("turn.end")) { sawTurnEnd = true; break }
                         }
                         0x8 -> if (closeThrows) throw java.io.IOException("Edge 语音连接已关闭") else break
                     }
@@ -946,7 +1004,13 @@ object EdgeTts {
             decoder.close()
         }
         if (writeFailed) return StreamResult(false, "AudioTrack.write 失败", sawPcm)
-        if (!sawPcm) return StreamResult(false, if (gotAudio) "解码无音频" else "取音为空", false)
+        if (!sawPcm) {
+            // “取音为空”只保留给真正 turn.end 到达且零音频帧的情况。
+            val reason = if (gotAudio) "解码无音频"
+                else if (sawTurnEnd) "取音为空"
+                else "取音连接已关闭（未等到 turn.end）"
+            return StreamResult(false, reason, false)
+        }
         return StreamResult(true, null, true)
     }
 
@@ -955,13 +1019,20 @@ object EdgeTts {
         seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int,
         session: EdgeSession?, onPcm: (ByteArray) -> Boolean
     ): StreamResult {
-        val mp3: ByteArray = if (session != null) {
-            fetchMp3OnSession(session, seq, sentence, voice, ratePct, pitchHz)
+        // 会话路（fetchMp3OnSession）仍抛异常：0x8 提前关连接时抛是会话失效的信号，
+        // 调用方凭它关会话、改逐句重试——不在这里吞掉。逐句路（fetchMp3）已改成
+        // 返回带原因的 FetchResult，不再吞成空字节。
+        val mp3: ByteArray
+        var fetchFailure: String? = null
+        if (session != null) {
+            mp3 = fetchMp3OnSession(session, seq, sentence, voice, ratePct, pitchHz)
         } else {
-            fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+            val fetched = fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+            mp3 = fetched.mp3
+            fetchFailure = fetched.failure
         }
         if (cancelled(seq)) return StreamResult(false, "cancelled", false)
-        if (mp3.isEmpty()) return StreamResult(false, "取音为空", false)
+        if (mp3.isEmpty()) return StreamResult(false, fetchFailure ?: "取音为空", false)
         val pcms = decodeMp3(seq, mp3)
         if (pcms.isEmpty()) return StreamResult(false, "解码为空", false)
         var saw = false
@@ -1153,7 +1224,12 @@ object EdgeTts {
             val (opcode, payload) = session.reader.readFrame()
             when (opcode) {
                 0x2 -> if (payload.isNotEmpty()) { binAll.write(payload); gotAudio = true }
-                0x1 -> { val msg = String(payload, Charsets.UTF_8); if (msg.contains("turn.end")) break }
+                0x1 -> {
+                    val msg = String(payload, Charsets.UTF_8)
+                    val err = serverErrorIn(msg)
+                    if (err != null) throw java.io.IOException("Edge 语音合成失败：$err")
+                    if (msg.contains("turn.end")) break
+                }
                 // 服务端没给 turn.end 就关连接：当本次合成失败，调用方回落逐句握手重念该句。
                 0x8 -> throw java.io.IOException("Edge 语音连接已关闭")
             }
@@ -1162,7 +1238,7 @@ object EdgeTts {
         return extractAudio(binAll.toByteArray())
     }
 
-    private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): ByteArray {
+    private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): FetchResult {
         waitHandshakeBackoff()
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
         socket = ssl
@@ -1211,24 +1287,42 @@ object EdgeTts {
                 "X-Timestamp:${date}Z\r\n" +
                 "Path:ssml\r\n\r\n" +
                 ssml(sentence, voice, ratePct, pitchHz)
-            sendTextFrame(out, ssmlMsg)
+            // 发 SSML 失败要单独记原因，别让它在外层 catch 里混成笼统的“取音失败”。
+            try {
+                sendTextFrame(out, ssmlMsg)
+            } catch (e: Exception) {
+                throw java.io.IOException("发 SSML 失败：${e.message ?: e.javaClass.simpleName}")
+            }
 
             val binAll = ByteArrayOutputStream()
             var gotAudio = false
+            var endedCleanly = false
             while (true) {
                 if (cancelled(seq)) break
                 val (opcode, payload) = reader.readFrame()
                 when (opcode) {
                     0x2 -> if (payload.isNotEmpty()) { binAll.write(payload); gotAudio = true }
-                    0x1 -> { val msg = String(payload, Charsets.UTF_8); if (msg.contains("turn.end")) break }
+                    0x1 -> {
+                        val msg = String(payload, Charsets.UTF_8)
+                        val err = serverErrorIn(msg)
+                        if (err != null) throw java.io.IOException("Edge 语音合成失败：$err")
+                        if (msg.contains("turn.end")) { endedCleanly = true; break }
+                    }
                     0x8 -> break
                 }
             }
-            if (!gotAudio) return ByteArray(0)
-            return extractAudio(binAll.toByteArray())
+            if (cancelled(seq)) return FetchResult(ByteArray(0), null)
+            if (!gotAudio) return FetchResult(
+                ByteArray(0),
+                if (endedCleanly) "取音为空" else "取音连接已关闭（未等到 turn.end）"
+            )
+            val audio = extractAudio(binAll.toByteArray())
+            return if (audio.isEmpty()) FetchResult(ByteArray(0), "收到音频帧但未解析出音频段")
+            else FetchResult(audio, null)
         } catch (e: Exception) {
-            if (!cancelled(seq)) Log.e(TAG, "fetchMp3 failed: ${e.message}")
-            return ByteArray(0)
+            if (cancelled(seq)) return FetchResult(ByteArray(0), null)
+            Log.e(TAG, "fetchMp3 failed: ${e.message}")
+            return FetchResult(ByteArray(0), classifyFetchFailure(e))
         } finally {
             if (socket === ssl) socket = null
             runCatching { ssl.close() }
@@ -1270,7 +1364,12 @@ object EdgeTts {
     }
 
     /** Sec-MS-GEC v2：格式为“CS64-SHA256”，算法见 EdgeGec（移植自 edge-tts 7.3.1 的 drm.py）。 */
-    private fun secMsGec(): String = EdgeGec.generate(TOKEN)
+    private fun secMsGec(): String = try {
+        EdgeGec.generate(TOKEN)
+    } catch (e: Exception) {
+        // GEC 生成失败要单独记原因，别让它混进后面的握手/超时里。
+        throw IllegalStateException("取音 GEC 生成失败：${e.message ?: e.javaClass.simpleName}", e)
+    }
 
     private fun hexId(): String {
         val r = SecureRandom()
