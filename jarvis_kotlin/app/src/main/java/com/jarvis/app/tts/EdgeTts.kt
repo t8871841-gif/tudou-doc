@@ -83,6 +83,9 @@ object EdgeTts {
     private const val STALL_AFTER_MS = 20_000L
     // 预取等待上限：等下一句预取最多 5 秒，超时放弃预取、直接走当前句流式现取现播，不死等。
     private const val PREFETCH_WAIT_TIMEOUT_MS = 5_000L
+    // 流式解码器已死的失败原因前缀（见 DecoderDeadException）：句循环凭它认出
+    // “解码器错”并走整段回落；与握手失败的 IllegalStateException 区分开。
+    private const val DECODER_DEAD_REASON = "流式解码器已释放"
     // 握手 429 退避：下次握手前等待至此时刻（elapsedRealtime），避免 429 后立刻重握手再被限流。
     private const val HANDSHAKE_429_BACKOFF_MS = 2_000L
     @Volatile private var handshakeRetryAfterMs = 0L
@@ -399,6 +402,9 @@ object EdgeTts {
         var session: EdgeSession? = null
         var prefetchFuture: Future<PrefetchResult>? = null
         var prefetchIndex = -1
+        // 流式解码器已确认死在这台机上（第一次喂就报 Released）：之后各句不再往它
+        // 上撞，直接走整段回落；预取也不再发起（它走同一条流式路，必失败）。
+        var streamingDecoderDead = false
         // M9：onStart 早发——会话打开（或确定走逐句回落）时就发，不等首句取音+解码+首段写入。
         val fireStartOnce: () -> Unit = {
             if (!started) {
@@ -439,7 +445,7 @@ object EdgeTts {
                 if (cancelled(seq)) break
                 // M8 预取：下一句的取音/解码在上一句还在写 AudioTrack 时就跑在 prefetchIo 上，
                 // 不等上一句写完才开始；预取走独立逐句连接，不抢当前句的共享会话。
-                if (i + 1 < sentences.size && prefetchFuture == null) {
+                if (i + 1 < sentences.size && prefetchFuture == null && !streamingDecoderDead) {
                     val nextSentence = sentences[i + 1]
                     prefetchIndex = i + 1
                     prefetchFuture = prefetchIo.submit(Callable<PrefetchResult> {
@@ -506,31 +512,47 @@ object EdgeTts {
                 if (cancelled(seq)) break
                 // 2) 流式现取现播：边收帧边解码边写（见 streamSentence），不收满整句 MP3。
                 var sentenceFired = false
-                val playOne: (EdgeSession?) -> StreamResult = { sess ->
-                    streamSentence(seq, sentence, voice, ratePct, pitchHz, sess) { pcm ->
-                        if (pcm.isEmpty()) return@streamSentence true
+                // 写 PCM 进 AudioTrack：流式句与整段回落句共用同一份（行为一字不差——
+                // 空 PCM 照过、首段到时回调 onSentence、写失败返回 false）。
+                val writePcm: (ByteArray) -> Boolean = { pcm ->
+                    if (pcm.isEmpty()) {
+                        true
+                    } else {
                         if (!sentenceFired) {
                             sentenceFired = true
                             // H5：每句开始播放时回调一次 onSentence(sentence)。
                             main.post { if (!cancelled(seq)) onSentence?.invoke(sentence) }
                         }
                         val frames = writePcmFully(t, pcm)
-                        if (frames < 0) false else {
+                        if (frames < 0) {
+                            false
+                        } else {
                             totalFrames += frames
                             sawAny = true
                             true
                         }
                     }
                 }
-                val result: StreamResult = try {
-                    if (session != null) {
+                val playOne: (EdgeSession?) -> StreamResult = { sess ->
+                    streamSentence(seq, sentence, voice, ratePct, pitchHz, sess, writePcm)
+                }
+                var result: StreamResult = try {
+                    if (streamingDecoderDead) {
+                        // 流式解码器已确认死：直接整段取音+解码，不再往死解码器上撞。
+                        streamSentenceWhole(seq, sentence, voice, ratePct, pitchHz, null, writePcm)
+                    } else if (session != null) {
                         try {
                             playOne(session)
                         } catch (e: Exception) {
-                            Log.w(TAG, "edge tts session sentence $i failed, fallback to per-sentence", e)
                             closeSession(session)
                             session = null
                             if (cancelled(seq)) throw e
+                            if (e is DecoderDeadException) {
+                                // 解码器已死：逐句重试必定再死，别浪费一次合成，直接抛给外层走整段回落。
+                                Log.w(TAG, "edge tts session sentence $i decoder dead, skip per-sentence retry", e)
+                                throw e
+                            }
+                            Log.w(TAG, "edge tts session sentence $i failed, fallback to per-sentence", e)
                             playOne(null)
                         }
                     } else {
@@ -538,10 +560,32 @@ object EdgeTts {
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "edge tts sentence $i failed", e)
-                    StreamResult(false, e.message ?: "取音失败", false)
+                    // sentenceFired 即“已有 PCM 写进轨道”：异常路径也不能硬填 false，
+                    // 否则下面的整段回落会误判、把播过一半的句整句重播。
+                    StreamResult(false, e.message ?: "取音失败", sentenceFired)
                 }
                 if (cancelled(seq)) break
                 if (!result.ok) {
+                    // 流式解码器到手即死（Flyme 上第一次喂就报 Released）：还没出过 PCM 时，
+                    // 整句改走整段 MediaExtractor 解码路再试一次；已出过 PCM 就不能整句重播
+                    // （会重复），按原规则失败。只试一次；成了这句就算播完。
+                    if (!cancelled(seq) && !streamingDecoderDead && !result.sawAudio &&
+                        (result.reason ?: "").startsWith(DECODER_DEAD_REASON)
+                    ) {
+                        streamingDecoderDead = true
+                        // 在途的预取停掉（它走同一条流式路，必失败）；共享会话还攺着半截
+                        // turn 的帧，不能再用：关掉、改逐句。
+                        prefetchFuture?.cancel(true)
+                        prefetchFuture = null
+                        prefetchIndex = -1
+                        if (session != null) {
+                            closeSession(session)
+                            session = null
+                        }
+                        Log.w(TAG, "edge tts streaming decoder dead, sentence $i fallback to whole-mp3")
+                        result = streamSentenceWhole(seq, sentence, voice, ratePct, pitchHz, null, writePcm)
+                        if (result.ok) continue
+                    }
                     // 首句失败或写轨道失败会 break（该句及之后都没播）；其余失败只跳过这句、
                     // 继续播后面的句子，续播时只补这一句、不重播已播完的尾巴。
                     val stoppedHere = i == 0 || result.reason == "AudioTrack.write 失败"
@@ -673,68 +717,93 @@ object EdgeTts {
         }
     }
 
+    /**
+     * 流式解码器已死：MediaCodec 在 Released 状态下被喂。Flyme 上手写裸 format 造出的
+     * OMX 解码器可能到手即死（configure/start 看似成功，第一次 feed 就报 Released
+     * state）。单独成类、消息带固定前缀，调用方凭前缀认出它、走整段回落，而不是把
+     * MediaCodec 的原始 IllegalStateException 裸奔到审计里。
+     */
+    private class DecoderDeadException(message: String) : Exception(message)
+
     /** 增量 MP3 解码器：MP3 块随到随喂 MediaCodec，随到随出 PCM；不用 MediaExtractor 等整段。 */
     private class StreamingMp3Decoder {
         private val codec: MediaCodec
         private var rateChecked = false
         private var outputDone = false
         private var finished = false
+        private var closed = false
 
         init {
             codec = MediaCodec.createDecoderByType("audio/mpeg")
             val format = MediaFormat.createAudioFormat("audio/mpeg", SAMPLE_RATE, 1)
             codec.configure(format, null, null, 0)
             codec.start()
+            // 诊断：记下到底是哪个 OMX 解码器——以后只凭这一行就能区分“创建即死”
+            // 还是“中途被释放”。只记 Log，不记审计。
+            Log.i(TAG, "streaming decoder created: ${runCatching { codec.name }.getOrNull() ?: "?"}")
         }
 
         fun feed(mp3: ByteArray): List<ByteArray> {
+            if (closed) throw DecoderDeadException("流式解码器已释放：feed 在 close 之后被调用")
             val out = ArrayList<ByteArray>()
             var off = 0
             var guard = 0
-            while (off < mp3.size) {
-                if (++guard > 10_000) {
-                    Log.e(TAG, "streaming decoder feed guard tripped")
-                    break
-                }
-                val inIdx = codec.dequeueInputBuffer(10_000)
-                if (inIdx < 0) {
+            try {
+                while (off < mp3.size) {
+                    if (++guard > 10_000) {
+                        Log.e(TAG, "streaming decoder feed guard tripped")
+                        break
+                    }
+                    val inIdx = codec.dequeueInputBuffer(10_000)
+                    if (inIdx < 0) {
+                        out.addAll(drainAll(0))
+                        try { Thread.sleep(1) } catch (_: InterruptedException) { break }
+                        continue
+                    }
+                    val inBuf = codec.getInputBuffer(inIdx) ?: continue
+                    inBuf.clear()
+                    val n = min(inBuf.remaining(), mp3.size - off)
+                    inBuf.put(mp3, off, n)
+                    off += n
+                    codec.queueInputBuffer(inIdx, 0, n, 0, 0)
                     out.addAll(drainAll(0))
-                    try { Thread.sleep(1) } catch (_: InterruptedException) { break }
-                    continue
                 }
-                val inBuf = codec.getInputBuffer(inIdx) ?: continue
-                inBuf.clear()
-                val n = min(inBuf.remaining(), mp3.size - off)
-                inBuf.put(mp3, off, n)
-                off += n
-                codec.queueInputBuffer(inIdx, 0, n, 0, 0)
-                out.addAll(drainAll(0))
+            } catch (e: IllegalStateException) {
+                // CodecException 也是 IllegalStateException 的子类：到手即死的解码器
+                // 第一次喂就从这里炸出来，转成带前缀的错、触发整段回落；不要吞掉当没事。
+                throw DecoderDeadException("流式解码器已释放：${e.message}")
             }
             return out
         }
 
         fun finish(): List<ByteArray> {
+            if (closed) throw DecoderDeadException("流式解码器已释放：finish 在 close 之后被调用")
             if (finished) return emptyList()
             finished = true
             val out = ArrayList<ByteArray>()
             var tries = 0
-            while (tries++ < 200) {
-                val inIdx = codec.dequeueInputBuffer(10_000)
-                if (inIdx >= 0) {
-                    codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                    break
+            try {
+                while (tries++ < 200) {
+                    val inIdx = codec.dequeueInputBuffer(10_000)
+                    if (inIdx >= 0) {
+                        codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        break
+                    }
+                    out.addAll(drainAll(0))
+                    if (outputDone) return out
                 }
-                out.addAll(drainAll(0))
-                if (outputDone) return out
-            }
-            val deadline = System.currentTimeMillis() + 10_000L
-            while (!outputDone && System.currentTimeMillis() < deadline) {
-                out.addAll(drainAll(10_000))
+                val deadline = System.currentTimeMillis() + 10_000L
+                while (!outputDone && System.currentTimeMillis() < deadline) {
+                    out.addAll(drainAll(10_000))
+                }
+            } catch (e: IllegalStateException) {
+                throw DecoderDeadException("流式解码器已释放：${e.message}")
             }
             return out
         }
 
         fun close() {
+            closed = true
             runCatching { codec.stop() }
             runCatching { codec.release() }
         }
