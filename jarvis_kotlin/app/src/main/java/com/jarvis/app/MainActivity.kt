@@ -261,6 +261,9 @@ class MainActivity : Activity() {
         homePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            // 方案 A·底色：整屏一块深空底——渐变只做在 homePanel 上一次（上 2/3 被
+            // 不透明的 HUD WebView 盖住，看不见；对话区露出渐变的下半段）。
+            background = deepSpaceBackground()
         }
         stageLayout = buildStage()
         homePanel.addView(stageLayout)
@@ -276,6 +279,9 @@ class MainActivity : Activity() {
         settingsScroll = buildSettingsPanel().apply {
             visibility = View.GONE
             layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            // 方案 A·底色：设置是全屏覆盖页，自己的渐变从顶到底（与对话区同款），
+            // 原来无独立背景、透出根布局的深紫渐变，玻璃行跟对话区读起来不一致。
+            background = deepSpaceBackground()
         }
         // 设置页是根布局上的覆盖层（不再塞进竖屏内容列里），横竖屏都能打开。
         root.addView(settingsScroll)
@@ -1438,15 +1444,28 @@ class MainActivity : Activity() {
 
     // ---------- 对话气泡流 ----------
 
+    // 方案 A·底色：HUD 默认皮肤自己的深蓝黑——bg #020509（RGB 2,5,9）从上往下微微
+    // 过渡到 pnl #040C12（RGB 4,12,18）的纵向实色渐变，两个色值 alpha 都是 FF、不透明。
+    // 纯黑吃掉了液态玻璃的高光边、微透底色与外投影（黑底上什么都衬不出来）；换成 HUD
+    // 自己的底色，舞台（WebView 底色 #020509）与对话区接缝消失。每次调用返回一个新的
+    // GradientDrawable——一个 Drawable 实例不能同时挂在两个 View 上。
+    private fun deepSpaceBackground(): GradientDrawable =
+        GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(0xFF020509.toInt(), 0xFF040C12.toInt())
+        )
+
     private fun buildChatPanel() {
         chatList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(8))
         }
         chatScroll = ScrollView(this).apply {
-            // 竖屏精修：下半部分底色改纯黑，与上面 2/3 的黑色统一（原来透出根布局的
-            // 深紫渐变，分色看着割裂）。对话气泡自己的玻璃质感不动，只改背后的底色。
-            setBackgroundColor(0xFF000000.toInt())
+            // 方案 A·底色：这里不再自己涂底色——改透明，透出 homePanel 上那条
+            // #020509→#040C12 纵向渐变。原来涂纯黑是为了“与上面统一”，但 HUD 默认
+            // 皮肤的底色根本不是纯黑（bg #020509），纯黑还把玻璃的高光边与微透底色
+            // 全吃掉了。气泡自己的玻璃质感不动，只改背后的底色。
+            background = null
             addView(chatList)
         }
         // C14：问候语不在这里加——onCreate 末尾的 renderHistoryBubbles() 按 ChatHistory
@@ -1469,8 +1488,8 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(8), dp(16), dp(8))
         }
         panelScroll = ScrollView(this).apply {
-            // 竖屏精修：底色纯黑，与上面统一（见 chatScroll）。
-            setBackgroundColor(0xFF000000.toInt())
+            // 方案 A·底色：与 chatScroll 一样改透明，透出 homePanel 的渐变（见 chatScroll）。
+            background = null
             addView(panelList)
             visibility = View.GONE
         }
@@ -2092,8 +2111,8 @@ class MainActivity : Activity() {
 
     private fun buildBottomPanel(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        // 竖屏精修：底色纯黑，与上面统一（见 chatScroll）；输入行与麦克风行本身的样式不动。
-        setBackgroundColor(0xFF000000.toInt())
+        // 方案 A·底色：改透明，透出 homePanel 的渐变（见 chatScroll）；输入行与麦克风行本身的样式不动。
+        background = null
         // 底栏收窄：下边距 14dp→6dp，麦克风那一行整体往下贴到底边，省出来的空间给上面的舞台。
         setPadding(dp(16), dp(4), dp(16), dp(6))
 
