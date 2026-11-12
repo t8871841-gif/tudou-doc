@@ -2241,18 +2241,20 @@ else controller.longPressAim(on, x, y, null, null, ms, handover = handover)
 else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null, null, "PARSE_ERROR")
 }
 } catch (e: IllegalStateException) {
-// 批三十：树盲应用上 tap 因 zoom 过期被拒时，自动对同一目标重拍一张 zoom 图
-// 并直接在图中央落点，不用另花一步 zoom，也不会在 zoom 和 tap 之间插导航
+// 批三十：树盲应用上 tap/longPress 因 zoom 过期被拒时，自动对同一目标重拍一张 zoom 图
+// 并直接在图中央落点/长按，不用另花一步 zoom，也不会在 zoom 和 tap/longPress 之间插导航
 // 把 zoom 作废。只认守卫的 refused 文案、只认全屏坐标（on=screen）；参数
 // 错误（坏 cell、未知 eid/part）和 zoom 图内坐标（on=zoom）不走这里，模型
 // 须先修正参数或手动重拍。
-if (kind != "tap" || on != "screen" || e.message?.startsWith("refused:") != true) throw e
+// 第 3 批：longPress 与 tap 同门进补救——盲树上被拒的长按以前只能由模型自己
+// zoom 处理，但 autoglm-phone 的 do() 表达不出 on="zoom"，等于没路走。
+if ((kind != "tap" && kind != "longPress") || on != "screen" || e.message?.startsWith("refused:") != true) throw e
 // 2026-11-12 精度修法：模型给了原始 x,y 就以它为中心裁图（zoomAimAt），不再
 // 经 cellFromNorm 量化成格子——格子中心会偏离模型想点的具体像素；只给了
 // cell 时才走 zoomAim(cell, part)（cell 本身就是模型选的目标，没有更细的
-// 坐标可保）。小写 cell 是 zoom 图内的格子，全屏 tap 不能用，照旧拒绝。
+// 坐标可保）。小写 cell 是 zoom 图内的格子，全屏 tap/longPress 不能用，照旧拒绝。
 // 拍图只为登记 zoom（zoomRegion/zoomAtMs）——图本身不再回喂模型，图中央
-// 就是 autoTap 的落点；拍图失败也按原拒绝处理。
+// 就是自动落点/长按的落点；拍图失败也按原拒绝处理。
 runCatching {
 if (action.has("x") && action.has("y")) {
 controller.zoomAimAt(action.optInt("x", 500), action.optInt("y", 500))
@@ -2263,16 +2265,24 @@ controller.zoomAim(zoomCell, part)
 }
 }.getOrNull() ?: throw e
 // flow 方向的落地（2026-11-05）：zoom 图已到手，目标就在图中央（十字准星处）。
-// 直接在 zoom 图中央落点，不用再问模型——autoglm-phone 的 do() 格式
+// 直接在 zoom 图中央落点/长按，不用再问模型——autoglm-phone 的 do() 格式
 // 表达不出 on="zoom"，等它重试只会再被拒一次，空转到 MAX_REPEATS。
-// zoom→点在同一步内原子完成，中间没有模型往返，zoom 不会过期。
+// zoom→点/长按在同一步内原子完成，中间没有模型往返，zoom 不会过期。
 // 成了就当这一步成功；没成直接判这一步失败（原拒绝）：把裁图回喂给模型是
 // 帮倒忙——AutoGLM 发不出 on="zoom"，裁图当全屏读会算得更偏。
-val autoTap = runCatching { controller.tapAim("zoom", 500, 500, null, null, handover = handover) }.getOrNull()
-if (autoTap != null) {
-val autoResult = markTimeoutUnknown("tap", autoTap, summarize("tap", autoTap))
+// 第 3 批：longPress 走现成的 longPressAim("zoom", 500, 500, …, ms)——与 tapAim
+// 同路（resolveAim 的 on="zoom" 换算 + requireZoomedOnBlind），不用新加函数；
+// ms 沿用模型给的时长（缺省 700）。
+val autoLand = runCatching {
+if (kind == "longPress") controller.longPressAim("zoom", 500, 500, null, null, ms, handover = handover)
+else controller.tapAim("zoom", 500, 500, null, null, handover = handover)
+}.getOrNull()
+if (autoLand != null) {
+val autoResult = markTimeoutUnknown(kind, autoLand, summarize(kind, autoLand))
 if (autoResult.ok) {
-return autoResult.copy(summary = "点按被拒后已自动 zoom 并点中目标（zoom 图中央）。${autoResult.summary}")
+val verb = if (kind == "longPress") "长按" else "点按"
+val act = if (kind == "longPress") "长按" else "点中"
+return autoResult.copy(summary = "${verb}被拒后已自动 zoom 并${act}目标（zoom 图中央）。${autoResult.summary}")
 }
 }
 throw e
