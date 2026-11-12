@@ -146,6 +146,9 @@ class MainActivity : Activity() {
     private lateinit var keyboardToggle: ImageButton
     // 竖屏第 4 批：设置齿轮从顶栏移到屏幕右下角（底部麦克风行最右端），只在竖屏对话框态显示。
     private lateinit var settingsGearButton: ImageButton
+    // 真液态玻璃第 2 批：设置齿轮的玻璃壳——齿轮的显示/隐藏（refreshSettingsGear）
+    // 要改壳的可见性，光藏图标会留一个空玻璃圆。
+    private lateinit var settingsGearWrap: LiquidGlassView
     // 麦克风动效（默认对话框）：待机无动效；聆听脉冲环、思考旋转弧、回复均衡条。
     // 状态源是 JarvisAgent.onStateChanged（idle/listening/thinking/speaking），见 onAgentStateChanged。
     private lateinit var micButton: View
@@ -568,9 +571,9 @@ class MainActivity : Activity() {
     /** 竖屏第 4 批：设置齿轮只在竖屏对话框态显示——左滑进 HUD 面板时藏起，横屏也藏起。
      * 设置页打开时 contentView 整个藏起，齿轮自然不可见，这里不用另判 showingSettings。 */
     private fun refreshSettingsGear() {
-        if (!::settingsGearButton.isInitialized) return
+        if (!::settingsGearWrap.isInitialized) return
         val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-        settingsGearButton.visibility = if (portrait && !hudPanelOpen) View.VISIBLE else View.GONE
+        settingsGearWrap.visibility = if (portrait && !hudPanelOpen) View.VISIBLE else View.GONE
     }
 
     /** 竖屏第 1 批：把 HUD WebView 移进舞台（上 2/3），静图藏起来。唤醒词胶囊已撤，舞台只留核心动画与四个演示快捷键。 */
@@ -2215,6 +2218,28 @@ class MainActivity : Activity() {
         }
     }
 
+    // 真液态玻璃第 2 批：底部三个圆钮的玻璃壳——把 ImageButton 包进 LiquidGlassView。
+    // 参数与第 1 批气泡同一套（CLEAR 材质、白 8%、折射 80/斜面 32/色散 0.05），
+    // 按钮比气泡还矮，adaptiveLensScale 会再钳一档；动态背景开、背景来源定死根布局。
+    // 库自带的按压效果不要开：ImageButton 吃掉了触摸，玻璃自己的 onTouchEvent
+    // 拿不到 ACTION_DOWN（库没有 onInterceptTouchEvent）；按压反馈仍走
+    // attachPressScale（贴在图标上，0.97x/80ms，与旧版同一套），图标缩、玻璃不动。
+    private fun glassWrapButton(btn: ImageButton, radiusDp: Float): LiquidGlassView {
+        val r = dp(radiusDp.toInt()).toFloat()
+        return LiquidGlassView(this).apply {
+            setCornerRadii(r, r, r, r)
+            material = GlassMaterial.CLEAR
+            refractionHeight = 80f
+            bevelWidth = 32f
+            dispersionStrength = 0.05f
+            enableSensorHighlight = true
+            enablePressEffect = false
+            enableDynamicBackground = true
+            backdropSource = rootLayout
+            addView(btn, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+    }
+
     // ---------- 底部：静音 / 麦克风 / 键盘切换 + 折叠输入行 ----------
 
     private fun buildBottomPanel(): LinearLayout = LinearLayout(this).apply {
@@ -2270,8 +2295,9 @@ class MainActivity : Activity() {
         }
         muteButton = ImageButton(this@MainActivity).apply {
             setImageResource(if (JarvisPrefs.isMuted(this@MainActivity)) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
-            // 第 2 批·液态玻璃：44x40dp 药丸形（圆角取短边一半 20dp），底色白 2%→0%，按下提亮。
-            background = liquidGlassButtonBg(20f)
+            // 真液态玻璃第 2 批：44x40dp 药丸形（圆角取短边一半 20dp）；背景改透明，
+            // 玻璃由外面的 LiquidGlassView 给（见 glassWrapButton）。
+            background = null
             attachPressScale(this)
             contentDescription = "回答朗读开关"
             setOnClickListener {
@@ -2290,7 +2316,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
         }
-        muteCol.addView(muteButton, LinearLayout.LayoutParams(dp(44), dp(40)))
+        muteCol.addView(glassWrapButton(muteButton, 20f), LinearLayout.LayoutParams(dp(44), dp(40)))
         micCenter.addView(muteCol)
 
         // 麦克风动效：64dp 圆钮本身不动，外面套一个 96dp 的框（动效圈有地方伸展），
@@ -2379,28 +2405,29 @@ class MainActivity : Activity() {
 
         keyboardToggle = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_edit)
-            // 第 2 批·液态玻璃：44x44dp 药丸形（圆角 22dp），底色白 2%→0%，按下提亮。
-            background = liquidGlassButtonBg(22f)
+            // 真液态玻璃第 2 批：44x44dp 药丸形（圆角 22dp）；背景改透明，玻璃由外面的壳给。
+            background = null
             attachPressScale(this)
             setOnClickListener {
                 if (showInput) hideInputRow() else showInputRow()
             }
         }
-        micCenter.addView(keyboardToggle, LinearLayout.LayoutParams(dp(44), dp(44)))
+        micCenter.addView(glassWrapButton(keyboardToggle, 22f), LinearLayout.LayoutParams(dp(44), dp(44)))
         micRow.addView(micCenter)
 
         settingsGearButton = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_manage)
-            // 第 2 批·液态玻璃：48x48dp 药丸形（圆角 24dp，等于圆形），底色白 2%→0%，按下提亮；
-            // 旧版是白 5% 平色 + 1dp 白 16% 描边的椭圆，图标/内边距/尺寸一律不动。
-            background = liquidGlassButtonBg(24f)
+            // 真液态玻璃第 2 批：48x48dp 药丸形（圆角 24dp，等于圆形）；背景改透明，玻璃由外面的壳给；
+            // 图标/内边距/尺寸一律不动。
+            background = null
             attachPressScale(this)
             scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
             setPadding(dp(8), dp(8), dp(8), dp(8))
             setOnClickListener { toggleSettings() }
             contentDescription = "设置"
         }
-        micRow.addView(settingsGearButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        settingsGearWrap = glassWrapButton(settingsGearButton, 24f)
+        micRow.addView(settingsGearWrap, LinearLayout.LayoutParams(dp(48), dp(48)))
         addView(micRow)
 
         // 竖屏第 1 批：下面的「点击麦克风开始语音交互」提示字已删。
