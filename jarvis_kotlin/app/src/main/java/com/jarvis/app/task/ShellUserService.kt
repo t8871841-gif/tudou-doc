@@ -1,5 +1,7 @@
 package com.jarvis.app.task
 
+import android.os.Binder
+import android.os.Parcel
 import android.os.SystemClock
 import java.io.ByteArrayOutputStream
 
@@ -9,7 +11,7 @@ import java.io.ByteArrayOutputStream
  * 机制（13.1.5，官方 README + 服务端 UserService.create 源码，已核实）：
  * - 客户端经 Shizuku.bindUserService 绑定；服务端经 app_process 用咱们 APK 的类加载器
  *   按类名加载这个类，先试 Context 构造器（没有），再用默认构造器实例化，实例必须实现
- *   IBinder——这里直接继承 AIDL Stub（Stub 就是 Binder）。所以：公开类 + 公开无参构造器。
+ *   IBinder——这里直接继承 android.os.Binder、手写 onTransact（协议见 IShellService.kt）。
  *   注意：13.1.5 的库里根本没有 `Shizuku.UserService` 这个基类，不要继承不存在的东西；
  *   也不要继承 android.app.Service（服务端不走 Android 的 Service 机制）。
  * - 不要给这个类加 manifest `<service>` 声明：服务端经 app_process 拉起，不查 manifest。
@@ -19,7 +21,24 @@ import java.io.ByteArrayOutputStream
  *   或重启手机后才消失。这是符合设计的，不主动 unbind。
  * - 超时语义与旧的本地 runProcess 一致：超时就杀掉进程、回退出码 -1；起不来也回 -1。
  */
-class ShellUserService : IShellService.Stub() {
+class ShellUserService : Binder(), IShellService {
+
+    init {
+        attachInterface(this, IShellService.DESCRIPTOR)
+    }
+
+    override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+        if (code == IShellService.TRANSACTION_runCommand) {
+            data.enforceInterface(IShellService.DESCRIPTOR)
+            val cmd = data.createStringArray()
+            val timeoutMs = data.readLong()
+            val result = runCommand(cmd, timeoutMs)
+            reply?.writeNoException()
+            reply?.writeStringArray(result)
+            return true
+        }
+        return super.onTransact(code, data, reply, flags)
+    }
 
     override fun runCommand(cmd: Array<String>?, timeoutMs: Long): Array<String> {
         return try {

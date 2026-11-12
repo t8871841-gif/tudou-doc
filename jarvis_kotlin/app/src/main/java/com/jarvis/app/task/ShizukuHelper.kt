@@ -26,9 +26,12 @@ import java.util.concurrent.TimeUnit
  * - 客户端经 `Shizuku.bindUserService(UserServiceArgs, ServiceConnection)` 绑定；
  *   服务端经 app_process 用咱们 APK 的类加载器按类名加载 ShellUserService，先试
  *   Context 构造器（没有），再用默认构造器实例化，实例必须实现 IBinder（直接继承
- *   AIDL Stub）。注意：13.1.5 的库里根本没有 `Shizuku.UserService` 这个基类，
- *   不要继承不存在的东西；也不要给 ShellUserService 加 manifest `<service>` 声明
- *   （服务端不查 manifest）。
+ *   android.os.Binder、手写 onTransact，协议见 IShellService.kt）。注意：13.1.5 的库里
+ *   根本没有 `Shizuku.UserService` 这个基类，不要继承不存在的东西；也不要给
+ *   ShellUserService 加 manifest `<service>` 声明（服务端不查 manifest）。
+ * - 不用 .aidl 文件：jk-v75 第一次构建在 CI 上失败——日志里根本没有 compileDebugAidl
+ *   这一项，生成的 IShellService 类不存在，Kotlin 报 Unresolved reference。手写 Binder
+ *   不依赖任何代码生成，就没有这路问题。
  * - `processNameSuffix` 是必填（UserServiceArgs.forAdd 里 requireNonNull，缺了
  *   bind 时直接 NPE）；tag 显式给，免得 R8 后类名不稳；daemon 默认 true——服务进程
  *   比应用活得久（直到 Shizuku 停掉或重启手机），调用方复用绑定，符合设计，我们不
@@ -159,7 +162,7 @@ object ShizukuHelper {
     private val shellConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             try {
-                shellStub = IShellService.Stub.asInterface(service)
+                shellStub = IShellService.asInterface(service)
             } catch (_: Exception) {
                 shellStub = null
             }
@@ -255,7 +258,7 @@ object ShizukuHelper {
 
     /**
      * 跑一条命令：经绑定的 UserService 在 shell 进程里执行，回 stdout + 退出码。
-     * 绑定不上、服务挂了、AIDL 返回异常，一律回 null（调用方按失败回落）。
+     * 绑定不上、服务挂了、Binder 调用抛异常，一律回 null（调用方按失败回落）。
      * stdout 里的 stderr 沿用老格式缀在后面（stderr 非空时）。
      */
     private fun runProcess(cmd: Array<String>, timeoutMs: Long): ShellResult? {
