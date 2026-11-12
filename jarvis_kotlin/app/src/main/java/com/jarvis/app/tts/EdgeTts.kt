@@ -72,6 +72,10 @@ object EdgeTts {
     @Volatile private var socket: SSLSocket? = null
     @Volatile private var prefetchSocket: SSLSocket? = null
     @Volatile private var track: AudioTrack? = null
+    // 语音诊断批：最近一次 writePcmFully 失败的原因（失败时才写，成功不动它）。
+    // 调用方在已有失败记录旁补一行审计，不改任何 reason 字符串；下面那个
+    // stoppedHere 判据靠 reason 精确比对，必须原样。
+    @Volatile private var lastWriteDiag = ""
 
     // H4 失速看门狗（对齐 Andee TtsController.armStallWatchdog）：每 5 秒查一次，
     // 以 lastProgressAt 为准，20 秒无 PCM 进展即取消本次合成、停播、回 idle 并记可见报错。
@@ -521,6 +525,8 @@ object EdgeTts {
                         if (!writeOk) {
                             // 预取 PCM 写轨道失败即 break：这句及之后都没播，续播从这句开始。
                             recordFailure(i, "AudioTrack.write 失败", true)
+                            // 语音诊断批：补一行写轨诊断，reason 字符串不动。
+                            com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句写轨诊断", lastWriteDiag)
                             break
                         }
                         sentenceDone = true
@@ -620,6 +626,10 @@ object EdgeTts {
                     // 继续播后面的句子，续播时只补这一句、不重播已播完的尾巴。
                     val stoppedHere = i == 0 || result.reason == "AudioTrack.write 失败"
                     recordFailure(i, result.reason ?: "取音/解码失败", stoppedHere)
+                    // 语音诊断批：写轨失败时补一行写轨诊断，reason 字符串不动。
+                    if (result.reason == "AudioTrack.write 失败") {
+                        com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句写轨诊断", lastWriteDiag)
+                    }
                     // 第一句就失败当整体失败；写轨道失败说明轨道已死，后面也不用再试。
                     if (stoppedHere) break
                     continue
@@ -739,22 +749,56 @@ object EdgeTts {
         }
     }
 
+    // 语音诊断批：write 返回码中文名（官方文档）+ 当时轨状态，失败诊断行用。
+    private fun writeCodeName(n: Int): String = when (n) {
+        AudioTrack.ERROR -> "通用错 ERROR"
+        AudioTrack.ERROR_BAD_VALUE -> "参数错 BAD_VALUE"
+        AudioTrack.ERROR_INVALID_OPERATION -> "轨未初始化 INVALID_OPERATION"
+        AudioTrack.ERROR_DEAD_OBJECT -> "轨已死 DEAD_OBJECT"
+        else -> "未知码"
+    }
+
+    private fun trackStateText(t: AudioTrack): String {
+        val state = runCatching { t.state }.getOrNull()
+        val stateName = when (state) {
+            AudioTrack.STATE_INITIALIZED -> "已初始化"
+            AudioTrack.STATE_UNINITIALIZED -> "未初始化"
+            AudioTrack.STATE_NO_STATIC_DATA -> "无静态数据"
+            else -> "未知"
+        }
+        val playState = runCatching { t.playState }.getOrNull()
+        val playName = when (playState) {
+            AudioTrack.PLAYSTATE_PLAYING -> "播放中"
+            AudioTrack.PLAYSTATE_PAUSED -> "已暂停"
+            AudioTrack.PLAYSTATE_STOPPED -> "已停止"
+            else -> "未知"
+        }
+        return "state=$state（$stateName），playState=$playState（$playName）"
+    }
+
     // L7：AudioTrack.write 的返回值必须检查，<= 0 即停；返回实际写入的帧数（失败返回 -1），
     // 调用方按返回值累加帧数，不再丢弃返回值后按 pcm.size/2 硬算。
     // 每次成功写出都刷新失速看门狗的 lastProgressAt。
+    // 语音诊断批：三支失败都把原因写进 lastWriteDiag（之前只回 -1，审计里和
+    // write 错分不出来）；调用方在失败记录旁补一行审计，reason 字符串一字不动。
     private fun writePcmFully(t: AudioTrack, pcm: ByteArray): Int {
         var off = 0
         while (off < pcm.size) {
             // 语音第 2 批：焦点暂失时挂起，不往暂停的轨里写。
-            if (!waitForFocusGain(t)) return -1
+            if (!waitForFocusGain(t)) {
+                lastWriteDiag = "焦点等待失败（5 秒未等到 GAIN，或轨已被换掉）；${trackStateText(t)}"
+                return -1
+            }
             val n = try {
                 t.write(pcm, off, pcm.size - off)
             } catch (e: Exception) {
                 Log.e(TAG, "AudioTrack.write threw", e)
+                lastWriteDiag = "write 抛异常：${e.javaClass.simpleName}；${trackStateText(t)}"
                 return -1
             }
             if (n <= 0) {
                 Log.e(TAG, "AudioTrack.write returned $n, stopping playback")
+                lastWriteDiag = "write 返回 $n（${writeCodeName(n)}）；${trackStateText(t)}"
                 return -1
             }
             off += n
