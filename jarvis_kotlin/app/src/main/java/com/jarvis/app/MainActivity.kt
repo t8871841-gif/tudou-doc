@@ -92,6 +92,8 @@ class MainActivity : Activity() {
         const val EXTRA_TEXT = "jarvis_text"
         // jk-v66 前台拉起：任务循环要开应用时，把包名交给 MainActivity，由它在 onResume（已在前台）时代开，Flyme 给全屏。
         const val EXTRA_LAUNCH_PKG = "launch_pkg"
+        // 第 3 批·拉起队列过期时间：入队超过 10 秒未执行就丢弃，防幽灵拉起。
+        const val LAUNCH_QUEUE_TTL_MS = 10_000L
         const val REQ_PICK_MODEL = 5151
         const val REQ_PROJECTION = 5152
         // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
@@ -112,7 +114,8 @@ class MainActivity : Activity() {
     private var orbSwitchUpdating = false
     // jk-v66 前台拉起：待代开的包名队列（M49：单个字段连续拉起会丢第一个）+ 是否已 resumed
     // （onResume 里才代开，保证是前台身份）。L28：设置页开着时暂缓的 assist/晨报/提醒 intent。
-    private val pendingLaunchQueue = ArrayDeque<String>()
+    // 第 3 批：队列项改成（包名，入队时间戳），10 秒过期丢弃，防幽灵拉起。
+    private val pendingLaunchQueue = ArrayDeque<Pair<String, Long>>()
     private var deferredAssistIntent: Intent? = null
     private var isResumed = false
     private lateinit var homePanel: LinearLayout
@@ -3351,6 +3354,8 @@ class MainActivity : Activity() {
         isResumed = true
         // jk-v66 小窗修复诊断：只在有待拉起队列时记一次（onResume 进来时），
         // 真机验证中转是否落全屏；无队列的日常 onResume 不刷屏。
+        // 第 3 批：先清过期请求，诊断里不出现已死的队列。
+        pruneExpiredLaunchQueue()
         if (pendingLaunchQueue.isNotEmpty()) {
             val diagW = window.decorView.width
             val diagH = window.decorView.height
@@ -3447,7 +3452,10 @@ class MainActivity : Activity() {
             val pkg = intent.getStringExtra(EXTRA_LAUNCH_PKG).orEmpty()
             if (pkg.isNotBlank()) {
                 // M49：多个待开包进队列，不再用单个字段互相覆盖。
-                if (!pendingLaunchQueue.contains(pkg)) pendingLaunchQueue.addLast(pkg)
+                // 第 3 批：入队记时间戳，10 秒过期丢弃，防幽灵拉起。
+                if (pendingLaunchQueue.none { it.first == pkg }) {
+                    pendingLaunchQueue.addLast(pkg to android.os.SystemClock.uptimeMillis())
+                }
                 maybeLaunchPendingApp()
             }
         }
@@ -3484,14 +3492,28 @@ class MainActivity : Activity() {
         handleAssistIntent(pending)
     }
 
+    /** 第 3 批·丢弃过期拉起请求：队首超过 10 秒未执行就丢掉，下次 MainActivity
+     * 拿焦点时不再把它拉起来（幽灵拉起的断法）。每丢一条写一条审计。 */
+    private fun pruneExpiredLaunchQueue() {
+        val now = android.os.SystemClock.uptimeMillis()
+        while (true) {
+            val head = pendingLaunchQueue.firstOrNull() ?: return
+            if (now - head.second <= LAUNCH_QUEUE_TTL_MS) return
+            pendingLaunchQueue.removeFirst()
+            AuditLog.append(this, "本地指令", "前台拉起", "丢弃过期拉起请求：${head.first}（已等 ${(now - head.second) / 1000} 秒）")
+        }
+    }
+
     /** jk-v66 前台拉起：MainActivity 已在前台时，代开待开的包（前台身份拉起，Flyme 给全屏）。
      * S1/M49：启动成功返回后才出队；没 launchIntent 或抛异常时不静默丢——记审计、给可见提示，
      * 失败的保留在队首（下次 onResume/拿焦点再试）；没窗口焦点或设置页开着时暂缓，不硬拉。 */
     private fun maybeLaunchPendingApp() {
+        // 第 3 批：先清过期请求，队首过期就丢弃，不再幽灵拉起。
+        pruneExpiredLaunchQueue()
         if (!isResumed) return
         if (!hasWindowFocus()) return
         if (showingSettings) return
-        val pkg = pendingLaunchQueue.firstOrNull() ?: return
+        val (pkg, _) = pendingLaunchQueue.firstOrNull() ?: return
         val launch = try {
             packageManager.getLaunchIntentForPackage(pkg)
         } catch (e: Exception) {

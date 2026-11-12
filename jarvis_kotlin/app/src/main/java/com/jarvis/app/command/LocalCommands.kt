@@ -411,24 +411,53 @@ object LocalCommands {
             putExtra(com.jarvis.app.MainActivity.EXTRA_LAUNCH_PKG, pkg)
             addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
-        try {
-            ctx.startActivity(intent)
-        } catch (e: Exception) {
-            AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 拉起失败：${e.javaClass.simpleName}，回落普通启动")
+        val svc = com.jarvis.app.JarvisAccessibilityService.instance
+        // 第 3 批·第一跳改走无障碍服务自身的 context + PendingIntent：服务上下文
+        // 拉起不受后台启动限制的普通约束；Flyme 上若仍被拦，逐级回落，每级都写审计。
+        var relayOk = false
+        if (svc != null) {
             try {
-                val fallback = ctx.packageManager.getLaunchIntentForPackage(pkg)
-                if (fallback != null) {
-                    fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ctx.startActivity(fallback)
-                }
-            } catch (_: Exception) {
+                svc.startActivity(intent)
+                relayOk = true
+                AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 已通过无障碍服务上下文拉起")
+            } catch (e: Exception) {
+                AuditLog.append(ctx, "本地指令", "前台拉起", "服务上下文拉起被拦：${e.javaClass.simpleName}，改走 PendingIntent")
             }
-            // S1：MainActivity 拉起失败、只走了普通启动兜底，没确认应用到前台，
-            // 不能报"正在打开"，否则任务循环会当成功继续、后面全点在错误屏幕上。
-            return "打开${appName}失败：前台拉起不可用"
+            if (!relayOk) {
+                try {
+                    val pi = android.app.PendingIntent.getActivity(
+                        svc, 0, intent,
+                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                    )
+                    pi.send()
+                    relayOk = true
+                    AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 已通过 PendingIntent 拉起")
+                } catch (e: Exception) {
+                    AuditLog.append(ctx, "本地指令", "前台拉起", "PendingIntent 拉起被拦：${e.javaClass.simpleName}，回落应用上下文")
+                }
+            }
+        }
+        if (!relayOk) {
+            try {
+                ctx.startActivity(intent)
+                AuditLog.append(ctx, "本地指令", "前台拉起", "走了应用上下文回落拉起")
+            } catch (e: Exception) {
+                AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 拉起失败：${e.javaClass.simpleName}，回落普通启动")
+                try {
+                    val fallback = ctx.packageManager.getLaunchIntentForPackage(pkg)
+                    if (fallback != null) {
+                        fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        ctx.startActivity(fallback)
+                    }
+                } catch (_: Exception) {
+                }
+                // 第 3 批：回落直启若真把应用打开了（上面没抛），不能再报“前台拉起不可用”——
+                // 那是旧的自相矛盾文案。是否真到了前台由下面的轮询裁决，这里只报拉起路径。
+                AuditLog.append(ctx, "本地指令", "前台拉起", "中转拉起失败，已回落普通启动，等轮询裁决是否到前台")
+            }
         }
         // 等目标应用真正到前台（MainActivity 起来到 onResume 再拉目标，需要时间），最多等 5 秒
-        val svc = com.jarvis.app.JarvisAccessibilityService.instance
+        // svc 已在前面取出（第 3 批第一跳用），这里复用。
         if (svc != null) {
             for (i in 0 until 17) {
                 try {
@@ -443,8 +472,10 @@ object LocalCommands {
                     ""
                 }
                 if (fg == pkg) {
-                    AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 已全屏到前台")
-                    return "正在打开$appName"
+                    AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 已到前台")
+                    // 第 3 批·拉起后验窗口：量目标窗口 bounds，不足整屏 80% 判小窗，接展开。
+                    // “已全屏到前台”不能只凭包名就报，旧文案正是断点 #5 的谎报。
+                    return "正在打开$appName" + verifyTargetWindow(ctx, svc, pkg, appName)
                 }
             }
             val cur = try {
@@ -464,6 +495,48 @@ object LocalCommands {
             // S1：无障碍服务为空，无法确认前台包名，不报"正在打开"。
             AuditLog.append(ctx, "本地指令", "前台拉起", "无障碍服务不可用，无法确认$appName 是否到前台")
             return "打开${appName}失败：无障碍服务不可用"
+        }
+    }
+
+    /** 第 3 批·拉起后验窗口：用无障碍服务的 getWindows() 量目标窗口 bounds，
+     * 面积不足整屏 80% 判小窗，接上现成的 expandFloatingApp 做展开（jk-v64 起
+     * 就是死代码，零调用）。返回要追加到“正在打开...”后面的后缀（开头不带
+     * “正在打开”，调用方保证前缀完整，TaskLoop 认这个前缀判成功）：
+     * 全屏返回空串；展开成功报一句；展开失败如实报明原因并提醒模型优先用
+     * 编号 eid（节点 bounds 是绝对坐标，不受小窗换算影响），绝不静默。 */
+    private fun verifyTargetWindow(ctx: Context, svc: com.jarvis.app.JarvisAccessibilityService?, pkg: String, appName: String): String {
+        val controller = svc?.let { com.jarvis.app.JarvisAccessibilityService.screenController }
+        if (controller == null) {
+            AuditLog.append(ctx, "本地指令", "前台拉起", "无法验窗口：无障碍控制器为空")
+            return ""
+        }
+        val bounds = try {
+            controller.appWindowBounds(pkg)
+        } catch (_: Exception) {
+            null
+        }
+        if (bounds == null) {
+            AuditLog.append(ctx, "本地指令", "前台拉起", "无法验窗口：没找到 $appName 的窗口")
+            return ""
+        }
+        val screen = com.jarvis.app.screen.ScreenController.displaySize(ctx)
+        val screenArea = screen.x.toLong() * screen.y
+        val winArea = bounds.width().toLong() * bounds.height()
+        if (screenArea <= 0 || winArea * 100 >= screenArea * 80) return ""
+        AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 还在小窗里（窗口 ${bounds.width()}x${bounds.height()}），尝试展开")
+        val expanded = try {
+            controller.expandFloatingApp(pkg)
+        } catch (e: Exception) {
+            null
+        }
+        val ok = expanded?.optBoolean("expanded", false) == true
+        val detail = expanded?.optString("detail").orEmpty()
+        return if (ok) {
+            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 小窗已展开成全屏")
+            "，小窗已展开成全屏"
+        } else {
+            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 小窗展开失败：$detail")
+            "，小窗展开失败（仍是小窗：${detail}，坐标按全屏算可能偏移，建议优先用编号 eid 点）"
         }
     }
 
