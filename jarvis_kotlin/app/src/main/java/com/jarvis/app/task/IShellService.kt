@@ -1,6 +1,7 @@
 package com.jarvis.app.task
 
 import android.os.IBinder
+import android.os.IInterface
 import android.os.Parcel
 
 /**
@@ -11,7 +12,7 @@ import android.os.Parcel
  * 不依赖任何代码生成：服务端（ShellUserService）继承 android.os.Binder、重写 onTransact，
  * 客户端（ShellServiceProxy）用 IBinder.transact 发包。协议只有一个方法，收发都在这一个文件里。
  */
-interface IShellService {
+interface IShellService : IInterface {
 
     fun runCommand(cmd: Array<String>?, timeoutMs: Long): Array<String>
 
@@ -31,6 +32,8 @@ interface IShellService {
 
 /** 客户端代理：把调用封成 Parcel 发过去，等回包拆出来。服务端挂了抛 RemoteException，调用方按失败处理。 */
 private class ShellServiceProxy(private val remote: IBinder) : IShellService {
+
+    override fun asBinder(): IBinder = remote
 
     override fun runCommand(cmd: Array<String>?, timeoutMs: Long): Array<String> {
         val data = Parcel.obtain()
