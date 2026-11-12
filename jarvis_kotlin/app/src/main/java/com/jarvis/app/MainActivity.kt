@@ -63,7 +63,6 @@ import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
-import com.jarvis.app.ui.LiquidGlass
 // 真液态玻璃第 1 批：QWEA0 Liquid-Glass-Android v2.0.11（MIT；包名是
 // com.example.liquidglass，见库源码 LiquidGlassView.kt:35 / GlassMaterial.kt:14）。
 import com.example.liquidglass.GlassMaterial
@@ -1892,7 +1891,6 @@ class MainActivity : Activity() {
      * 气泡时 record=false，只渲染不重复记、不重复推字幕。 */
     private fun addBubble(text: String, mine: Boolean, record: Boolean = true) {
         val color = HudPalette.colorFor(JarvisAgent.currentState())
-        val (sec, _) = HudPalette.secondaryTertiary(color)
         val ts = System.currentTimeMillis()
         val headText = (if (mine) "我" else "助手") + " · " +
             SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
@@ -1925,18 +1923,24 @@ class MainActivity : Activity() {
             marginStart = if (mine) dp(48) else 0
             marginEnd = if (mine) 0 else dp(48)
         }
-        // 真液态玻璃第 1 批（QWEA0 Liquid-Glass-Android v2.0.11）：只有助手气泡改走
-        // LiquidGlassView 包裹（FrameLayout 子类，内容列原样塞进去）；用户气泡不动
-        // （仍是状态色底 + 共用组件）。逐角圆角与旧版一字不差（左上 4，其余 18）。
+        // 真液态玻璃第 4 批：用户气泡也改走 LiquidGlassView 包裹（参数与第 1 批
+        // 助手气泡同一套）；逐角圆角是助手气泡的镜像（左上 18、右上 4、其余 18）。
+        // 状态色改走 glassTint（主色 38%，正好在库的 20–40% 参考范围里）：透镜管线
+        // 把它当有色介质处理，折射/色散都保留；旧的 30% 次色没有染色槽、就此丢掉——
+        // 现在是单色平染，不再是双色对角渐变。
         val bubble: View = if (mine) {
-            content.apply {
-                // 第 1 批·液态玻璃：底色与圆角与旧版一字不差（当前状态色的 38%→30% 对角渐变），
-                // 只把背景层换成共用组件——高光边 + 顶部柔光 + 底部内阴影由组件加。
-                background = LiquidGlass.bubble(
-                    this@MainActivity,
-                    HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f),
-                    floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                )
+            LiquidGlassView(this).apply {
+                setCornerRadii(dp(18).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat())
+                material = GlassMaterial.CLEAR
+                refractionHeight = 80f
+                bevelWidth = 32f
+                dispersionStrength = 0.05f
+                enableSensorHighlight = true
+                enablePressEffect = false
+                enableDynamicBackground = true
+                backdropSource = rootLayout
+                glassTint = HudPalette.withAlpha(color, 0.38f)
+                addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
                 layoutParams = bubbleLp
             }
         } else {
