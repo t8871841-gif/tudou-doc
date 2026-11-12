@@ -4,6 +4,7 @@ import android.app.KeyguardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.util.Base64
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
@@ -135,6 +136,10 @@ object TaskLoop {
     private const val STEP_TIMEOUT_MS = 60_000L
     /** H8：工具自带 timeout_ms 时加的 slack（Andee TIMEOUT_SLACK_MS）。 */
     private const val STEP_TIMEOUT_SLACK_MS = 10_000L
+    /** 第 5 批·黑帧规则（断点 #13，nanoMuse 同款）：连续 3 帧黑屏（截图全黑或接近
+     * 全黑）即判任务不可行、干净停下。3 不是 1：单帧黑可能是转场瞬间/视频黑场；
+     * 连续 3 步（每步之间隔一次模型问答）都黑，才是“屏幕被保护、读不到内容”。 */
+    private const val BLACK_FRAME_LIMIT = 3
 
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "jarvis-taskloop").apply { isDaemon = true }
@@ -277,12 +282,16 @@ object TaskLoop {
         var repeats = 0
         // 第八批·遍历环检测：本轮任务内已走过的（界面指纹 screenSig，动作签名）对
         // 到出现次数的映射（LinkedHashMap 插入顺序，超 MAX_LOOP_PAIRS 时丢最旧的）。
-        // 只放本轮任务内：新任务从空开始，续跑不继承（断点不存它，不改 TaskResumeState）；
+        // 第 5 批·断点续跑恢复它（断点 #13）：续跑不继承时环路要重走 3 遍才停；
+        // 现在断点里多存这张表，恢复时只留最后 MAX_LOOP_PAIRS 对（键是全量
+        // screenSig + 签名全文，只放内存，不落盘——与 plan/completed 同款）。
         // key 是 screenSig 全文 + '\u0000' + 签名全文，界面指纹按全量 elements 比，不用
         // 哈希（哈希碰撞会误停任务）。只在“界面确实回到之前的状态”时算环：key 里含
         // screenSig，同一签名在不同界面上做是不同的对；连续重复（签名连着上一步）
         // 不进这里，仍归重复守卫（见执行前的 consecutiveSameSig）。
-        val loopSeen = LinkedHashMap<String, Int>()
+        val loopSeen = LinkedHashMap<String, Int>().also { map ->
+            resumeFrom?.loopSeen?.entries?.takeLast(MAX_LOOP_PAIRS)?.forEach { map[it.key] = it.value }
+        }
         // 无进展计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
         // 见上方的说明。任何一步出现这几种动作就清零；计数只用于强制带图。
         var noProgressSteps = 0
@@ -295,6 +304,9 @@ object TaskLoop {
         // 上一步是不是 outcomeUnknown：是就下一轮先核对、不要直接重做。
         var prevOutcomeUnknown = false
         var prevScreenChanged: Boolean? = null
+        // 第 5 批·黑帧规则（断点 #13）：连续黑帧步数，跨步累计；截图正常后清零。
+        // 续跑不继承（新跑重新数 3 帧；断点那几帧黑是上个界面的事，不带到新界面）。
+        var blackFrameStreak = 0
         // R3 轻量核验（2026-11-05）：模型说“done”被顶回过没有，只顶回一次。
         var doneChallenged = false
         // 第十三批·子目标状态机（Minitap Orchestrator 生命周期 NOT_STARTED /
@@ -333,7 +345,11 @@ object TaskLoop {
         // 第一批·连续失败计数：最近连续失败的步数。执行失败（不含结果未知）
         // 与输出无法解析各 +1；确认成功清零；问模型网络失败不计（它有自己的
         // 连败规则）。达到 STUCK_THRESHOLD 时下一轮提示词注入升级段。
-        var consecutiveFailures = 0
+        // 第 5 批·断点续跑恢复它（断点 #13）：与 loopSeen 同款，断点里多存这个数，
+        // 续跑首轮就接着算——断点前已连败 2 次，续跑不该从 0 开始假装没卡过。
+        // 子目标/Manager 的“本次升级已标过”旗子不恢复（每轮任务内复位，见下）；
+        // 所以续跑首轮若已达阈值，升级段会再注一次、Manager 也会再问一次。
+        var consecutiveFailures = resumeFrom?.consecutiveFailures ?: 0
         val recentFailureNotes = mutableListOf<String>()
         // 第十三批·子目标状态机：本次连续失败升级里是否已把进行中的子目标标过
         // FAILURE（一次升级只标一次，成功清零失败计数时复位；见计划段的升级块
@@ -401,12 +417,14 @@ object TaskLoop {
                     if (saveResume) {
                         // 第四批·断点升级：断点连同当前计划、笔记与最后界面指纹一起记下，
                         // 用户说“继续”时 plan/completed/notes/prevScreenSig 一起恢复。
+                        // 第 5 批：再加环路表与连续失败计数（断点 #13），续跑接着算。
                         TaskResumeState.offer(
                             taskText, history.toList(), step,
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
-                            notes = notes.toList()
+                            notes = notes.toList(),
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
                         )
                         stoppedWithResume = true
                         finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
@@ -422,12 +440,14 @@ object TaskLoop {
                 if (isKeyguardLocked(ctx)) {
                     if (saveResume) {
                         // 第四批·断点升级：同急停，断点连同计划、笔记与界面指纹一起记。
+                        // 第 5 批：再加环路表与连续失败计数（断点 #13），续跑接着算。
                         TaskResumeState.offer(
                             taskText, history.toList(), step - 1,
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
-                            notes = notes.toList()
+                            notes = notes.toList(),
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
                         )
                         stoppedWithResume = true
                         finalReply = "手机锁了，解锁后我再继续。已停在第 ${step - 1} 步，解锁后说「继续」可以接着做。"
@@ -452,7 +472,8 @@ object TaskLoop {
                             foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
-                            notes = notes.toList()
+                            notes = notes.toList(),
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
                         )
                         stoppedWithResume = true
                         finalReply = "无障碍服务掉了，任务停在第 ${step - 1} 步。到设置里重新开关一次 Jarvis 无障碍服务，然后说「继续」可以接着做。"
@@ -552,6 +573,10 @@ object TaskLoop {
                 // 拍不到就只给树、不卡住这一步。录屏通道仍是无障碍截图的兜底。
                 var image: String? = pendingImage
                 var imageFromProjection = false
+                // 第 5 批·黑帧规则（断点 #13）：本轮新拍的全屏图是不是黑帧、拍没拍到
+                // （只新拍的全屏图才计数，zoom 放大图与没拍到都不算）。
+                var freshShotBlack = false
+                var freshShotTaken = false
                 // pendingImage 是上一轮 zoom 的放大图（坐标系不是全屏），OCR 不能复用它。
                 val imageIsZoom = pendingImage != null
                 pendingImage = null
@@ -561,11 +586,48 @@ object TaskLoop {
                     (image != null || elements.isBlank() || prevStepFailed || prevScreenChanged == false ||
                         treeTooThin || noProgressSteps >= 2)
                 if (image == null && needImage && pkg.isNotEmpty()) {
-                    image = accessibilityShot(controller, ctx)
+                    // 第 5 批·黑帧规则（断点 #13）：截图通道同时回黑帧旗子
+                    // （图是不是全黑），供下面计数。
+                    val accShot = accessibilityShot(controller, ctx)
+                    image = accShot.first
+                    freshShotBlack = accShot.second
+                    freshShotTaken = image != null
                     if (image == null) {
-                        image = projectionShot(ctx)
+                        val projShot = projectionShot(ctx)
+                        image = projShot.first
+                        freshShotBlack = projShot.second
+                        freshShotTaken = image != null
                         imageFromProjection = image != null
                     }
+                }
+                // 第 5 批·黑帧规则（断点 #13，nanoMuse 同款：连续 3 帧黑屏 = 不可行）：
+                // 只有本轮新拍的全屏图才计数（pendingImage 是上一轮 zoom 的放大图，
+                // 坐标系不是全屏，不算；没拍到图时不计数也不清零——转场瞬间可能
+                // 一两轮拍不到，不能因此把 streak 洗掉，也不能算黑）。
+                // 拍到正常图清零；连着 3 步都黑就干净停下：记断点（用户换到能看的
+                // 界面后说“继续”可续跑）、写审计、播报明白话；不记连续失败、
+                // 不触发升级、不烧完 25 步。
+                if (freshShotTaken) {
+                    blackFrameStreak = if (freshShotBlack) blackFrameStreak + 1 else 0
+                }
+                if (blackFrameStreak >= BLACK_FRAME_LIMIT) {
+                    if (saveResume) {
+                        TaskResumeState.offer(
+                            taskText, history.toList(), step - 1,
+                            foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                            plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                            notes = notes.toList(),
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                        )
+                        stoppedWithResume = true
+                        finalReply = "屏幕连续 $BLACK_FRAME_LIMIT 次都是黑的（被保护、读不到内容），这个任务做不了，已停在第 ${step - 1} 步。换个能看的界面再说「继续」可以接着做。"
+                        AuditLog.append(ctx, "任务循环", "连续黑帧停下（第 $step 步）", "黑帧已连 $blackFrameStreak 步，断点已记")
+                    } else {
+                        finalReply = "屏幕连续 $BLACK_FRAME_LIMIT 次都是黑的（被保护、读不到内容），这个任务做不了。"
+                        AuditLog.append(ctx, "任务循环", "连续黑帧停下（第 $step 步）", "黑帧已连 $blackFrameStreak 步，内部任务，不记断点")
+                    }
+                    return
                 }
 
                 // ---------- OCR 补字层（2026-11-05，Mika 同款） ----------
@@ -1014,7 +1076,8 @@ object TaskLoop {
                                     foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                                     plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                                     screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
-                                    notes = notes.toList()
+                                    notes = notes.toList(),
+                                    loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
                                 )
                                 stoppedWithResume = true
                                 finalReply = "任务卡在第 $step 步：在${pkg.ifEmpty { "未知界面" }}对同一目标反复做「${describeAction(action)}」，在同一界面反复打转，已停下。说「继续」可以接着做。"
@@ -1068,6 +1131,11 @@ object TaskLoop {
                 prevStepFailed = !r.ok
                 prevOutcomeUnknown = r.outcomeUnknown
                 prevScreenChanged = r.screenChanged
+                // 第 5 批·盲树核验未知（断点 #13）：只记一条审计——false 是未知数，
+                // 不当失败、不进 Reflector；模型从摘要里的“界面变化未知”自行判断。
+                if (r.screenChangeUnknown) {
+                    AuditLog.append(ctx, "任务循环", "盲树核验未知（第 $step 步）", "${describeAction(action)}：树被挡/读不到，screen_changed:false 是未知数，不当失败、不核验")
+                }
                 // 第一批·连续失败计数：确认成功清零；确认失败 +1 并记一条；
                 // 结果未知不计（不知道成没成，既不算失败也不算成功）。
                 // 第八批·环检测已把这一步记过一次失败（同一对第二次出现，
@@ -1108,7 +1176,8 @@ object TaskLoop {
                         val verifyImage = if ((afterCompact.isBlank() || afterWithheld || afterThin) &&
                             afterPkg.isNotEmpty() && !JarvisAccessibilityService.isShotBlocked(afterPkg)
                         ) {
-                            accessibilityShot(controller, ctx) ?: projectionShot(ctx)
+                            // 第 5 批：截图通道现在回“图 + 是不是黑帧”一对，核验只要图。
+                            accessibilityShot(controller, ctx).first ?: projectionShot(ctx).first
                         } else null
                         askReflect(
                             ctx,
@@ -1196,12 +1265,14 @@ object TaskLoop {
             // 跑满步数也没完成：把断点记下来，用户说“继续”可以接着做（累计不超
             // MAX_TOTAL_STEPS 步）；内部任务（saveResume=false）不记断点（S16）。
             // 第四批·断点升级：同急停/锁屏，断点连同计划、笔记与界面指纹一起记。
+            // 第 5 批：再加环路表与连续失败计数（断点 #13），续跑接着算。
             if (saveResume) TaskResumeState.offer(
                 taskText, history.toList(), step,
                 foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
                 plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                 screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
-                notes = notes.toList()
+                notes = notes.toList(),
+                loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
             )
             finalReply = if (saveResume) {
                 "任务跑满了步数上限（累计 $step 步）还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"
@@ -1355,16 +1426,21 @@ object TaskLoop {
      * 异常里的原始 message（含 errCode）原样记下来——下次真机再卡在这里，审计日志里就能直接
      * 看到是哪种失败，不用再靠猜。
      */
-    private fun accessibilityShot(controller: ScreenController, ctx: Context): String? {
+    /**
+     * 第 5 批·黑帧规则（断点 #13）：返回“图 + 这张图是不是黑帧”——黑帧判定在
+     * 这里做（图已经解码过一次、直接抽样，不再为黑帧单独截一次屏）。
+     */
+    private fun accessibilityShot(controller: ScreenController, ctx: Context): Pair<String?, Boolean> {
         return try {
             val shot = controller.screenshot()
             val b64 = shot.optString("png_base64")
             if (b64.isEmpty()) {
                 AuditLog.append(ctx, "截图通道", "accessibility", "返回了结果但没有 png_base64 字段（未抛异常）")
-                null
+                null to false
             } else {
                 val bytes = Base64.decode(b64, Base64.DEFAULT)
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                val black = bmp?.let { isBlackBitmap(it) } ?: false
                 val jpeg = bmp?.let { GridOverlay.toJpegBase64(it) }
                 bmp?.recycle()
                 // 2026-10-24 跨应用修复第 3 件：成功也要留痕。旧逻辑只记失败，
@@ -1374,14 +1450,51 @@ object TaskLoop {
                 } else {
                     AuditLog.append(ctx, "截图通道", "accessibility", "解码失败：b64 非空但解不出位图")
                 }
-                jpeg
+                jpeg to black
             }
         } catch (e: Exception) {
             // screenshot() 的异常 message 本身就带着 errCode（见 ScreenController.screenshot()
             // 的 "screenshot failed with code $errCode" / "screenshot timeout"），原样记下。
             AuditLog.append(ctx, "截图通道", "accessibility", "失败：${e.message ?: e.javaClass.simpleName}")
-            null
+            null to false
         }
+    }
+
+    /**
+     * 第 5 批·黑帧抽样（断点 #13，nanoMuse“连续 3 帧黑屏”规则的判定部分）：
+     * 不解全分辨率——在已有的位图上按 32×17 网格抽样（步长跳像素），跳过第 0 行
+     * （状态栏：时间电量图标是亮的，不能算进屏内容）。黑帧 = 平均亮度 < 8 且
+     * 97% 以上的采样点亮度 < 16：FLAG_SECURE 的帧是纯黑（均值 0），深色界面
+     * 哪怕底再黑、文字/图标也会把均值抬上去——阈值卡在“几乎全黑”这一档，
+     * 正常深色界面不会误判；真误判了也要连着 3 步才停，单帧黑不致命。
+     * 注意：无障碍截图在 FLAG_SECURE 窗口上直接失败（secure_window，无帧可采），
+     * 所以这条规则抓的是录屏通道的黑帧与个别返回黑图的机型，不是对微信那条
+     * 已知硬墙的重复判定——那种情况树也被扣留，走连续失败计数与升级。
+     */
+    private fun isBlackBitmap(bmp: Bitmap): Boolean {
+        val w = bmp.width
+        val h = bmp.height
+        if (w <= 0 || h <= 0) return false
+        val stepX = maxOf(1, w / 32)
+        val stepY = maxOf(1, h / 17)
+        var dark = 0
+        var n = 0
+        var sum = 0f
+        var y = stepY // 跳过第 0 行（状态栏）
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val c = bmp.getPixel(x, y)
+                val luma = 0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c)
+                sum += luma
+                n++
+                if (luma < 16f) dark++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (n == 0) return false
+        return sum / n < 8f && dark.toFloat() / n >= 0.97f
     }
 
     /**
@@ -1397,7 +1510,7 @@ object TaskLoop {
      * + onActivityResult 转 start()）是接好的；isAvailable() 为 false 只说明本次进程里
      * 还没授权过（MediaProjection 授权不随进程重启保留，进程死后需重新授权）。
      */
-    private fun projectionShot(ctx: Context): String? {
+    private fun projectionShot(ctx: Context): Pair<String?, Boolean> {
         val cap = ScreenCapture.shared(ctx)
         if (!cap.isAvailable()) {
             val now = System.currentTimeMillis()
@@ -1409,24 +1522,28 @@ object TaskLoop {
                         "授权不随进程重启保留，进程死后需重新授权）"
                 )
             }
-            return null
+            return null to false
         }
         return try {
             val bmp = cap.grab()
             if (bmp == null) {
                 AuditLog.append(ctx, "截图通道", "media_projection", "grab() 超时，没等到帧")
-                return null
+                return null to false
             }
             val scaled = downscale(bmp, ScreenCapture.SHOT_MAX_SIDE)
+            // 第 5 批·黑帧规则（断点 #13）：录屏通道是 FLAG_SECURE 帧变黑的主路
+            // （无障碍截图在安全窗口上直接失败、没有帧），在这里抽样——图已经
+            // 拿到手，不再为黑帧单独抓一帧。
+            val black = isBlackBitmap(scaled)
             val jpeg = GridOverlay.toJpegBase64(scaled)
             if (scaled !== bmp) scaled.recycle()
             bmp.recycle()
             // 2026-10-24 跨应用修复第 3 件：成功留痕（同 accessibility 通道）。
             AuditLog.append(ctx, "截图通道", "media_projection", "已拿到图")
-            jpeg
+            jpeg to black
         } catch (e: Exception) {
             AuditLog.append(ctx, "截图通道", "media_projection", "失败：${e.message ?: e.javaClass.simpleName}")
-            null
+            null to false
         }
     }
 
@@ -2007,7 +2124,10 @@ val ok: Boolean,
 val screenChanged: Boolean?,
 val zoomImage: String?,
 val code: String = "",
-val outcomeUnknown: Boolean = false
+val outcomeUnknown: Boolean = false,
+/** 第 5 批·盲树 UNKNOWN（断点 #13）：screen_changed:false 是未知数、不是“没点上”
+ * 时为 true；此时 screenChanged 恒为 null（summarize 已折掉），Reflector 不触发。 */
+val screenChangeUnknown: Boolean = false
 )
 
 /**
@@ -2030,8 +2150,17 @@ val outcomeUnknown: Boolean = false
 */
 /**
  * H8：单步执行包一个 deadline（Andee LocalBrain.dispatchWithTimeout 同款）：
- * 默认 60 秒，动作自带 timeout_ms 则加 10 秒 slack。超时不要杀调用——只放弃
- * 等待，把 timed_out 结果回喂模型，让它读屏再决定（调用可能还在后台跑）。
+ * 默认 60 秒，动作自带 timeout_ms 则加 10 秒 slack。
+ * 第 5 批·超时取消后台调用（断点 #13）：超时不只放弃等待——后台那次调用
+ * 还在跑，模型下一轮若原样重发同一个变异动作（点发送/付款），迟到的第一次
+ * 执行会和重发撞在一起造成重复执行。所以超时时 future.cancel(true) 打断
+ * 工作线程：runGesture 的 latch 等待与 attachEffectSnapshot 的 sleep 都会
+ * 响应中断、立即退出；已发到系统的手势无法撤回（平台限制），TIMEOUT +
+ * outcomeUnknown 的信号照旧保留，模型仍须先读屏核对再决定，不要直接重做。
+ * 选“取消”不选“只打标记”：标记拦不住迟到的执行，只多一道文字提醒；
+ * 取消直接掐断了迟到执行的来源。打断残留的中断位由下一次提交开头
+ * 的 Thread.interrupted() 清掉，不会污染下一个任务；stepExecutor 是
+ * cached 池，cancel 只打断跑这个任务的那条线程。
  * FlowRuntime 的流内步也走这里，同样受这个上限保护。
  */
 internal fun execute(
@@ -2045,12 +2174,16 @@ return StepResult("手机锁了，解锁后我再继续：锁屏下 $kind 不可
 }
 val declared = action.optLong("timeout_ms", 0L)
 val budget = if (declared > 0) declared + STEP_TIMEOUT_SLACK_MS else STEP_TIMEOUT_MS
-val future = stepExecutor.submit<StepResult> { executeInner(ctx, controller, action) }
+val future = stepExecutor.submit<StepResult> { Thread.interrupted(); executeInner(ctx, controller, action) }
 return try {
 future.get(budget, TimeUnit.MILLISECONDS)
 } catch (e: TimeoutException) {
+// 第 5 批（断点 #13）：超时即取消后台调用（见上面 H8 注释），不要让它迟到落地、
+// 与下一轮的重发撞在一起重复执行。cancel(true) 打断跑这个任务的线程；
+// 调用已完成时 cancel 返回 false、不打断任何人，无害。
+future.cancel(true)
 StepResult(
-"这一步 ${budget / 1000} 秒没返回（timed_out），可能还在后台跑——先读屏看看成没成，再决定下一步，不要直接重做",
+"这一步 ${budget / 1000} 秒没返回（timed_out），后台调用已取消——先读屏看看成没成，再决定下一步，不要直接重做",
 false, null, null, "TIMEOUT", true
 )
 } catch (e: ExecutionException) {
@@ -2503,16 +2636,24 @@ private fun summarize(kind: String, result: JSONObject): StepResult {
 // 没有就以 completed 为准（ScreenController 的约定：调用方按 completed 判成败）。
 val performed = result.optBoolean("performed", result.optBoolean("completed", false))
 val error = result.optString("error")
-val changed: Boolean? = if (result.has("screen_changed")) {
+// 第 5 批·盲树 UNKNOWN（断点 #13）：控制层置了 screen_changed_unknown 时，
+// screen_changed:false 不是“没点上”而是“不知道”——这里折成 null，不再说
+// “界面没变化”，Reflector 的 (screenChanged == false) 触发条件也随之失效，
+// 不进 C 误判路径、不记一步失败；只在摘要里明说“变化未知”。
+val changeUnknown = result.optBoolean("screen_changed_unknown", false)
+val changed: Boolean? = if (changeUnknown) {
+null
+} else if (result.has("screen_changed")) {
 result.optBoolean("screen_changed")
 } else {
 null
 }
-if (error.isNotEmpty()) return StepResult(error, false, changed, null, errorCodeFor(error))
+if (error.isNotEmpty()) return StepResult(error, false, changed, null, errorCodeFor(error), screenChangeUnknown = changeUnknown)
 val parts = mutableListOf<String>()
 parts += if (performed) "已执行" else "未执行（无说明）"
 if (result.has("now_pkg")) parts += "现在在 ${result.optString("now_pkg")}"
-if (changed!= null) parts += if (changed) "界面有变化" else "界面没变化"
+if (changeUnknown) parts += "界面变化未知（树被挡/读不到，无法核验）"
+else if (changed!= null) parts += if (changed) "界面有变化" else "界面没变化"
 val snappedFrom = result.optString("snapped_from")
 if (snappedFrom.isNotEmpty()) {
 parts += "落点被吸附：从 $snappedFrom 吸到 ${result.optString("snapped_to")}"
@@ -2531,7 +2672,7 @@ val text = result.optString("text")
 if (text.isNotEmpty()) parts += "框内文字：${text.take(40)}"
 val eh = result.optString("elements_hint")
 if (eh.isNotEmpty()) parts += eh.take(120)
-return StepResult(parts.joinToString("，"), performed, changed, null)
+return StepResult(parts.joinToString("，"), performed, changed, null, screenChangeUnknown = changeUnknown)
 }
 
 private const val SYSTEM_PROMPT =

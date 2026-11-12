@@ -47,7 +47,14 @@ object TaskResumeState {
         val screenSig: String? = null,
         /** 第十二批·Scratchpad 持久笔记：断点时的持久笔记列表（TaskLoop 的 notes，
          * 最多 10 条）；续跑时恢复，旧断点没有该字段时默认空列表。只放内存，不落盘。 */
-        val notes: List<String> = emptyList()
+        val notes: List<String> = emptyList(),
+        /** 第 5 批·断点续跑恢复环路表（断点 #13）：断点时 loopSeen 的全量拷贝
+         * （（界面指纹，动作签名）对 → 出现次数），恢复时只留最后 64 对；
+         * 旧断点没有该字段时默认空表。只放内存，不落盘。 */
+        val loopSeen: Map<String, Int> = emptyMap(),
+        /** 第 5 批·断点续跑恢复连续失败计数（断点 #13）：断点时 consecutiveFailures
+         * 的值；旧断点没有该字段时默认 0。只放内存，不落盘。 */
+        val consecutiveFailures: Int = 0
     )
 
     private data class Pending(val info: ResumeInfo, val expiresAt: Long)
@@ -84,10 +91,15 @@ object TaskResumeState {
      * 第十二批·Scratchpad 持久笔记：[notes] 一并记下来，续跑时恢复；调用方
      * （TaskLoop）保证 notes 已在第十二批的上限内，这里原样存。参数有默认值，
      * 旧的 offer 调用照旧能编，缺字段的旧断点按空列表回落。
+     * 第 5 批·断点续跑恢复环路表与连续失败计数（断点 #13）：[loopSeen] /
+     * [consecutiveFailures] 一并记下来，续跑时恢复；调用方保证 loopSeen 已在
+     * 第八批的上限内，这里原样存、不另起一套上限常量。两个参数都有默认值，
+     * 旧的 offer 调用照旧能编，缺字段的旧断点按空表/0 回落。
      */
     fun offer(taskText: String, history: List<String>, stepsDone: Int, foregroundPkg: String? = null,
               plan: List<String> = emptyList(), completed: List<String> = emptyList(),
-              screenSig: String? = null, notes: List<String> = emptyList()): Boolean {
+              screenSig: String? = null, notes: List<String> = emptyList(),
+              loopSeen: Map<String, Int> = emptyMap(), consecutiveFailures: Int = 0): Boolean {
         val now = System.currentTimeMillis()
         val existing = pending
         if (existing != null && now <= existing.expiresAt) {
@@ -99,7 +111,8 @@ object TaskResumeState {
             ResumeInfo(taskText, history.toList(), stepsDone, foregroundPkg = pkg,
                 plan = plan.toList(), completed = completed.toList(),
                 screenSig = screenSig?.takeIf { it.isNotEmpty() },
-                notes = notes.toList()),
+                notes = notes.toList(),
+                loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures),
             now + TTL_MS
         )
         return true

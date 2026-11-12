@@ -177,6 +177,12 @@ class ScreenController(
     //   2. 尺寸已知且没过期：执行时的现读尺寸必须等于最近一次观察时盖的戳
     //      （observedSize，由 dumpUiTree/screenshot 盖戳）；没盖过戳、读不到
     //      尺寸、或两次尺寸不一样（旋转/分屏/悬浮窗变了尺寸），都直接拒执行。
+    //      第 5 批·戳带时间：盖戳超过 OBSERVED_SIZE_TTL_MS（10 秒）也拒——
+    //      同包页面变了尺寸没变时戳看不出来，但超过 10 秒没重新观察过，
+    //      坐标本来就是赌，拒了让模型先重读屏幕。动作入口（tapNorm/
+    //      longPressNorm/swipeNorm）执行前先现读一次树刷戳（见
+    //      refreshObservationForCoord），所以 TTL 平时只在不刷戳的只读入口
+    //      （lookRegion）与将来新增的契约入口处触发，是硬门不是摆设。
     //   3. 换算后像素落屏内：1000 恰好换算成宽/高本身，已在屏外，拒（旧行为里
     //      像素层 tap() 也拒，本批只是把话说清、把码统一）。
     // 校验与换算用同一份现读尺寸（contractSize 把它返回给调用方），不让
@@ -204,10 +210,35 @@ class ScreenController(
     @Volatile
     private var observedSize: android.graphics.Point? = null
 
+    /** 第 5 批·观察戳的盖戳时间（uptimeMillis）：contractSize 凭它判过期。 */
+    @Volatile
+    private var observedSizeAtMs: Long = 0L
+
+    /** 第 5 批·观察戳 TTL：超过 10 秒没重新观察过，坐标不可信（同包页面变了
+     * 尺寸不一定变，戳本身看不出来；10 秒这个数是“模型刚看过的屏”与“早就不
+     * 知道是哪张屏了”之间的分界，问模型一次往返常常几秒到几十秒，10 秒既
+     * 不至于让刚看过的屏动不动被拒，也盖住了页面跳转/弹窗出现的窗口期）。 */
+    private val OBSERVED_SIZE_TTL_MS = 10_000L
+
     /** 盖一次观察戳：读不到尺寸时记 null（下次坐标动作按“尺寸未知”拒）。 */
     private fun noteObservedSize() {
-        observedSize = runCatching { mappingSize() }.getOrNull()
+        val size = runCatching { mappingSize() }.getOrNull()
             ?.takeIf { it.x > 0 && it.y > 0 }
+        observedSize = size
+        if (size != null) observedSizeAtMs = SystemClock.uptimeMillis()
+    }
+
+    /** 第 5 批·动作入口执行前的现读：读一次活树、刷一次观察戳。
+     * 用指纹散步（tap 效果快照同款的 screenFingerprint，预算封顶的轻量树遍历）
+     * 而不用整棵 dumpUiTree：第 4 批之后 dumpUiTree 在读不到树时最多重试 7 次、
+     * 退避 29 秒，一次点按前调它最坏拖 40 秒；指纹散步只读活树、不重试，
+     * 读完立刻按现读窗口尺寸刷戳——契约消费的正是这个戳（尺寸 + 时间）。
+     * 盲树（被扣留/自绘）时散步也照常返回 blind 标志、不抛错：戳照刷（窗口
+     * 尺寸是现读的），坐标能不能点由 contractSize 与小窗守卫再判，不在这里
+     * 因为“树盲”就把坐标路全封死——盲屏上坐标是唯一的瞄准方式。 */
+    private fun refreshObservationForCoord() {
+        runCatching { screenFingerprint() }
+        noteObservedSize()
     }
 
     /** 第 3 批·前台任务窗口的 bounds：TYPE_APPLICATION、已聚焦，排除自家与
@@ -276,6 +307,18 @@ class ScreenController(
                 "坐标契约拒绝：屏幕尺寸未知（本轮还没读到过界面/截图，或读尺寸失败），" +
                     "坐标不可信，请改走编号 eid 点目标，不要盲点坐标。"
             )
+        // 第 5 批·戳过期：上次观察距今超过 TTL，坐标是对一张旧屏的赌——拒，
+        // 让模型先重读屏幕（再看一眼）再点，不要原样重发同一坐标。
+        // observedSizeAtMs == 0 只发生在盖戳的两行 volatile 写之间被并发读到
+        // 的瞬间（尺寸已盖、时间还没写），那时按“刚盖的戳”放行，不误拒。
+        val stampAgeMs = SystemClock.uptimeMillis() - observedSizeAtMs
+        if (observedSizeAtMs > 0L && stampAgeMs > OBSERVED_SIZE_TTL_MS) {
+            throw IllegalStateException(
+                "坐标契约拒绝：屏幕尺寸戳已过期（${stampAgeMs / 1000} 秒前观察的，超过 " +
+                    "${OBSERVED_SIZE_TTL_MS / 1000} 秒），坐标不可信，请先重读界面再点，" +
+                    "不要盲点旧坐标。"
+            )
+        }
         val now = runCatching { mappingSize() }.getOrNull()
             ?.takeIf { it.x > 0 && it.y > 0 }
             ?: throw IllegalStateException(
@@ -303,6 +346,10 @@ class ScreenController(
     }
 
     fun tapNorm(nx: Int, ny: Int, beforePx: FloatArray? = null, handover: Boolean = false): JSONObject {
+        // 第 5 批·点按前现读一次树刷戳（断点 #8）：上一轮 dump 距现在可能已过
+        // 几秒到几十秒（问模型一次的往返），同包页面变了还按旧尺寸换算会点错；
+        // 先读活树、刷观察戳，再按新尺寸换算坐标。
+        refreshObservationForCoord()
         // 第九批·坐标契约：范围 + 尺寸已知/未过期 + 像素落屏内，一处校验；
         // 换算用校验返回的那份现读尺寸（contractSize 已含 requireNorm）。
         val size = contractSize(nx to ny)
@@ -332,6 +379,8 @@ class ScreenController(
     }
 
     fun longPressNorm(nx: Int, ny: Int, durationMs: Long, handover: Boolean = false): JSONObject {
+        // 第 5 批·与 tapNorm 同一道：长按前现读一次树刷戳，再进契约（断点 #8）。
+        refreshObservationForCoord()
         // 第九批·坐标契约：与 tapNorm 同一道门（contractSize 已含 requireNorm）。
         val size = contractSize(nx to ny)
         // 第 3 批·小窗守卫：目标还在小窗里时坐标长按直接拒，改走编号 eid。
@@ -498,7 +547,9 @@ class ScreenController(
         // 展开拖动只认目标包的前台（S2 的 expectedPkg）；目标还没到前台时
         // swipe 会拒绝，展开如实报失败，不抛到任务循环里。
         val dragged = runCatching {
-            swipe(startX, startY, screenW / 2, screenH - 5, 400, fling = false, expectedPkg = targetPkg)
+            // 第 5 批：展开拖动是内部机械动作、不用屏变快照（snapshot=false）——
+            // 成败由调用方重测窗口判定，不靠 screen_changed；快照还会多拍一张图。
+            swipe(startX, startY, screenW / 2, screenH - 5, 400, fling = false, expectedPkg = targetPkg, snapshot = false)
             true
         }.onFailure { Log.w("Body", "expandFloatingApp: drag refused: ${it.message}") }
             .getOrDefault(false)
@@ -1237,6 +1288,8 @@ class ScreenController(
         // H6：交接步的滑动同样要把标志带给 swipe，否则前台校验会拦。
         handover: Boolean = false,
     ): JSONObject {
+        // 第 5 批·与 tapNorm 同一道：滑动前现读一次树刷戳，再进契约（断点 #8）。
+        refreshObservationForCoord()
         // 第九批·坐标契约：起终两点同过一道门（contractSize 已含 requireNorm）；
         // 换算用校验返回的那份现读尺寸。像素层 swipe() 本身没有落屏检查，
         // 1000 这类边值以前会直接发出去，本批起在归一化层就拒。
@@ -1279,18 +1332,29 @@ class ScreenController(
         val n = screens.coerceIn(1, MAX_SCREENS)
         var moved = 0
         var stoppedAtEnd = false
+        var stopUnknown = false
         for (i in 0 until n) {
             val before = screenFingerprint()
             val beforePx = if (before.optBoolean("blind")) pixelSignature() else null
-            swipe(x1, y1, x2, y2, durationMs, fling = false, handover = handover)
+            swipe(x1, y1, x2, y2, durationMs, fling = false, handover = handover, snapshot = false)
             try { Thread.sleep(SCREEN_SETTLE_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
             val after = screenFingerprint()
             var changed = before.optString("pkg") != after.optString("pkg") ||
                 before.optInt("sig") != after.optInt("sig")
+            var pixelTold = false
             if (!changed && beforePx != null) {
-                pixelSignature()?.let { if (pixelsMoved(beforePx, it)) changed = true }
+                pixelSignature()?.let {
+                    pixelTold = true
+                    if (pixelsMoved(beforePx, it)) changed = true
+                }
             }
-            if (!changed) { stoppedAtEnd = true; break }
+            if (!changed) {
+                stoppedAtEnd = true
+                // 第 5 批·盲树 UNKNOWN（断点 #13）：树被挡、像素又没比上时，
+                // “没动”只是未知数，不是“滑到底了”。
+                stopUnknown = before.optBoolean("blind") && !pixelTold
+                break
+            }
             moved++
         }
         val out = JSONObject()
@@ -1298,11 +1362,15 @@ class ScreenController(
             .put("duration_ms", dur).put("fling", false)
             .put("screens_moved", moved)
             .put("requested", n)
+            // 第 5 批·连滑也给 screen_changed（断点 #13）：滑了几屏就是屏变信号，
+            // 没有它 Reflector 永远不触发；盲树下停在“没动”时按 UNKNOWN 处理。
+            .put("screen_changed", moved > 0)
             .apply {
                 if (dur != durationMs) {
                     put("requested_duration_ms", durationMs)
                     put("duration_clamped", true)
                 }
+                if (moved == 0 && stopUnknown) put("screen_changed_unknown", true)
             }
         if (stoppedAtEnd) {
             out.put(
@@ -2882,6 +2950,14 @@ class ScreenController(
                         "and you should carry on from what you see.",
                 )
         }
+        // 第 5 批·盲树 UNKNOWN（断点 #13）：树被挡/读不到、又没有像素第二意见时，
+        // screen_changed:false 不是“没点上”，是“不知道”——置旗子，TaskLoop 的
+        // summarize 据此把 changed 折成 null，不进 Reflector 的 C 误判路径、
+        // 不记一步失败。像素比对过（pixelTold）时 false 是真否定，不置；
+        // 指纹被截断（cut）时签名本身不可信，false 同样是未知数。
+        val changeUnknown = !changed &&
+            ((!pixelTold && blindTree) || before.optBoolean("cut") || after.optBoolean("cut"))
+        if (changeUnknown) result.put("screen_changed_unknown", true)
         result.put("screen_changed", changed)
         if (before.optBoolean("cut") || after.optBoolean("cut")) {
             result.put(
@@ -3054,7 +3130,7 @@ class ScreenController(
      * a longer duration because release velocity is distance/duration — slowing
      * the stroke shrinks the coast but never removes it.
      */
-    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long, fling: Boolean, expectedPkg: String? = null, handover: Boolean = false): JSONObject {
+    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long, fling: Boolean, expectedPkg: String? = null, handover: Boolean = false, snapshot: Boolean = true): JSONObject {
         requireForeground(expectedPkg ?: lastDumpPkg, handover)
         // L11：时长在这里钳制一次，实际用的时长与原值一起返回，不静默。
         val dur = durationMs.coerceIn(SWIPE_DURATION_MIN_MS, SWIPE_DURATION_MAX_MS)
@@ -3069,8 +3145,12 @@ class ScreenController(
         // WeChat timeline 21 times and never learned anything from any of them
         // — top, bottom, top again — because the reply said only "swiped".
         // Chained flings without a look are how a list becomes a maze.
-        val before = if (fling) screenFingerprint() else null
-        val beforePx = if (fling && before?.optBoolean("blind") == true) pixelSignature() else null
+        // 第 5 批·非 fling 滑动也要屏变快照（断点 #13）：原来只有 fling 取
+        // before 指纹，非 fling 滑动从不产生 screen_changed，Reflector 永远不
+        // 触发；现在一律取（swipeScreens 每段自己比对，传 snapshot=false，
+        // 免得一段滑两次快照、多睡一次）。
+        val before = if (snapshot) screenFingerprint() else null
+        val beforePx = if (snapshot && before?.optBoolean("blind") == true) pixelSignature() else null
         // Andee 对齐：上一圈还亮着时先藏起来。
         marker?.hideNow()
         // Andee 对齐：滑动起点或终点在球下时球先让开，手势完恢复。
@@ -3120,6 +3200,11 @@ class ScreenController(
         // L11: 主手势没完成（被取消）也不抛异常——completed=false 的结果连同
         // fling 快照一起返回，调用方按 completed 判断成败（Andee 同款）。
         if (fling && before != null) attachFlingSnapshot(result, before, beforePx)
+        // 第 5 批·非 fling 滑动的屏变快照：与 fling 同一套 before/after 比对，
+        // 只少一句“滑到底了”的提示（那句是 fling 专用的）。
+        if (!fling && snapshot && before != null) {
+            attachChangeSnapshot(result, before, beforePx, SCREEN_SETTLE_MS, "swipe_after")
+        }
         return result.put("from", "$x1,$y1").put("to", "$x2,$y2").put("duration_ms", dur)
             .put("fling", fling)
             .apply {
@@ -3152,9 +3237,17 @@ class ScreenController(
         val after = screenFingerprint()
         var changed = before.optString("pkg") != after.optString("pkg") ||
             before.optInt("sig") != after.optInt("sig")
+        var pixelTold = false
         if (!changed && beforePx != null) {
-            pixelSignature()?.let { if (pixelsMoved(beforePx, it)) changed = true }
+            pixelSignature()?.let {
+                pixelTold = true
+                if (pixelsMoved(beforePx, it)) changed = true
+            }
         }
+        // 第 5 批·盲树 UNKNOWN（断点 #13）：与 attachEffectSnapshot 同一规则——
+        // 树被挡、像素又没比上时，“没动”只是未知数。
+        val blindTree = before.optBoolean("blind") || after.optBoolean("blind")
+        if (!changed && blindTree && !pixelTold) result.put("screen_changed_unknown", true)
         result.put("screen_changed", changed)
         if (changed) {
             runCatching { result.put("after_shot", guardedShot { screenshot("fling_after") }) }
@@ -3166,6 +3259,39 @@ class ScreenController(
                     "nothing. If you are hunting one particular old item, stop scrolling " +
                     "and use the app's search instead.",
             )
+        }
+    }
+
+    /**
+     * 第 5 批·非 fling 滑动的屏变快照（断点 #13）：tap 那套 screen_changed
+     * 机制的轻量版——动作前后各取一次屏变指纹（树 + 盲树时的像素第二意见），
+     * 只少 tap_mark/元素提示（滑动没有单点落点）与 fling 那句“滑到底了”
+     * 的提示。长按直接复用 attachEffectSnapshot（菜单反馈要元素提示），
+     * fling 仍走 attachFlingSnapshot，不三套各写一份。
+     */
+    private fun attachChangeSnapshot(result: JSONObject, before: JSONObject, beforePx: FloatArray?, settleMs: Long, shotReason: String) {
+        try {
+            Thread.sleep(settleMs)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        val after = screenFingerprint()
+        var changed = before.optString("pkg") != after.optString("pkg") ||
+            before.optInt("sig") != after.optInt("sig")
+        var pixelTold = false
+        if (!changed && beforePx != null) {
+            pixelSignature()?.let {
+                pixelTold = true
+                if (pixelsMoved(beforePx, it)) changed = true
+            }
+        }
+        val blindTree = before.optBoolean("blind") || after.optBoolean("blind")
+        if (!changed && ((!pixelTold && blindTree) || before.optBoolean("cut") || after.optBoolean("cut"))) {
+            result.put("screen_changed_unknown", true)
+        }
+        result.put("screen_changed", changed)
+        if (changed) {
+            runCatching { result.put("after_shot", guardedShot { screenshot(shotReason) }) }
         }
     }
 
@@ -3211,6 +3337,12 @@ class ScreenController(
         val dur = durationMs.coerceIn(LONG_PRESS_MIN_MS, LONG_PRESS_MAX_MS)
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, dur)
+        // 第 5 批·长按也要屏变快照（断点 #13）：原来只有 tap 有 before/after
+        // 指纹，长按从不产生 screen_changed，Reflector 永远不触发；现在与 tap
+        // 同一套（菜单弹不弹得出就靠它），直接复用 attachEffectSnapshot——
+        // 菜单类反馈要元素提示与 after_shot，不另造一套。
+        val before = screenFingerprint()
+        val beforePx = if (before.optBoolean("blind")) pixelSignature() else null
         // Andee 对齐：上一圈还亮着时先藏起来。
         marker?.hideNow()
         // Andee 对齐：落点在球下时球先让开，手势完恢复。
@@ -3230,7 +3362,11 @@ class ScreenController(
         runCatching { Thread.sleep(POPUP_SETTLE_MS) }
             .onFailure { if (it is InterruptedException) Thread.currentThread().interrupt() }
         putPopups(result)
-        return result.put("x", x).put("y", y).put("duration_ms", dur)
+        // 先把落点写进结果：attachEffectSnapshot 凭它画 tap_mark、决定要不要附
+        // after_shot（tap 里 x/y 就在快照之前写，这里别写反了）。
+        result.put("x", x).put("y", y)
+        attachEffectSnapshot(result, before, beforePx)
+        return result.put("duration_ms", dur)
             .apply {
                 if (dur != durationMs) {
                     put("requested_duration_ms", durationMs)
