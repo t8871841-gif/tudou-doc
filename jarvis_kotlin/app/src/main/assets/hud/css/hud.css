@@ -388,7 +388,7 @@ body[data-state="listening"] .state-badge,body[data-state="thinking"] .state-bad
 body[data-live] .demo-tag{display:none}
 .agent.off{opacity:.42}.agent .name small{font-family:var(--f-cn);font-size:11px;color:var(--ink-3);margin-left:8px;letter-spacing:0}
 
-/* <<demo-quick: portrait quick demo buttons (batch 2) — four icon-only buttons in a row
+/* <<demo-quick: portrait quick demo buttons (batch 2) — eight icon-only buttons in a row
    at the bottom edge of the HUD animation area, just above the native dialogue box.
    Fixed to the HUD page viewport (the WebView is the top 3/5 in portrait), so they can
    never overlap the native dialogue below. Hidden by default; a tap on the HUD shows
@@ -396,9 +396,19 @@ body[data-live] .demo-tag{display:none}
 #demoQuick{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:none;gap:14px;width:min(94vw,560px);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;justify-content:flex-start;z-index:8}
 #demoQuick.on{display:flex}
 #demoQuick::-webkit-scrollbar{display:none}
-#demoQuick .dq-btn{flex:0 0 auto;width:60px;height:60px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(var(--sk-pri),.45);background:rgba(var(--sk-pnl),.55);color:rgb(var(--sk-ink));cursor:pointer;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 0 14px rgba(var(--sk-pri),.18);padding:0}
+/* 第 4 批·液态玻璃 + 彩色：每个按钮一个主色（RGB 三元组，供 rgba(var(--dq-accent), alpha) 用）。
+   共用规则里用 var(--dq-accent, var(--sk-pri)) 读它——没写主色的按钮退回皮肤主色，以后加按钮也不至于没色。 */
+#demoQuick #dqShip{--dq-accent:56,189,248}
+#demoQuick #dqRoadster{--dq-accent:255,107,53}
+#demoQuick #dqOptimus{--dq-accent:167,139,250}
+#demoQuick #dqRaptor{--dq-accent:251,191,36}
+#demoQuick #dqHoloLib{--dq-accent:52,211,153}
+#demoQuick #dqEarth{--dq-accent:96,165,250}
+#demoQuick #dqSkin{--dq-accent:244,114,182}
+#demoQuick #dqBrowser{--dq-accent:45,212,191}
+#demoQuick .dq-btn{flex:0 0 auto;width:60px;height:60px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(var(--dq-accent, var(--sk-pri)),.55);background:linear-gradient(135deg,rgba(var(--dq-accent, var(--sk-pri)),.22),rgba(var(--sk-pnl),.55) 60%);color:rgb(var(--dq-accent, var(--sk-ink)));cursor:pointer;backdrop-filter:blur(18px) saturate(1.6);-webkit-backdrop-filter:blur(18px) saturate(1.6);box-shadow:0 0 16px rgba(var(--dq-accent, var(--sk-pri)),.28),inset 0 1px 1px rgba(255,255,255,.55),inset 0 -2px 4px rgba(0,0,0,.28);padding:0}
 #demoQuick .dq-btn svg{width:32px;height:32px;display:block}
-#demoQuick .dq-btn:active{transform:scale(.92);background:rgba(var(--sk-pnl),.8)}
+#demoQuick .dq-btn:active{transform:scale(.92);background:linear-gradient(135deg,rgba(var(--dq-accent, var(--sk-pri)),.38),rgba(var(--sk-pnl),.7) 60%)}
 @media (orientation:landscape){#demoQuick,#demoQuick.on{display:none}}
 /* demo-quick>> */
 
