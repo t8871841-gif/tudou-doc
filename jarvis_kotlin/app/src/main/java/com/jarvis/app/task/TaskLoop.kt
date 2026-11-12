@@ -438,9 +438,34 @@ object TaskLoop {
                     }
                     return
                 }
+                // 第 4 批·每步服务守卫（断点 #6）：无障碍服务中途死掉只表现为 dump
+                // 持续返回空树，旧代码会沿 treeUnreadable 一路记失败、走升级、
+                // 烧完 25 步。每步观察前现读 instance（不用 runBlocking 开头
+                // 抓到的那个 svc——服务死掉重绑后 instance 会换新对象），掉了
+                // 就干净停下：不记连续失败、不触发 STUCK 升级、不烧步数；
+                // 记断点，用户到设置里重新开关一次 Jarvis 无障碍服务、说
+                // 「继续」可以接着做。不要后台常驻看门狗，本批只要每步检查。
+                if (JarvisAccessibilityService.instance == null) {
+                    if (saveResume) {
+                        TaskResumeState.offer(
+                            taskText, history.toList(), step - 1,
+                            foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                            plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                            notes = notes.toList()
+                        )
+                        stoppedWithResume = true
+                        finalReply = "无障碍服务掉了，任务停在第 ${step - 1} 步。到设置里重新开关一次 Jarvis 无障碍服务，然后说「继续」可以接着做。"
+                        AuditLog.append(ctx, "任务循环", "第 $step 步前发现无障碍服务已掉线", "断点已记，重开服务后说继续可续跑")
+                    } else {
+                        finalReply = "无障碍服务掉了，任务停下了。"
+                        AuditLog.append(ctx, "任务循环", "第 $step 步前发现无障碍服务已掉线", "内部任务，不记断点")
+                    }
+                    return
+                }
                 // ---------- 观察 ----------
                 // 第七批·取树重试 + 恢复：dumpUiTree 内已带退避重试（抛错/无窗口时
-                // 最多 3 次尝试，见 ScreenController），正常不再抛错；这里只留兜底，
+                // 最多 7 次尝试，见 ScreenController），正常不再抛错；这里只留兜底，
                 // 万一抛了也合成一张空树走下面的“读不到界面”分支，不再 continue
                 // 烧步（旧做法：取树一抛错这一步就白白烧掉，模型连问都没问到）。
                 // 另：TaskLoop 原有的 1500ms/300ms 空树轮询已删——dumpUiTree 内
@@ -2177,7 +2202,7 @@ r.ok || jpeg!= null, r.screenChanged, jpeg, r.code
 val app = action.optString("app")
 if (app.isEmpty()) return StepResult("openApp 没有应用名", false, null, null, "PARSE_ERROR")
 // 跨应用任务循环：前台拉起，直接全屏（jk-v66：不要小窗；反射已死、拖展开靠不住）。
-// launchApp 里已等目标到前台（最多 5 秒），这里不再睡、不再展开。
+// launchApp 里已等目标窗口出现（最多 10 秒），这里不再睡、不再展开。
 val r = LocalCommands.launchApp(ctx, app, fullscreen = true)
 if (!r.startsWith("正在打开")) {
 return StepResult(r, false, null, null, "UNKNOWN")

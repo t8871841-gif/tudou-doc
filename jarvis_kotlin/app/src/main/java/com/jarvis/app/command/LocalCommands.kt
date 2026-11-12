@@ -404,7 +404,9 @@ object LocalCommands {
      * 反射 setLaunchWindowingMode 在这台 Flyme 上根本不存在（NoSuchMethodException），
      * 拖小窗展开也靠不住（jk-v65 审计：微信拖动后仍是小窗）。
      * 改法：把要开的包名交给 MainActivity，由它在 onResume（已在前台）时去 startActivity，
-     * 系统当成前台启动，Flyme 就给全屏。等目标到前台最多 5 秒，超时也返回（任务循环下一步会再确认）。 */
+     * 系统当成前台启动，Flyme 就给全屏。第 4 批：等目标包的窗口出现才算到
+     * （前台包名到了、窗口还没画出来时不算到），上限 10 秒，超时也返回
+     * （任务循环下一步会再确认前台包名）。 */
     fun launchAppFullscreenViaActivity(ctx: Context, pkg: String, appName: String): String {
         val intent = android.content.Intent(ctx, com.jarvis.app.MainActivity::class.java).apply {
             putExtra(com.jarvis.app.MainActivity.EXTRA_ACTION, "launch_app")
@@ -456,10 +458,16 @@ object LocalCommands {
                 AuditLog.append(ctx, "本地指令", "前台拉起", "中转拉起失败，已回落普通启动，等轮询裁决是否到前台")
             }
         }
-        // 等目标应用真正到前台（MainActivity 起来到 onResume 再拉目标，需要时间），最多等 5 秒
+        // 第 4 批·等目标窗口出现：只凭前台包名不够——包名到了、窗口还没画出来
+        // 时也算“到了”，冷启动应用首轮常在这里吃超时。改成前台包名是目标包、
+        // 且目标包的窗口已出现（appWindowBounds 非空）才算到；上限 10 秒
+        // （33 次 × 300ms），超时返回失败文案（不带“正在打开”前缀，任务
+        // 循环的 openApp 步会判失败）；控制器拿不到时退回只看前台包名，
+        // 不把已开的应用也判失败。第 3 批的 verifyTargetWindow 不动。
         // svc 已在前面取出（第 3 批第一跳用），这里复用。
         if (svc != null) {
-            for (i in 0 until 17) {
+            val controller = com.jarvis.app.JarvisAccessibilityService.screenController
+            for (i in 0 until 33) {
                 try {
                     Thread.sleep(300)
                 } catch (_: InterruptedException) {
@@ -471,7 +479,16 @@ object LocalCommands {
                 } catch (_: Exception) {
                     ""
                 }
-                if (fg == pkg) {
+                val hasWindow = if (controller == null) {
+                    true
+                } else {
+                    try {
+                        controller.appWindowBounds(pkg) != null
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                if (fg == pkg && hasWindow) {
                     AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 已到前台")
                     // 第 3 批·拉起后验窗口：量目标窗口 bounds，不足整屏 80% 判小窗，接展开。
                     // “已全屏到前台”不能只凭包名就报，旧文案正是断点 #5 的谎报。
@@ -483,9 +500,9 @@ object LocalCommands {
             } catch (_: Exception) {
                 "?"
             }
-            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 5 秒内没到前台（当前前台：$cur）")
-            // S1：5 秒轮询超时，没确认到前台，不报"正在打开"。
-            return "打开${appName}后5秒还没到前台"
+            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 10 秒内没出现目标窗口（当前前台：$cur）")
+            // S1：10 秒轮询超时，没确认到窗口，不报"正在打开"。
+            return "打开${appName}后10秒还没出现窗口"
         } else {
             try {
                 Thread.sleep(1200)

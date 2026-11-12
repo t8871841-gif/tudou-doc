@@ -4311,15 +4311,15 @@ class ScreenController(
      * 在像素里）或 `withheld`（应用扣留了树）时重试也读不到，白白烧时间，
      * 直接把结果交给调用方走截图/OCR。
      *
-     * 参数（DroidRun 是 7 次、退避 [1,2,3,5,8,10] 秒、总计约 29 秒；手机内
-     * 单步观察不能这么拖——单次尝试里已有 1500ms settle 轮询，每多一次
-     * 尝试都是一次全量重读）：
-     *   - 最多 [DUMP_RETRY_ATTEMPTS] 次尝试（首次 + 2 次重试）；
-     *   - 退避 400ms、800ms（共 ≤1200ms）；
-     *   - 单次调用最坏约 6 秒：3 次尝试 × 每试至多 1500ms settle + 1200ms
-     *     退避（触发重试时树里一个节点都没有，walk 本身极快，不会撞上
+     * 参数（第 4 批照 DroidRun 拉长：7 次、退避 [1,2,3,5,8,10] 秒、共 29 秒；
+     * 单次尝试里已有 1500ms settle 轮询，每多一次尝试都是一次全量重读）：
+     *   - 最多 [DUMP_RETRY_ATTEMPTS] 次尝试（首次 + 6 次重试）；
+     *   - 退避 1000ms、2000ms、3000ms、5000ms、8000ms、10000ms（共 29 秒）；
+     *   - 单次调用最坏约 40 秒：7 次尝试 × 每试至多 1500ms settle + 29 秒
+     *     退避。触发重试时树里一个节点都没有，walk 本身极快，不会撞上
      *     8000ms 的 [TREE_BUDGET_MS]；walk 被预算截断又返回 0 节点的极端
-     *     情况除外，那时单试就可能吃满预算——今天不重试时单次调用也一样）。
+     *     情况除外，那时单次调用最坏约 85 秒（7 × 8000ms + 29 秒）——
+     *     极少发生。树正常时首次尝试即返回，不付任何重试代价。
      * 重试在单次观察内完成，不占 TaskLoop 的 25 步额度。
      *
      * 诊断字段（只在重试过时才附加，现有字段一字不动）：
@@ -5632,14 +5632,13 @@ class ScreenController(
         private const val SETTLE_BUDGET_MS = 1500L
 
         /**
-         * 第七批·取树重试：最多尝试次数（首次 + 2 次重试）与每次重试前的
-         * 退避（首次重试前 400ms、第二次 800ms，共 ≤1200ms）。DroidRun 是
-         * 7 次、退避 [1,2,3,5,8,10] 秒；手机内单步观察不能这么拖，单次
-         * 尝试里已有 1500ms settle 轮询——3 次尝试已相当于 18 次以上的
-         * dumpOnce 轮询，再多只是拖慢每一步。退避数组长度须是次数减一。
+         * 第七批·取树重试：第 4 批提到 7 次，退避照 DroidRun [1,2,3,5,8,10] 秒。
+         * 只在瞬时读不到时重试（树里一个节点都没有），每次重试都是一次全量
+         * 重读；单次尝试里已有 1500ms settle 轮询，空树时 walk 本身极快，
+         * 所以退避是大头。退避数组长度须是次数减一。
          */
-        private const val DUMP_RETRY_ATTEMPTS = 3
-        private val DUMP_RETRY_BACKOFF_MS = longArrayOf(400L, 800L)
+        private const val DUMP_RETRY_ATTEMPTS = 7
+        private val DUMP_RETRY_BACKOFF_MS = longArrayOf(1000L, 2000L, 3000L, 5000L, 8000L, 10000L)
 
         /**
          * Stability pass knobs — see the second loop in [dumpUiTree].
