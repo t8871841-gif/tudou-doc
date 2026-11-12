@@ -166,8 +166,11 @@ class ScreenController(
     // 坐标的流向：模型输出的 x/y、cell/part、OCR 行里的 [x,y]、zoom 图里的
     // 0-1000，都是“某张图上的相对值”，不是像素；执行层在这里统一换算
     // （tapNorm/longPressNorm/swipeNorm/lookRegion），换算用的尺寸只从一个
-    // 地方来——mappingSize()（前台任务窗口 bounds，拿不到时回落 displaySize
-    // 的整屏最大窗口），screenW/screenH 本就是每次现读的 getter，不缓存。
+    // 地方来——mappingSize()（整屏最大窗口，即 displaySize(service) 的
+    // maximumWindowMetrics）：模型看的是整屏截图、坐标是整屏相对的，按
+    // 前台窗口 bounds 换算会系统性点偏（x=500 在 810 宽小窗上换成 405px，
+    // 实际目标在 540px），所以映射口径就是整屏，不按窗口走。
+    // screenW/screenH 本就是每次现读的 getter，不缓存。
     // 注意：displaySize() 本身仍是整屏最大窗口的原语，isFullscreen/展开拖动/
     // M38 滑动/弹窗过滤/zoom 数学等按绝对屏幕像素走的地方继续用它，不能跟
     // 映射口径混用。
@@ -202,9 +205,11 @@ class ScreenController(
     // zoomToScreen 先验 zoom 图的尺寸戳（zoomSize，拍图时与 zoomRegion 同批
     // 记录），过期/尺寸变了就拒；换算出的屏坐标再过 tapNorm 的屏契约，两道门。
     //
-    // 第 3 批：映射口径改用前台任务窗口 bounds（mappingSize），拿不到窗口时
-    // 回落 displaySize；小窗下坐标点按另有小窗守卫（requireTargetFullscreenForCoord）
-    // 直接拒，不盲点——旧缺口（displaySize 是整屏最大窗口、小窗也按全屏算）到此关闭。
+    // 2026-11-12 改回整屏映射：第 3 批曾把映射口径改成前台任务窗口 bounds、
+    // 并配小窗守卫（窗口 <80% 直接拒坐标）——方向错了：模型看的是整屏截图，
+    // 坐标是整屏相对的，按窗口换算才是点偏的根源，守卫只是在替这个错换算
+    // 兜底。Andee 没有这两样，坐标按整屏算，小窗里的目标照样点中。改回后
+    // mappingSize() 就是 displaySize(service)，小窗守卫整删。
 
     /** 最近一次观察（dumpUiTree/screenshot）时盖的屏幕尺寸戳；没观察过为 null。 */
     @Volatile
@@ -232,64 +237,22 @@ class ScreenController(
      * 用指纹散步（tap 效果快照同款的 screenFingerprint，预算封顶的轻量树遍历）
      * 而不用整棵 dumpUiTree：第 4 批之后 dumpUiTree 在读不到树时最多重试 7 次、
      * 退避 29 秒，一次点按前调它最坏拖 40 秒；指纹散步只读活树、不重试，
-     * 读完立刻按现读窗口尺寸刷戳——契约消费的正是这个戳（尺寸 + 时间）。
-     * 盲树（被扣留/自绘）时散步也照常返回 blind 标志、不抛错：戳照刷（窗口
-     * 尺寸是现读的），坐标能不能点由 contractSize 与小窗守卫再判，不在这里
+     * 读完立刻按现读整屏尺寸刷戳——契约消费的正是这个戳（尺寸 + 时间）。
+     * 盲树（被扣留/自绘）时散步也照常返回 blind 标志、不抛错：戳照刷（整屏
+     * 尺寸是现读的），坐标能不能点由 contractSize 再判，不在这里
      * 因为“树盲”就把坐标路全封死——盲屏上坐标是唯一的瞄准方式。 */
     private fun refreshObservationForCoord() {
         runCatching { screenFingerprint() }
         noteObservedSize()
     }
 
-    /** 第 3 批·前台任务窗口的 bounds：TYPE_APPLICATION、已聚焦，排除自家与
-     * SystemUI/权限弹窗；没有返回 null。窗口信息用完即回收（appWindow 同款）。 */
-    private fun foregroundTaskWindowBounds(): android.graphics.Rect? {
-        val excluded = setOf(
-            service.packageName, "com.android.systemui",
-            "com.android.permissioncontroller", "com.google.android.permissioncontroller"
-        )
-        val windows = runCatching { service.windows }.getOrNull() ?: return null
-        val r = android.graphics.Rect()
-        try {
-            for (w in windows) {
-                val type = runCatching { w.type }.getOrNull() ?: continue
-                if (type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue
-                if (!runCatching { w.isFocused }.getOrDefault(false)) continue
-                val root = runCatching { rootOf(w) }.getOrNull()
-                val pkg = runCatching { root?.packageName?.toString() }.getOrNull().orEmpty()
-                runCatching { root?.recycle() }
-                if (pkg.isEmpty() || pkg in excluded) continue
-                if (!runCatching { w.getBoundsInScreen(r); true }.getOrDefault(false)) continue
-                if (r.width() <= 0 || r.height() <= 0) continue
-                return android.graphics.Rect(r)
-            }
-        } finally {
-            windows.forEach { runCatching { it.recycle() } }
-        }
-        return null
-    }
-
-    /** 第 3 批·0-1000 映射口径：前台另有应用窗口时按该窗口 bounds，不再一律按
-     * 整屏最大窗口算；拿不到窗口时回落整屏最大窗口（displaySize）。 */
+    /** 2026-11-12·0-1000 映射口径：永远按整屏最大窗口算（displaySize）。
+     * 模型看的是整屏截图，坐标是整屏相对的——x=500 就是屏宽的一半，不论
+     * 目标在全屏还是小窗里。按前台窗口 bounds 换算会系统性点偏（x=500 在
+     * 810 宽小窗上换成 405px，实际目标在 540px），Andee 同款做法就是整屏
+     * 换算，小窗里的目标照样点中。 */
     private fun mappingSize(): android.graphics.Point {
-        foregroundTaskWindowBounds()?.let { return android.graphics.Point(it.width(), it.height()) }
         return displaySize(service)
-    }
-
-    /** 第 3 批·小窗守卫：前台目标窗口不足整屏 80% 时，0-1000 坐标是按整屏截图
-     * 给的、按窗口换算会系统性点错——直接拒，模型改走编号 eid（节点
-     * getBoundsInScreen 是绝对坐标，不受此限）或先展开窗口。文案以“坐标契约
-     * 拒绝：”开头，TaskLoop 映成 COORD_CONTRACT。 */
-    private fun requireTargetFullscreenForCoord() {
-        val win = foregroundTaskWindowBounds() ?: return
-        val screen = displaySize(service)
-        val screenArea = screen.x.toLong() * screen.y
-        if (screenArea <= 0) return
-        val pct = win.width().toLong() * win.height() * 100 / screenArea
-        if (pct >= 80) return
-        throw IllegalStateException(
-            "坐标契约拒绝：目标应用还在小窗里（窗口仅占屏幕 $pct%，请先展开成全屏，或改走编号 eid 点目标，不要盲点坐标）。"
-        )
     }
 
     /**
@@ -353,8 +316,6 @@ class ScreenController(
         // 第九批·坐标契约：范围 + 尺寸已知/未过期 + 像素落屏内，一处校验；
         // 换算用校验返回的那份现读尺寸（contractSize 已含 requireNorm）。
         val size = contractSize(nx to ny)
-        // 第 3 批·小窗守卫：目标还在小窗里时坐标点按直接拒，改走编号 eid。
-        requireTargetFullscreenForCoord()
         requireForeground(handover = handover)
         val w = size.x; val h = size.y
         val px = nx.toPixel(w); val py = ny.toPixel(h)
@@ -383,8 +344,6 @@ class ScreenController(
         refreshObservationForCoord()
         // 第九批·坐标契约：与 tapNorm 同一道门（contractSize 已含 requireNorm）。
         val size = contractSize(nx to ny)
-        // 第 3 批·小窗守卫：目标还在小窗里时坐标长按直接拒，改走编号 eid。
-        requireTargetFullscreenForCoord()
         requireForeground(handover = handover)
         val w = size.x; val h = size.y
         val px = nx.toPixel(w); val py = ny.toPixel(h)
@@ -1294,8 +1253,6 @@ class ScreenController(
         // 换算用校验返回的那份现读尺寸。像素层 swipe() 本身没有落屏检查，
         // 1000 这类边值以前会直接发出去，本批起在归一化层就拒。
         val size = contractSize(nx1 to ny1, nx2 to ny2)
-        // 第 3 批·小窗守卫：目标还在小窗里时坐标滑动直接拒，改走编号 eid。
-        requireTargetFullscreenForCoord()
         // Not a sample, but it moves everything on screen: without it the
         // offline pairing would read a post-scroll retry as a correction of a
         // pre-scroll miss, at a point that no longer means the same thing.
