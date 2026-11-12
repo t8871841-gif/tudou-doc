@@ -3640,16 +3640,24 @@ class MainActivity : Activity() {
 
     private val SETTING_INPUT_BG = 0xFF1E1533.toInt()
     private val SETTING_STROKE = 0x2EFFFFFF
-    private val SETTING_DIVIDER = 0x1EFFFFFF
 
-    /** 目录行：图标 + 标题 + 右箭头，下附细线（参考图样式）。 */
+    /** 目录行：图标 + 标题 + 右箭头。 */
+    // 第 3 批·液态玻璃：目录行改成玻璃卡片（可点：复用第 2 批的按压态背景 + 按压缩放）。
+    // 圆角 14dp；底色白 10%→5%，按下提亮到白 18%→10%（与第 1、2 批协调）。
+    // 旧版行底是 1dp 分隔细线：卡片化后细线不要了，行间改留 8dp 间距，卡片才看得出来。
+    // 横向内边距 4dp→16dp：旧版无底色、4dp 也够；玻璃卡要留边，文字贴边会压到高光边——
+    // 这是本批唯一动内边距的地方，竖向内边距（14dp）、文字字号颜色一律不动。
     private fun settingRow(icon: String, title: String, onClick: (View) -> Unit): View {
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(14), dp(4), dp(14))
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = liquidGlassButtonBg(14f)
             setOnClickListener(onClick)
+            attachPressScale(this)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
         }
         row.addView(TextView(this).apply { text = icon; textSize = 24f })
         row.addView(TextView(this).apply {
@@ -3658,12 +3666,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
         row.addView(TextView(this).apply { text = "›"; textSize = 20f; setTextColor(0x8AFFFFFF.toInt()) })
-        col.addView(row)
-        col.addView(View(this).apply {
-            setBackgroundColor(SETTING_DIVIDER)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
-        })
-        return col
+        return row
     }
 
     /** 分组小标题：13sp 旋臂紫。 */
@@ -3700,10 +3703,18 @@ class MainActivity : Activity() {
         title: String, desc: String, initial: Boolean,
         onCreated: ((android.widget.Switch) -> Unit)? = null, onChecked: (Boolean) -> Unit
     ): View {
+        // 第 3 批·液态玻璃：开关行改成玻璃卡片（静态底：行本身不可点，只有 Switch 能拨，
+        // 不加按压反馈）。圆角 14dp，底色白 10%→5%（与目录行、气泡同一套）。
+        // 横向内边距 0→16dp：旧版无底色、0 也够；玻璃卡要留边，文字贴边会压到高光边——
+        // 竖向内边距（10dp）、文字字号颜色、Switch 本身一律不动。行间留 8dp 间距。
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(10), 0, dp(10))
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = LiquidGlass.rounded(this@MainActivity, 0x1AFFFFFF, 0x0DFFFFFF, 14f)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            }
         }
         val texts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3750,6 +3761,11 @@ class MainActivity : Activity() {
                     buttons.forEachIndexed { j, bb -> bb.alpha = if (j == i) 1f else 0.5f }
                 }
             }, false)
+            // 第 3 批·液态玻璃：分段按钮是分页里的可点取值项，底色改走第 2 批的按压态玻璃背景
+            // （常态白 10%→5%，按下提亮；圆角 12dp，与 styleBtn 原来的 12dp 一致），取代
+            // styleBtn 的实色深底；文字色/内边距、选中态 alpha（1f/0.5f）一律不动。
+            b.background = liquidGlassButtonBg(12f)
+            attachPressScale(b)
             b.alpha = if (i == selected) 1f else 0.5f
             buttons.add(b)
             row.addView(b)
