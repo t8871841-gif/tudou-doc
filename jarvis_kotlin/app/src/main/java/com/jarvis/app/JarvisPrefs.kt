@@ -369,6 +369,17 @@ object JarvisPrefs {
         p(ctx).edit().putString(KEY_PORTRAIT_BG_URI, v).apply()
     }
 
+    // ---------- D 批·对话区背景图（图库自选，与舞台图分开） ----------
+    // 存图库 URI 字符串；空 = 不用照片，沿用深空渐变。URI 拿的是持久授权
+    // （takePersistableUriPermission），重启后还在；授权丢了或解不出来就回渐变
+    // （MainActivity.refreshDialogueBackground 里兜底）。
+    private const val KEY_DIALOGUE_BG_URI = "dialogue_bg_uri"
+
+    fun getDialogueBgUri(ctx: Context): String = p(ctx).getString(KEY_DIALOGUE_BG_URI, "") ?: ""
+    fun setDialogueBgUri(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_DIALOGUE_BG_URI, v).apply()
+    }
+
     // ---------- 竖屏舞台动态/静态 ----------
     // 竖屏舞台用动画还是静态图；默认 false=动画。静态时竖屏舞台显示静图
     // （自定义 URI 或默认静帧），WebView 藏起暂停以省电；横屏不受影响，永远是 WebView 全屏。

@@ -100,6 +100,8 @@ class MainActivity : Activity() {
         const val REQ_PROJECTION = 5152
         // 彻底融合第 1 步：竖屏舞台背景图，图库选图（ACTION_OPEN_DOCUMENT 回调）。
         const val REQ_PICK_PORTRAIT_BG = 5153
+        // D 批·对话区背景图（与舞台图分开），图库选图（ACTION_OPEN_DOCUMENT 回调）。
+        const val REQ_PICK_DIALOGUE_BG = 5154
         // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
@@ -166,6 +168,10 @@ class MainActivity : Activity() {
     // onActivityResult 与 openSettingsPage 都能刷新（设置页只建一次，状态行不跟着重建）。
     private lateinit var stageModeStatusText: TextView
     private lateinit var portraitBgStatusText: TextView
+    // D 批·对话区背景图：全屏照片层（root 最底层）+ 状态行，字段化以便
+    // onActivityResult 与设置按钮都能刷新。
+    private var dialogueBgImageView: ImageView? = null
+    private lateinit var dialogueBgStatusText: TextView
     // 长期记忆条数（原生面板 Agent 调度 LEARNING 行的真实信号），null=还没取到。
     private var lastMemoryCount: Int? = null
     private var memoryCountLoading = false
@@ -288,6 +294,16 @@ class MainActivity : Activity() {
 
         root.addView(contentView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         setContentView(root)
+
+        // D 批·对话区背景图：全屏照片层，垫在 contentView 与 settingsScroll 下面
+        // （root 是 FrameLayout，index 0 = 最底层）；没选图时 GONE，homePanel
+        // 与 settingsScroll 沿用深空渐变。CENTER_CROP：照片铺满屏，裁边不留黑条。
+        dialogueBgImageView = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }.also { root.addView(it, 0) }
+        refreshDialogueBackground()
 
         // HUD WebView 常驻（只建一次），竖屏藏起来停渲染，横屏全屏显示；再按当前方向摆一次。
         setupHudWebView(root)
@@ -615,6 +631,16 @@ class MainActivity : Activity() {
             "竖屏舞台现在用默认图（HUD 默认皮肤静帧）"
         } else {
             "竖屏舞台现在用你选的图"
+        }
+    }
+
+    /** D 批·对话区背景图状态行：现在用深空渐变还是你选的图。 */
+    private fun refreshDialogueBgStatus() {
+        if (!::dialogueBgStatusText.isInitialized) return
+        dialogueBgStatusText.text = if (JarvisPrefs.getDialogueBgUri(this).isBlank()) {
+            "对话区背景现在用深空渐变（默认）"
+        } else {
+            "对话区背景现在用你选的图"
         }
     }
 
@@ -1424,6 +1450,58 @@ class MainActivity : Activity() {
             val bmp = decodeSampledBitmap(uri, 1080)
             withContext(Dispatchers.Main) {
                 if (bmp != null) iv.setImageBitmap(bmp) else iv.setImageResource(R.drawable.hud_default_still)
+            }
+        }
+    }
+
+    // D 批·对话区背景图上的暗色罩子：纵向黑渐变，上 70% → 下 60%（第一版估值，
+    // 真机看亮照片上的白字清不清晰再调）。只在有照片时用，没照片时沿用深空渐变。
+    // 每次调用返回一个新的 GradientDrawable——一个 Drawable 实例不能同时挂在两个 View 上。
+    private fun dialogueScrim(): GradientDrawable =
+        GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(0xB3000000.toInt(), 0x99000000.toInt())
+        )
+
+    /** D 批·对话区背景图：选过用图库那张（按宽度等比缩小解码，大照片不占满内存），
+     * 上面压一层暗色罩子保白字可读；没选过/授权丢了/解不出来就回深空渐变，
+     * 不报错、不弹 toast。homePanel（对话区）与 settingsScroll（设置页）同时换，行为一致。 */
+    private fun refreshDialogueBackground() {
+        val iv = dialogueBgImageView ?: return
+        val uriStr = JarvisPrefs.getDialogueBgUri(this)
+        if (uriStr.isBlank()) {
+            iv.visibility = View.GONE
+            iv.setImageDrawable(null)
+            homePanel.background = deepSpaceBackground()
+            settingsScroll.background = deepSpaceBackground()
+            return
+        }
+        val uri = try {
+            Uri.parse(uriStr)
+        } catch (e: Exception) {
+            null
+        }
+        if (uri == null) {
+            iv.visibility = View.GONE
+            iv.setImageDrawable(null)
+            homePanel.background = deepSpaceBackground()
+            settingsScroll.background = deepSpaceBackground()
+            return
+        }
+        uiScope.launch(Dispatchers.IO) {
+            val bmp = decodeSampledBitmap(uri, 1080)
+            withContext(Dispatchers.Main) {
+                if (bmp != null) {
+                    iv.setImageBitmap(bmp)
+                    iv.visibility = View.VISIBLE
+                    homePanel.background = dialogueScrim()
+                    settingsScroll.background = dialogueScrim()
+                } else {
+                    iv.visibility = View.GONE
+                    iv.setImageDrawable(null)
+                    homePanel.background = deepSpaceBackground()
+                    settingsScroll.background = deepSpaceBackground()
+                }
             }
         }
     }
@@ -2799,6 +2877,31 @@ class MainActivity : Activity() {
             refreshStageModeStatus()
             toast("已恢复默认图")
         })
+        // D 批·对话区背景图（与舞台图分开选）：状态行 + 选图 + 清除（回深空渐变）。
+        dialogueBgStatusText = TextView(this).apply {
+            textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        }
+        refreshDialogueBgStatus()
+        root.addView(dialogueBgStatusText)
+        root.addView(btn("从图库选一张对话区背景图") {
+            try {
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "image/*"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(i, REQ_PICK_DIALOGUE_BG)
+            } catch (e: Exception) {
+                toast("打不开图库：${e.message}")
+            }
+        })
+        root.addView(btn("清除对话区背景图") {
+            JarvisPrefs.setDialogueBgUri(this, "")
+            refreshDialogueBackground()
+            refreshDialogueBgStatus()
+            toast("对话区背景已恢复渐变")
+        })
         // 竖屏舞台动态/静态切换：当前模式 + 动画/静态图两项，点中即切换并立即生效。
         stageModeStatusText = TextView(this).apply {
             textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
@@ -3176,6 +3279,22 @@ class MainActivity : Activity() {
                 setPortraitStageMode(true)
                 refreshStageImage()
                 toast("竖屏背景图已换")
+            }
+            return
+        }
+        // D 批·对话区背景图——图库选图回调，拿持久授权存起来，立即换背景。
+        if (requestCode == REQ_PICK_DIALOGUE_BG) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: Exception) {
+                    // 拿不到持久授权也先用着：本次能显示，下次打开可能回渐变。
+                }
+                JarvisPrefs.setDialogueBgUri(this, uri.toString())
+                refreshDialogueBgStatus()
+                refreshDialogueBackground()
+                toast("对话区背景图已换")
             }
             return
         }
