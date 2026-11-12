@@ -45,9 +45,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * 与现状不同处以它为准：
  *
  * - 步数上限 25（Andee VoiceConfig.DEFAULT_MAX_STEPS），不再是 12。
- * - 相同动作签名连续重复守卫（LocalBrain 的 MAX_REPEATS=3）：同一个动作连着
- *   发第 4 次之前就中止并如实回报在打转，不让它原地耗满步数。无法解析的输出
- *   也算一种签名，连着来一样触发。
+ * - 相同动作签名连续重复守卫（LocalBrain 的 MAX_REPEATS=3，根治第 4 批改义）：
+ *   只数“动作相同且界面没动”的重复——同一个动作连着发、且上一步的执行结果
+ *   说界面没变（或观察到的大纲也没变），到第 4 次之前就中止并如实回报在打转，
+ *   不让它原地耗满步数；动作相同但界面在变（比如连着点一列聊天，每点都打开
+ *   新界面）不算打转。无法解析的输出也算一种签名，连着来一样触发。
  * - 模型输出不合规：带原因立即纠偏重试一次（原有做法，保留）；再不行记为一
  *   步失败继续循环（Andee 是把错误当工具结果回喂让模型自纠），不再整场中止。
  * - 历史回喂：每步把「动作 + 结果摘要」记进下一步提示词，结果摘要尽量透传
@@ -293,9 +295,10 @@ object TaskLoop {
         var lastError = ""
         var pendingImage: String? = null // zoom 放大图：作为下一轮的观察图喂回模型
         var finalReply: String? = null
-        // 重复守卫（LocalBrain 同款：数的是动作签名，不是点的位置——那层在
-        // ScreenController 里另有计数）：同一签名连着来，repeats 每次 +1，
-        // 达到 MAX_REPEATS 时在执行前拦下中止。
+        // 重复守卫（LocalBrain 同款，根治第 4 批改义：数的是“动作签名相同且
+        // 界面没动”的重复，不是光数签名——那层在 ScreenController 里另有计数）：
+        // 同一签名连着来、且上一步没让界面变，repeats 每次 +1；动作相同但界面
+        // 变了就清零（正在推进，不算打转）；达到 MAX_REPEATS 时在执行前拦下中止。
         var lastSignature = ""
         var repeats = 0
         // 第八批·遍历环检测：本轮任务内已走过的（界面指纹 screenSig，动作签名）对
@@ -517,7 +520,13 @@ object TaskLoop {
                         .put("nodes_total", 0).put("nodes_useful", 0).put("pkg", "")
                         .put("elements", "").put("compact", "")
                 }
-                val pkg = dump.optString("pkg")
+                val rawPkg = dump.optString("pkg")
+                // 根治第 4 批·输入法排除：输入法弹起时 dump 报的“前台包名”是输入法
+                // （2026-11-12 21:00：搜狗输入法一弹，循环以为前台切走了、模型重发
+                // openApp 回微信）。输入法是盖在原应用上的悬浮窗，不是换应用——认出
+                // 来就当没换：包名沿用上一轮的，断点与核对都不记输入法。首轮（上一轮
+                // 为空）时沿用无从沿用，原样留着（不比现在差）。
+                val pkg = if (rawPkg.isNotEmpty() && isImePackage(ctx, rawPkg) && prevRoundPkg.isNotEmpty()) prevRoundPkg else rawPkg
                 // 第四批·断点升级：记下本步观察到的前台包名，供停下记断点时用。
                 if (pkg.isNotEmpty()) lastObservedPkg = pkg
                 // 第六批·每轮核对前台包名：本轮观察到的包名与上一轮比对。
@@ -1120,7 +1129,20 @@ object TaskLoop {
                 // lastSignature 之前记——更新完 lastSignature 就恒等于 sig 了。
                 val consecutiveSameSig = sig == lastSignature
                 if (sig == lastSignature) {
-                    repeats++
+                    // 根治第 4 批·重复守卫改义：只数“动作相同且界面没动”的重复。
+                    // 2026-11-12 21:00 微信任务的教训：模型连着点同一个签名，但每次
+                    // 点按都让界面变了（自动 zoom + 已执行 + 界面有变化），旧守卫照数
+                    // 不误、在第 11 步把一个正在推进的任务拦停了。屏变信号取上一步的
+                    // 执行结果（prevScreenChanged：true=确实变了，false=确实没变，
+                    // null=未知）；结果未知时退到本轮观察（screenSameAsPrev：同一份
+                    // 大纲再出现=没动），盲树（大纲为空）下观察分不出、按“不知道”
+                    // 处理——不计数、不误停。宁可漏判、不误判（上限 25 步兜底）。
+                    val unchanged = when (prevScreenChanged) {
+                        true -> false
+                        false -> true
+                        null -> screenSameAsPrev && elements.isNotEmpty()
+                    }
+                    if (unchanged) repeats++ else repeats = 0
                 } else {
                     lastSignature = sig
                     repeats = 0
@@ -1463,6 +1485,29 @@ object TaskLoop {
         }
         return false
     }
+
+/** 本机已启用的输入法包名（现查一次后缓存；任务中途用户换输入法时缓存会旧，
+ * 下次跑任务重查）。 */
+@Volatile
+private var cachedImePackages: Set<String>? = null
+
+/** 是不是输入法包：包名含 "inputmethod" 的直接认（搜狗、Gboard 同款）；
+ * 其余的查本机已启用的输入法列表（百度等包名里没这串的靠它认）。 */
+private fun isImePackage(ctx: Context, pkg: String): Boolean {
+    if (pkg.isEmpty()) return false
+    if ("inputmethod" in pkg) return true
+    val pkgs = cachedImePackages ?: run {
+        val queried = try {
+            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+            imm?.inputMethodList?.map { it.packageName }?.toSet().orEmpty()
+        } catch (_: Exception) {
+            emptySet()
+        }
+        cachedImePackages = queried
+        queried
+    }
+    return pkg in pkgs
+}
 
     /**
      * 动作签名（重复守卫用）：动作种类 + 决定它「是同一个动作」的关键参数。
