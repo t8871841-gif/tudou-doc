@@ -67,6 +67,10 @@ dependencies {
     // 用 WebViewAssetLoader 把 assets/hud/ 以 https 域名形式交给 WebView，
     // 否则 file:// 下 ES 模块与 importmap 会被跨域拦截、页面跑不起来。
     implementation libs.androidx.webkit
+    // 真液态玻璃第 1 批：QWEA0 Liquid-Glass-Android v2.0.11（MIT，JitPack 坐标，
+    // 见 gradle/libs.versions.toml）。库本身只依赖 core-ktx（appcompat/material
+    // 是 compileOnly，弹窗才用得到，本批不用，不会拖进来）。
+    implementation libs.liquidglass
     // Agnes 对话(REST) 用的 HTTP 客户端。来源：Maven Central，com.squareup.okhttp3:okhttp 4.12.0。
     implementation libs.okhttp
     // 批三：长期记忆的 Room 持久化 + 协程（版本对应见 gradle/libs.versions.toml：

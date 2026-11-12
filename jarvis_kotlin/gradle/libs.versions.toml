@@ -10,6 +10,7 @@ mediapipeGenai = "0.10.24"
 webkit = "1.9.0"
 shizuku = "12.2.0"
 mlkitTextRecognition = "16.0.1"
+liquidglass = "2.0.11"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -25,6 +26,9 @@ shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref
 # OCR 补字层（Mika 同款，Bundled 版离线模型，不依赖 Play Services，国行机可用）
 mlkit-text-recognition = { module = "com.google.mlkit:text-recognition", version.ref = "mlkitTextRecognition" }
 mlkit-text-recognition-chinese = { module = "com.google.mlkit:text-recognition-chinese", version.ref = "mlkitTextRecognition" }
+# 真液态玻璃第 1 批：QWEA0/Liquid-Glass-Android v2.0.11（MIT，JitPack 坐标；
+# 仓库见 settings.gradle）。View 体系、minSdk 24，API 33+ 走 AGSL 透镜管线。
+liquidglass = { group = "com.github.QWEA0", name = "liquidglass", version.ref = "liquidglass" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

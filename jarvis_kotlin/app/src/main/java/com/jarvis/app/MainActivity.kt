@@ -65,6 +65,10 @@ import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
 import com.jarvis.app.skill.SkillTrace
 import com.jarvis.app.ui.LiquidGlass
+// 真液态玻璃第 1 批：QWEA0 Liquid-Glass-Android v2.0.11（MIT；包名是
+// com.example.liquidglass，见库源码 LiquidGlassView.kt:35 / GlassMaterial.kt:14）。
+import com.example.liquidglass.GlassMaterial
+import com.example.liquidglass.LiquidGlassView
 import com.jarvis.app.wake.WakeWordEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -1889,39 +1893,13 @@ class MainActivity : Activity() {
         val ts = System.currentTimeMillis()
         val headText = (if (mine) "我" else "助手") + " · " +
             SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
-        val bubble = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            background = if (mine) {
-                // 第 1 批·液态玻璃：底色与圆角与旧版一字不差（当前状态色的 38%→30% 对角渐变），
-                // 只把背景层换成共用组件——高光边 + 顶部柔光 + 底部内阴影由组件加。
-                LiquidGlass.bubble(
-                    this@MainActivity,
-                    HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f),
-                    floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                )
-            } else {
-                // 第 1 批·液态玻璃：旧版是白 6% 平色 + 1dp 白 8% 描边；改成白 2%→0% 的
-                // 微透渐变底（只剩一点白，基本通透），高光边与柔光由组件加。
-                LiquidGlass.bubble(
-                    this@MainActivity,
-                    0x05FFFFFF, 0x00000000,
-                    floatArrayOf(dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                )
-            }
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = if (mine) Gravity.END else Gravity.START
-                topMargin = dp(6); bottomMargin = dp(6)
-                marginStart = if (mine) dp(48) else 0
-                marginEnd = if (mine) 0 else dp(48)
-            }
-        }
-        bubble.addView(TextView(this).apply {
+        // 内容列：两行文字（用户/助手共用；内边距与原来气泡一字不差）。
+        val headView = TextView(this).apply {
             this.text = headText
             textSize = 11f
             setTextColor(0xB3FFFFFF.toInt())
-        })
-        bubble.addView(TextView(this).apply {
+        }
+        val bodyView = TextView(this).apply {
             this.text = text
             textSize = 15.5f
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -1930,7 +1908,58 @@ class MainActivity : Activity() {
             maxLines = 6
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, dp(4), 0, 0)
-        })
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            addView(headView)
+            addView(bodyView)
+        }
+        // 气泡在 chatList 里的位置与尺寸：两边共用，与旧版一字不差。
+        val bubbleLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = if (mine) Gravity.END else Gravity.START
+            topMargin = dp(6); bottomMargin = dp(6)
+            marginStart = if (mine) dp(48) else 0
+            marginEnd = if (mine) 0 else dp(48)
+        }
+        // 真液态玻璃第 1 批（QWEA0 Liquid-Glass-Android v2.0.11）：只有助手气泡改走
+        // LiquidGlassView 包裹（FrameLayout 子类，内容列原样塞进去）；用户气泡不动
+        // （仍是状态色底 + 共用组件）。逐角圆角与旧版一字不差（左上 4，其余 18）。
+        val bubble: View = if (mine) {
+            content.apply {
+                // 第 1 批·液态玻璃：底色与圆角与旧版一字不差（当前状态色的 38%→30% 对角渐变），
+                // 只把背景层换成共用组件——高光边 + 顶部柔光 + 底部内阴影由组件加。
+                background = LiquidGlass.bubble(
+                    this@MainActivity,
+                    HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f),
+                    floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
+                )
+                layoutParams = bubbleLp
+            }
+        } else {
+            LiquidGlassView(this).apply {
+                // 逐角圆角（顺序：左上、右上、右下、左下），与旧版气泡一字不差。
+                setCornerRadii(dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
+                // 材质 CLEAR：弱模糊 + 固定压暗层（白字在亮照片上仍可读），底染白 8%、
+                // 高光 1.2×——白只保留一点点（用户要求）。自适应染色不开（CLEAR 本来也不用）。
+                material = GlassMaterial.CLEAR
+                // 收敛的折射/色散数值（第一版估值，真机验收再调）：默认值折射 160px、
+                // 斜面 48px、色散 0.10 都偏强；气泡矮，adaptiveLensScale 还会再钳一档。
+                refractionHeight = 80f
+                bevelWidth = 32f
+                dispersionStrength = 0.05f
+                // 重力感应高光（demo 里那个跟着倾斜走的亮边）；气泡不可点，按压效果关掉。
+                enableSensorHighlight = true
+                enablePressEffect = false
+                // 聊天会滚动：背景必须每帧重采，否则滚起来玻璃冻住。背景来源定死根布局
+                // （祖先）：直接父容器 chatList 自己没背景，采它只能采到别的气泡；
+                // 采根布局才把照片/罩子/紫渐变/别的气泡都采进来（见 BackdropCapture）。
+                enableDynamicBackground = true
+                backdropSource = rootLayout
+                addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+                layoutParams = bubbleLp
+            }
+        }
         chatList.addView(bubble)
         // M40：气泡数上限 100 条，超了从顶部移除旧气泡（视图上限，与 ChatHistory 的 80 条记录上限是两套数，不混在一起）。
         if (chatList.childCount > 100) chatList.removeViewAt(0)

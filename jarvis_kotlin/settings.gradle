@@ -25,6 +25,10 @@ dependencyResolutionManagement {
         maven { url 'https://maven.aliyun.com/repository/public' }
         google()
         mavenCentral()
+        // 真液态玻璃第 1 批（QWEA0/Liquid-Glass-Android v2.0.11，MIT）：库只发
+        // JitPack，不在 Maven Central；FAIL_ON_PROJECT_REPOS 下仓库只能加在
+        // 这里，不能加到 app/build.gradle。
+        maven { url 'https://jitpack.io' }
     }
 }
 
