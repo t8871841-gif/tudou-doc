@@ -18,6 +18,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.util.Base64
 import android.util.Log
 import android.net.TrafficStats
@@ -2066,6 +2067,27 @@ class MainActivity : Activity() {
             })
     }
 
+    // 第 2 批·液态玻璃按钮：静音/手写/设置三个圆钮共用的按压态背景与按压缩放。
+    // 背景是 StateListDrawable：常态白 10%→5% 微透渐变（与第 1 批气泡底色协调），
+    // 按下时底色提亮到白 18%→10%（高光边与柔光由组件给，同一套）；圆角取按钮高度的一半、做药丸形。
+    // 按压缩放只在视觉层（0.97 倍，80ms），OnTouchListener 返回 false，不吞点击、不改长按行为。
+    private fun liquidGlassButtonBg(radiusDp: Float): StateListDrawable =
+        StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), LiquidGlass.rounded(this@MainActivity, 0x2EFFFFFF, 0x1AFFFFFF, radiusDp))
+            addState(intArrayOf(), LiquidGlass.rounded(this@MainActivity, 0x1AFFFFFF, 0x0DFFFFFF, radiusDp))
+        }
+
+    private fun attachPressScale(v: View) {
+        v.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.97f).scaleY(0.97f).setDuration(80).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(80).start()
+            }
+            false
+        }
+    }
+
     // ---------- 底部：静音 / 麦克风 / 键盘切换 + 折叠输入行 ----------
 
     private fun buildBottomPanel(): LinearLayout = LinearLayout(this).apply {
@@ -2121,7 +2143,9 @@ class MainActivity : Activity() {
         }
         muteButton = ImageButton(this@MainActivity).apply {
             setImageResource(if (JarvisPrefs.isMuted(this@MainActivity)) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
-            background = null
+            // 第 2 批·液态玻璃：44x40dp 药丸形（圆角取短边一半 20dp），底色白 10%→5%，按下提亮。
+            background = liquidGlassButtonBg(20f)
+            attachPressScale(this)
             contentDescription = "回答朗读开关"
             setOnClickListener {
                 // L27：与 HudBridge.toggleVoice 共用同一把锁，翻转是原子的，文案不会跟状态打架。
@@ -2228,7 +2252,9 @@ class MainActivity : Activity() {
 
         keyboardToggle = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_edit)
-            background = null
+            // 第 2 批·液态玻璃：44x44dp 药丸形（圆角 22dp），底色白 10%→5%，按下提亮。
+            background = liquidGlassButtonBg(22f)
+            attachPressScale(this)
             setOnClickListener {
                 if (showInput) hideInputRow() else showInputRow()
             }
@@ -2238,11 +2264,10 @@ class MainActivity : Activity() {
 
         settingsGearButton = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_manage)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0x0DFFFFFF)
-                setStroke(dp(1), 0x29FFFFFF)
-            }
+            // 第 2 批·液态玻璃：48x48dp 药丸形（圆角 24dp，等于圆形），底色白 10%→5%，按下提亮；
+            // 旧版是白 5% 平色 + 1dp 白 16% 描边的椭圆，图标/内边距/尺寸一律不动。
+            background = liquidGlassButtonBg(24f)
+            attachPressScale(this)
             scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
             setPadding(dp(8), dp(8), dp(8), dp(8))
             setOnClickListener { toggleSettings() }
