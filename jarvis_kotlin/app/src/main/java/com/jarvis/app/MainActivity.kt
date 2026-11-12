@@ -1823,11 +1823,11 @@ class MainActivity : Activity() {
                     floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
                 )
             } else {
-                // 第 1 批·液态玻璃：旧版是白 6% 平色 + 1dp 白 8% 描边；改成白 14%→5% 的
-                // 微透渐变底（顶部稍亮，平均透度与旧版相近），高光边与柔光由组件加。
+                // 第 1 批·液态玻璃：旧版是白 6% 平色 + 1dp 白 8% 描边；改成白 2%→0% 的
+                // 微透渐变底（只剩一点白，基本通透），高光边与柔光由组件加。
                 LiquidGlass.bubble(
                     this@MainActivity,
-                    0x24FFFFFF, 0x0DFFFFFF,
+                    0x05FFFFFF, 0x00000000,
                     floatArrayOf(dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
                 )
             }
@@ -2087,13 +2087,13 @@ class MainActivity : Activity() {
     }
 
     // 第 2 批·液态玻璃按钮：静音/手写/设置三个圆钮共用的按压态背景与按压缩放。
-    // 背景是 StateListDrawable：常态白 10%→5% 微透渐变（与第 1 批气泡底色协调），
-    // 按下时底色提亮到白 18%→10%（高光边与柔光由组件给，同一套）；圆角取按钮高度的一半、做药丸形。
+    // 背景是 StateListDrawable：常态白 2%→0% 微透渐变（与第 1 批气泡底色协调），
+    // 按下时底色提亮到白 4%→2%（高光边与柔光由组件给，同一套）；圆角取按钮高度的一半、做药丸形。
     // 按压缩放只在视觉层（0.97 倍，80ms），OnTouchListener 返回 false，不吞点击、不改长按行为。
     private fun liquidGlassButtonBg(radiusDp: Float): StateListDrawable =
         StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), LiquidGlass.rounded(this@MainActivity, 0x2EFFFFFF, 0x1AFFFFFF, radiusDp))
-            addState(intArrayOf(), LiquidGlass.rounded(this@MainActivity, 0x1AFFFFFF, 0x0DFFFFFF, radiusDp))
+            addState(intArrayOf(android.R.attr.state_pressed), LiquidGlass.rounded(this@MainActivity, 0x0AFFFFFF, 0x05FFFFFF, radiusDp))
+            addState(intArrayOf(), LiquidGlass.rounded(this@MainActivity, 0x05FFFFFF, 0x00000000, radiusDp))
         }
 
     private fun attachPressScale(v: View) {
@@ -2162,7 +2162,7 @@ class MainActivity : Activity() {
         }
         muteButton = ImageButton(this@MainActivity).apply {
             setImageResource(if (JarvisPrefs.isMuted(this@MainActivity)) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
-            // 第 2 批·液态玻璃：44x40dp 药丸形（圆角取短边一半 20dp），底色白 10%→5%，按下提亮。
+            // 第 2 批·液态玻璃：44x40dp 药丸形（圆角取短边一半 20dp），底色白 2%→0%，按下提亮。
             background = liquidGlassButtonBg(20f)
             attachPressScale(this)
             contentDescription = "回答朗读开关"
@@ -2271,7 +2271,7 @@ class MainActivity : Activity() {
 
         keyboardToggle = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_edit)
-            // 第 2 批·液态玻璃：44x44dp 药丸形（圆角 22dp），底色白 10%→5%，按下提亮。
+            // 第 2 批·液态玻璃：44x44dp 药丸形（圆角 22dp），底色白 2%→0%，按下提亮。
             background = liquidGlassButtonBg(22f)
             attachPressScale(this)
             setOnClickListener {
@@ -2283,7 +2283,7 @@ class MainActivity : Activity() {
 
         settingsGearButton = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_manage)
-            // 第 2 批·液态玻璃：48x48dp 药丸形（圆角 24dp，等于圆形），底色白 10%→5%，按下提亮；
+            // 第 2 批·液态玻璃：48x48dp 药丸形（圆角 24dp，等于圆形），底色白 2%→0%，按下提亮；
             // 旧版是白 5% 平色 + 1dp 白 16% 描边的椭圆，图标/内边距/尺寸一律不动。
             background = liquidGlassButtonBg(24f)
             attachPressScale(this)
@@ -3662,7 +3662,7 @@ class MainActivity : Activity() {
 
     /** 目录行：图标 + 标题 + 右箭头。 */
     // 第 3 批·液态玻璃：目录行改成玻璃卡片（可点：复用第 2 批的按压态背景 + 按压缩放）。
-    // 圆角 14dp；底色白 10%→5%，按下提亮到白 18%→10%（与第 1、2 批协调）。
+    // 圆角 14dp；底色白 2%→0%，按下提亮到白 4%→2%（与第 1、2 批协调）。
     // 旧版行底是 1dp 分隔细线：卡片化后细线不要了，行间改留 8dp 间距，卡片才看得出来。
     // 横向内边距 4dp→16dp：旧版无底色、4dp 也够；玻璃卡要留边，文字贴边会压到高光边——
     // 这是本批唯一动内边距的地方，竖向内边距（14dp）、文字字号颜色一律不动。
@@ -3723,14 +3723,14 @@ class MainActivity : Activity() {
         onCreated: ((android.widget.Switch) -> Unit)? = null, onChecked: (Boolean) -> Unit
     ): View {
         // 第 3 批·液态玻璃：开关行改成玻璃卡片（静态底：行本身不可点，只有 Switch 能拨，
-        // 不加按压反馈）。圆角 14dp，底色白 10%→5%（与目录行、气泡同一套）。
+        // 不加按压反馈）。圆角 14dp，底色白 2%→0%（与目录行、气泡同一套）。
         // 横向内边距 0→16dp：旧版无底色、0 也够；玻璃卡要留边，文字贴边会压到高光边——
         // 竖向内边距（10dp）、文字字号颜色、Switch 本身一律不动。行间留 8dp 间距。
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = LiquidGlass.rounded(this@MainActivity, 0x1AFFFFFF, 0x0DFFFFFF, 14f)
+            background = LiquidGlass.rounded(this@MainActivity, 0x05FFFFFF, 0x00000000, 14f)
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(8)
             }
@@ -3781,7 +3781,7 @@ class MainActivity : Activity() {
                 }
             }, false)
             // 第 3 批·液态玻璃：分段按钮是分页里的可点取值项，底色改走第 2 批的按压态玻璃背景
-            // （常态白 10%→5%，按下提亮；圆角 12dp，与 styleBtn 原来的 12dp 一致），取代
+            // （常态白 2%→0%，按下提亮；圆角 12dp，与 styleBtn 原来的 12dp 一致），取代
             // styleBtn 的实色深底；文字色/内边距、选中态 alpha（1f/0.5f）一律不动。
             b.background = liquidGlassButtonBg(12f)
             attachPressScale(b)

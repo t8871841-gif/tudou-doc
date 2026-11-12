@@ -23,8 +23,8 @@ import android.graphics.drawable.LayerDrawable
  *
  * 材料数值表（都在下面当具名常量，不散落各处）：
  *  描边宽        RIM_WIDTH_DP = 1.5dp
- *  高光边渐变    左上白 60% → 中部白 22% → 右下白 8%
- *  顶部柔光      上沿白 20% → 中部白 4% → 透明（约上 1/3 淡出）
+ *  高光边渐变    左上白 10% → 中部白 3% → 右下白 1%
+ *  顶部柔光      上沿白 2% → 中部透明（约上 1/3 淡出）
  *  底部内阴影    透明 → 下沿黑 18%（只在下半部分）
  *  外投影        上沿黑 30% → 透明，向下伸出 3dp、两侧各伸出 1dp
  */
@@ -33,17 +33,17 @@ object LiquidGlass {
     /** 镜面高光边的描边宽。 */
     const val RIM_WIDTH_DP = 1.5f
 
-    /** 高光边：左上亮（白 60%）。 */
-    private const val RIM_TOP = 0x99FFFFFF.toInt()
-    /** 高光边：中部（白 22%）。 */
-    private const val RIM_MID = 0x38FFFFFF.toInt()
-    /** 高光边：右下暗（白 8%）。 */
-    private const val RIM_BOTTOM = 0x14FFFFFF.toInt()
+    /** 高光边：左上亮（白 10%）。 */
+    private const val RIM_TOP = 0x1AFFFFFF.toInt()
+    /** 高光边：中部（白 3%）。 */
+    private const val RIM_MID = 0x08FFFFFF.toInt()
+    /** 高光边：右下暗（白 1%）。 */
+    private const val RIM_BOTTOM = 0x03FFFFFF.toInt()
 
-    /** 顶部柔光：上沿白 20%。 */
-    private const val TOP_LIGHT_TOP = 0x33FFFFFF.toInt()
-    /** 顶部柔光：中部白 4%（到这一步已基本看不见，柔光约在上 1/3 淡出）。 */
-    private const val TOP_LIGHT_MID = 0x0AFFFFFF.toInt()
+    /** 顶部柔光：上沿白 2%。 */
+    private const val TOP_LIGHT_TOP = 0x05FFFFFF.toInt()
+    /** 顶部柔光：中部透明（柔光只剩上沿一点）。 */
+    private const val TOP_LIGHT_MID = 0x00FFFFFF.toInt()
 
     /** 底部内阴影：下沿黑 18%。 */
     private const val BOTTOM_SHADE = 0x2E000000.toInt()
