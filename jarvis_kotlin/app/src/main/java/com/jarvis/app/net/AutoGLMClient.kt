@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  * 本文件把 do(...) 转成 Jarvis 的 JSON 动作字符串再交回 TaskLoop，
  * 这样 TaskLoop 的 parseAction、重复守卫、错误码回喂都不用改。
  * 动作映射（Open-AutoGLM phone_agent/actions/handler.py + config/prompts_zh.py）：
- *   Launch(app) -> openApp；Tap(element=[x,y]) -> tap(x,y)；
+ *   Launch(app) -> openApp；Tap(element=[x,y]) -> tap(x,y)；Tap(eid="s3f9a2") -> tap(eid)；
  *   Type/Type_Name(text) -> type(text)；
  *   Swipe(start,end) -> swipe(x1,y1,x2,y2)；Back -> back；Home -> home；
  *   Long Press(element) -> longPress(x,y)；Double Tap(element) -> tap(x,y)（Jarvis 无双击）；
@@ -56,6 +56,7 @@ object AutoGLMClient {
         "操作指令如下：\n" +
         "- do(action=\"Launch\", app=\"xxx\") 启动目标 App，比从主屏幕找更快。\n" +
         "- do(action=\"Tap\", element=[x,y]) 点屏幕上的一个点，坐标从左上角 (0,0) 到右下角 (999,999)。可点按钮、列表项、输入框。\n" +
+        "- do(action=\"Tap\", eid=\"s3f9a2\") 按紧凑表里的稳定编号点元素（最优先、最稳；编号以 s 开头，e 数字编号也认，但只对当轮有效）。\n" +
         "- do(action=\"Tap\", element=[x,y], message=\"重要操作\") 同 Tap，点涉及财产、支付、隐私等敏感按钮时用。\n" +
         "- do(action=\"Type\", text=\"xxx\") 往当前已聚焦的输入框输文字，用之前先点输入框让它聚焦。\n" +
         "- do(action=\"Type_Name\", text=\"xxx\") 输入人名，基本同 Type。\n" +
@@ -68,7 +69,7 @@ object AutoGLMClient {
         "- do(action=\"Take_over\", message=\"xxx\") 需要用户接管（登录、验证码、支付确认），message 写清原因。\n" +
         "- do(action=\"Interact\") 有多个选项要用户自己选时用。\n" +
         "- finish(message=\"xxx\") 任务准确完整完成时用，message 写完成情况；做不下去时也用 finish，message 写清卡在哪、什么原因。\n" +
-        "读屏方式：每轮你会看到任务原文、当前前台应用、界面元素紧凑表（只列可操作元素，带稳定编号与中心坐标，都是 0-1000 相对值），以及一张全屏截图（带网格标定）。有编号的元素优先用紧凑表里的坐标点；没编号的按截图上的位置估坐标。\n" +
+        "读屏方式：每轮你会看到任务原文、当前前台应用、界面元素紧凑表（只列可操作元素，带稳定编号与中心坐标，都是 0-1000 相对值），以及一张全屏截图（带网格标定）。有编号的元素优先用编号点（eid）；没编号的按截图上的位置估坐标。\n" +
         "必须遵循的规则：\n" +
         "1. 先检查当前 App 是不是目标 App，不是就先 Launch。\n" +
         "2. 进了无关页面先 Back；Back 没变化就点左上角返回或右上角 X。\n" +
@@ -77,7 +78,7 @@ object AutoGLMClient {
         "5. 每步前检查上一步是否生效：点了没反应先等一下，再调一下点击位置重试；还不生效就跳过这步继续，并在 finish 里说明。\n" +
         "6. 绝不输入密码、验证码；绝不点付款、转账、删除类按钮，除非任务原文明确要求；登录、验证码场景用 Take_over 交给用户。\n" +
         "7. 一步只做一个动作；发消息这类任务要依次完成打开应用、找到联系人、点开会话、输入消息、点发送，发送完成才能 finish。\n" +
-        "8. 紧凑表里带稳定编号的元素优先点它：do(...) 只有坐标参数，取该编号元素的中心坐标填进 element=[x,y]，不要另算坐标、不要凭截图位置重算。\n" +
+        "8. 紧凑表里带稳定编号的元素优先用编号点它：do(action=\"Tap\", eid=\"s3f9a2\")，不要把编号换算成坐标填 element、不要凭截图位置重算坐标；没有编号的元素才用 element=[x,y]。\n" +
         "9. 上一步若带错误码，按码换招，别对同一码重复同一动作：ELEMENT_NOT_FOUND 换目标或滑动找、TAP_REFUSED 先 zoom 再点、TIMEOUT 先看界面确认成没成再决定、NO_INPUT_FOCUS 先点输入框、NO_ACTIVE_WINDOW 先 Launch 目标应用、PARSE_ERROR 检查动作格式、UNKNOWN 换路线或 finish 说明；树被扣留的应用（如微信）先 zoom 再点，盲点会被拒绝。"
 
     /** M11 急停序号：cancelInFlight() 自增，askOnce 回调凭序号丢弃已取消轮次的结果。 */
@@ -177,7 +178,7 @@ object AutoGLMClient {
         }
         // M9：传入的 TaskLoop SYSTEM_PROMPT（错误码表、eid 优先、zoom 规则）与自带提示词
         // 拼接后一起发，两份都不丢。输出格式只用 do(...)/finish(...) 这一套，不输出 JSON；
-        // eid 优先落到 do(...) 里就是取该编号元素的中心坐标填 element（见上面规则 8）。
+        // eid 优先落到 do(...) 里就是直接带 eid 参数（见上面规则 8），不走坐标换算。
         val mergedSystemPrompt = buildString {
             if (systemPrompt.isNotBlank()) {
                 append(systemPrompt)
@@ -390,15 +391,42 @@ object AutoGLMClient {
     }
 
     private fun parseDo(call: String): JSONObject? {
-        val name = stringArg(call, "action") ?: return null
+        // 第2批·do() 加 eid 参数：动作名除 action="..." 外也认位置写法
+        // do(Tap, eid=s3f9a2)；位置写法常小写，统一成文档里的写法再分发。
+        // eid 优先，有 eid 就走 tapByEid（第 10、11 批的遮挡改道+三重回退），
+        // 没有才退到坐标。TaskLoop 的分发（executeInner）已按 eid 优先，
+        // 这里只负责把 eid 原样产出。
+        val rawName = stringArg(call, "action") ?: positionalAction(call) ?: return null
+        val name = when (rawName.trim().lowercase()) {
+            "tap" -> "Tap"
+            "long press", "longpress" -> "Long Press"
+            "double tap", "doubletap" -> "Double Tap"
+            "launch" -> "Launch"
+            "type" -> "Type"
+            "type_name" -> "Type_Name"
+            "swipe" -> "Swipe"
+            "back" -> "Back"
+            "home" -> "Home"
+            "wait" -> "Wait"
+            "take_over" -> "Take_over"
+            "interact" -> "Interact"
+            "note" -> "Note"
+            "call_api" -> "Call_API"
+            else -> rawName.trim()
+        }
         return when (name) {
             "Launch" -> {
                 val app = stringArg(call, "app") ?: return null
                 JSONObject().put("action", "openApp").put("app", app)
             }
             "Tap" -> {
-                val (x, y) = pointArg(call, "element") ?: return null
-                JSONObject().put("action", "tap").put("x", x).put("y", y)
+                val eid = eidArg(call)
+                if (eid != null) {
+                    JSONObject().put("action", "tap").put("eid", eid)
+                } else {
+                    val (x, y) = pointArg(call, "element") ?: return null
+                    JSONObject().put("action", "tap").put("x", x).put("y", y)
+                }
             }
             "Type", "Type_Name" -> {
                 val text = stringArg(call, "text") ?: return null
@@ -412,13 +440,23 @@ object AutoGLMClient {
             "Back" -> JSONObject().put("action", "back")
             "Home" -> JSONObject().put("action", "home")
             "Long Press" -> {
-                val (x, y) = pointArg(call, "element") ?: return null
-                JSONObject().put("action", "longPress").put("x", x).put("y", y)
+                val eid = eidArg(call)
+                if (eid != null) {
+                    JSONObject().put("action", "longPress").put("eid", eid)
+                } else {
+                    val (x, y) = pointArg(call, "element") ?: return null
+                    JSONObject().put("action", "longPress").put("x", x).put("y", y)
+                }
             }
             "Double Tap" -> {
                 // Jarvis 没有双击动作，退化成一次点按。
-                val (x, y) = pointArg(call, "element") ?: return null
-                JSONObject().put("action", "tap").put("x", x).put("y", y)
+                val eid = eidArg(call)
+                if (eid != null) {
+                    JSONObject().put("action", "tap").put("eid", eid)
+                } else {
+                    val (x, y) = pointArg(call, "element") ?: return null
+                    JSONObject().put("action", "tap").put("x", x).put("y", y)
+                }
             }
             "Wait" -> {
                 val duration = stringArg(call, "duration") ?: "1 seconds"
@@ -451,5 +489,19 @@ object AutoGLMClient {
         val x = m.groupValues[1].toIntOrNull() ?: return null
         val y = m.groupValues[2].toIntOrNull() ?: return null
         return x to y
+    }
+
+    /** 第2批·取 eid="..." 或 eid=... 形式的编号参数（稳定编号 s3f9a2、e 数字编号都认）。 */
+    private fun eidArg(call: String): String? {
+        stringArg(call, "eid")?.takeIf { it.isNotBlank() }?.let { return it }
+        val m = Regex("""eid\s*=\s*([A-Za-z0-9_.\-]+)""").find(call) ?: return null
+        return m.groupValues[1].takeIf { it.isNotBlank() }
+    }
+
+    /** 第2批·位置写法的动作名：do(Tap, ...) / do("Long Press", ...)，action="..." 缺省时用。 */
+    private fun positionalAction(call: String): String? {
+        Regex("""do\(\s*"([^"]+)""").find(call)?.groupValues?.get(1)?.trim()
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+        return Regex("""do\(\s*([A-Za-z]+)""").find(call)?.groupValues?.get(1)
     }
 }

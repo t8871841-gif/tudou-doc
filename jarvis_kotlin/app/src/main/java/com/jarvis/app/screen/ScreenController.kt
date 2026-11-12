@@ -255,16 +255,23 @@ class ScreenController(
         val w = size.x; val h = size.y
         val px = nx.toPixel(w); val py = ny.toPixel(h)
         guardPopup(px, py, nx, ny)
+        // 第2批·坐标点按过遮挡：点之前判断该点有没有被盖住；被盖住改道到同一
+        // 元素最大未遮挡块的中心，全盖住抛错（TaskLoop 映射成 TAP_BLOCKED，
+        // 模型去处理遮挡物）；没被盖住、树上没东西、算不清时原点照点。
+        val point = divertCoveredPoint(px, py, "($nx,$ny)")
+        val ax = point.x; val ay = point.y
         // Logged at the four norm/eid entry points rather than in [tap], even
         // though TapMarkerUi is hooked there and treats every path alike. It
         // can afford to — a ring is a ring. Here the distinction is the whole
         // point: only a coordinate the BRAIN chose is a grounding sample; an
         // e-tap's pixels were computed by us and would poison the set.
-        guardRepetition(px, py) {
-            GroundingLog.noteTapCoord(nx, ny, px, py, w, h, hold = false, refused = true, pkg = lastPkg())
+        guardRepetition(ax, ay) {
+            GroundingLog.noteTapCoord(nx, ny, ax, ay, w, h, hold = false, refused = true, pkg = lastPkg())
         }
-        GroundingLog.noteTapCoord(nx, ny, px, py, w, h, hold = false, refused = false, pkg = lastPkg())
-        return tap(px, py, beforePx, handover = handover).put("norm", "$nx,$ny")
+        GroundingLog.noteTapCoord(nx, ny, ax, ay, w, h, hold = false, refused = false, pkg = lastPkg())
+        val result = tap(ax, ay, beforePx, handover = handover).put("norm", "$nx,$ny")
+        point.divertedBy?.let { result.put("diverted_by", it) }
+        return result
     }
 
     fun longPressNorm(nx: Int, ny: Int, durationMs: Long, handover: Boolean = false): JSONObject {
@@ -1521,10 +1528,11 @@ class ScreenController(
     // 若中心正上方盖着弹窗、悬浮按钮、键盘按键等可交互覆盖物，这一 tap
     // 实际落在覆盖物上——点错东西，比点不中更糟（可能误触删除/发送）。
     //
-    // 做法（只在 eid/sel 点按的活树重定位处算：tapByEid/longPressByEid/
-    // tapSelector 调 resolveTapPoint；纯坐标点按 tapNorm/tapAim 不算——
-    // 坐标本来就是“你说哪就点哪”，不替模型改点；tapById 走节点自身的
-    // performAction，不经过坐标，也不算）：
+    // 做法（在 eid/sel 点按的活树重定位处算：tapByEid/longPressByEid/
+    // tapSelector 调 resolveTapPoint；纯坐标点按 tapNorm 也算——先判模型要
+    // 的点有没有被盖住，被盖住改道到同一元素最大未遮挡块的中心，全盖住报
+    // TAP_BLOCKED；没盖住、树上没东西、算不清时原点照点，不替模型改点；
+    // tapById 走节点自身的 performAction，不经过坐标，也不算）：
     //   1. 以目标节点为基准，在同一时刻的活树里找遮挡者：可见、已启用、
     //      可点或可长按、bounds 与目标重叠、且确实画在目标上面。
     //   2. “画在上面”的判定（drawingOrder/windowId 都现取自活节点，不存
@@ -1586,6 +1594,38 @@ class ScreenController(
         val center = TapPoint(cx, cy, null)
         if (targetRect.isEmpty) return center
         val targetWindowId = runCatching { target.windowId }.getOrNull() ?: -1
+        // 第2批·遮挡收集抽成 blockersAbove（坐标点按复用同一道判定）。
+        val blockers = blockersAbove(targetRect, targetWindowId) ?: return center
+        if (blockers.isEmpty()) return center
+        val screen = Rect(0, 0, screenW, screenH)
+        val pieces = subtractRects(targetRect, blockers.map { it.rect })
+            .mapNotNull { p -> if (p.intersect(screen)) Rect(p) else null }
+            .filter { !it.isEmpty }
+        if (pieces.isEmpty()) {
+            val top = blockers.maxByOrNull { overlapArea(it.rect, targetRect) }
+            val name = top?.label ?: "遮挡物"
+            throw IllegalStateException(
+                "目标被遮住，点不下去：${ref}被「${name}」完全遮住，点原位置只会点到遮挡物。" +
+                    "请先把遮挡物处理掉（关弹窗、收起悬浮窗、滑开遮挡，或先点遮挡物本身），" +
+                    "再重新读屏点目标，不要原样重发这一步。"
+            )
+        }
+        val best = pieces.maxByOrNull { it.width().toLong() * it.height() } ?: return center
+        val x = (best.left + best.right) / 2
+        val y = (best.top + best.bottom) / 2
+        if (x == cx && y == cy) return center
+        val coveringCenter = blockers.firstOrNull { it.rect.contains(cx, cy) }
+            ?: blockers.maxByOrNull { overlapArea(it.rect, targetRect) }
+        return TapPoint(x, y, coveringCenter?.label)
+    }
+
+    /**
+     * 第2批·遮挡收集（从 resolveTapPoint 抽出，供坐标点按复用）：对目标矩形做一
+     * 次全窗口 walk，返回真正画在目标上面的遮挡者（跨窗口先比层，同窗口再比链，
+     * 与原来 resolveTapPoint 里的过滤一字不差）。算不清（walk 截断、目标链没
+     * 找到、窗口层读不到）时返回 null——调用方退回旧行为，不拒点、不改点。
+     */
+    private fun blockersAbove(targetRect: Rect, targetWindowId: Int): List<Blocker>? {
         val walk = OcclusionWalk(targetRect, targetWindowId)
         val budget = WalkBudget(SEARCH_BUDGET_MS)
         // 各窗口的层 + 各窗口的根：同一批 windows 对象一次取完、用完回收。
@@ -1630,11 +1670,11 @@ class ScreenController(
         } finally {
             windows?.forEach { runCatching { it.recycle() } }
         }
-        // 算不清不拒点：只退回旧行为点中心。
-        if (walk.cut) return center
-        val targetChain = walk.targetChain ?: return center
+        // 算不清返回 null，调用方退回旧行为（resolveTapPoint 是点中心）。
+        if (walk.cut) return null
+        val targetChain = walk.targetChain ?: return null
         // 只留真正画在目标上面的遮挡者（跨窗口先比层，同窗口再比链）。
-        val blockers = walk.blockers.filter { b ->
+        return walk.blockers.filter { b ->
             if (b.windowId != targetWindowId) {
                 val bLayer = layers[b.windowId] ?: return@filter false
                 val tLayer = layers[targetWindowId] ?: return@filter false
@@ -1652,27 +1692,152 @@ class ScreenController(
                 b.chain[d] > targetChain[d]
             }
         }
-        if (blockers.isEmpty()) return center
-        val screen = Rect(0, 0, screenW, screenH)
-        val pieces = subtractRects(targetRect, blockers.map { it.rect })
-            .mapNotNull { p -> if (p.intersect(screen)) Rect(p) else null }
-            .filter { !it.isEmpty }
-        if (pieces.isEmpty()) {
-            val top = blockers.maxByOrNull { overlapArea(it.rect, targetRect) }
-            val name = top?.label ?: "遮挡物"
-            throw IllegalStateException(
-                "目标被遮住，点不下去：${ref}被「${name}」完全遮住，点原位置只会点到遮挡物。" +
-                    "请先把遮挡物处理掉（关弹窗、收起悬浮窗、滑开遮挡，或先点遮挡物本身），" +
-                    "再重新读屏点目标，不要原样重发这一步。"
-            )
+    }
+
+    /** 第2批·点上的命中：节点 + 它所在窗口的类型（输入法窗口单独处理）。 */
+    private class PointHit(val node: AccessibilityNodeInfo, val windowType: Int)
+
+    /**
+     * 第2批·找点上的节点：全窗口里找包含 (px,py) 的最上层可见节点（即手势实际
+     * 会落到的那个元素）。跨窗口按 layer 高者为准，同窗口按祖先链比较（子孙在
+     * 上、分叉处比 drawingOrder，与遮挡收集同一套规则）；自家包的窗口跳过。
+     * 找不到返回 null（没树、点在空白处）。返回的节点调用方负责回收。
+     */
+    private fun nodeAtPoint(px: Int, py: Int): PointHit? {
+        var best: AccessibilityNodeInfo? = null
+        var bestChain: List<Int>? = null
+        var bestLayer = Int.MIN_VALUE
+        var bestType = -1
+        val budget = WalkBudget(SEARCH_BUDGET_MS)
+        fun visit(node: AccessibilityNodeInfo, chain: List<Int>, layer: Int, type: Int, depth: Int) {
+            if (budget.spent() || depth > OCCLUSION_MAX_DEPTH) return
+            val r = Rect()
+            runCatching { node.getBoundsInScreen(r) }
+            val order = runCatching { node.drawingOrder }.getOrNull() ?: 0
+            val myChain = chain + order
+            if (!r.isEmpty && r.contains(px, py) && node.isVisibleToUser) {
+                val known = bestChain
+                val above = when {
+                    known == null -> true
+                    bestLayer < layer -> true
+                    bestLayer > layer -> false
+                    isChainPrefix(known, myChain) -> true
+                    isChainPrefix(myChain, known) -> false
+                    else -> {
+                        val d = firstDivergence(myChain, known)
+                        d != null && myChain[d] > known[d]
+                    }
+                }
+                if (above) {
+                    best?.recycle()
+                    best = AccessibilityNodeInfo.obtain(node)
+                    bestChain = myChain
+                    bestLayer = layer
+                    bestType = type
+                }
+            }
+            // 子节点框可能溢出父节点框（悬浮元素），父节点框不住该点时仍要下行，
+            // 与 walkOcclusion 同款做法；预算与深度封顶。
+            for (i in 0 until node.childCount) {
+                val child = childOf(node, i) ?: continue
+                try {
+                    visit(child, myChain, layer, type, depth + 1)
+                } finally {
+                    child.recycle()
+                }
+            }
         }
-        val best = pieces.maxByOrNull { it.width().toLong() * it.height() } ?: return center
-        val x = (best.left + best.right) / 2
-        val y = (best.top + best.bottom) / 2
-        if (x == cx && y == cy) return center
-        val coveringCenter = blockers.firstOrNull { it.rect.contains(cx, cy) }
-            ?: blockers.maxByOrNull { overlapArea(it.rect, targetRect) }
-        return TapPoint(x, y, coveringCenter?.label)
+        val windows = runCatching { service.windows }.getOrNull()
+        try {
+            if (windows != null) {
+                for (w in windows) {
+                    val layer = runCatching { w.layer }.getOrNull() ?: continue
+                    val type = runCatching { w.type }.getOrNull() ?: continue
+                    val root = runCatching { rootOf(w) }.getOrNull() ?: continue
+                    val pkg = runCatching { root.packageName?.toString() }.getOrNull().orEmpty()
+                    if (pkg == service.packageName) {
+                        root.recycle()
+                        continue
+                    }
+                    try {
+                        visit(root, emptyList(), layer, type, 0)
+                    } finally {
+                        root.recycle()
+                    }
+                    if (budget.spent()) break
+                }
+            } else {
+                val root = runCatching { activeRoot() }.getOrNull()
+                if (root != null) {
+                    try {
+                        visit(root, emptyList(), 0, android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION, 0)
+                    } finally {
+                        root.recycle()
+                    }
+                }
+            }
+        } finally {
+            windows?.forEach { runCatching { it.recycle() } }
+        }
+        val node = best ?: return null
+        return PointHit(node, bestType)
+    }
+
+    /**
+     * 第2批·坐标点按过遮挡：点之前判断模型要的这个点有没有被盖住。返回实际要
+     * 点的像素点（可能与原点相同）；被盖住时改道到同一元素最大未遮挡块的中
+     * 心，全盖住抛错（文案以“目标被遮住”开头，TaskLoop 映射成 TAP_BLOCKED，
+     * 模型去处理遮挡物）；树上没东西、算不清、点没被盖住时返回原点，不改点。
+     * 点落在键盘上单独处理：键盘盖住的是下面的元素，改道没有意义，直接拒。
+     * 目标太大（地图/网页整面，超过屏幕 1/4）时也不改道——改道会点错位置，
+     * 直接拒，让模型先把遮挡物处理掉再重读屏点。
+     */
+    private fun divertCoveredPoint(px: Int, py: Int, ref: String): TapPoint {
+        val hit = nodeAtPoint(px, py) ?: return TapPoint(px, py, null)
+        val target = hit.node
+        try {
+            val targetRect = Rect()
+            runCatching { target.getBoundsInScreen(targetRect) }
+            if (targetRect.isEmpty) return TapPoint(px, py, null)
+            if (hit.windowType == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                throw IllegalStateException(
+                    "目标被遮住，点不下去：${ref}所在的点被键盘盖住了，请先收起键盘再重新读屏点目标，不要原样重发这一步。"
+                )
+            }
+            val targetWindowId = runCatching { target.windowId }.getOrNull() ?: -1
+            // 算不清（walk 截断/目标链没找到）时原点照点，不改点、不拒点。
+            val blockers = blockersAbove(targetRect, targetWindowId) ?: return TapPoint(px, py, null)
+            // 只有盖住模型要的这个点的遮挡者才算数。
+            val covering = blockers.filter { it.rect.contains(px, py) }
+            if (covering.isEmpty()) return TapPoint(px, py, null)
+            if (targetRect.width().toLong() * targetRect.height() > screenW.toLong() * screenH / 4) {
+                val name = covering.maxByOrNull { overlapArea(it.rect, targetRect) }?.label ?: "遮挡物"
+                throw IllegalStateException(
+                    "目标被遮住，点不下去：${ref}被「${name}」盖住了，目标太大、改道会点错位置，" +
+                        "请先把遮挡物处理掉（关弹窗、收起键盘、滑开遮挡）再重新读屏点目标，不要原样重发这一步。"
+                )
+            }
+            val screen = Rect(0, 0, screenW, screenH)
+            val pieces = subtractRects(targetRect, blockers.map { it.rect })
+                .mapNotNull { p -> if (p.intersect(screen)) Rect(p) else null }
+                .filter { !it.isEmpty }
+            if (pieces.isEmpty()) {
+                val top = covering.maxByOrNull { overlapArea(it.rect, targetRect) }
+                val name = top?.label ?: "遮挡物"
+                throw IllegalStateException(
+                    "目标被遮住，点不下去：${ref}被「${name}」完全遮住，点原位置只会点到遮挡物。" +
+                        "请先把遮挡物处理掉（关弹窗、收起悬浮窗、滑开遮挡，或先点遮挡物本身），" +
+                        "再重新读屏点目标，不要原样重发这一步。"
+                )
+            }
+            val best = pieces.maxByOrNull { it.width().toLong() * it.height() } ?: return TapPoint(px, py, null)
+            val x = (best.left + best.right) / 2
+            val y = (best.top + best.bottom) / 2
+            val by = covering.maxByOrNull { overlapArea(it.rect, targetRect) }?.label
+            return TapPoint(x, y, by)
+        } finally {
+            target.recycle()
+        }
     }
 
     /** 遮挡 walk：沿树下行，记下目标链与全部可能遮住目标的候选节点。 */
