@@ -1,15 +1,29 @@
 package com.jarvis.app.task
 
+import android.Manifest
+import android.app.ActivityManager
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.media.AudioManager
+import android.net.Uri
+import android.os.Build
+import android.provider.AlarmClock
+import android.provider.Settings
 import android.util.Base64
+import androidx.core.content.ContextCompat
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
+import com.jarvis.app.JarvisPrefs
+import com.jarvis.app.command.DeviceCommands
 import com.jarvis.app.command.LocalCommands
+import com.jarvis.app.net.DeepSeekLlmClient
 import com.jarvis.app.net.LlmRegistry
+import com.jarvis.app.net.ToolSchemas
 import com.jarvis.app.screen.ScreenCapture
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
@@ -268,6 +282,10 @@ object TaskLoop {
         com.jarvis.app.OrbController.setTaskHidden(true)
         // 断点续跑：历史与步数接着上次的来；新任务从空开始。
         val history = resumeFrom?.history?.toMutableList() ?: mutableListOf<String>()
+        // 根治第 2 批·DeepSeek 工具模式的消息历史（Andee LocalBrain 的 history
+        // 同款：system + 每轮 user/assistant/tool 三元组；只在 deepseek 模式用，
+        // GLM/自定义模式不碰它）。
+        val toolMessages = mutableListOf<JSONObject>()
         // 停下时要播报“说继续可以接着做”：onReply 平时只在 alive() 时才发，
         // 急停分支会把 finalReply 置 null 抢掉播报；用这个旗子让 finally
         // 在急停时也把断点播报发出去。
@@ -885,7 +903,89 @@ object TaskLoop {
                 var attempt = 0
                 var askText = askTextBase
                 var badReply: String? = null
-                while (action == null && attempt < 2) {
+                // 根治第 2 批·DeepSeek 工具模式的状态（只在 deepseek 模式填值）：
+                // toolStep 是本步分发后的聚合结果；其余三项供循环后半段复用
+                // （无进展计数、前台跑偏核对、输入校验）。
+                var toolStep: ToolStepOutcome? = null
+                var toolHasRealAction = false
+                var toolSwitchExpected = false
+                var toolTypeText: String? = null
+                // 根治第 2 批·DeepSeek 工具模式：模型开关是 deepseek 时走原生工具调用
+                // （Andee LocalBrain.runTurn 的机制）：新观察当 user 消息续进
+                // toolMessages，模型回 tool_calls 就分发、回 done/fail 工具就收尾；
+                // 没调工具只写了文字时当这一步没动作，告诉模型下轮调工具。
+                val toolMode = JarvisPrefs.getModelMode(ctx) == "deepseek"
+                if (toolMode) {
+                    if (toolMessages.isEmpty()) {
+                        toolMessages += JSONObject().put("role", "system").put("content", SYSTEM_PROMPT_TOOLS)
+                    }
+                    val userContent = JSONArray().put(DeepSeekLlmClient.textBlock(askTextBase))
+                    if (sendImage != null) userContent.put(DeepSeekLlmClient.imageBlock(sendImage, "image/jpeg"))
+                    toolMessages += JSONObject().put("role", "user").put("content", userContent)
+                    val (tReply, tErr) = askToolsModel(ctx, toolMessages) { alive() }
+                    if (!alive()) return
+                    if (tErr != null || tReply == null) {
+                        val err = tErr ?: "模型没有返回内容"
+                        askFails++
+                        if (askFails >= 2) {
+                            finalReply = "任务没能继续：$err"
+                            AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", "$err（连着失败 $askFails 次，已停下）")
+                            return
+                        }
+                        AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", "$err（第 $askFails 次，将重试）")
+                        history += "第 $step 步：问模型失败 — $err（已重试）"
+                        lastError = "问模型失败：$err，已重试"
+                        prevStepFailed = true
+                        prevScreenChanged = null
+                        if (err.contains("429")) {
+                            AuditLog.append(ctx, "任务循环", "第 $step 步问模型失败", "HTTP 429 限流，等 30 秒再重试")
+                            try { Thread.sleep(30_000) } catch (_: InterruptedException) { /* 被打断就直接进下一轮 */ }
+                        }
+                        continue@stepLoop
+                    }
+                    askFails = 0
+                    toolMessages += tReply.assistantMessage
+                    val content = tReply.content
+                    parsePlan(content)?.let { parsed -> applyPlanUpdate(parsed, subgoals) }
+                    parseNotes(content)?.let { parsed -> applyNotesUpdate(parsed, notes) }
+                    val calls = tReply.toolCalls
+                    if (calls.isEmpty()) {
+                        history += "第 $step 步：模型这轮没调任何工具（只写了文字），请它下一轮直接调工具"
+                        lastError = "你这轮没有调任何工具。要继续就调工具（看屏、点按、输入都在工具表里）；任务做完了就调 done 工具，做不下去调 fail 工具。不要只写文字。"
+                        prevStepFailed = true
+                        prevScreenChanged = null
+                        noProgressSteps++
+                        continue@stepLoop
+                    }
+                    val doneCall = calls.firstOrNull { it.name == "done" }
+                    val failCall = calls.firstOrNull { it.name == "fail" }
+                    if (doneCall != null || failCall != null) {
+                        // 终态工具单独成步（混了其他调用也不执行——系统提示里已写明
+                        // done/fail 请单独调）：合成现成的 done/fail 动作，落到下面
+                        // 现成的收尾（含 done 的 Reflector 挑战）。
+                        val terminal = doneCall ?: failCall!!
+                        val tArgs = terminal.argumentsOrNull()
+                        val isDone = doneCall != null
+                        action = JSONObject().put("action", if (isDone) "done" else "fail")
+                            .put(
+                                if (isDone) "message" else "reason",
+                                tArgs?.optString(if (isDone) "message" else "reason").orEmpty()
+                            )
+                    } else {
+                        action = syntheticToolAction(calls)
+                        toolStep = executeToolCalls(ctx, controller, calls)
+                        // 回喂工具结果（Andee runTurn 同款：每个 tool_call_id 都要
+                        // 有一条 role=tool 的消息）。
+                        for ((id, resultText) in toolStep.toolResults) {
+                            toolMessages += JSONObject().put("role", "tool").put("tool_call_id", id).put("content", resultText)
+                        }
+                        toolHasRealAction = calls.any { toolKindOf(it) in REAL_ACTION_KINDS }
+                        toolSwitchExpected = calls.any { toolKindOf(it) in EXPECTED_PKG_SWITCH_KINDS }
+                        toolTypeText = calls.firstOrNull { toolKindOf(it) == "type" }
+                            ?.argumentsOrNull()?.optString("text")
+                    }
+                }
+                while (action == null && attempt < 2 && !toolMode) {
                     attempt++
                     // 每步问模型前固定停 1 秒，降速、别一分钟内连着发多次请求撞限流。
                     try { Thread.sleep(1000) } catch (_: InterruptedException) { /* 继续 */ }
@@ -1096,7 +1196,7 @@ object TaskLoop {
                 }
                 // Andee 对齐：无进展熔断 abort 删除（Andee 只有重复守卫 + 25 步上限兜底）。
                 // 计数保留：连续 2 轮无真交互时强制带图（截图策略），让模型有图可破局。
-                noProgressSteps = if (kind in REAL_ACTION_KINDS) 0 else noProgressSteps + 1
+                noProgressSteps = if (kind in REAL_ACTION_KINDS || toolHasRealAction) 0 else noProgressSteps + 1
                 // ---------- 执行 ----------
                 // M18：每步执行前推一句播报（Andee narrate(toolName) 同款），不要只在最后调一次 onReply。
                 onProgress(narrate(kind))
@@ -1105,7 +1205,8 @@ object TaskLoop {
                 // （Minitap Orchestrator 同款：一次只做一个子目标）；done/fail、
                 // 输出无法解析、重复守卫/环检测拦下的轮次到不了这里，不标。
                 markSubgoalStarted(subgoals)
-                val r = execute(ctx, controller, action)
+                // 根治第 2 批·工具模式：本步在上面已分发过，复用聚合结果，不再走 execute()。
+                val r = if (toolMode && toolStep != null) toolStep.result else execute(ctx, controller, action)
                 if (r.zoomImage != null) pendingImage = r.zoomImage
                 // 第六批·记下本步实际执行的动作，供下一轮观察时核对前台包名：
                 // 只有真正执行过的动作才更新（问模型失败/输出无法解析/done 顶回
@@ -1113,7 +1214,7 @@ object TaskLoop {
                 // 仍按最后一次真实动作判预期与否）。
                 prevActionKind = kind
                 prevActionExpectedSwitch = kind in EXPECTED_PKG_SWITCH_KINDS ||
-                    action.optBoolean("handover", false) || flowHasAppSwitch(action)
+                    action.optBoolean("handover", false) || flowHasAppSwitch(action) || toolSwitchExpected
                 // 固定等 600ms 改成等界面静止：连续两次读到的界面哈希相同才算稳，
                 // 下一步的大纲在界面真稳了之后再读，不盲等。超时没稳住也继续，
                 // 只是如实记一笔（历史里的“界面已稳定 / 仍在变”就是这句的来处）。
@@ -1228,9 +1329,9 @@ object TaskLoop {
                 // executeInner 传给 typeText 的 id 恒为 null），且紧凑表/元素大纲
                 // 都不标哪个是焦点框，所以按 fresh 树里所有输入框扫——字段一个都
                 // 找不到时（跳页、输入框已消失、树被扣留）当无法验证，什么都不做。
-                if (kind == "type" && (r.ok || r.outcomeUnknown) && alive()) {
+                if ((kind == "type" || toolTypeText != null) && (r.ok || r.outcomeUnknown) && alive()) {
                     val afterDump = try { controller.dumpUiTree() } catch (_: Exception) { null }
-                    val expected = action.optString("text")
+                    val expected = toolTypeText ?: action.optString("text")
                     val fieldTexts = if (afterDump != null) {
                         extractInputFieldTexts(afterDump.optString("compact"), afterDump.optString("elements"))
                     } else emptyList()
@@ -1370,6 +1471,16 @@ object TaskLoop {
     private fun signatureOf(action: JSONObject): String {
         val kind = action.optString("action")
         val sb = StringBuilder(kind)
+        // 根治第 2 批·工具步：签名按全量工具调用拼（Andee ToolCall.signature()
+        // = name/argumentsRaw 同款）——只拼第一条会让“点 A 再输文字”和
+        // “点 A 再点 B”被误判为同一个动作。
+        action.optJSONArray("tool_calls")?.let { calls ->
+            for (i in 0 until calls.length()) {
+                val c = calls.optJSONObject(i) ?: continue
+                sb.append('|').append(c.optString("name")).append('/').append(c.optString("arguments"))
+            }
+            return sb.toString()
+        }
         // 本地流：签名按流里各步的全量参数拼（Andee ToolCall.signature() =
         // "$name/$argumentsRaw" 同款）——只拼动作种类会让点不同目标的流被误判
         // 为原地打转；每步的 eid/坐标/文字都进签名，目标不同就是不同的流。
@@ -1396,6 +1507,14 @@ object TaskLoop {
     /** 一步的简短描述（进历史用）：种类 + 关键参数，比光秃秃的种类更能让模型对上号。 */
     private fun describeAction(action: JSONObject): String {
         val kind = action.optString("action")
+        // 根治第 2 批·工具步：列出各调用的工具名（tap_screen_element→type_text…），
+        // 每步的具体结果在历史行的摘要里，不用再拼 detail。
+        action.optJSONArray("tool_calls")?.let { calls ->
+            val names = (0 until calls.length()).mapNotNull { i ->
+                calls.optJSONObject(i)?.optString("name")?.takeIf { it.isNotEmpty() }
+            }
+            if (names.isNotEmpty()) return names.joinToString("→")
+        }
         val detail = when (kind) {
             "tap", "longPress" -> action.optString("eid").ifEmpty {
                 action.optJSONObject("sel")?.let { "选「${UiSelector.shortSummary(it)}」" } ?: action.optString("cell").ifEmpty {
@@ -1600,6 +1719,49 @@ if (!isAlive()) return null to "任务已被取消，不再等模型回复"
 if (System.currentTimeMillis() >= deadlineMs) return null to "模型 $MODEL_TIMEOUT_SEC 秒没有回复"
 }
 return reply to error
+}
+
+/**
+ * DeepSeek 工具模式的模型调用（askModel 的工具版）：消息历史 + 工具表一次
+ * 发过去，带原生 tool_calls 回。超时与 askModel 同款（MODEL_TIMEOUT_SEC
+ * 闩锁，客户端读超时 180 秒在内）。客户端按 DeepSeek 适配器同款参数现建
+ * （地址/模型内置、思考开、强度 high），每步读当前设置里的 Key。
+ */
+private fun askToolsModel(
+    ctx: Context, messages: List<JSONObject>,
+    isAlive: () -> Boolean = { true }
+): Pair<DeepSeekLlmClient.Reply?, String?> {
+    val key = JarvisPrefs.getDeepSeekKey(ctx)
+    if (key.isBlank()) return null to "未配置 DeepSeek API Key，请先去设置里填写"
+    val client = DeepSeekLlmClient(
+        JarvisPrefs.DEEPSEEK_BASE_URL, key, JarvisPrefs.DEEPSEEK_MODEL,
+        thinking = true, reasoningEffort = JarvisPrefs.DEEPSEEK_REASONING_EFFORT
+    )
+    val latch = CountDownLatch(1)
+    var reply: DeepSeekLlmClient.Reply? = null
+    var error: String? = null
+    val specs = DeepSeekLlmClient.toolSpecs(ToolSchemas.all(), DONE_FAIL_SPECS)
+    Thread {
+        try {
+            reply = client.complete(messages, specs)
+        } catch (e: Exception) {
+            error = "DeepSeek 调用失败：${e.message}"
+        } finally {
+            latch.countDown()
+        }
+    }.apply { isDaemon = true; start() }
+    val deadlineMs = System.currentTimeMillis() + MODEL_TIMEOUT_SEC * 1000
+    while (true) {
+        val done = try {
+            latch.await(200, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            return null to "问模型时被打断"
+        }
+        if (done) break
+        if (!isAlive()) return null to "任务已被取消，不再等模型回复"
+        if (System.currentTimeMillis() >= deadlineMs) return null to "模型 $MODEL_TIMEOUT_SEC 秒没有回复"
+    }
+    return reply to error
 }
 
 /** 第二批·核验结论：A 成功、B 错页、C 无变化。 */
@@ -2169,6 +2331,421 @@ val screenChangeUnknown: Boolean = false
  * cached 池，cancel 只打断跑这个任务的那条线程。
  * FlowRuntime 的流内步也走这里，同样受这个上限保护。
  */
+/**
+ * 根治第 2 批·工具分发（Andee CommandDispatcher.dispatch 的 TaskLoop 版：
+ * 机制照搬，分发键是 ToolSchemas.methodOf，执行器是 Jarvis 现有的）。
+ * - 手势/输入/拉起类（tap、longPress、swipe、type、submit、zoom、openApp）
+ *   先翻成现成的动作 JSON、走已有的 execute()——deadline、自动 zoom 补救、
+ *   summarize、markTimeoutUnknown 全复用，不另起一套。
+ * - ui_tree / screenshot / wait / global / 设备类没有对应的动作，就在这里
+ *   直接实现（dumpUiTree、截图通道、DeviceCommands、LocalCommands、系统 intent）。
+ * - 分发永不抛错：参数缺了、工具暂不支持、执行抛异常，一律收成一句工具
+ *   结果（ok=false + 原因），让模型下一轮自己纠正；只有被急停打断才原样
+ *   抛出 InterruptedException。
+ * - done/fail 不走这里：它们是终态信号，循环在分发前先截住（见 runBlocking）。
+ */
+
+/** 一个工具调用的映射种类（给合成动作的 action 字段、守卫与核验的 kind 集合用）。 */
+private fun toolKindOf(call: DeepSeekLlmClient.ToolCall): String {
+    return when (ToolSchemas.methodOf(call.name)) {
+        "screen.ui_tree" -> "ui_tree"
+        "screen.tap_id", "screen.tap" -> "tap"
+        "screen.long_press_id", "screen.long_press" -> "longPress"
+        "screen.swipe" -> "swipe"
+        "screen.type" -> "type"
+        "screen.submit_input" -> "submit"
+        "screen.wait" -> "wait"
+        "screen.look_region" -> "zoom"
+        "screen.screenshot" -> "screenshot"
+        "screen.global" -> when (call.argumentsOrNull()?.optString("action")) {
+            "back" -> "back"
+            "home" -> "home"
+            "recents" -> "recents"
+            "notifications" -> "notifications"
+            "quick_settings" -> "quick_settings"
+            else -> "global"
+        }
+        "device.launch" -> "openApp"
+        else -> "device"
+    }
+}
+
+/**
+ * 把一个工具调用翻成现成的动作 JSON；翻不出来的工具（ui_tree、截图、wait、
+ * 设备类）返回 null，由 dispatchToolCall 直接实现。参数形状与 executeInner
+ * 的动作协议一致（tap/longPress 的 eid/cell/x/y/on、swipe 的 x1/y1/x2/y2、
+ * zoom 的 cell 或 x/y——w/h 在 Jarvis 里没有用：zoom 裁图尺寸是固定的，
+ * 只按中心点裁）。
+ */
+private fun toolCallToAction(call: DeepSeekLlmClient.ToolCall): JSONObject? {
+    val args = call.argumentsOrNull() ?: return null
+    return when (ToolSchemas.methodOf(call.name)) {
+        "screen.tap_id" -> JSONObject().put("action", "tap")
+            .put("eid", args.optString("eid"))
+        "screen.tap" -> JSONObject().put("action", "tap")
+            .put("on", args.optString("on").ifEmpty { "screen" })
+            .apply {
+                if (args.has("x")) put("x", args.optInt("x"))
+                if (args.has("y")) put("y", args.optInt("y"))
+                if (args.optString("cell").isNotEmpty()) put("cell", args.optString("cell"))
+                if (args.optString("part").isNotEmpty()) put("part", args.optString("part"))
+            }
+        "screen.long_press_id" -> JSONObject().put("action", "longPress")
+            .put("eid", args.optString("eid")).put("ms", 600)
+        "screen.long_press" -> JSONObject().put("action", "longPress")
+            .put("on", args.optString("on").ifEmpty { "screen" })
+            .put("ms", args.optLong("duration_ms", 600))
+            .apply {
+                if (args.has("x")) put("x", args.optInt("x"))
+                if (args.has("y")) put("y", args.optInt("y"))
+                if (args.optString("cell").isNotEmpty()) put("cell", args.optString("cell"))
+                if (args.optString("part").isNotEmpty()) put("part", args.optString("part"))
+            }
+        "screen.swipe" -> {
+            if (!args.has("x1") || !args.has("y1") || !args.has("x2") || !args.has("y2")) return null
+            JSONObject().put("action", "swipe")
+                .put("x1", args.optInt("x1")).put("y1", args.optInt("y1"))
+                .put("x2", args.optInt("x2")).put("y2", args.optInt("y2"))
+                .apply {
+                    val screens = args.optInt("screens", 0)
+                    if (screens > 0) put("screens", screens)
+                }
+        }
+        "screen.type" -> JSONObject().put("action", "type")
+            .put("text", args.optString("text"))
+        "screen.submit_input" -> JSONObject().put("action", "submit")
+        "screen.look_region" -> {
+            val cell = args.optString("cell")
+            if (cell.isNotEmpty()) {
+                JSONObject().put("action", "zoom").put("cell", cell)
+                    .apply {
+                        if (args.optString("part").isNotEmpty()) put("part", args.optString("part"))
+                    }
+            } else if (args.has("x") && args.has("y")) {
+                JSONObject().put("action", "zoom")
+                    .put("x", args.optInt("x")).put("y", args.optInt("y"))
+            } else null
+        }
+        "device.launch" -> JSONObject().put("action", "openApp")
+            .put("app", args.optString("pkg").ifEmpty { args.optString("label") })
+        else -> null
+    }
+}
+
+/** PNG base64 → JPEG base64（与 executeInner 的 zoom 分支同款转换，供 ui_tree / wait / 截图的附图用）。 */
+private fun pngToJpeg(b64: String): String? {
+    if (b64.isEmpty()) return null
+    return try {
+        val bytes = Base64.decode(b64, Base64.DEFAULT)
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        val j = GridOverlay.toJpegBase64(bmp)
+        bmp.recycle()
+        j
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/** 把一次 dumpUiTree 的结果收成给模型看的文字：包名 + 节点数 + 大纲（Andee
+ * screen.ui_tree / screen.wait 的回文同款）。 */
+private fun uiTreeSummary(dump: JSONObject, prefix: String): String {
+    val elements = dump.optString("elements")
+    val pkg = dump.optString("pkg")
+    val nodesTotal = dump.optInt("nodes_total", -1)
+    val nodesUseful = dump.optInt("nodes_useful", -1)
+    return buildString {
+        append(prefix).append(pkg.ifEmpty { "未知应用" })
+        if (nodesTotal >= 0) {
+            append("，节点共 $nodesTotal 个，其中带名可用的 $nodesUseful 个")
+        }
+        if (dump.optBoolean("withheld", false)) append("（界面树被扣留，元素可能不全）")
+        if (elements.isNotBlank()) append("\n").append(elements.take(6000))
+        else append("\n（元素列表为空）")
+    }
+}
+
+private fun dispatchToolCall(ctx: Context, controller: ScreenController, call: DeepSeekLlmClient.ToolCall): StepResult {
+    val method = ToolSchemas.methodOf(call.name)
+        ?: return StepResult("未知工具：${call.name}", false, null, null, "UNKNOWN")
+    val args = call.argumentsOrNull()
+        ?: return StepResult("${call.name} 的参数不是合法 JSON：${call.argumentsRaw.take(80)}", false, null, null, "PARSE_ERROR")
+    return try {
+        when (method) {
+            "screen.tap_id", "screen.tap", "screen.long_press_id", "screen.long_press",
+            "screen.swipe", "screen.type", "screen.submit_input", "screen.look_region",
+            "device.launch" -> {
+                if (method in setOf("screen.tap_id", "screen.long_press_id") &&
+                    args.optString("eid").isEmpty()
+                ) return StepResult("${call.name} 需要 eid（从 get_screen_element 的元素列表里取）", false, null, null, "PARSE_ERROR")
+                val action = toolCallToAction(call)
+                    ?: return StepResult("${call.name} 缺少必要参数", false, null, null, "PARSE_ERROR")
+                execute(ctx, controller, action)
+            }
+            "screen.ui_tree" -> {
+                val dump = controller.dumpUiTree(
+                    verbose = args.optBoolean("verbose", false),
+                    withShot = args.optBoolean("with_shot", ToolSchemas.UI_TREE_WITH_SHOT_DEFAULT),
+                )
+                val shotPng = dump.optJSONObject("shot")?.optString("png_base64").orEmpty()
+                StepResult(uiTreeSummary(dump, "当前在 "), true, null, pngToJpeg(shotPng))
+            }
+            "screen.screenshot" -> {
+                val (jpeg, _) = accessibilityShot(controller, ctx)
+                val shot = jpeg ?: projectionShot(ctx).first
+                if (shot == null) StepResult("截图没拿到（无障碍截图与录屏通道都失败了）", false, null, null, "UNKNOWN")
+                else StepResult("已截图，图在下一轮附上", true, null, shot)
+            }
+            "screen.wait" -> {
+                val seconds = args.optDouble("seconds", Double.NaN)
+                if (seconds.isNaN() || seconds <= 0) {
+                    return StepResult("wait_for_screen 需要正数的 seconds", false, null, null, "PARSE_ERROR")
+                }
+                val waitMs = (seconds * 1000).toLong().coerceAtMost(20000)
+                Thread.sleep(waitMs)
+                val dump = controller.dumpUiTree(verbose = false, withShot = true)
+                val shotPng = dump.optJSONObject("shot")?.optString("png_base64").orEmpty()
+                StepResult(uiTreeSummary(dump, "已等 ${waitMs}ms，当前在 "), true, null, pngToJpeg(shotPng))
+            }
+            "screen.global" -> {
+                val action = args.optString("action")
+                if (action.isEmpty()) return StepResult("system_action 需要 action（back/home/recents/notifications/quick_settings）", false, null, null, "PARSE_ERROR")
+                summarize(action, controller.globalAction(action))
+            }
+            "device.contacts" -> {
+                if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    StepResult("没有通讯录权限：请到设置 → 功能自检页点「申请通讯录权限」，给了之后再查", false, null, null, "UNKNOWN")
+                } else {
+                    val query = args.optString("query")
+                    val hits = LocalCommands.queryContacts(ctx, query)
+                    if (hits.isEmpty()) {
+                        StepResult("通讯录里没找到${if (query.isEmpty()) "" else "「$query」"}", false, null, null, "ELEMENT_NOT_FOUND")
+                    } else {
+                        StepResult(
+                            "找到 ${hits.size} 个：\n" + hits.take(20).joinToString("\n") { "${it.display}|${it.number}" },
+                            true, null, null
+                        )
+                    }
+                }
+            }
+            "device.dial" -> {
+                val number = args.optString("number")
+                if (number.isEmpty()) return StepResult("dial 需要 number", false, null, null, "PARSE_ERROR")
+                if (args.optBoolean("direct", false)) {
+                    StepResult("直接拨号需要用户明确同意：先问用户一句，得到同意后再调 dial（direct=true）——不要自己直接拨", false, null, null, "UNKNOWN")
+                } else {
+                    try {
+                        val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        ctx.startActivity(intent)
+                        StepResult("拨号盘已打开，号码 $number 已填好，等用户点拨出", true, null, null)
+                    } catch (e: Exception) {
+                        StepResult("拨号盘没打开：${e.message ?: e.javaClass.simpleName}", false, null, null, "UNKNOWN")
+                    }
+                }
+            }
+            "device.connectivity" -> {
+                val type = DeviceCommands.networkType(ctx)
+                val online = type != "未联网" && type != "未知"
+                StepResult("联网状态：${if (online) "在线" else "离线"}（$type）", true, null, null)
+            }
+            "device.battery" -> {
+                val info = DeviceCommands.batteryInfo(ctx)
+                if (info == null) StepResult("电量读不到", false, null, null, "UNKNOWN")
+                else StepResult("电量 ${info.first}%，${if (info.second) "正在充电" else "未充电"}", true, null, null)
+            }
+            "device.apps" -> {
+                val pm = ctx.packageManager
+                val apps = try {
+                    pm.getInstalledApplications(0)
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                val lines = apps.mapNotNull { app ->
+                    val label = try { pm.getApplicationLabel(app)?.toString().orEmpty() } catch (_: Exception) { "" }
+                    val pkg = app.packageName.orEmpty()
+                    if (label.isEmpty() || pkg.isEmpty()) null else "$label|$pkg"
+                }.sorted().take(100)
+                StepResult("已装应用 ${lines.size} 个（只列前 100 个）：\n" + lines.joinToString("\n"), true, null, null)
+            }
+            "device.facts" -> {
+                val storage = DeviceCommands.storageInfo(ctx)
+                val mem = try {
+                    val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                    val mi = ActivityManager.MemoryInfo()
+                    am.getMemoryInfo(mi)
+                    "内存可用 ${mi.availMem / 1024 / 1024} MB / 共 ${mi.totalMem / 1024 / 1024} MB"
+                } catch (_: Exception) {
+                    "内存读不到"
+                }
+                StepResult(
+                    "机型 ${Build.MANUFACTURER} ${Build.MODEL}，Android ${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}），$mem，" +
+                        (storage?.let { "存储可用 ${"%.1f".format(it.first)} GB / 共 ${"%.1f".format(it.second)} GB" } ?: "存储读不到"),
+                    true, null, null
+                )
+            }
+            "device.open_url" -> {
+                val url = args.optString("url")
+                if (url.isEmpty()) return StepResult("open_url 需要 url", false, null, null, "PARSE_ERROR")
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    val msg = BrowserController.open(ctx, url)
+                    Thread.sleep(1500)
+                    BrowserController.refreshSnapshot(3000)
+                    val snap = BrowserController.lastSnapshot()
+                    val snapNote = if (snap != null) {
+                        "（当前页：${snap.url}${if (snap.title.isNotEmpty()) "「${snap.title}」" else ""}）"
+                    } else {
+                        "（页面快照还没拿到，可能还在加载）"
+                    }
+                    StepResult("$msg$snapNote", BrowserController.isOpen(), null, null)
+                } else {
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        ctx.startActivity(intent)
+                        StepResult("已用对应应用打开 $url", true, null, null)
+                    } catch (e: Exception) {
+                        StepResult("打不开 $url：${e.message ?: e.javaClass.simpleName}", false, null, null, "UNKNOWN")
+                    }
+                }
+            }
+            "device.alarm" -> {
+                val hour = args.optInt("hour", -1)
+                val minute = args.optInt("minute", -1)
+                if (hour !in 0..23 || minute !in 0..59) {
+                    return StepResult("set_alarm 需要 hour（0-23）与 minute（0-59）", false, null, null, "PARSE_ERROR")
+                }
+                val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                    putExtra(AlarmClock.EXTRA_HOUR, hour)
+                    putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                    args.optString("message").takeIf { it.isNotEmpty() }?.let { putExtra(AlarmClock.EXTRA_MESSAGE, it) }
+                    putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    ctx.startActivity(intent)
+                    StepResult("闹钟已设：${"%02d:%02d".format(hour, minute)}", true, null, null)
+                } catch (e: Exception) {
+                    StepResult("闹钟没设上：${e.message ?: e.javaClass.simpleName}", false, null, null, "UNKNOWN")
+                }
+            }
+            "device.volume" -> {
+                val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                if (!args.has("level") && !args.has("mute")) {
+                    val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    val muted = try { am.isStreamMute(AudioManager.STREAM_MUSIC) } catch (_: Exception) { false }
+                    StepResult("媒体音量 $cur/$max${if (muted) "（已静音）" else ""}", true, null, null)
+                } else {
+                    if (args.has("mute")) {
+                        am.adjustStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            if (args.optBoolean("mute")) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE, 0
+                        )
+                    }
+                    if (args.has("level")) {
+                        am.setStreamVolume(AudioManager.STREAM_MUSIC, args.optInt("level").coerceIn(0, max), 0)
+                    }
+                    StepResult("媒体音量已设为 ${am.getStreamVolume(AudioManager.STREAM_MUSIC)}/$max", true, null, null)
+                }
+            }
+            "device.brightness" -> {
+                val cur = try {
+                    Settings.System.getInt(ctx.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+                } catch (_: Exception) {
+                    -1
+                }
+                if (!args.has("brightness")) {
+                    if (cur < 0) StepResult("亮度读不到", false, null, null, "UNKNOWN")
+                    else StepResult("屏幕亮度 $cur/255", true, null, null)
+                } else if (!Settings.System.canWrite(ctx)) {
+                    StepResult("改亮度需要「修改系统设置」授权：请到设置里给 Jarvis 开，然后再试", false, null, null, "UNKNOWN")
+                } else {
+                    val v = args.optInt("brightness").coerceIn(1, 255)
+                    Settings.System.putInt(ctx.contentResolver, Settings.System.SCREEN_BRIGHTNESS, v)
+                    StepResult("屏幕亮度已设为 $v/255", true, null, null)
+                }
+            }
+            "device.location" -> {
+                val loc = DeviceCommands.requestFreshLocation(ctx)
+                if (loc == null) StepResult("定位拿不到（可能没给定位权限、或定位服务没开）", false, null, null, "UNKNOWN")
+                else StepResult("位置：纬度 ${loc.latitude}，经度 ${loc.longitude}（精度约 ${loc.accuracy} 米）", true, null, null)
+            }
+            // Jarvis 里没有对应的执行器：如实报不支持，让模型换路线，不要假装做了。
+            "device.steps", "device.sensors", "device.call_log", "device.sms.read", "device.sms.send" ->
+                StepResult("${call.name} 在 Jarvis 里暂不支持（没有对应的执行器），换一条路线做这件事", false, null, null, "UNKNOWN")
+            else -> StepResult("未知方法：$method", false, null, null, "UNKNOWN")
+        }
+    } catch (e: InterruptedException) {
+        throw e
+    } catch (e: Exception) {
+        StepResult("执行 ${call.name} 出错：${e.message ?: e.javaClass.simpleName}", false, null, null, errorCodeFor(e.message.orEmpty()))
+    }
+}
+
+/** 一步里的工具结果（聚成一个 StepResult 给循环后半段用 + 每条回喂给模型）。 */
+private data class ToolStepOutcome(
+    val result: StepResult,
+    val toolResults: List<Pair<String, String>>, // (tool_call_id, 回喂给模型的结果文字)
+)
+
+/**
+ * 一步里的多个工具调用按顺序分发（Andee LocalBrain.runTurn 同款：每个
+ * tool_call 都执行、每个结果都回喂），聚成一个 StepResult 供循环后半段
+ * （历史、守卫、Reflector、输入校验）复用。
+ */
+private fun executeToolCalls(ctx: Context, controller: ScreenController, calls: List<DeepSeekLlmClient.ToolCall>): ToolStepOutcome {
+    val summaries = mutableListOf<String>()
+    val toolResults = mutableListOf<Pair<String, String>>()
+    var anyOk = true
+    var anyChanged: Boolean? = null
+    var zoomImage: String? = null
+    var firstCode = ""
+    var anyUnknown = false
+    for (call in calls) {
+        val r = dispatchToolCall(ctx, controller, call)
+        summaries += "${call.name}：${r.summary}"
+        toolResults += call.id to "${call.name}：${r.summary}"
+        if (!r.ok) anyOk = false
+        if (r.screenChanged == true) anyChanged = true
+        if (r.zoomImage != null) zoomImage = r.zoomImage
+        if (firstCode.isEmpty() && r.code.isNotEmpty()) firstCode = r.code
+        if (r.outcomeUnknown) anyUnknown = true
+    }
+    return ToolStepOutcome(
+        StepResult(
+            summary = summaries.joinToString("\n"),
+            ok = anyOk,
+            screenChanged = anyChanged,
+            zoomImage = zoomImage,
+            code = firstCode,
+            outcomeUnknown = anyUnknown,
+        ),
+        toolResults
+    )
+}
+
+/**
+ * 工具步的合成动作：给重复守卫/遍历环/描述/核验用的“一个动作”。
+ * action 取第一个“能动手”的调用的映射种类（tap/type/openApp…），让现成的
+ * kind 集合（REAL_ACTION_KINDS、REFLECT_CHANGE_KINDS、
+ * EXPECTED_PKG_SWITCH_KINDS）原样生效；全量调用签名另存 tool_calls 字段，
+ * signatureOf 按它拼（Andee ToolCall.signature() = name/argumentsRaw 同款）。
+ */
+private fun syntheticToolAction(calls: List<DeepSeekLlmClient.ToolCall>): JSONObject {
+    val firstActionable = calls.firstOrNull {
+        toolKindOf(it) in REAL_ACTION_KINDS || toolKindOf(it) in EXPECTED_PKG_SWITCH_KINDS
+    } ?: calls.first()
+    val action = toolCallToAction(firstActionable) ?: JSONObject().put("action", toolKindOf(firstActionable))
+    val arr = JSONArray()
+    for (c in calls) arr.put(JSONObject().put("name", c.name).put("arguments", c.argumentsRaw))
+    action.put("tool_calls", arr)
+    return action
+}
+
 internal fun execute(
 ctx: Context, controller: ScreenController, action: JSONObject
 ): StepResult {
@@ -2687,6 +3264,85 @@ if (text.isNotEmpty()) parts += "框内文字：${text.take(40)}"
 val eh = result.optString("elements_hint")
 if (eh.isNotEmpty()) parts += eh.take(120)
 return StepResult(parts.joinToString("，"), performed, changed, null, screenChangeUnknown = changeUnknown)
+}
+
+/**
+ * 根治第 2 批·DeepSeek 工具模式的系统提示（SYSTEM_PROMPT 的工具版）：
+ * 观察规则、计划/笔记格式、硬规则与之一致，只把“输出一个 JSON 动作”换成
+ * “调工具”——每轮看到的工具表自带各工具的用法说明，这里不再逐条复述。
+ * 终态只认 done/fail 工具：文字里写“做完了”不算完成，调了 done 才算。
+ * done/fail 请单独调，不要和其他工具混在一步里（混了的那步其他调用不执行）。
+ */
+private const val SYSTEM_PROMPT_TOOLS =
+"你是 Jarvis 的跨应用任务执行器，在用户的安卓手机上一步一步完成任务。" +
+"每一轮你会看到：任务原文、当前前台应用、界面元素紧凑表（只列可操作元素，带稳定编号）、已执行步骤和上一步的结果。树不够用或上一步有问题时还会附一张截图（全屏图带 A1–H12 网格标定；若提示说明来自录屏通道，则那张图没有网格、只能看不能按图瞄准；没有附图时只按紧凑表操作）。\n" +
+"紧凑表是默认且最准的观察：每行格式「稳定编号|类型|文字|[中心x,中心y]」，坐标是系统算好的 0-1000 相对值；稳定编号（s 开头，如 s3f9a2）跨轮不变，同一元素每轮同一个编号，点它就用这个编号；列表型界面（聊天列表、动态流、搜索结果）里同一形状会重复出现，要认准目标文字所在的那一行，只点那一行的编号，绝不把一行的名字配上另一行的按钮。" +
+"文字为 # 开头的是控件的内部 id，不是屏幕上印的字，只能用来区分控件，不许当可见文字。" +
+"有编号就用编号点（tap_screen_element 的 eid，优先用紧凑表的稳定编号），绝不拿 [x,y] 或截图位置重算坐标去点一个有编号的元素。" +
+"若某步结果说编号已过期、是按位置或文字找回的，那个编号就作废了，下轮只用最新紧凑表里的编号，不要再用旧编号。" +
+"没文字没说明的图标按钮靠类型和中心坐标认领（比如某条动态下方的评论图标就是那条动态的），也可以先 zoom 看清再点。\n" +
+"你手头有一组工具，每轮可以调一个或多个：先看屏，再调工具；工具结果会原样回给你（附下一轮的新观察）。输入文字：先调 tap_screen_element 点输入框，下一个工具必须紧接着就是 type_text，不许在点框和输入之间插别的动作，也不许重复点同一个输入框；如果上一个工具已经把回复框带起来并聚焦，直接 type_text，不要再点一次输入条（树被扣留的应用里输入条很薄，点它容易误点到下面的内容）。" +
+"开屏广告、会员弹窗、更新提示、权限请求这类挡路的弹窗，先处理掉再继续任务。" +
+"树被扣留的应用（如微信）先 zoom 再点是硬规矩：没经过新放大的盲点会被系统拒绝，一个界面一次放大。用 zoom_screen_region 放大后，再用 tap_by_coordinates 加 on=\"zoom\" 按放大图点。" +
+"wait_for_screen 只在页面真的在加载时用；需要连着等时，每次必须比上一次等得更久（如 3→5→10→20 秒），发相同秒数会被判打转；等到了上限界面还是一动不动，那不是在加载，是卡住了或被弹窗/登录挡住了，换路线或调 fail 说明。\n" +
+"每轮回复里先写计划（见下），再调工具；需要记关键信息时在计划后加一段“笔记：”，没有可记的可以不写。计划（任务开始时列出，之后每轮更新；最多 10 条，每条一句话）：\n" +
+"计划：\n" +
+"1. 打开微信\n" +
+"2. 找到联系人\n" +
+"3. 输入消息并发送\n" +
+"已完成的子目标在行首标 ✓（如“1. ✓ 打开微信”）；没做完的照常列；卡住时修订计划（重排、改写、插入纠正步骤、换策略），修订后的计划在回复里一并给出。没有计划可列时可以不写计划，只调工具。" +
+"笔记（与“计划：”段并列，记跨步关键信息——账号、位置、已确认的事实；最多 10 条，每条一句话）：\n" +
+"笔记：\n" +
+"- 账号尾号 1393\n" +
+"每条一行以 - 开头；需要更新笔记时重写整个“笔记：”段（以新段为准全量替换旧笔记），没新内容时不用重写，旧笔记会一直保留；没有可记的可以不写笔记。" +
+"任务真正完成时调 done 工具（message 写完成情况一句话）；做不下去时调 fail 工具（reason 写卡在哪一步、什么原因），禁止假装完成。不要在文字里写“做完了”而不调 done——只有调了 done 才算完成。done/fail 请单独调，不要和其他工具混在一步里。\n" +
+"做决定前先读已执行步骤，找重复失败和计划与现实的矛盾。硬规则：绝不重复失败的动作——先搞清它为什么失败，再换一种做法；只凭屏幕上观测到的证据判断子目标完成：紧凑表或截图里确实出现了目标内容才算完成，绝不凭感觉提前标完成；数据类任务（金额、账号、验证码、数量、日期）原文照抄，不改格式、不加标点。" +
+"上一步结果说「界面没变化」就是大概率没点中：不要把同一个动作原样再发一遍（连着重复同一个动作会被判定为原地打转、任务直接中止），换瞄准方式（先 zoom 核对、改用编号、或先滑动把目标挪到清楚的位置）。" +
+"上一步的问题会带一个错误码：ELEMENT_NOT_FOUND（要找的元素不存在）、TAP_REFUSED（系统拒绝了这次点按，先 zoom 再点）、TAP_BLOCKED（目标被别的元素完全遮住，先把遮挡物处理掉——关弹窗、收起悬浮窗、滑开遮挡——再重新读屏点目标，不要原样重发）、COORD_CONTRACT（坐标契约拒绝：屏幕尺寸未知或已变，坐标不可信，改走编号 eid 点目标，不要重发同一坐标）、TIMEOUT（动作超时，不知道成没成）、NO_INPUT_FOCUS（没有输入框获得焦点，先点输入框）、NO_ACTIVE_WINDOW（当前没有可操作的窗口）、PARSE_ERROR（你调的工具缺字段或格式不对）、UNKNOWN（其他原因）。按码换招，别对着同一个码重复同一个动作。" +
+"上一步标「结果未知」时，那个动作可能动了也可能没动——不要直接重做同样的动作，先看紧凑表和截图确认成没成，再决定下一步。" +
+"屏幕下方有个「停止」按钮，用户随时可以点它停下任务；任务可能因此提前结束，不用你处理。" +
+"有些应用不给元素大纲（只有截图或干脆是空的）：节点总数为 0 说明这一屏是自绘的（小程序、网页、游戏画布），优先用 back/home 退出换路线，不要盲点坐标；节点有数但带名的为 0 时，大纲的分组和中心还在，拿截图和大纲的缩进、坐标对位，用编号点，别降级成坐标点。" +
+"发消息这类任务，要依次完成：打开应用、找到联系人、点开会话、输入消息、点发送，发送完成才能调 done；" +
+"绝不输入密码、验证码；绝不点付款、转账、删除类按钮，除非任务原文明确要求。"
+
+/** 终态工具（Jarvis 自加，不进 ToolSchemas 的 1:1 工具表）：任务完成调 done，做不下去调 fail。 */
+private val DONE_FAIL_SPECS: JSONArray = JSONArray().apply {
+    put(
+        JSONObject()
+            .put("name", "done")
+            .put("method", "task.done")
+            .put("description", "Call this when the task is fully complete and verified on screen. Call it alone, not mixed with other tools in the same step.")
+            .put(
+                "parameters", JSONObject()
+                    .put("type", "object")
+                    .put(
+                        "properties", JSONObject().put(
+                            "message", JSONObject()
+                                .put("type", "string")
+                                .put("description", "What was accomplished, one sentence.")
+                        )
+                    )
+                    .put("required", JSONArray().apply { put("message") })
+            )
+    )
+    put(
+        JSONObject()
+            .put("name", "fail")
+            .put("method", "task.fail")
+            .put("description", "Call this when the task cannot continue. Call it alone, not mixed with other tools in the same step.")
+            .put(
+                "parameters", JSONObject()
+                    .put("type", "object")
+                    .put(
+                        "properties", JSONObject().put(
+                            "reason", JSONObject()
+                                .put("type", "string")
+                                .put("description", "Which step is stuck and why.")
+                        )
+                    )
+                    .put("required", JSONArray().apply { put("reason") })
+            )
+    )
 }
 
 private const val SYSTEM_PROMPT =

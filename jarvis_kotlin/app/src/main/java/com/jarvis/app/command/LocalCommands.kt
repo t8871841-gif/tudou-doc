@@ -315,7 +315,7 @@ object LocalCommands {
         }
     }
 
-    private data class ContactHit(val display: String, val number: String, val contactId: String, val numberType: String)
+    internal data class ContactHit(val display: String, val number: String, val contactId: String, val numberType: String)
 
     /**
      * 返回每个联系人一条（同一个人有多个号码时，优先选"手机"号），精确同名的排前面。
@@ -323,7 +323,7 @@ object LocalCommands {
      * 永远拿 ContactsProvider 吐出来的第一条（不一定是手机号）；现在按 CONTACT_ID 分组、
      * 组内优先手机号，真正按"人"去重，而不是按"号码行"去重。
      */
-    private fun queryContacts(ctx: Context, name: String): List<ContactHit> {
+    internal fun queryContacts(ctx: Context, name: String): List<ContactHit> {
         val byContact = LinkedHashMap<String, MutableList<Triple<String, String, Int>>>() // id -> [(display, number, type)]
         try {
             ctx.contentResolver.query(

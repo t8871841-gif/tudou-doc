@@ -474,7 +474,7 @@ object DeviceCommands {
     /** M30：位置时效——缓存超过 5 分钟就等最多 8 秒取新定位（Andee STALE_LOC_MS 同款）；回报带精度与定位时间。 */
     private const val STALE_LOC_MS = 5 * 60_000L
 
-    private fun requestFreshLocation(ctx: Context): Location? {
+    internal fun requestFreshLocation(ctx: Context): Location? {
         return try {
             val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
             val latch = java.util.concurrent.CountDownLatch(1)
