@@ -2242,33 +2242,32 @@ else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null
 }
 } catch (e: IllegalStateException) {
 // 批三十：树盲应用上 tap 因 zoom 过期被拒时，自动对同一目标重拍一张 zoom 图
-// 随拒绝一并返回，模型直接从这张图上用 on=zoom 再点，不用另花一步 zoom，
-// 也不会在 zoom 和 tap 之间插导航把 zoom 作废。只认守卫的 refused 文案、
-// 只认全屏坐标（on=screen）；参数错误（坏 cell、未知 eid/part）和 zoom 图内
-// 坐标（on=zoom）不走这里，模型须先修正参数或手动重拍。
+// 并直接在图中央落点，不用另花一步 zoom，也不会在 zoom 和 tap 之间插导航
+// 把 zoom 作废。只认守卫的 refused 文案、只认全屏坐标（on=screen）；参数
+// 错误（坏 cell、未知 eid/part）和 zoom 图内坐标（on=zoom）不走这里，模型
+// 须先修正参数或手动重拍。
 if (kind != "tap" || on != "screen" || e.message?.startsWith("refused:") != true) throw e
-val zoomCell = cell ?: if (action.has("x") && action.has("y")) cellFromNorm(action.optInt("x", 500), action.optInt("y", 500)) else null
-if (zoomCell == null || zoomCell.any { it.isLowerCase() }) throw e
-val zoomed = runCatching { controller.zoomAim(zoomCell, part) }.getOrNull() ?: throw e
-val png = zoomed.optString("png_base64")
-val jpeg = if (png.isNotEmpty()) {
-try {
-val bytes = Base64.decode(png, Base64.DEFAULT)
-val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-val j = bmp?.let { GridOverlay.toJpegBase64(it) }
-bmp?.recycle()
-j
-} catch (_: Exception) {
-null
-}
+// 2026-11-12 精度修法：模型给了原始 x,y 就以它为中心裁图（zoomAimAt），不再
+// 经 cellFromNorm 量化成格子——格子中心会偏离模型想点的具体像素；只给了
+// cell 时才走 zoomAim(cell, part)（cell 本身就是模型选的目标，没有更细的
+// 坐标可保）。小写 cell 是 zoom 图内的格子，全屏 tap 不能用，照旧拒绝。
+// 拍图只为登记 zoom（zoomRegion/zoomAtMs）——图本身不再回喂模型，图中央
+// 就是 autoTap 的落点；拍图失败也按原拒绝处理。
+runCatching {
+if (action.has("x") && action.has("y")) {
+controller.zoomAimAt(action.optInt("x", 500), action.optInt("y", 500))
 } else {
-null
+val zoomCell = cell ?: throw e
+if (zoomCell.any { it.isLowerCase() }) throw e
+controller.zoomAim(zoomCell, part)
 }
+}.getOrNull() ?: throw e
 // flow 方向的落地（2026-11-05）：zoom 图已到手，目标就在图中央（十字准星处）。
 // 直接在 zoom 图中央落点，不用再问模型——autoglm-phone 的 do() 格式
 // 表达不出 on="zoom"，等它重试只会再被拒一次，空转到 MAX_REPEATS。
 // zoom→点在同一步内原子完成，中间没有模型往返，zoom 不会过期。
-// 成了就当这一步成功；没成就回落到原有行为，把 zoom 图交给模型。
+// 成了就当这一步成功；没成直接判这一步失败（原拒绝）：把裁图回喂给模型是
+// 帮倒忙——AutoGLM 发不出 on="zoom"，裁图当全屏读会算得更偏。
 val autoTap = runCatching { controller.tapAim("zoom", 500, 500, null, null, handover = handover) }.getOrNull()
 if (autoTap != null) {
 val autoResult = markTimeoutUnknown("tap", autoTap, summarize("tap", autoTap))
@@ -2276,8 +2275,7 @@ if (autoResult.ok) {
 return autoResult.copy(summary = "点按被拒后已自动 zoom 并点中目标（zoom 图中央）。${autoResult.summary}")
 }
 }
-if (jpeg == null) throw e
-return StepResult("点按被拒：${e.message}。已自动对同一目标重拍 zoom 图（见附图），请直接从这张图上用 on=\"zoom\" 点目标，不要再做 zoom、导航等中间动作。", false, null, jpeg, "TAP_REFUSED")
+throw e
 }
 markTimeoutUnknown(kind, result, summarize(kind, result))
 }

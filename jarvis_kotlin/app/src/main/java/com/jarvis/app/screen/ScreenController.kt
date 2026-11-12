@@ -1106,6 +1106,28 @@ class ScreenController(
     }
 
     /**
+     * 以原始 (nx, ny) 为中心裁一张与 [zoomAim] 同尺寸的 zoom 图。批三十自动
+     * 补救用：模型给的就是原始坐标，直接以它为中心裁，不再经 cellFromNorm 量化
+     * 成格子（格子中心会偏离模型想点的具体像素）。登记与 [zoomAim] 完全相同——
+     * 都经 [lookRegion] 做（zoomRegion/zoomAtMs/zoomSize 同批记录），随后
+     * tapAim("zoom", 500, 500) 点图中央即落在 (nx, ny) 上。坐标先钳到
+     * 0..999，与旧的 cellFromNorm 入参口径一致。
+     */
+    fun zoomAimAt(nx: Int, ny: Int): JSONObject {
+        val cx = nx.coerceIn(0, NORM_MAX - 1)
+        val cy = ny.coerceIn(0, NORM_MAX - 1)
+        val out = lookRegion(
+            cx, cy, 2 * NORM_MAX / GRID_COLS, 2 * NORM_MAX / GRID_ROWS,
+            mark = intArrayOf(cx, cy),
+        )
+        return out.put("aimed_at", "($cx,$cy)").put(
+            "aim_check",
+            "The RED CROSSHAIR is exactly where tap_by_coordinates " +
+                "{\"x\": $cx, \"y\": $cy} would land on the full screen.",
+        )
+    }
+
+    /**
      * Draw the aim grid onto an image the brain is about to be shown, in
      * place-of-copy (the source is left alone; the caller recycles the copy).
      *
