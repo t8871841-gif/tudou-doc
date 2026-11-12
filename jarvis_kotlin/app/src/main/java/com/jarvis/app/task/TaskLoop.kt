@@ -2473,7 +2473,10 @@ summary = "$summary（结果未知：不知道成没成）"
 * 失败时按错误文案附一个错误码（见 errorCodeFor），成功时 code 为空。
 */
 private fun summarize(kind: String, result: JSONObject): StepResult {
-val performed = result.optBoolean("performed", false)
+// 跨应用检查 2026-11-12 断点 #1：手势路径只返回 completed，从不写 performed，
+// 这里直接读 performed 会把每次点按都判成“未执行”。performed 有就用它，
+// 没有就以 completed 为准（ScreenController 的约定：调用方按 completed 判成败）。
+val performed = result.optBoolean("performed", result.optBoolean("completed", false))
 val error = result.optString("error")
 val changed: Boolean? = if (result.has("screen_changed")) {
 result.optBoolean("screen_changed")
