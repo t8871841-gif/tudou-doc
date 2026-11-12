@@ -737,6 +737,12 @@ object TaskLoop {
                         val appKnowledge = AppKnowledge.forPackage(ctx, pkg)
                         if (appKnowledge != null) {
                             append("这个应用的用法知识：\n").append(appKnowledge).append('\n')
+                        } else if (pkg.isNotEmpty()) {
+                            // 第 6 批·断点 #12：无知识不再静默退化——模型这轮就看
+                            // 到一句提示，而不是只在审计日志里留一行；审计仍由
+                            // forPackage 的重载写（切换时才查，免得每步都刷一条）。
+                            // 前台包名读不到（pkg 为空）时不贴这句，避免无意义提示。
+                            append("这个应用暂无内置用法知识：按通用流程操作——先读紧凑表和截图、认准目标再点，勤用截图核对，不要凭猜测点。\n")
                         }
                     }
                     // 内置浏览器开着时，把当前页快照（地址/标题/正文/链接）也给模型，

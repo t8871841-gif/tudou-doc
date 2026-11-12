@@ -575,19 +575,36 @@ object LocalCommands {
         "快手" to "com.smile.gifmaker",
         "哔哩哔哩" to "tv.danmaku.bili",
         "b站" to "tv.danmaku.bili",
+        // 第 6 批·断点 #9：补小红书、今日头条、微博、知乎、闲鱼（包名与
+        // AppKnowledge 一致）；小红书包名待真机 pm list packages 核实。
+        "小红书" to "com.xingin.xhs",
+        "红书" to "com.xingin.xhs",
+        "xiaohongshu" to "com.xingin.xhs",
+        "今日头条" to "com.ss.android.article.news",
+        "微博" to "com.sina.weibo",
+        "知乎" to "com.zhihu.android",
+        "闲鱼" to "com.taobao.idlefish",
         "高德地图" to "com.autonavi.minimap",
         "高德" to "com.autonavi.minimap",
         "百度地图" to "com.baidu.BaiduMap",
         "设置" to "com.android.settings",
-        "电话" to "com.android.dialer",
-        "短信" to "com.android.messaging",
-        "相机" to "com.android.camera",
+        // 第 6 批·断点 #9：电话/短信改走魅族包名（白名单里已有
+        // com.meizu.flyme.mms/dialer 作参照）；相机按魅族常见包名填，
+        // 待真机 pm list packages 核实。直查失败仍回落到标签枚举，
+        // 所以别家 ROM 上这三条不命中也不会开错应用。
+        "电话" to "com.meizu.flyme.dialer",
+        "拨号" to "com.meizu.flyme.dialer",
+        "短信" to "com.meizu.flyme.mms",
+        "相机" to "com.meizu.media.camera",
         "相册" to "com.android.gallery3d"
     )
 
-    /** 按应用名找包名（小窗展开用）：先查常用表，再枚举已装应用按 label 精确匹配
-     *  （C10：忽略大小写，只认精确相等，不做模糊包含）；找不到返回 null。
-     *  同名多包时返回第一个——任务循环里 launchApp 已先报过多候选错误，不会走到这里。 */
+    /** 按应用名找包名（小窗展开用）：先查常用表（含别名），再枚举已装应用——
+     *  先按 label 精确匹配（忽略大小写），无精确命中时子串兜底（label 含名字、
+     *  或名字含 label，名字至少 2 字，label 为空时不参与反向包含；第 6 批，
+     *  与 findAppCandidates 同款顺序）；找不到返回 null。
+     *  同名多包时精确匹配返回第一个（任务循环里 launchApp 已先报过多候选错误，
+     *  不会走到这里）；子串命中多个时不猜，返回 null。 */
     fun packageForApp(ctx: Context, name: String): String? {
         val key = name.trim().lowercase()
         WELL_KNOWN_APPS[key]?.let { return it }
@@ -597,21 +614,50 @@ object LocalCommands {
                 val label = pm.getApplicationLabel(app).toString()
                 if (label.equals(name.trim(), ignoreCase = true)) return app.packageName
             }
+            val query = name.trim()
+            if (query.length >= 2) {
+                var hit: String? = null
+                for (app in pm.getInstalledApplications(0)) {
+                    val label = pm.getApplicationLabel(app).toString()
+                    if (label.contains(query, ignoreCase = true) ||
+                        (label.isNotEmpty() && query.contains(label, ignoreCase = true))
+                    ) {
+                        if (hit != null) return null // 多个子串命中，不猜
+                        hit = app.packageName
+                    }
+                }
+                if (hit != null) return hit
+            }
         } catch (_: Exception) {
         }
         return null
     }
 
-    /** C10 + M28：按 label 精确匹配（忽略大小写）找全部候选，不做模糊匹配；
-     *  同名应用（如分身/双开）会返回多个，调用方走澄清问用户选哪个，绝不猜一个开。
-     *  枚举异常不上吞，由调用方接住并如实回报。 */
+    /** C10 + M28：第 6 批改成精确→子串两级（别名在调用方的常用表里先认，
+     *  如“红书”→小红书、“拨号”→电话）：先按 label 精确匹配（忽略大小写），
+     *  只有零精确命中时才走子串兜底（label 含名字、或名字含 label，名字至少
+     *  2 字，label 为空时不参与反向包含）——先精确后子串，免得“微信读书”把
+     *  “微信”也带进来造成假多候选；同优先级多个候选都返回，调用方走澄清
+     *  问用户选哪个，绝不猜一个开。枚举异常不上吞，由调用方接住并如实回报。 */
     private fun findAppCandidates(ctx: Context, name: String): List<Pair<String, String>> {
         val out = ArrayList<Pair<String, String>>()
         val pm = ctx.packageManager
+        val query = name.trim()
         for (app in pm.getInstalledApplications(0)) {
             val label = pm.getApplicationLabel(app).toString()
-            if (label.equals(name.trim(), ignoreCase = true)) {
+            if (label.equals(query, ignoreCase = true)) {
                 out.add(label to app.packageName)
+            }
+        }
+        if (out.isNotEmpty()) return out
+        if (query.length >= 2) {
+            for (app in pm.getInstalledApplications(0)) {
+                val label = pm.getApplicationLabel(app).toString()
+                if (label.contains(query, ignoreCase = true) ||
+                    (label.isNotEmpty() && query.contains(label, ignoreCase = true))
+                ) {
+                    out.add(label to app.packageName)
+                }
             }
         }
         return out
@@ -684,9 +730,10 @@ object LocalCommands {
     }
 
     /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。
-     *  C10：只认 label 精确匹配（忽略大小写，Andee DeviceActionsController.resolveLabel
-     *  同款）；匹配不上就返回明确错误（让模型看到错误再反问），绝不猜一个打开；
-     *  多个精确候选时不取最短/第一个，返回错误让调用方澄清。 */
+     *  第 6 批·匹配顺序：常用表直查（含别名）→ label 精确匹配（忽略大小写，
+     *  Andee DeviceActionsController.resolveLabel 同款）→ 子串兜底（无精确
+     *  命中时才走）；匹配不上就返回明确错误（让模型看到错误再反问），绝不
+     *  猜一个打开；多个同优先级候选时不取最短/第一个，返回错误让调用方澄清。 */
     private fun launchAppInternal(ctx: Context, name: String, fullscreen: Boolean = false): String {
         val pm = ctx.packageManager
         // 2026-10-24 跨应用修复第 1 件：按名字枚举应用时好时坏（21:56 任务循环里

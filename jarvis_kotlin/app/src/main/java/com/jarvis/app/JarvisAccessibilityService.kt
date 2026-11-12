@@ -63,6 +63,23 @@ class JarvisAccessibilityService : AccessibilityService() {
             "com.eg.android.AlipayGphone", // 支付宝
             "com.autonavi.minimap", // 高德地图
             "com.ss.android.ugc.aweme.lite", // 抖音极速版
+            // 第 6 批·断点 #11：把 AppKnowledge 里缺的补齐（原来 11 个里缺的 8 个，
+            // 加这批新补知识的淘宝/京东/百度地图），让三条旧路（视觉定位/技能/
+            // 调试看树）能在这些应用上用。
+            // 边界（有意不动）：白名单继续只守旧路，TaskLoop 主路本来就不认
+            // 它；FORBIDDEN_CLICK（付款/密码词）不扩到主路——主路点按仍只靠
+            // 提示词守，见第 6 批汇报。
+            "com.ss.android.ugc.aweme", // 抖音完整版
+            "com.xingin.xhs", // 小红书
+            "tv.danmaku.bili", // 哔哩哔哩
+            "com.smile.gifmaker", // 快手
+            "com.ss.android.article.news", // 今日头条
+            "com.sina.weibo", // 微博
+            "com.zhihu.android", // 知乎
+            "com.taobao.idlefish", // 闲鱼
+            "com.taobao.taobao", // 淘宝
+            "com.jingdong.app.mall", // 京东
+            "com.baidu.BaiduMap", // 百度地图
             "com.meizu.weather", // 魅族自带天气
             "com.meizu.flyme.weather", // 魅族天气（候选包名，未装则不命中）
             "com.meizu.flyme.dialer", // 电话（魅族）
