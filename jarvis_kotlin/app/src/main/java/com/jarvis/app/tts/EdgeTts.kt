@@ -83,6 +83,8 @@ object EdgeTts {
     private const val STALL_AFTER_MS = 20_000L
     // 预取等待上限：等下一句预取最多 5 秒，超时放弃预取、直接走当前句流式现取现播，不死等。
     private const val PREFETCH_WAIT_TIMEOUT_MS = 5_000L
+    // 语音第 2 批：焦点暂失后等 GAIN 的上限，与预取超时一致（5 秒）。
+    private const val FOCUS_GAIN_TIMEOUT_MS = 5_000L
     // 流式解码器已死的失败原因前缀（见 DecoderDeadException）：句循环凭它认出
     // “解码器错”并走整段回落；与握手失败的 IllegalStateException 区分开。
     private const val DECODER_DEAD_REASON = "流式解码器已释放"
@@ -427,7 +429,26 @@ object EdgeTts {
             com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句播报失败", reason)
         }
         try {
-            t.play()
+            // 语音第 2 批：建轨后立即验 state——Flyme 上 Builder 可能悄悄建成
+            // 一个未初始化的轨，往里写必报 AudioTrack.write 失败；未初始化就
+            // 直接记失败走现有兜底（return 会进 finally：关轨、释焦点、发 onDone(false)）。
+            if (t.state != AudioTrack.STATE_INITIALIZED) {
+                recordFailure(0, "AudioTrack 未初始化（state=${t.state}）", true)
+                return
+            }
+            // play() 无返回值（Unit）；验它是否真启动：抛异常或 playState 未进
+            // PLAYING 都按本句失败处理。
+            try {
+                t.play()
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioTrack.play threw", e)
+                recordFailure(0, "AudioTrack 播放失败", true)
+                return
+            }
+            if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                recordFailure(0, "AudioTrack 播放未启动（playState=${t.playState}）", true)
+                return
+            }
             try {
                 session = openSession()
             } catch (e: Exception) {
@@ -695,12 +716,37 @@ object EdgeTts {
         }
     }
 
+    // 语音第 2 批：焦点暂失时挂起写循环，别往暂停的轨里写——等 GAIN（playState 回到
+    // PLAYING）或 5 秒超时；超时返回 false，调用方按写失败处理（reason 仍是
+    // "AudioTrack.write 失败"，stoppedHere 判据不变）。
+    // stop() 会先把 track 置空再释放，等待中发现轨道已换也立刻返回 false，不死等。
+    private fun waitForFocusGain(t: AudioTrack): Boolean {
+        if (!focusPaused) return true
+        val deadline = SystemClock.elapsedRealtime() + FOCUS_GAIN_TIMEOUT_MS
+        while (true) {
+            if (track !== t) return false
+            val playing = runCatching { t.playState == AudioTrack.PLAYSTATE_PLAYING }.getOrDefault(false)
+            if (!focusPaused && playing) return true
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                Log.w(TAG, "audio focus gain timeout after ${FOCUS_GAIN_TIMEOUT_MS}ms, dropping write")
+                return false
+            }
+            try {
+                Thread.sleep(50)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+    }
+
     // L7：AudioTrack.write 的返回值必须检查，<= 0 即停；返回实际写入的帧数（失败返回 -1），
     // 调用方按返回值累加帧数，不再丢弃返回值后按 pcm.size/2 硬算。
     // 每次成功写出都刷新失速看门狗的 lastProgressAt。
     private fun writePcmFully(t: AudioTrack, pcm: ByteArray): Int {
         var off = 0
         while (off < pcm.size) {
+            // 语音第 2 批：焦点暂失时挂起，不往暂停的轨里写。
+            if (!waitForFocusGain(t)) return -1
             val n = try {
                 t.write(pcm, off, pcm.size - off)
             } catch (e: Exception) {
