@@ -290,7 +290,7 @@ object TaskLoop {
         // screenSig，同一签名在不同界面上做是不同的对；连续重复（签名连着上一步）
         // 不进这里，仍归重复守卫（见执行前的 consecutiveSameSig）。
         val loopSeen = LinkedHashMap<String, Int>().also { map ->
-            resumeFrom?.loopSeen?.entries?.takeLast(MAX_LOOP_PAIRS)?.forEach { map[it.key] = it.value }
+            resumeFrom?.loopSeen?.entries?.toList()?.takeLast(MAX_LOOP_PAIRS)?.forEach { map[it.key] = it.value }
         }
         // 无进展计数：连续多少步没有出现 tap/longPress/type/zoom 这类真交互，
         // 见上方的说明。任何一步出现这几种动作就清零；计数只用于强制带图。

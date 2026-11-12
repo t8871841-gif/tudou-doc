@@ -1818,7 +1818,7 @@ class MainActivity : Activity() {
                 // 第 1 批·液态玻璃：底色与圆角与旧版一字不差（当前状态色的 38%→30% 对角渐变），
                 // 只把背景层换成共用组件——高光边 + 顶部柔光 + 底部内阴影由组件加。
                 LiquidGlass.bubble(
-                    this,
+                    this@MainActivity,
                     HudPalette.withAlpha(color, 0.38f), HudPalette.withAlpha(sec, 0.30f),
                     floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
                 )
@@ -1826,7 +1826,7 @@ class MainActivity : Activity() {
                 // 第 1 批·液态玻璃：旧版是白 6% 平色 + 1dp 白 8% 描边；改成白 14%→5% 的
                 // 微透渐变底（顶部稍亮，平均透度与旧版相近），高光边与柔光由组件加。
                 LiquidGlass.bubble(
-                    this,
+                    this@MainActivity,
                     0x24FFFFFF, 0x0DFFFFFF,
                     floatArrayOf(dp(4).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
                 )

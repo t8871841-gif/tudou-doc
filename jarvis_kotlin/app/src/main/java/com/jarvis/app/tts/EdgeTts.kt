@@ -534,7 +534,7 @@ object EdgeTts {
                     }
                 }
                 val playOne: (EdgeSession?) -> StreamResult = { sess ->
-                    streamSentence(seq, sentence, voice, ratePct, pitchHz, sess, writePcm)
+                    streamSentence(seq, sentence, voice, ratePct, pitchHz, sess, onPcm = writePcm)
                 }
                 var result: StreamResult = try {
                     if (streamingDecoderDead) {
