@@ -20,7 +20,9 @@ import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
+import com.jarvis.app.task.ShizukuHelper
 import com.jarvis.app.task.UiSelector
 import org.json.JSONArray
 import org.json.JSONObject
@@ -476,6 +478,8 @@ class ScreenController(
      * 小窗里的东西点不到。打开后调这里：按包名找到目标应用的窗口，若未铺满屏幕，
      * 就把它的顶栏拖到屏幕顶沿展开成全屏，再复核一次。成败都如实返回，不抛异常、
      * 不阻塞任务——展开失败时任务照常继续，审计里能看到原因。
+     * 第 2 批：拖动之前先试一次 Shizuku shell（am start --windowingMode 1），
+     * shell 不成再拖动。
      */
     fun expandFloatingApp(targetPkg: String): JSONObject {
         val out = JSONObject()
@@ -497,6 +501,14 @@ class ScreenController(
         if (isFullscreen(before)) {
             out.put("expanded", false)
             out.put("detail", "已是全屏，不用展开")
+            return out
+        }
+        // 第 2 批·先试 Shizuku shell 展开：反射与拖动都已证实不可靠，
+        // shell 跑 am start --windowingMode 1 是另一条路。成了直接返回；
+        // 不成、或 Shizuku 不可用/未授权时落回下面的拖动老路。
+        if (tryShellExpand(targetPkg, before)) {
+            out.put("expanded", true)
+            out.put("detail", "小窗已展开成全屏（Shizuku shell）")
             return out
         }
         // 横条在窗口最下方：往下拖横条展开成全屏（用户纠正：往下走是全屏，
@@ -527,6 +539,57 @@ class ScreenController(
             out.put("detail", "拖动后仍是小窗，展开失败")
         }
         return out
+    }
+
+    /**
+     * 第 2 批·Shizuku shell 展开（评估）：以 shell 身份跑
+     * `am start --windowingMode 1 -n <launcher 组件>`，把目标应用的窗口
+     * 直接改成全屏模式；等一下再重测窗口，铺满屏幕（≥80%）才算成。
+     * Shizuku 不可用 / 未授权 / 没有 launcher 组件时整段跳过，只写审计、
+     * 不抛异常、不阻塞，调用方落回拖动老路。只供 expandFloatingApp 调。
+     */
+    private fun tryShellExpand(targetPkg: String, before: Rect): Boolean {
+        if (!ShizukuHelper.isShizukuAvailable(service)) {
+            AuditLog.append(service, "小窗展开", "Shizuku shell", "跳过：Shizuku 不可用（未安装或守护进程未启动）")
+            return false
+        }
+        if (!ShizukuHelper.hasPermission()) {
+            AuditLog.append(service, "小窗展开", "Shizuku shell", "跳过：Shizuku 未授权")
+            return false
+        }
+        val component = try {
+            service.packageManager.getLaunchIntentForPackage(targetPkg)?.component
+        } catch (_: Exception) {
+            null
+        }
+        if (component == null) {
+            AuditLog.append(service, "小窗展开", "Shizuku shell", "跳过：${targetPkg} 没有 launcher 界面")
+            return false
+        }
+        val cls = component.className
+        val fullCls = if (cls.startsWith(".")) targetPkg + cls else cls
+        val compArg = "$targetPkg/$fullCls"
+        val result = runCatching {
+            ShizukuHelper.runShell(arrayOf("am", "start", "--windowingMode", "1", "-n", compArg))
+        }.getOrNull()
+        if (result == null) {
+            AuditLog.append(service, "小窗展开", "Shizuku shell", "命令没跑起来：am start --windowingMode 1 -n ${compArg}")
+            return false
+        }
+        val output = result.stdout.replace("\n", " ").replace("\r", " ").take(200)
+        AuditLog.append(
+            service, "小窗展开", "Shizuku shell",
+            "am start --windowingMode 1 -n ${compArg}，退出码 ${result.exitCode}，输出：${output}"
+        )
+        try { Thread.sleep(1000) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
+        val after = appWindow(targetPkg)
+        val afterText = if (after == null) "没找到窗口" else "${after.width()}x${after.height()}"
+        val ok = after != null && isFullscreen(after)
+        AuditLog.append(
+            service, "小窗展开", "Shizuku shell",
+            "展开前 ${before.width()}x${before.height()}，展开后 ${afterText}，${if (ok) "已全屏" else "仍是小窗"}"
+        )
+        return ok
     }
 
     /** 该包名的应用窗口（取最大的一个）；没有返回 null。 */
