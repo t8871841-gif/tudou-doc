@@ -1,6 +1,7 @@
 package com.jarvis.app.task
 
 import android.os.Binder
+import android.os.IBinder
 import android.os.Parcel
 import android.os.SystemClock
 import java.io.ByteArrayOutputStream
@@ -26,6 +27,9 @@ class ShellUserService : Binder(), IShellService {
     init {
         attachInterface(this, IShellService.DESCRIPTOR)
     }
+
+    // IInterface 的 asBinder：Binder 只实现 IBinder、本身没有这个方法，必须显式补上。
+    override fun asBinder(): IBinder = this
 
     override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
         if (code == IShellService.TRANSACTION_runCommand) {
