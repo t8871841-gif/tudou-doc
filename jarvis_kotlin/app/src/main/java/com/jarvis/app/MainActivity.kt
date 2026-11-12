@@ -299,14 +299,15 @@ class MainActivity : Activity() {
         root.addView(contentView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         setContentView(root)
 
-        // D 批·对话区背景图：全屏照片层，垫在 contentView 与 settingsScroll 下面
-        // （root 是 FrameLayout，index 0 = 最底层）；没选图时 GONE，homePanel
-        // 与 settingsScroll 沿用深空渐变。CENTER_CROP：照片铺满屏，裁边不留黑条。
+        // D 批·对话区背景图：全屏照片层，垫在 contentView 与 settingsScroll 下面，
+        // 但必须在 GradientLayerView（不透明紫渐变，root index 0）之上——插 index 0
+        // 会被它全盖住，照片永远看不见。没选图时 GONE，homePanel 与 settingsScroll
+        // 沿用深空渐变。CENTER_CROP：照片铺满屏，裁边不留黑条。
         dialogueBgImageView = ImageView(this).apply {
             layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             scaleType = ImageView.ScaleType.CENTER_CROP
             visibility = View.GONE
-        }.also { root.addView(it, 0) }
+        }.also { root.addView(it, 1) }
         refreshDialogueBackground()
 
         // HUD WebView 常驻（只建一次），竖屏藏起来停渲染，横屏全屏显示；再按当前方向摆一次。
