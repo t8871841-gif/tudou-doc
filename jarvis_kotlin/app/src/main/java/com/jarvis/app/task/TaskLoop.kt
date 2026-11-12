@@ -135,7 +135,7 @@ object TaskLoop {
      * （截图策略），让模型有图可破局；真正的兜底是 MAX_STEPS 与重复守卫。
      * 没有把 swipe 算进“真操作”——滑动本身更像是在找东西，不一定代表任务在往前推进。
      */
-    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow", "browse", "browserTap", "browserBack")
+    private val REAL_ACTION_KINDS = setOf("tap", "longPress", "type", "zoom", "flow", "browse", "browserTap", "browserBack", "sendChat")
 
     private const val MODEL_TIMEOUT_SEC = 200L // Andee 对齐：客户端读超时 180 秒，闩锁须大于它才不先成瓶颈
     private const val COMPACT_CHARS = 2500
@@ -1425,6 +1425,7 @@ object TaskLoop {
         "swipe", "scroll_to" -> "正在滑动……"
         "zoom" -> "正在放大看……"
         "openApp" -> "正在打开应用……"
+        "sendChat" -> "正在发消息……"
         "browse", "browserTap", "browserBack" -> "正在打开网页……"
         "back", "home" -> "正在返回……"
         "find" -> "正在找目标……"
@@ -1740,7 +1741,7 @@ private fun askToolsModel(
     val latch = CountDownLatch(1)
     var reply: DeepSeekLlmClient.Reply? = null
     var error: String? = null
-    val specs = DeepSeekLlmClient.toolSpecs(ToolSchemas.all(), DONE_FAIL_SPECS)
+    val specs = DeepSeekLlmClient.toolSpecs(ToolSchemas.all(), DONE_FAIL_SPECS, SEND_CHAT_SPEC)
     Thread {
         try {
             reply = client.complete(messages, specs)
@@ -2347,6 +2348,9 @@ val screenChangeUnknown: Boolean = false
 
 /** 一个工具调用的映射种类（给合成动作的 action 字段、守卫与核验的 kind 集合用）。 */
 private fun toolKindOf(call: DeepSeekLlmClient.ToolCall): String {
+    // 根治第 3 批·发送定型是 Jarvis 自加的工具，不在 1:1 工具表里，
+    // methodOf 查不到——在这里先认出来。
+    if (call.name == "send_chat_message") return "sendChat"
     return when (ToolSchemas.methodOf(call.name)) {
         "screen.ui_tree" -> "ui_tree"
         "screen.tap_id", "screen.tap" -> "tap"
@@ -2465,12 +2469,17 @@ private fun uiTreeSummary(dump: JSONObject, prefix: String): String {
 }
 
 private fun dispatchToolCall(ctx: Context, controller: ScreenController, call: DeepSeekLlmClient.ToolCall): StepResult {
-    val method = ToolSchemas.methodOf(call.name)
+    // 根治第 3 批·发送定型是 Jarvis 自加的工具（method "task.send_chat"），
+    // 不在 1:1 工具表里，methodOf 查不到——在这里先认出来。
+    val method = if (call.name == "send_chat_message") "task.send_chat"
+        else ToolSchemas.methodOf(call.name)
         ?: return StepResult("未知工具：${call.name}", false, null, null, "UNKNOWN")
     val args = call.argumentsOrNull()
         ?: return StepResult("${call.name} 的参数不是合法 JSON：${call.argumentsRaw.take(80)}", false, null, null, "PARSE_ERROR")
     return try {
         when (method) {
+            // 根治第 3 批·发送定型：核对标题 → 输入 → 点发送 → 确认气泡，一条龙在里面做完。
+            "task.send_chat" -> sendChatMessage(ctx, controller, args)
             "screen.tap_id", "screen.tap", "screen.long_press_id", "screen.long_press",
             "screen.swipe", "screen.type", "screen.submit_input", "screen.look_region",
             "device.launch" -> {
@@ -2684,6 +2693,206 @@ private fun dispatchToolCall(ctx: Context, controller: ScreenController, call: D
     } catch (e: Exception) {
         StepResult("执行 ${call.name} 出错：${e.message ?: e.javaClass.simpleName}", false, null, null, errorCodeFor(e.message.orEmpty()))
     }
+}
+
+/** 顶栏标题候选（一行文字 + 中心坐标）。 */
+private data class TitleLine(val text: String, val x: Int, val y: Int)
+
+/** 顶栏是这些时说明根本不在会话里（聊天列表/通讯录/发现/个人页）。 */
+private val NON_CHAT_TITLES = setOf("微信", "通讯录", "发现", "我")
+
+/**
+ * 根治第 3 批·发送定型（Andee 和 Jarvis 都没有的关卡，代码自己做，不靠模型自觉）：
+ * 在当前会话里发一条消息，分五步——
+ * 1. 核对会话标题：fresh 树里读顶栏，树被扣留或读不到节点时拍一张干净图跑 OCR
+ *    读顶栏；标题对不上 recipient 直接拦下（进错会话是 2026-11-12 两次失败的
+ *    根因，两次都进了小丽的聊天）；顶栏是“微信/通讯录/发现/我”说明根本不在
+ *    会话里；标题读不到时不猜、不发。
+ * 2. 点输入框：树里有可编辑节点就按编号点；盲树点底栏输入区 [500, 960]
+ *    （走 execute()，盲树被拒时自动 zoom 补救兜底）。
+ * 3. 输入并校验：type 之后重新读树，输入框里没有这句话就停下不发
+ *    （树读不到时跳过这步校验，靠第 5 步的气泡确认兜底）。
+ * 4. 点发送：树里找“发送”按编号点；盲树跑 OCR 找“发送”按坐标点。
+ * 5. 确认气泡：等 1 秒重新读屏，消息正文出现才算成功；没确认到就如实报
+ *    “没确认到”，让模型自己看一眼再决定，不假装发出去了。
+ * 每步失败都收成一句工具结果（ok=false + 原因），不抛错——只有被急停打断
+ * 才原样抛出 InterruptedException（外层 dispatchToolCall 负责）。
+ */
+private fun sendChatMessage(ctx: Context, controller: ScreenController, args: JSONObject): StepResult {
+    val recipient = args.optString("recipient").trim()
+    val message = args.optString("message")
+    if (recipient.isEmpty()) return StepResult("send_chat_message 缺少 recipient（发给谁）", false, null, null, "PARSE_ERROR")
+    if (message.isEmpty()) return StepResult("send_chat_message 的 message 为空，没什么可发", false, null, null, "PARSE_ERROR")
+
+    // 1. 核对会话标题。
+    val dump = try {
+        controller.dumpUiTree()
+    } catch (e: Exception) {
+        return StepResult("核对标题时读不到界面：${e.message}，没敢发送", false, null, null, "UNKNOWN")
+    }
+    val elements = dump.optString("elements")
+    val compact = dump.optString("compact")
+    var title = titleFromElements(elements)
+    if (title == null && (dump.optBoolean("withheld", false) || dump.optInt("nodes_useful", 0) == 0)) {
+        title = titleFromOcrShot(ctx, controller)
+    }
+    if (title == null) {
+        return StepResult("核对不了当前会话标题（树被扣留且 OCR 没读到顶栏），没敢发送：请先调 get_screen_element 或 take_screenshot 再看一眼", false, null, null, "UNKNOWN")
+    }
+    if (title in NON_CHAT_TITLES) {
+        return StepResult("当前不在会话里（顶栏是「$title」），没敢发送：请先打开要发的人的会话", false, null, null, "ELEMENT_NOT_FOUND")
+    }
+    if (!titlesMatch(title, recipient)) {
+        return StepResult("当前会话标题是「$title」，不是「$recipient」，没敢发送：请退回（back）重找；通讯录里再确认一下名字，找不到就调 fail 说没找到", false, null, null, "ELEMENT_NOT_FOUND")
+    }
+
+    // 2. 点输入框。
+    val inputEid = compact.lineSequence()
+        .map { it.trim().split("|") }
+        .filter { it.size >= 3 && it[1] == "Input" }
+        .map { it[0].trim() }
+        .firstOrNull { it.isNotEmpty() }
+    val tapInput = if (inputEid != null) {
+        execute(ctx, controller, JSONObject().put("action", "tap").put("eid", inputEid))
+    } else {
+        execute(ctx, controller, JSONObject().put("action", "tap").put("x", 500).put("y", 960))
+    }
+    if (!tapInput.ok && !tapInput.outcomeUnknown) {
+        return StepResult("输入框点不中（${tapInput.summary}），没敢继续发", false, null, null, tapInput.code.ifEmpty { "UNKNOWN" })
+    }
+
+    // 3. 输入 + 字段校验（复用输入校验的抽字段逻辑；树读不到时跳过，靠气泡兜底）。
+    val typed = execute(ctx, controller, JSONObject().put("action", "type").put("text", message))
+    if (!typed.ok && !typed.outcomeUnknown) {
+        return StepResult("输入失败（${typed.summary}），没发", false, null, null, typed.code.ifEmpty { "UNKNOWN" })
+    }
+    val afterType = try { controller.dumpUiTree() } catch (_: Exception) { null }
+    if (afterType != null && !afterType.optBoolean("withheld", false)) {
+        val fields = extractInputFieldTexts(afterType.optString("compact"), afterType.optString("elements"))
+            .map { it.replace(Regex("\\s"), "") }
+            .filter { it.isNotEmpty() }
+        val norm = message.replace(Regex("\\s"), "")
+        if (fields.isNotEmpty() && fields.none { it.contains(norm) || norm.contains(it) }) {
+            return StepResult("输入后校验不通过：输入框里没有这句话（框里是「${fields.first()}」），没敢发送", false, null, null, "ELEMENT_NOT_FOUND")
+        }
+    }
+
+    // 4. 点发送：树里找“发送”按编号点；盲树跑 OCR 找“发送”按坐标点。
+    val sendEid = afterType?.let { findEidByText(it.optString("compact"), it.optString("elements"), "发送") }
+    val tapSend = when {
+        sendEid != null -> execute(ctx, controller, JSONObject().put("action", "tap").put("eid", sendEid))
+        else -> {
+            val xy = findSendButtonByOcr(ctx, controller)
+                ?: return StepResult("没找到发送按钮（树里没有、OCR 也没读到），消息还留在输入框里没发", false, null, null, "ELEMENT_NOT_FOUND")
+            execute(ctx, controller, JSONObject().put("action", "tap").put("x", xy.first).put("y", xy.second))
+        }
+    }
+    if (!tapSend.ok && !tapSend.outcomeUnknown) {
+        return StepResult("点发送失败（${tapSend.summary}），消息可能还在输入框里", false, null, null, tapSend.code.ifEmpty { "UNKNOWN" })
+    }
+
+    // 5. 确认气泡出现。
+    try { Thread.sleep(1000) } catch (e: InterruptedException) { throw e }
+    val afterSend = try { controller.dumpUiTree() } catch (_: Exception) { null }
+    val needle = message.replace(Regex("\\s"), "").take(20)
+    val inTree = afterSend != null && !afterSend.optBoolean("withheld", false) &&
+        (afterSend.optString("elements") + "\n" + afterSend.optString("compact"))
+            .replace(Regex("\\s"), "").contains(needle)
+    val inOcr = if (!inTree && (afterSend == null || afterSend.optBoolean("withheld", false))) {
+        ocrShotLines(ctx, controller)?.any { it.text.replace(Regex("\\s"), "").contains(needle) } == true
+    } else false
+    return if (inTree || inOcr) {
+        StepResult("已发送给「$title」：$message（已确认消息气泡出现）", true, true, null, "")
+    } else {
+        StepResult("已点发送，但没确认消息气泡出现（又读了一遍屏，树/OCR 都没读到这句话）——请你自己看一眼屏幕，确认到了就调 done，没到就重试或调 fail", false, true, null, "UNKNOWN", true)
+    }
+}
+
+/** 从元素大纲里抽顶栏标题：顶栏（y 30–170）里最居中的短文字。返回 null =
+ * 顶栏没字（树被扣留时大纲是空的，也走这条）。大纲行格式
+ * 「e3*|Button|发送|[540,210]」，坐标是 0–1000。 */
+private fun titleFromElements(elements: String): String? {
+    val candidates = elements.lineSequence()
+        .map { it.trim().split("|") }
+        .filter { it.size >= 4 }
+        .mapNotNull { parts ->
+            val text = parts[2].trim()
+            val coords = parts[3].trim().removeSurrounding("[", "]").split(",")
+            if (coords.size < 2) return@mapNotNull null
+            val x = coords[0].trim().toIntOrNull() ?: return@mapNotNull null
+            val y = coords[1].trim().toIntOrNull() ?: return@mapNotNull null
+            TitleLine(text, x, y)
+        }
+        .filter { it.text.isNotEmpty() && it.y in 30..170 && it.text.length <= 15 }
+        .sortedWith(compareBy({ Math.abs(it.x - 500) }, { it.y }))
+    return candidates.firstOrNull()?.text
+}
+
+/** 从 OCR 行里抽顶栏标题：同款逻辑（顶栏最居中的短文字），另滤掉截图网格
+ * 的格号（A1–H12、单字母 A–H）。 */
+private fun titleFromOcrLines(lines: List<OcrReader.OcrLine>): String? {
+    return lines
+        .map { it.text.trim() to it }
+        .filter { (text, line) ->
+            text.isNotEmpty() && line.centerY in 30..170 && text.length <= 15 &&
+                !text.matches(Regex("^[A-H][0-9]{1,2}$")) && !text.matches(Regex("^[A-H]$"))
+        }
+        .sortedWith(compareBy({ Math.abs(it.second.centerX - 500) }, { it.second.centerY }))
+        .firstOrNull()?.first
+}
+
+/** 拍一张干净图跑 OCR 读顶栏；拍不到/认不出返回 null。 */
+private fun titleFromOcrShot(ctx: Context, controller: ScreenController): String? {
+    val lines = ocrShotLines(ctx, controller) ?: return null
+    return titleFromOcrLines(lines)
+}
+
+/** 拍一张干净图跑 OCR，返回识别出的行；拍不到/认不出返回 null（不抛错）。
+ * 无障碍截图那张带网格，网格字母由调用方过滤；录屏通道的图没网格。 */
+private fun ocrShotLines(ctx: Context, controller: ScreenController): List<OcrReader.OcrLine>? {
+    val (jpeg, _) = accessibilityShot(controller, ctx)
+    val shot = jpeg ?: projectionShot(ctx).first ?: return null
+    val bmp = try {
+        val bytes = Base64.decode(shot, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    } catch (_: Exception) {
+        null
+    } ?: return null
+    return try {
+        OcrReader.legible(OcrReader.read(bmp, 5000))
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/** 标题与收件人是否同一人：去空白、小写后相等，或一方包含另一方（≥2 字）。
+ * 同款逻辑见 OcrReader.same——短名也认（如“小丽”对上“小丽（备注）”）。 */
+private fun titlesMatch(title: String, recipient: String): Boolean {
+    val t = title.replace(Regex("\\s"), "").lowercase()
+    val r = recipient.replace(Regex("\\s"), "").lowercase()
+    if (t.isEmpty() || r.isEmpty()) return false
+    return t == r || (r.length >= 2 && t.contains(r)) || (t.length >= 2 && r.contains(t))
+}
+
+/** 在紧凑表/元素大纲里按文字找一个可点元素的编号（紧凑表优先，元素大纲兜底）。
+ * 元素大纲的编号带 * 标记（e3*），lookupEid 不认星号，进 tap 前先去掉。 */
+private fun findEidByText(compact: String, elements: String, text: String): String? {
+    for (source in listOf(compact, elements)) {
+        val hit = source.lineSequence()
+            .map { it.trim().split("|") }
+            .filter { it.size >= 3 && it[2].trim() == text }
+            .map { it[0].trim().removeSuffix("*") }
+            .firstOrNull { it.isNotEmpty() }
+        if (hit != null) return hit
+    }
+    return null
+}
+
+/** 盲树下跑 OCR 找“发送”按钮的中心坐标（0-1000）；找不到返回 null。 */
+private fun findSendButtonByOcr(ctx: Context, controller: ScreenController): Pair<Int, Int>? {
+    val lines = ocrShotLines(ctx, controller) ?: return null
+    val hit = lines.firstOrNull { it.text.trim() == "发送" } ?: return null
+    return hit.centerX to hit.centerY
 }
 
 /** 一步里的工具结果（聚成一个 StepResult 给循环后半段用 + 每条回喂给模型）。 */
@@ -3303,6 +3512,7 @@ private const val SYSTEM_PROMPT_TOOLS =
 "屏幕下方有个「停止」按钮，用户随时可以点它停下任务；任务可能因此提前结束，不用你处理。" +
 "有些应用不给元素大纲（只有截图或干脆是空的）：节点总数为 0 说明这一屏是自绘的（小程序、网页、游戏画布），优先用 back/home 退出换路线，不要盲点坐标；节点有数但带名的为 0 时，大纲的分组和中心还在，拿截图和大纲的缩进、坐标对位，用编号点，别降级成坐标点。" +
 "发消息这类任务，要依次完成：打开应用、找到联系人、点开会话、输入消息、点发送，发送完成才能调 done；" +
+"找人发消息的硬规矩：先调 search_contacts 拿真名——任务里说的名字可能是关系称呼（如“老婆”），通讯录里未必这么存；先搜全名，搜不到就搜前半截、试同音字；还是没有就调 fail 说“没找到”，绝不猜一个长得像的人。进会话后不要自己输文字、自己点发送——一律单独调 send_chat_message（它自己核对会话标题、输入、点发送、确认气泡出现）；它说标题对不上时就退回（back）重找，找不到就调 fail。找人优先用应用内搜索框，不要滚动翻列表。\n" +
 "绝不输入密码、验证码；绝不点付款、转账、删除类按钮，除非任务原文明确要求。"
 
 /** 终态工具（Jarvis 自加，不进 ToolSchemas 的 1:1 工具表）：任务完成调 done，做不下去调 fail。 */
@@ -3341,6 +3551,39 @@ private val DONE_FAIL_SPECS: JSONArray = JSONArray().apply {
                         )
                     )
                     .put("required", JSONArray().apply { put("reason") })
+            )
+    )
+}
+
+/** 发送定型工具（Jarvis 自加，不进 ToolSchemas 的 1:1 工具表）：在当前会话里
+ * 发一条消息。代码自己核对会话标题（进错会话直接拦下）、输入、点发送、确认
+ * 消息气泡出现——模型不用自己输文字、自己点发送。 */
+private val SEND_CHAT_SPEC: JSONArray = JSONArray().apply {
+    put(
+        JSONObject()
+            .put("name", "send_chat_message")
+            .put("method", "task.send_chat")
+            .put(
+                "description",
+                "Send a message in the chat you are currently in. It verifies the chat title matches the recipient, types the message, taps Send, and confirms the message bubble appeared. Call it alone, after you have opened the right chat. Do not type or tap send yourself."
+            )
+            .put(
+                "parameters", JSONObject()
+                    .put("type", "object")
+                    .put(
+                        "properties", JSONObject()
+                            .put(
+                                "recipient", JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "Who the message is for, as shown in the chat title (the real name from search_contacts).")
+                            )
+                            .put(
+                                "message", JSONObject()
+                                    .put("type", "string")
+                                    .put("description", "The message text to send, verbatim.")
+                            )
+                    )
+                    .put("required", JSONArray().apply { put("recipient"); put("message") })
             )
     )
 }
