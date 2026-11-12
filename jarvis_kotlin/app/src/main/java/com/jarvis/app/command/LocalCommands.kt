@@ -713,7 +713,9 @@ object LocalCommands {
                         // 不再走后台直接启动（Flyme 默认给小窗）。
                         val result = launchPackage(ctx, chosen.payload, name.trim(), fullscreen = true)
                         AuditLog.append(ctx, "本地指令", "打开应用（澄清后选定）", "${chosen.label}：$result")
-                        speak(result)
+                        // 小窗当默认接受（2026-11-12 用户定）：只念“正在打开X”，不念小窗展开失败的后缀；
+                        // 后缀仍在返回值里（任务循环/模型照常看到，审计照常记），只不进语音。
+                        speak(if (result.startsWith("正在打开")) "正在打开${name.trim()}" else result)
                     }
                     val listText = candidates.mapIndexed { i, (_, pkg) -> "第${i + 1}个，$pkg" }.joinToString("；")
                     AuditLog.append(ctx, "本地指令", "打开$name·需要澄清", "${candidates.size}个同名应用，已反问")
@@ -726,7 +728,10 @@ object LocalCommands {
         // 用户 2026-11-05 原话“不要小窗，我要应用全屏”）；launchAppInternal /
         // launchPackage 里 fullscreen=false 的后台直接启动分支，日常打开这条路不再走。
         val result = launchAppInternal(ctx, name, fullscreen = true)
-        main.post { speak(result) }
+        // 小窗当默认接受（2026-11-12 用户定）：只念“正在打开X”，不念小窗展开失败的后缀；
+        // 后缀仍在返回值里（任务循环/模型照常看到，审计照常记），只不进语音。
+        val spoken = if (result.startsWith("正在打开")) "正在打开${name.trim()}" else result
+        main.post { speak(spoken) }
     }
 
     /** 按应用名找已装应用并拉起，返回一句结果描述；成功/失败都写审计。
