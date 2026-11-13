@@ -1,7 +1,10 @@
 # 并发与生命周期治理（框架第 3 步，2026-11-13）
 
-全仓 @Volatile 共 135 处（37 个文件）。这一步不宣称全查完：热路径模块逐项核
-对过，其余模块只列数量、留待以后改动时按规则补核对。规则先立，清单后补。
+全仓 @Volatile 共 135 处（36 个文件，jarvis_kotlin 模块内）。计数只数注解行
+（@Volatile 单独成行）；注释/KDoc 里提到这个词的不算——复审第 2 批订正：
+之前 OfflineAsrSession、EdgeTts 的数就是这么多算 1 处的。这一步不宣称全查完：
+热路径模块逐项核对过，其余模块只列数量、留待以后改动时按规则补核对。规则先
+立，清单后补。
 
 ## 规则（三条，不能错）
 
@@ -15,7 +18,7 @@
 
 ## 已核对的模块（2026-11-13，逐项读过）
 
-### tts/EdgeTts.kt（16 处）——owner：EdgeTts 自己；统一清理点 stop()
+### tts/EdgeTts.kt（18 处）——owner：EdgeTts 自己；统一清理点 stop()
 - `mySeq`：代际计数，stop() 里自增；`cancelled(seq)` 是唯一的“还有效吗”判据。
 - `socket` / `prefetchSocket`：各归各的线程；stop() 全关；解码器死时也关
   prefetchSocket（排雷 A 批：阻塞的 SSLSocket 读不响应 interrupt，只 cancel
@@ -39,7 +42,7 @@
 - `cachedImePackages`：每任务开始时清（排雷 B 批），查已启用的输入法列表。
 - `lastProjectionUnavailableLogAt`：日志节流时间戳，不用清。
 
-### screen/ScreenController.kt（12 处）——owner：ScreenController
+### screen/ScreenController.kt（10 处）——owner：ScreenController
 - `cachedImePackages`：同 TaskLoop，每任务由 runBlocking 调 clearImeCache() 清。
 - `lastDumpPkg`：每次 dump 重写；`eidEpoch`：每次 dump 自增（s-id 的 epoch）。
 - `zoomRegion` / `zoomAtMs` / `zoomSize`：zoom 状态，带时间戳，手势/回退
@@ -91,6 +94,12 @@
   不清，注释“下次跑任务重查”是空话。违反规则 1：没人是清理的 owner。
 - **建轨没包 try/catch（2026-11-13，排雷 D）**：build() 抛异常绕开所有
   诊断、onDone 也不回。违反规则 2：失败路径没进统一清理。
+- **计数方法（2026-11-13，复审第 2 批）**：之前是简单 grep 文本数 "@Volatile"
+  出现次数，注释里提到这个词的也被算进去（OfflineAsrSession 88 行注释、
+  EdgeTts 复审批注释各 1 次）。现改为只数注解行；EdgeTts 16→18（复审批
+  F8 补的 2 处）、ScreenController 12→10（复审批 F7 删的 2 处）、
+  OfflineAsrSession 13（G3 把 gotAnyFinalOrError 提成对象级 @Volatile 后是
+  13 处真注解，之前是 12 处 + 1 次注释提及）。
 
 ## 开放项
 

@@ -1150,9 +1150,26 @@ object TaskLoop {
                     repeats = 0
                 }
                 if (repeats >= MAX_REPEATS) {
-                    finalReply = "任务卡在第 $step 步：同一个动作（$kind）连着重复多次、界面没有进展，已停下。" +
-                        "当前停在${pkg.ifEmpty { "未知界面" }}。"
+                    // 复审第 2 批：重复守卫也要记断点——跟遍历环停下同款收尾（与锁屏
+                    // 一致）：写断点、播报“说继续”。原来只 return，断点丢了，用户
+                    // 说“继续”也接不上；内部任务（saveResume=false）不记断点、不发那句。
+                    history += "第 $step 步：同一个动作（$kind）连着重复多次、界面没有进展，已停下"
                     AuditLog.append(ctx, "任务循环", "重复守卫触发", "$kind 连续重复")
+                    if (saveResume) {
+                        TaskResumeState.offer(
+                            taskText, history.toList(), step - 1,
+                            foregroundPkg = lastObservedPkg.takeIf { it.isNotEmpty() },
+                            plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
+                            screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
+                            notes = notes.toList(),
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
+                        )
+                        stoppedWithResume = true
+                        finalReply = "任务卡在第 $step 步：同一个动作（$kind）连着重复多次、界面没有进展，已停下。说「继续」可以接着做。"
+                    } else {
+                        finalReply = "任务卡在第 $step 步：同一个动作（$kind）连着重复多次、界面没有进展，已停下。" +
+                            "当前停在${pkg.ifEmpty { "未知界面" }}。"
+                    }
                     return
                 }
                 // ---------- 第八批·遍历环检测：执行前判定（Minitap 元认知“发现循环”的 TaskLoop 版，确定性代码、不调模型、不额外取树） ----------

@@ -104,6 +104,14 @@ object OfflineAsrSession {
     @Volatile
     private var loadTimeoutRunnable: Runnable? = null
 
+    /** 复审第 2 批：本轮是否已有最终结果或错误——loadTimeout（主线程）与
+     * onReady/onFinal/onError（引擎回调线程）共同读写。原来是 listenOnce()
+     * 里的局部 var，Kotlin 编成 Ref.BooleanRef、字段本身不是 volatile，
+     * 超时与结果同时到时两边可能都以为自己是第一个。提成对象级 @Volatile，
+     * 与本组其他轮次状态同款。 */
+    @Volatile
+    private var gotAnyFinalOrError = false
+
     // ---- H3：收音侧音频焦点（内联实现，不另建共享文件）----
     /** 当前轮次的焦点句柄（stop() 取走它去释放；每轮一个对象，不会错放新轮次的焦点）。 */
     @Volatile
@@ -147,8 +155,7 @@ object OfflineAsrSession {
         heardAnything = false
         engineReady = false
         chunksSent = 0
-
-        var gotAnyFinalOrError = false
+        gotAnyFinalOrError = false
 
         // C2：模型加载加超时——20 秒还没 onReady 就报“识别加载超时”，而不是静默无反应。
         val loadTimeout = Runnable {

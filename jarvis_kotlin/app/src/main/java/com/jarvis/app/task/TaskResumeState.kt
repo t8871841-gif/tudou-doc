@@ -142,6 +142,15 @@ object TaskResumeState {
      * 取走时记下原有效期，restore() 按它补回核实消耗的时间（见 M21）。
      */
     fun take(): ResumeInfo? {
+        // 复审第 2 批：重入防护——上一次 take() 还没配对 restore() 时，
+        // takenExpiresAt/takenAt 还留着第一次的值；这时再 take() 会把它们
+        // 清掉，第一次的 restore() 因 null 直接返回 false、断点永久丢失。
+        // 现在只有一个调用点（TripLoop.verifyAndRevise），今天撞不上；
+        // 但函数本身必须有防护：重复 take 只记日志、不动已存的值。
+        if (takenExpiresAt != null || takenAt != null) {
+            Log.w(TAG, "take() called while a previous take is outstanding; ignoring")
+            return null
+        }
         val p = pending ?: run { takenExpiresAt = null; takenAt = null; return null }
         pending = null
         if (System.currentTimeMillis() > p.expiresAt) {

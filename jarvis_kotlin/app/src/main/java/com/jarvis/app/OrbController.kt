@@ -422,17 +422,59 @@ object OrbController {
      * restoreDodge() 恢复。返回是否让位了。
      */
     fun dodgeIfNeeded(x: Int, y: Int): Boolean {
-        val o = orb ?: return false
-        val lp = orbLp ?: return false
-        val w = wm ?: return false
-        val s = svc ?: return false
-        if (collapsed) return false // 收起态不让位：球本来就只剩一小截在屏外，让位会把
+        // 复审第 2 批：lp.x/lp.y/collapsed 是主线程拥有的状态（拖动/收起动画/
+        // restoreTaskHome 都在主线程改），不能在任务执行器线程上裸读——读到
+        // 动画写一半的中间值，restoreDodge 会把球放回错误位置。快照走主线程
+        // 同步取（与下面 move() 的 latch 同款），判定用快照算；主线程 300ms
+        // 内没回就当没碰到球（不让位，手势照常走），此时不读快照——半写完的
+        // 快照不能读。
+        var snapOrb: OrbView? = null
+        var snapLp: WindowManager.LayoutParams? = null
+        var snapWm: WindowManager? = null
+        var snapSvc: AccessibilityService? = null
+        var snapX = 0
+        var snapY = 0
+        var snapW = 0
+        var snapH = 0
+        var snapCollapsed = true
+        val takeSnap = {
+            snapOrb = orb
+            snapLp = orbLp
+            snapWm = wm
+            snapSvc = svc
+            snapCollapsed = collapsed
+            val l = orbLp
+            if (l != null) {
+                snapX = l.x
+                snapY = l.y
+                snapW = l.width
+                snapH = l.height
+            }
+        }
+        val snapOk = if (Looper.myLooper() == Looper.getMainLooper()) {
+            takeSnap()
+            true
+        } else {
+            val latch = CountDownLatch(1)
+            main.post { try { takeSnap() } finally { latch.countDown() } }
+            try {
+                latch.await(300, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                false
+            }
+        }
+        if (!snapOk) return false
+        val o = snapOrb ?: return false
+        val lp = snapLp ?: return false
+        val w = snapWm ?: return false
+        val s = snapSvc ?: return false
+        if (snapCollapsed) return false // 收起态不让位：球本来就只剩一小截在屏外，让位会把
         // 收起时的屏外坐标记成 dodgeX/dockedX，恢复和再收起全乱
         val m = (8 * density()).toInt()
-        if (x < lp.x - m || x > lp.x + lp.width + m || y < lp.y - m || y > lp.y + lp.height + m) return false
+        if (x < snapX - m || x > snapX + snapW + m || y < snapY - m || y > snapY + snapH + m) return false
         val dm = s.resources.displayMetrics
-        dodgeX = lp.x
-        dodgeY = lp.y
+        dodgeX = snapX
+        dodgeY = snapY
         dodged = true
         // M35：让位只挪球，气泡跟着球走（不撤掉，下次有新文字也不用等重算）。
         repositionBubble()
