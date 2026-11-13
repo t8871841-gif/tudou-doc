@@ -378,23 +378,34 @@ object EdgeTts {
         acquireAudioFocus(ctx, seq)
         armStallWatchdog(ctx, seq)
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val t = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(SAMPLE_RATE)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(maxOf(minBuf, 4096) * 4)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
+        // 建轨包 try/catch（Claude 审出）：build() 本身抛异常会绕开所有诊断、
+        // onDone 也不回——静默丢一段播报。失败就记审计、报 onDone(false)、
+        // 关看门狗（不然 20 秒后它还会再报一次 onDone(false)）。
+        val t = try {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(SAMPLE_RATE)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(minBuf, 4096) * 4)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+        } catch (e: Exception) {
+            Log.e(TAG, "edge tts track build failed", e)
+            disarmStallWatchdog()
+            com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 建轨失败", e.message ?: e.javaClass.simpleName)
+            main.post { onDone(false) }
+            return
+        }
         track = t
         var started = false
         var sawAny = false
