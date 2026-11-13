@@ -1,18 +1,3 @@
-/*
- * Copyright 2026 KUAFUAI
- *
- * Licensed under the Apache License, Version 2.0 (the "License"), as modified
- * by the additional conditions in Part A of the Andee LICENSE; you may not use
- * this file except in compliance with the License. You may obtain a copy of
- * the License at http://www.apache.org/licenses/LICENSE-2.0
- *
- * Ported from Andee (net.kuafuai.andee.brain.TopicSplitter) into Jarvis
- * (com.jarvis.app.brain) and modified: package renamed, `internal` visibility
- * lifted to public so the Jarvis agent loop can call it, KDoc notes added
- * where Jarvis differs (see the file KDoc). The splitting rules themselves
- * are unchanged.
- */
-
 package com.jarvis.app.brain
 
 import org.json.JSONArray
@@ -21,17 +6,13 @@ import org.json.JSONObject
 /**
  * Where a conversation *can* be cut into topics, **on the device**.
  *
- * Ported from Andee's `TopicSplitter`. Read the name carefully: this module
- * does **not** split one long reply into topics. It folds a *conversation
- * history* — it finds the user turns, marks the silences between them, and
- * lets a review (in Andee, the quiet-hour review) decide which finished
- * stretch goes away. The split between the two halves of topic-folding is the
- * whole design: the model decides *which stretch is a finished topic*, and
- * the device decides *what that stretch is made of*. The model never names a
- * message range — it cannot count messages, and a range it invents can start
- * inside a tool call, which the API answers with a 400. It names two numbers
- * from a list this file builds: the user turns. Every cut lands on a user
- * message, so no turn is ever cut in half.
+ * The split between the two halves of topic-folding is the whole design: the
+ * model decides *which stretch is a finished topic*, and the device decides
+ * *what that stretch is made of*. The model never names a message range — it
+ * cannot count messages, and a range it invents can start inside a tool call,
+ * which the API answers with a 400. It names two numbers from a list this file
+ * builds: the user turns. Every cut lands on a user message, so no turn is ever
+ * cut in half.
  *
  * An earlier version cut only at long silences (≥ [GAP_MS]) and a change of day,
  * and offered the model just those stretches. On the tablet that meant a person
@@ -40,18 +21,10 @@ import org.json.JSONObject
  * subject is a judgement about content, and content is the model's job; the gap
  * survives only as a hint printed in the list.
  *
- * Pure: no Android, no state, so the rules can be tested directly.
- *
- * Jarvis status: logic ported, **not wired**. Jarvis keeps its chat history
- * as `List<Pair<String, String>>` in `CustomClient` — role/content pairs with
- * no `[now …]` stamp, no `tool_calls`, and no review loop that could ask for
- * a fold — and it has no `ChatHistory` row store with topic ids for
- * [locateRows] to map a stretch onto. Wiring needs (a) user turns stamped
- * the way Andee's `LocalBrain.stamp` does, (b) a caller that builds the
- * candidate list and asks the model, and (c) a row store that can collapse a
- * folded stretch. Until then this file is a library with no caller.
+ * Pure: no Android, no state, so the rules can be tested directly; see
+ * `TopicSplitterTest`.
  */
-object TopicSplitter {
+internal object TopicSplitter {
 
     /**
      * A silence at least this long is marked in the turn list as a likely seam.
@@ -117,13 +90,13 @@ object TopicSplitter {
      * The `[now …]` clock out of a user message, or 0.
      *
      * The one place a wall-clock time exists in the history is that bracket —
-     * see Andee's `LocalBrain.stamp` — and **it is not in a fixed format**: the stamp is
-     * `yyyy-MM-dd EEE HH:mm` rendered in the *interface language*, so a Chinese
-     * device writes `2026-10-15 周四 18:30` and an English one
-     * `2026-10-15 Thu 18:30`, and the weekday is three characters of whatever
-     * the locale says. Parsing it with one pattern is therefore wrong on half
-     * the installs, which is the kind of bug that only shows up as "topics
-     * never split" on someone else's phone.
+     * see [LocalBrain.stamp] — and **it is not in a fixed format**: the stamp is
+     * `yyyy-MM-dd EEE HH:mm` rendered in the *interface language*
+     * (`AppLocale.localeOf`), so a Chinese device writes `2026-10-15 周四 18:30`
+     * and an English one `2026-10-15 Thu 18:30`, and the weekday is three
+     * characters of whatever the locale says. Parsing it with one pattern is
+     * therefore wrong on half the installs, which is the kind of bug that only
+     * shows up as "topics never split" on someone else's tablet.
      *
      * So only the two locale-independent fields are read: the `yyyy-MM-dd` date
      * and the `HH:mm` clock. Both are fixed-width and fixed-position, which makes
@@ -184,10 +157,6 @@ object TopicSplitter {
      * section that forgets to register here would silently become part of an
      * anchor and stop a fold from matching — a failure with no symptom until
      * someone notices a conversation was never put away.
-     *
-     * Jarvis note: Jarvis appends no such sections today, so this list is
-     * inert here until a Jarvis equivalent exists. It is kept verbatim so a
-     * future section registers in the same place Andee's do.
      */
     private val INDEX_MARKERS = listOf(
         "(what your notebook holds",
@@ -209,7 +178,8 @@ object TopicSplitter {
      * the tool reported success and no conversation was ever put away. The text
      * is the only field that means the same thing on both sides.
      *
-     * Public and pure rather than private in the brain so it can be tested.
+     * Public and pure rather than private in `LocalBrain` so it can be tested;
+     * see `TopicAnchorTest` for the matching it exists to make possible.
      */
     fun anchorText(message: JSONObject): String = anchorText(message.opt("content") as? String)
 
@@ -238,7 +208,7 @@ object TopicSplitter {
 
     /**
      * What the matcher needs of a device row, and nothing more — kept apart from
-     * any chat-history class so [locateRows] stays pure and testable.
+     * `ChatHistory.Entry` so [locateRows] stays pure and testable.
      */
     data class RowKey(val isUser: Boolean, val text: String, val ts: Long)
 
@@ -303,7 +273,7 @@ object TopicSplitter {
 /**
  * Render [from] until [until] of a history as the text a topic keeps.
  *
- * Plain and complete on purpose: this is what a `get_topic` hands back when the
+ * Plain and complete on purpose: this is what `get_topic` hands back when the
  * user returns to a finished conversation, so it carries the words and nothing
  * else — no tool call ids, no JSON, no role prefixes the reader would have to
  * skip past. Tool traffic is summarised as a bracketed line because "it looked
@@ -311,7 +281,7 @@ object TopicSplitter {
  * device chatter, and a screenshot payload inside a folded topic would be a
  * megabyte of base64 with the user's sentence nowhere in it.
  */
-fun renderTopicText(history: List<JSONObject>, from: Int, until: Int): String {
+internal fun renderTopicText(history: List<JSONObject>, from: Int, until: Int): String {
     val sb = StringBuilder()
     for (i in from.coerceAtLeast(0) until until.coerceAtMost(history.size)) {
         val m = history[i]
