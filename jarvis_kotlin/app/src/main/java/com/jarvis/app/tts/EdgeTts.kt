@@ -409,7 +409,8 @@ object EdgeTts {
         var prefetchFuture: Future<PrefetchResult>? = null
         var prefetchIndex = -1
         // 流式解码器已确认死在这台机上（第一次喂就报 Released）：之后各句不再往它
-        // 上撞，直接走整段回落；预取也不再发起（它走同一条流式路，必失败）。
+        // 上撞，直接走整段回落；预取改走整段路（句号等待修法，2026-11-13），
+        // 不再走必死的流式路。
         var streamingDecoderDead = false
         // M9：onStart 早发——会话打开（或确定走逐句回落）时就发，不等首句取音+解码+首段写入。
         val fireStartOnce: () -> Unit = {
@@ -470,15 +471,27 @@ object EdgeTts {
                 if (cancelled(seq)) break
                 // M8 预取：下一句的取音/解码在上一句还在写 AudioTrack 时就跑在 prefetchIo 上，
                 // 不等上一句写完才开始；预取走独立逐句连接，不抢当前句的共享会话。
-                if (i + 1 < sentences.size && prefetchFuture == null && !streamingDecoderDead) {
+                // 句号等待修法（2026-11-13）：解码器已死时预取也走整段路——之前直接
+                // 不预取，每句边界都串行现取整句 MP3，句号后面空几秒；整段预取同样
+                // 收 PCM，播完直接接上。whole 在提交时快照：本句播着播着解码器才死时，
+                // 在途的流式预取会被解码器死分支取消，下一轮改走整段预取。
+                if (i + 1 < sentences.size && prefetchFuture == null) {
                     val nextSentence = sentences[i + 1]
                     prefetchIndex = i + 1
+                    val whole = streamingDecoderDead
                     prefetchFuture = prefetchIo.submit(Callable<PrefetchResult> {
                         if (cancelled(seq)) return@Callable PrefetchResult(emptyList(), false, "cancelled")
                         val collected = ArrayList<ByteArray>()
-                        val r = streamSentence(seq, nextSentence, voice, ratePct, pitchHz, null, usePrefetchSocket = true) { pcm ->
-                            collected.add(pcm)
-                            true
+                        val r = if (whole) {
+                            streamSentenceWhole(seq, nextSentence, voice, ratePct, pitchHz, null, onPcm = { pcm ->
+                                collected.add(pcm)
+                                true
+                            }, isPrefetch = true)
+                        } else {
+                            streamSentence(seq, nextSentence, voice, ratePct, pitchHz, null, usePrefetchSocket = true) { pcm ->
+                                collected.add(pcm)
+                                true
+                            }
                         }
                         if (cancelled(seq)) PrefetchResult(emptyList(), false, "cancelled")
                         else if (!r.ok) PrefetchResult(emptyList(), false, r.reason ?: "prefetch failed")
@@ -1107,7 +1120,7 @@ object EdgeTts {
     /** 流式解码器不可用时的旧路径：整句取音再整句解码（已验证过的回落，不动它）。 */
     private fun streamSentenceWhole(
         seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int,
-        session: EdgeSession?, onPcm: (ByteArray) -> Boolean
+        session: EdgeSession?, onPcm: (ByteArray) -> Boolean, isPrefetch: Boolean = false
     ): StreamResult {
         // 会话路（fetchMp3OnSession）仍抛异常：0x8 提前关连接时抛是会话失效的信号，
         // 调用方凭它关会话、改逐句重试——不在这里吞掉。逐句路（fetchMp3）已改成
@@ -1117,7 +1130,7 @@ object EdgeTts {
         if (session != null) {
             mp3 = fetchMp3OnSession(session, seq, sentence, voice, ratePct, pitchHz)
         } else {
-            val fetched = fetchMp3(seq, sentence, voice, ratePct, pitchHz)
+            val fetched = fetchMp3(seq, sentence, voice, ratePct, pitchHz, isPrefetch)
             mp3 = fetched.mp3
             fetchFailure = fetched.failure
         }
@@ -1328,10 +1341,13 @@ object EdgeTts {
         return extractAudio(binAll.toByteArray())
     }
 
-    private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int): FetchResult {
+    private fun fetchMp3(seq: Int, sentence: String, voice: String, ratePct: Int, pitchHz: Int, isPrefetch: Boolean = false): FetchResult {
         waitHandshakeBackoff()
         val ssl = SSLSocketFactory.getDefault().createSocket() as SSLSocket
-        socket = ssl
+        // 预取线程走 prefetchSocket 槽（与流式预取的 openEdgeSocket 同款）：
+        // 主线程的逐句取音用 socket 槽；两槽分开，预取的握手/读取才不会顶掉
+        // 主线程在用的连接，stop() 关 prefetchSocket 也才能叫停在途的整段预取。
+        if (isPrefetch) prefetchSocket = ssl else socket = ssl
         try {
             ssl.connect(InetSocketAddress(HOST, 443), 15_000)
             ssl.soTimeout = 45_000
@@ -1414,7 +1430,8 @@ object EdgeTts {
             Log.e(TAG, "fetchMp3 failed: ${e.message}")
             return FetchResult(ByteArray(0), classifyFetchFailure(e))
         } finally {
-            if (socket === ssl) socket = null
+            if (isPrefetch) { if (prefetchSocket === ssl) prefetchSocket = null }
+            else { if (socket === ssl) socket = null }
             runCatching { ssl.close() }
         }
     }
