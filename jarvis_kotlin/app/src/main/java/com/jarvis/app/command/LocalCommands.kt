@@ -410,6 +410,60 @@ object LocalCommands {
         }
     }
 
+    /** 直接拉起（Andee 手，2026-11-13 用户令加上试试）：
+     * 不经 MainActivity 中转，照 Andee DeviceActionsController.launchApp 原样：
+     * getLaunchIntentForPackage + 只加 NEW_TASK，从无障碍服务上下文直接起。
+     * 中转的怀疑：MainActivity 自己先到前台（全屏）再拉目标，系统把目标已有
+     * 任务栈连同小窗形态一起搬到前台；直拉少了这道中转，目标是不是落全屏，
+     * 真机说了算。到了就走同一条验窗口+展开路回结果；没到（抛异常或
+     * 15×300ms 内没出现目标窗口）返回 null，调用方原样走中转老路。 */
+    private fun tryDirectLaunch(ctx: Context, pkg: String, appName: String): String? {
+        val svc = com.jarvis.app.JarvisAccessibilityService.instance
+        val pm = ctx.packageManager
+        val intent = pm.getLaunchIntentForPackage(pkg) ?: run {
+            AuditLog.append(ctx, "本地指令", "直接拉起", "$appName 没有能打开的界面")
+            return null
+        }
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            if (svc != null) svc.startActivity(intent) else ctx.startActivity(intent)
+            AuditLog.append(ctx, "本地指令", "直接拉起", "已从服务上下文直拉 $appName")
+        } catch (e: Exception) {
+            AuditLog.append(ctx, "本地指令", "直接拉起", "直拉被拦：${e.javaClass.simpleName}，改走中转")
+            return null
+        }
+        // 等目标窗口出现（15×300ms ≈ 4.5 秒；冷启动赶不上就交给中转那轮 10 秒）。
+        val controller = svc?.let { com.jarvis.app.JarvisAccessibilityService.screenController }
+        for (i in 0 until 15) {
+            try {
+                Thread.sleep(300)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+            val fg = try {
+                svc?.foregroundPackage().orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+            val hasWindow = if (controller == null) {
+                true
+            } else {
+                try {
+                    controller.appWindowBounds(pkg) != null
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            if (fg == pkg && hasWindow) {
+                AuditLog.append(ctx, "本地指令", "直接拉起", "$appName 已到前台")
+                return "正在打开$appName" + verifyTargetWindow(ctx, svc, pkg, appName)
+            }
+        }
+        AuditLog.append(ctx, "本地指令", "直接拉起", "$appName 4.5 秒内没出现目标窗口，改走中转")
+        return null
+    }
+
     /** 前台拉起（jk-v66）：不要小窗、要应用直接全屏。
      * 反射 setLaunchWindowingMode 在这台 Flyme 上根本不存在（NoSuchMethodException），
      * 拖小窗展开也靠不住（jk-v65 审计：微信拖动后仍是小窗）。
@@ -418,6 +472,8 @@ object LocalCommands {
      * （前台包名到了、窗口还没画出来时不算到），上限 10 秒，超时也返回
      * （任务循环下一步会再确认前台包名）。 */
     fun launchAppFullscreenViaActivity(ctx: Context, pkg: String, appName: String): String {
+        // 直接拉起先试（Andee 手）：到了就回结果，没到才走中转老路。
+        tryDirectLaunch(ctx, pkg, appName)?.let { return it }
         val intent = android.content.Intent(ctx, com.jarvis.app.MainActivity::class.java).apply {
             putExtra(com.jarvis.app.MainActivity.EXTRA_ACTION, "launch_app")
             putExtra(com.jarvis.app.MainActivity.EXTRA_LAUNCH_PKG, pkg)
