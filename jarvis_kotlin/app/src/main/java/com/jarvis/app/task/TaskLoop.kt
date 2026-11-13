@@ -282,6 +282,11 @@ object TaskLoop {
         val controller = existingController ?: ScreenController(svc, TapMarkerUi(svc))
         val ownsController = existingController == null
         if (ownsController) JarvisAccessibilityService.screenController = controller
+        // 输入法缓存每任务清一次（Claude 审出：两处 cachedImePackages 只写不
+        // 清，服务存活期间新装/启用输入法不生效）；ScreenController 那份经
+        // clearImeCache() 清，TaskLoop 自己这份直接置空。
+        cachedImePackages = null
+        controller.clearImeCache()
         AuditLog.append(ctx, "任务循环", taskText, "开始（上限 $MAX_STEPS 步）")
         TakeoverBorder.show()
         // 跨应用任务期球沉底沿（右下角，留半个球可见、可点；任务结束回原位）——
@@ -1504,8 +1509,8 @@ object TaskLoop {
         return false
     }
 
-/** 本机已启用的输入法包名（现查一次后缓存；任务中途用户换输入法时缓存会旧，
- * 下次跑任务重查）。 */
+/** 本机已启用的输入法包名（现查一次后缓存；每任务开始时由 runBlocking 清掉重查，
+ * 服务存活期间新装/启用输入法才生效）。 */
 @Volatile
 private var cachedImePackages: Set<String>? = null
 
@@ -1517,7 +1522,7 @@ private fun isImePackage(ctx: Context, pkg: String): Boolean {
     val pkgs = cachedImePackages ?: run {
         val queried = try {
             val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
-            imm?.inputMethodList?.map { it.packageName }?.toSet().orEmpty()
+            imm?.enabledInputMethodList?.map { it.packageName }?.toSet().orEmpty()
         } catch (_: Exception) {
             emptySet()
         }

@@ -1568,9 +1568,15 @@ class ScreenController(
      * 再按包名比对会把 type/tap 全拦掉（2026-11-13 微信发消息、高德搜地点
      * 两次都死在这一步）。认法与 TaskLoop.isImePackage 同款。
      */
-    /** 本机已启用的输入法包名（现查一次后缓存；任务中途用户换输入法时缓存会旧，下次跑任务重查）。 */
+    /** 本机已启用的输入法包名（现查一次后缓存；每任务开始时由 TaskLoop 调 clearImeCache() 清掉重查，服务存活期间新装/启用输入法才生效）。 */
     @Volatile
     private var cachedImePackages: Set<String>? = null
+
+    /** 任务开始时清掉输入法缓存（TaskLoop 调）：不然服务存活期间新装/启用
+     * 的输入法永远查不到，注释“下次跑任务重查”就是空话（Claude 审出）。 */
+    fun clearImeCache() {
+        cachedImePackages = null
+    }
 
     /** 是不是输入法包：包名含 "inputmethod" 的直接认（搜狗、Gboard 同款）；其余的查本机已启用的输入法列表（百度等包名里没这串的靠它认）。 */
     private fun isImePackage(pkg: String): Boolean {
@@ -1580,7 +1586,7 @@ class ScreenController(
             val queried = try {
                 val imm = service.getSystemService(Context.INPUT_METHOD_SERVICE)
                     as? android.view.inputmethod.InputMethodManager
-                imm?.inputMethodList?.map { it.packageName }?.toSet().orEmpty()
+                imm?.enabledInputMethodList?.map { it.packageName }?.toSet().orEmpty()
             } catch (_: Exception) {
                 emptySet()
             }
