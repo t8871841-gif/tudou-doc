@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 大脑文案：Andee 的 brain_* / narrate_* / notebook_dump_* 原样搬入，
+     只改 Andee 设置路径的说法（「后端」→ Jarvis 的设置）。Jarvis 之前没有
+     strings.xml，这是第一个。 -->
+<resources>
+    <string name="brain_no_key">本地大脑还没配 API key。去设置里把 Key 填好再试。</string>
+    <string name="brain_error">我这边出错了：%1$s</string>
+    <string name="brain_error_402">后端服务返回了 402，多半是账户余额不足了。看看当前用的是哪家服务商，打开它的官网充值后再试。</string>
+    <string name="brain_error_402_codeflying">后端服务返回了 402，多半是账户余额不足了。去服务商官网充值后再试。</string>
+    <string name="brain_error_auth">后端拒绝了请求（HTTP %1$d）：Key 填错、过期或被停用了。去设置里检查 Key，必要时去服务商官网重新生成一个。</string>
+    <string name="brain_error_400">后端说请求有问题：%1$s\n最常见的原因是模型名写错了，去设置里核对一下模型名。</string>
+    <string name="brain_error_404">后端找不到这个地址（HTTP 404）。去设置里检查接口地址和模型名有没有填错。</string>
+    <string name="brain_error_429">后端现在太忙或者请求太频繁了（HTTP 429），过一会儿再说一遍就行。如果一直这样，去服务商官网看看额度有没有用完。</string>
+    <string name="brain_error_5xx">后端服务自己出了问题（HTTP %1$d），不是你这边的设置有误。过几分钟再试；一直不行就去服务商官网看看是否在维护。</string>
+    <string name="brain_error_timeout">后端半天没有回应。先看看网络通不通，稍后再试一次。</string>
+    <string name="brain_error_network">连不上后端服务。检查一下这台设备的网络；如果网络没问题，去设置里核对接口地址。</string>
+    <string name="brain_no_result">我这轮没拿到结果，你再说一遍试试。</string>
+    <string name="brain_repeat_stop">我一直在重复同一个动作（%1$s），停下来了 —— 这条路走不通，换个说法或者你来操作一下。</string>
+    <string name="brain_max_steps">这件事我做了 %1$d 步还没办完，先停下来问你一句：要不要换个路子，或者你来接手？</string>
+
+    <string name="narrate_get_screen">读一下屏幕…</string>
+    <string name="narrate_screenshot">看一眼屏幕…</string>
+    <string name="narrate_tap">点一下…</string>
+    <string name="narrate_long_press">长按…</string>
+    <string name="narrate_swipe">滑动…</string>
+    <string name="narrate_type">输入文字…</string>
+    <string name="narrate_submit">提交…</string>
+    <string name="narrate_wait">等一下…</string>
+    <string name="narrate_launch">打开…</string>
+    <string name="narrate_system">操作系统按键…</string>
+    <string name="narrate_show_html">把结果放到屏幕上…</string>
+    <string name="narrate_pages">翻一下之前做的东西…</string>
+    <string name="narrate_topics">回想一下之前聊到哪儿了…</string>
+    <string name="narrate_camera">看一眼…</string>
+    <string name="narrate_dog">动一下腿…</string>
+    <string name="narrate_market_search">找工具…</string>
+    <string name="narrate_market_call">调用外部服务…</string>
+    <string name="narrate_default">正在 %1$s…</string>
+
+    <string name="notebook_dump_header">"小本本 · 记忆 %1$d 条\n"</string>
+    <string name="notebook_dump_sort_note">"（下面按类型和最近更新排列，只读）\n\n"</string>
+    <string name="notebook_dump_empty_memories">"（还没有记下任何东西）\n"</string>
+    <string name="notebook_dump_expired">"  [已过期]"</string>
+    <string name="notebook_dump_source">" · 来源 "</string>
+    <string name="notebook_dump_hits">" · 被查过 %1$d 次\n\n"</string>
+    <string name="notebook_dump_todos_header">"\n待办 %1$d 条\n\n"</string>
+    <string name="notebook_dump_empty_todos">"（没有）\n"</string>
+    <string name="notebook_dump_recurring">周期 %1$s</string>
+    <string name="notebook_dump_next">" · 下次 "</string>
+    <string name="notebook_dump_last_error">"   上次出错："</string>
+</resources>
