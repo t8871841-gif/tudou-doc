@@ -186,7 +186,7 @@ object AppKnowledge {
 
     /**
      * 带审计的版本：查不到知识时记一条审计，而不是静默缺失。
-     * 无 Context 的 forPackage(pkg) 保持原样（TaskLoop.kt:325 仍在用它），
+     * 无 Context 的 forPackage(pkg) 保持原样（带 Context 的重载内部调它），
      * 调用方有 Context 时改调这个重载，缺失才会被记下来。
      */
     fun forPackage(ctx: Context, pkg: String): String? {

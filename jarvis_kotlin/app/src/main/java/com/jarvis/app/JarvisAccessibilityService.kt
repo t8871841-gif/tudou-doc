@@ -928,6 +928,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (event != null && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val pkg = event.packageName?.toString()
             if (pkg != null) {
+                // 换手第 3 批：DeviceState.foregroundPkg 由事件流喂（Andee 同款，
+                // ScreenController.reviveNote 读它）。
+                com.jarvis.app.device.DeviceState.foregroundPkg = pkg
                 try {
                     com.jarvis.app.skill.SkillRunner.maybeAutoEnterScene(this, pkg, { task != null }) { msg ->
                         com.jarvis.app.tts.TtsRouter.speak(this, msg, onStart = {}, onDone = {})

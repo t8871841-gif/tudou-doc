@@ -380,61 +380,26 @@ object LocalCommands {
     fun launchApp(ctx: Context, name: String, fullscreen: Boolean = false): String =
         launchAppInternal(ctx, name.trim(), fullscreen)
 
-    /** 全屏启动：跨应用打开应用时显式要全屏窗口模式，Flyme 就不会把它开成小窗。
-     * 原因：TaskLoop 在后台线程拿应用上下文启动，系统当成后台启动、Flyme 给小窗；
-     * 全屏后截图里只有目标应用、没有背后的 Jarvis 界面，看图模型干扰少、任务量小。
-     * setLaunchWindowingMode 是 @hide 接口（公开 SDK 里没有，直接调编译不过，
-     * jk-v61 首版就因此构建失败），只能反射调；WINDOWING_MODE_FULLSCREEN 的值是 1。
-     * 反射在部分系统上也被拦，失败就回落到普通启动，不让一次启动失败整个任务。
-     * 成败都写审计日志：反射失败时审计里能看到“回落普通启动”，
-     * 便于区分“没装 jk-v61”和“装了但系统拦了反射”两种情况。 */
-    fun startActivityFullscreen(ctx: Context, intent: Intent) {
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                val opts = android.app.ActivityOptions.makeBasic()
-                val m = android.app.ActivityOptions::class.java.getMethod(
-                    "setLaunchWindowingMode", Int::class.javaPrimitiveType
-                )
-                m.invoke(opts, 1) // WindowConfiguration.WINDOWING_MODE_FULLSCREEN
-                ctx.startActivity(intent, opts.toBundle())
-                AuditLog.append(ctx, "本地指令", "全屏启动", "已请求全屏窗口")
-                return
-            }
-        } catch (e: Exception) {
-            // 反射失败，回落到普通启动；写审计，免得小窗出现时查不到原因
-            AuditLog.append(ctx, "本地指令", "全屏启动", "反射失败，已回落普通启动：${e.javaClass.simpleName}")
-        }
-        try {
-            ctx.startActivity(intent)
-        } catch (_: Exception) {
-        }
-    }
 
-    /** 直接拉起（Andee 手，2026-11-13 用户令加上试试）：
-     * 不经 MainActivity 中转，照 Andee DeviceActionsController.launchApp 原样：
-     * getLaunchIntentForPackage + 只加 NEW_TASK，从无障碍服务上下文直接起。
-     * 中转的怀疑：MainActivity 自己先到前台（全屏）再拉目标，系统把目标已有
-     * 任务栈连同小窗形态一起搬到前台；直拉少了这道中转，目标是不是落全屏，
-     * 真机说了算。到了就走同一条验窗口+展开路回结果；没到（抛异常或
-     * 15×300ms 内没出现目标窗口）返回 null，调用方原样走中转老路。 */
-    private fun tryDirectLaunch(ctx: Context, pkg: String, appName: String): String? {
+
+    /** 拉起应用（换手第 3 批，Andee 手）：照 DeviceActionsController.launchApp
+     * 原样——getLaunchIntentForPackage + 只加 NEW_TASK，直接起；不起中转、
+     * 不验窗口、不展开（Andee 没有这些）。起完等前台包名到目标（最多 5 秒，
+     * 只等包名、不量窗口），到了回“正在打开X”，没到如实报失败。
+     * SkillRunner 靠“正在打开”前缀 + 前台包名判成功，约定不变。 */
+    fun launchAppFullscreenViaActivity(ctx: Context, pkg: String, appName: String): String {
+        val r = com.jarvis.app.device.DeviceActionsController(ctx).launchApp(pkg, appName)
+        if (r.has("error")) {
+            val err = r.optString("error")
+            AuditLog.append(ctx, "本地指令", "拉起", "打开$appName 失败：$err")
+            return "打开$appName 失败：$err"
+        }
         val svc = com.jarvis.app.JarvisAccessibilityService.instance
-        val pm = ctx.packageManager
-        val intent = pm.getLaunchIntentForPackage(pkg) ?: run {
-            AuditLog.append(ctx, "本地指令", "直接拉起", "$appName 没有能打开的界面")
-            return null
+        if (svc == null) {
+            AuditLog.append(ctx, "本地指令", "拉起", "$appName 已拉起（服务不可用，未确认前台）")
+            return "正在打开$appName"
         }
-        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-        try {
-            if (svc != null) svc.startActivity(intent) else ctx.startActivity(intent)
-            AuditLog.append(ctx, "本地指令", "直接拉起", "已从服务上下文直拉 $appName")
-        } catch (e: Exception) {
-            AuditLog.append(ctx, "本地指令", "直接拉起", "直拉被拦：${e.javaClass.simpleName}，改走中转")
-            return null
-        }
-        // 等目标窗口出现（15×300ms ≈ 4.5 秒；冷启动赶不上就交给中转那轮 10 秒）。
-        val controller = svc?.let { com.jarvis.app.JarvisAccessibilityService.screenController }
-        for (i in 0 until 15) {
+        for (i in 0 until 17) {
             try {
                 Thread.sleep(300)
             } catch (_: InterruptedException) {
@@ -442,311 +407,32 @@ object LocalCommands {
                 break
             }
             val fg = try {
-                svc?.foregroundPackage().orEmpty()
+                svc.foregroundPackage()
             } catch (_: Exception) {
                 ""
             }
-            val hasWindow = if (controller == null) {
-                true
-            } else {
-                try {
-                    controller.appWindowBounds(pkg) != null
-                } catch (_: Exception) {
-                    false
-                }
-            }
-            if (fg == pkg && hasWindow) {
-                AuditLog.append(ctx, "本地指令", "直接拉起", "$appName 已到前台")
-                return "正在打开$appName" + verifyTargetWindow(ctx, svc, pkg, appName)
+            if (fg == pkg) {
+                AuditLog.append(ctx, "本地指令", "拉起", "$appName 已到前台")
+                return "正在打开$appName"
             }
         }
-        AuditLog.append(ctx, "本地指令", "直接拉起", "$appName 4.5 秒内没出现目标窗口，改走中转")
-        return null
-    }
-
-    /** 前台拉起（jk-v66）：不要小窗、要应用直接全屏。
-     * 反射 setLaunchWindowingMode 在这台 Flyme 上根本不存在（NoSuchMethodException），
-     * 拖小窗展开也靠不住（jk-v65 审计：微信拖动后仍是小窗）。
-     * 改法：把要开的包名交给 MainActivity，由它在 onResume（已在前台）时去 startActivity，
-     * 系统当成前台启动，Flyme 就给全屏。第 4 批：等目标包的窗口出现才算到
-     * （前台包名到了、窗口还没画出来时不算到），上限 10 秒，超时也返回
-     * （任务循环下一步会再确认前台包名）。 */
-    fun launchAppFullscreenViaActivity(ctx: Context, pkg: String, appName: String): String {
-        // 直接拉起先试（Andee 手）：到了就回结果，没到才走中转老路。
-        tryDirectLaunch(ctx, pkg, appName)?.let { return it }
-        val intent = android.content.Intent(ctx, com.jarvis.app.MainActivity::class.java).apply {
-            putExtra(com.jarvis.app.MainActivity.EXTRA_ACTION, "launch_app")
-            putExtra(com.jarvis.app.MainActivity.EXTRA_LAUNCH_PKG, pkg)
-            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
-        val svc = com.jarvis.app.JarvisAccessibilityService.instance
-        // 第 3 批·第一跳改走无障碍服务自身的 context + PendingIntent：服务上下文
-        // 拉起不受后台启动限制的普通约束；Flyme 上若仍被拦，逐级回落，每级都写审计。
-        var relayOk = false
-        if (svc != null) {
-            try {
-                svc.startActivity(intent)
-                relayOk = true
-                AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 已通过无障碍服务上下文拉起")
-            } catch (e: Exception) {
-                AuditLog.append(ctx, "本地指令", "前台拉起", "服务上下文拉起被拦：${e.javaClass.simpleName}，改走 PendingIntent")
-            }
-            if (!relayOk) {
-                try {
-                    val pi = android.app.PendingIntent.getActivity(
-                        svc, 0, intent,
-                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                    )
-                    pi.send()
-                    relayOk = true
-                    AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 已通过 PendingIntent 拉起")
-                } catch (e: Exception) {
-                    AuditLog.append(ctx, "本地指令", "前台拉起", "PendingIntent 拉起被拦：${e.javaClass.simpleName}，回落应用上下文")
-                }
-            }
-        }
-        if (!relayOk) {
-            try {
-                ctx.startActivity(intent)
-                AuditLog.append(ctx, "本地指令", "前台拉起", "走了应用上下文回落拉起")
-            } catch (e: Exception) {
-                AuditLog.append(ctx, "本地指令", "前台拉起", "MainActivity 拉起失败：${e.javaClass.simpleName}，回落普通启动")
-                try {
-                    val fallback = ctx.packageManager.getLaunchIntentForPackage(pkg)
-                    if (fallback != null) {
-                        fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        ctx.startActivity(fallback)
-                    }
-                } catch (_: Exception) {
-                }
-                // 第 3 批：回落直启若真把应用打开了（上面没抛），不能再报“前台拉起不可用”——
-                // 那是旧的自相矛盾文案。是否真到了前台由下面的轮询裁决，这里只报拉起路径。
-                AuditLog.append(ctx, "本地指令", "前台拉起", "中转拉起失败，已回落普通启动，等轮询裁决是否到前台")
-            }
-        }
-        // 第 4 批·等目标窗口出现：只凭前台包名不够——包名到了、窗口还没画出来
-        // 时也算“到了”，冷启动应用首轮常在这里吃超时。改成前台包名是目标包、
-        // 且目标包的窗口已出现（appWindowBounds 非空）才算到；上限 10 秒
-        // （33 次 × 300ms），超时返回失败文案（不带“正在打开”前缀，任务
-        // 循环的 openApp 步会判失败）；控制器拿不到时退回只看前台包名，
-        // 不把已开的应用也判失败。第 3 批的 verifyTargetWindow 不动。
-        // svc 已在前面取出（第 3 批第一跳用），这里复用。
-        if (svc != null) {
-            val controller = com.jarvis.app.JarvisAccessibilityService.screenController
-            for (i in 0 until 33) {
-                try {
-                    Thread.sleep(300)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    break
-                }
-                val fg = try {
-                    svc.foregroundPackage()
-                } catch (_: Exception) {
-                    ""
-                }
-                val hasWindow = if (controller == null) {
-                    true
-                } else {
-                    try {
-                        controller.appWindowBounds(pkg) != null
-                    } catch (_: Exception) {
-                        false
-                    }
-                }
-                if (fg == pkg && hasWindow) {
-                    AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 已到前台")
-                    // 第 3 批·拉起后验窗口：量目标窗口 bounds，不足整屏 80% 判小窗，接展开。
-                    // “已全屏到前台”不能只凭包名就报，旧文案正是断点 #5 的谎报。
-                    return "正在打开$appName" + verifyTargetWindow(ctx, svc, pkg, appName)
-                }
-            }
-            val cur = try {
-                svc.foregroundPackage()
-            } catch (_: Exception) {
-                "?"
-            }
-            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 10 秒内没出现目标窗口（当前前台：$cur）")
-            // S1：10 秒轮询超时，没确认到窗口，不报"正在打开"。
-            return "打开${appName}后10秒还没出现窗口"
-        } else {
-            try {
-                Thread.sleep(1200)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
-            // S1：无障碍服务为空，无法确认前台包名，不报"正在打开"。
-            AuditLog.append(ctx, "本地指令", "前台拉起", "无障碍服务不可用，无法确认$appName 是否到前台")
-            return "打开${appName}失败：无障碍服务不可用"
-        }
-    }
-
-    /** 第 3 批·拉起后验窗口：用无障碍服务的 getWindows() 量目标窗口 bounds，
-     * 面积不足整屏 80% 判小窗，接上现成的 expandFloatingApp 做展开（jk-v64 起
-     * 就是死代码，零调用）。返回要追加到“正在打开...”后面的后缀（开头不带
-     * “正在打开”，调用方保证前缀完整，TaskLoop 认这个前缀判成功）：
-     * 全屏返回空串；展开成功报一句；展开失败如实报明原因并提醒模型优先用
-     * 编号 eid（节点 bounds 是绝对坐标，不受小窗换算影响），绝不静默。 */
-    private fun verifyTargetWindow(ctx: Context, svc: com.jarvis.app.JarvisAccessibilityService?, pkg: String, appName: String): String {
-        val controller = svc?.let { com.jarvis.app.JarvisAccessibilityService.screenController }
-        if (controller == null) {
-            AuditLog.append(ctx, "本地指令", "前台拉起", "无法验窗口：无障碍控制器为空")
-            return ""
-        }
-        val bounds = try {
-            controller.appWindowBounds(pkg)
+        val cur = try {
+            svc.foregroundPackage()
         } catch (_: Exception) {
-            null
+            "?"
         }
-        if (bounds == null) {
-            AuditLog.append(ctx, "本地指令", "前台拉起", "无法验窗口：没找到 $appName 的窗口")
-            return ""
-        }
-        val screen = com.jarvis.app.screen.ScreenController.displaySize(ctx)
-        val screenArea = screen.x.toLong() * screen.y
-        val winArea = bounds.width().toLong() * bounds.height()
-        if (screenArea <= 0 || winArea * 100 >= screenArea * 80) return ""
-        AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 还在小窗里（窗口 ${bounds.width()}x${bounds.height()}），尝试展开")
-        val expanded = try {
-            controller.expandFloatingApp(pkg)
-        } catch (e: Exception) {
-            null
-        }
-        val ok = expanded?.optBoolean("expanded", false) == true
-        val detail = expanded?.optString("detail").orEmpty()
-        return if (ok) {
-            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 小窗已展开成全屏")
-            "，小窗已展开成全屏"
-        } else {
-            AuditLog.append(ctx, "本地指令", "前台拉起", "$appName 小窗展开失败：$detail")
-            "，小窗展开失败（仍是小窗：${detail}，坐标按全屏算可能偏移，建议优先用编号 eid 点）"
-        }
+        AuditLog.append(ctx, "本地指令", "拉起", "$appName 5 秒内没到前台（当前前台：$cur）")
+        return "打开${appName}后5秒还没出现窗口"
     }
 
-    /**
-     * 常用应用包名直查表（键已小写；查前把名字 trim + lowercase）。
-     * 直查失败（包不存在、无启动界面、拉起抛异常）时一律回落到枚举，
-     * 所以表里即使有个别 ROM 上包名不同的条目也不会开错应用——
-     * 最坏只是直查没命中，走回老路。
-     */
-    private val WELL_KNOWN_APPS = mapOf(
-        "微信" to "com.tencent.mm",
-        "wechat" to "com.tencent.mm",
-        "qq" to "com.tencent.mobileqq",
-        "支付宝" to "com.eg.android.AlipayGphone",
-        "alipay" to "com.eg.android.AlipayGphone",
-        "淘宝" to "com.taobao.taobao",
-        "京东" to "com.jingdong.app.mall",
-        "抖音" to "com.ss.android.ugc.aweme",
-        "快手" to "com.smile.gifmaker",
-        "哔哩哔哩" to "tv.danmaku.bili",
-        "b站" to "tv.danmaku.bili",
-        // 第 6 批·断点 #9：补小红书、今日头条、微博、知乎、闲鱼（包名与
-        // AppKnowledge 一致）；小红书包名待真机 pm list packages 核实。
-        "小红书" to "com.xingin.xhs",
-        "红书" to "com.xingin.xhs",
-        "xiaohongshu" to "com.xingin.xhs",
-        "今日头条" to "com.ss.android.article.news",
-        "微博" to "com.sina.weibo",
-        "知乎" to "com.zhihu.android",
-        "闲鱼" to "com.taobao.idlefish",
-        "高德地图" to "com.autonavi.minimap",
-        "高德" to "com.autonavi.minimap",
-        "百度地图" to "com.baidu.BaiduMap",
-        "设置" to "com.android.settings",
-        // 第 6 批·断点 #9：电话/短信改走魅族包名（白名单里已有
-        // com.meizu.flyme.mms/dialer 作参照）；相机按魅族常见包名填，
-        // 待真机 pm list packages 核实。直查失败仍回落到标签枚举，
-        // 所以别家 ROM 上这三条不命中也不会开错应用。
-        "电话" to "com.meizu.flyme.dialer",
-        "拨号" to "com.meizu.flyme.dialer",
-        "短信" to "com.meizu.flyme.mms",
-        "相机" to "com.meizu.media.camera",
-        "相册" to "com.android.gallery3d"
-    )
-
-    /** 按应用名找包名（小窗展开用）：先查常用表（含别名），再枚举已装应用——
-     *  先按 label 精确匹配（忽略大小写），无精确命中时子串兜底（label 含名字、
-     *  或名字含 label，名字至少 2 字，label 为空时不参与反向包含；第 6 批，
-     *  与 findAppCandidates 同款顺序）；找不到返回 null。
-     *  同名多包时精确匹配返回第一个（任务循环里 launchApp 已先报过多候选错误，
-     *  不会走到这里）；子串命中多个时不猜，返回 null。 */
-    fun packageForApp(ctx: Context, name: String): String? {
-        val key = name.trim().lowercase()
-        WELL_KNOWN_APPS[key]?.let { return it }
-        val pm = ctx.packageManager
-        try {
-            for (app in pm.getInstalledApplications(0)) {
-                val label = pm.getApplicationLabel(app).toString()
-                if (label.equals(name.trim(), ignoreCase = true)) return app.packageName
-            }
-            val query = name.trim()
-            if (query.length >= 2) {
-                var hit: String? = null
-                for (app in pm.getInstalledApplications(0)) {
-                    val label = pm.getApplicationLabel(app).toString()
-                    if (label.contains(query, ignoreCase = true) ||
-                        (label.isNotEmpty() && query.contains(label, ignoreCase = true))
-                    ) {
-                        if (hit != null) return null // 多个子串命中，不猜
-                        hit = app.packageName
-                    }
-                }
-                if (hit != null) return hit
-            }
-        } catch (_: Exception) {
-        }
-        return null
-    }
-
-    /** C10 + M28：第 6 批改成精确→子串两级（别名在调用方的常用表里先认，
-     *  如“红书”→小红书、“拨号”→电话）：先按 label 精确匹配（忽略大小写），
-     *  只有零精确命中时才走子串兜底（label 含名字、或名字含 label，名字至少
-     *  2 字，label 为空时不参与反向包含）——先精确后子串，免得“微信读书”把
-     *  “微信”也带进来造成假多候选；同优先级多个候选都返回，调用方走澄清
-     *  问用户选哪个，绝不猜一个开。枚举异常不上吞，由调用方接住并如实回报。 */
-    private fun findAppCandidates(ctx: Context, name: String): List<Pair<String, String>> {
-        val out = ArrayList<Pair<String, String>>()
-        val pm = ctx.packageManager
-        val query = name.trim()
-        for (app in pm.getInstalledApplications(0)) {
-            val label = pm.getApplicationLabel(app).toString()
-            if (label.equals(query, ignoreCase = true)) {
-                out.add(label to app.packageName)
-            }
-        }
-        if (out.isNotEmpty()) return out
-        if (query.length >= 2) {
-            for (app in pm.getInstalledApplications(0)) {
-                val label = pm.getApplicationLabel(app).toString()
-                if (label.contains(query, ignoreCase = true) ||
-                    (label.isNotEmpty() && query.contains(label, ignoreCase = true))
-                ) {
-                    out.add(label to app.packageName)
-                }
-            }
-        }
-        return out
-    }
 
     /** 按包名拉起一个应用，返回结果描述（不播报）；fullscreen 时走前台拉起。 */
     private fun launchPackage(ctx: Context, pkg: String, label: String, fullscreen: Boolean = false): String {
-        val pm = ctx.packageManager
-        val intent = pm.getLaunchIntentForPackage(pkg)
-            ?: return "$label 没有能打开的界面"
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        try {
-            if (fullscreen) {
-                val r = launchAppFullscreenViaActivity(ctx, pkg, label)
-                AuditLog.append(ctx, "本地指令", "打开$label", "前台拉起结果：$r")
-                return r
-            }
-            ctx.startActivity(intent)
-        } catch (_: Exception) {
-            return "打开$label 失败了"
-        }
-        AuditLog.append(ctx, "本地指令", "打开$label", "已启动")
-        return "正在打开$label"
+        // fullscreen 参数已无意义（Andee 没有全屏概念）：拉起统一走
+        // launchAppFullscreenViaActivity（DeviceActionsController 直拉 + 等前台）。
+        val r = launchAppFullscreenViaActivity(ctx, pkg, label)
+        AuditLog.append(ctx, "本地指令", "打开$label", "拉起结果：$r")
+        return r
     }
 
     // ---------- 打开应用：tryHandle 在 io 线程调进来，枚举/拉起在本线程，回报回主线程 ----------
@@ -775,8 +461,7 @@ object LocalCommands {
                 }
                 main.post {
                     PendingClarification.ask(options) { chosen ->
-                        // jk-v66 小窗修复：日常打开统一走前台拉起全屏（与任务循环同一条路），
-                        // 不再走后台直接启动（Flyme 默认给小窗）。
+                        // 换手第 3 批：拉起统一走 DeviceActionsController 直拉。
                         val result = launchPackage(ctx, chosen.payload, name.trim(), fullscreen = true)
                         AuditLog.append(ctx, "本地指令", "打开应用（澄清后选定）", "${chosen.label}：$result")
                         // 小窗当默认接受（2026-11-12 用户定）：只念“正在打开X”，不念小窗展开失败的后缀；
@@ -790,9 +475,8 @@ object LocalCommands {
                 return
             }
         }
-        // jk-v66 小窗修复：日常“打开应用”统一走前台拉起全屏（与任务循环同一条路，
-        // 用户 2026-11-05 原话“不要小窗，我要应用全屏”）；launchAppInternal /
-        // launchPackage 里 fullscreen=false 的后台直接启动分支，日常打开这条路不再走。
+        // 换手第 3 批：日常“打开应用”统一走 DeviceActionsController 直拉，
+        // fullscreen 参数已无意义（Andee 没有全屏概念）。
         val result = launchAppInternal(ctx, name, fullscreen = true)
         // 小窗当默认接受（2026-11-12 用户定）：只念“正在打开X”，不念小窗展开失败的后缀；
         // 后缀仍在返回值里（任务循环/模型照常看到，审计照常记），只不进语音。
@@ -816,19 +500,10 @@ object LocalCommands {
         if (direct != null) {
             val intent = pm.getLaunchIntentForPackage(direct)
             if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                try {
-                    if (fullscreen) {
-                        val r = launchAppFullscreenViaActivity(ctx, direct, name.trim())
-                        AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "前台拉起结果：$r")
-                        return r
-                    }
-                    ctx.startActivity(intent)
-                    AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "已启动（包名直查）")
-                    return "正在打开${name.trim()}"
-                } catch (_: Exception) {
-                    // 拉起失败时不直接判死，继续走枚举（可能装了分身/改名版）
-                }
+                val r = launchAppFullscreenViaActivity(ctx, direct, name.trim())
+                AuditLog.append(ctx, "本地指令", "打开${name.trim()}", "拉起结果：$r")
+                if (r.startsWith("正在打开")) return r
+                // 拉起失败时不直接判死，继续走枚举（可能装了分身/改名版）
             }
         }
         var enumError: String? = null
