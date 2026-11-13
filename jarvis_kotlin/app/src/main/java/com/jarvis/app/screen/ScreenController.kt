@@ -1562,7 +1562,34 @@ class ScreenController(
      * 分享面板、选择器、权限弹窗、安装器都住在系统包里）时，包名不一致是预期的，
      * 不是手势会落错应用的证据，直接放行。门禁本身不删：非交接、非系统面、
      * 前台是另一个普通应用时，照旧拒绝。
+     *
+     * 输入法放行（2026-11-13，用户点头）：前台是输入法包时直接放行——输入法
+     * 只是盖在当前应用上的悬浮窗，不可能是“另一个应用”；点输入框弹起键盘后
+     * 再按包名比对会把 type/tap 全拦掉（2026-11-13 微信发消息、高德搜地点
+     * 两次都死在这一步）。认法与 TaskLoop.isImePackage 同款。
      */
+    /** 本机已启用的输入法包名（现查一次后缓存；任务中途用户换输入法时缓存会旧，下次跑任务重查）。 */
+    @Volatile
+    private var cachedImePackages: Set<String>? = null
+
+    /** 是不是输入法包：包名含 "inputmethod" 的直接认（搜狗、Gboard 同款）；其余的查本机已启用的输入法列表（百度等包名里没这串的靠它认）。 */
+    private fun isImePackage(pkg: String): Boolean {
+        if (pkg.isEmpty()) return false
+        if ("inputmethod" in pkg) return true
+        val pkgs = cachedImePackages ?: run {
+            val queried = try {
+                val imm = service.getSystemService(Context.INPUT_METHOD_SERVICE)
+                    as? android.view.inputmethod.InputMethodManager
+                imm?.inputMethodList?.map { it.packageName }?.toSet().orEmpty()
+            } catch (_: Exception) {
+                emptySet()
+            }
+            cachedImePackages = queried
+            queried
+        }
+        return pkg in pkgs
+    }
+
     private fun requireForeground(expectedPkg: String? = lastDumpPkg, handover: Boolean = false) {
         val fg = foregroundPkg()
         if (fg.isNullOrEmpty()) {
@@ -1577,6 +1604,8 @@ class ScreenController(
                     "then dump its screen; this gesture was NOT sent"
             )
         }
+        // 输入法是盖在当前应用上的悬浮窗，不是另一个应用：放行（见 isImePackage）。
+        if (isImePackage(fg)) return
         if (handover || fg in HANDOVER_SYSTEM_PKGS) return
         if (!expectedPkg.isNullOrEmpty() && fg != expectedPkg) {
             throw IllegalStateException(
