@@ -6,9 +6,10 @@ import com.jarvis.app.JarvisPrefs
 /**
  * 自动选模型·第 1 批：按任务文本定本次任务用哪个脑子。
  *
- * - 简单任务（单应用、查状态、调设置）→ GLM（autoglm-phone，专为手机任务调过）；
- * - 跨应用多步骤（找人/发消息/打电话、钱/账单、导航、多步骤、两个以上应用）→ DeepSeek
+ * - 简单任务（单应用、查状态、调设置、打电话）→ GLM（autoglm-phone，专为手机任务调过）；
+ * - 跨应用多步骤（找人/发消息、钱/账单、导航、多步骤、两个以上应用）→ DeepSeek
  *   （原生工具调用 + search_contacts + send_chat_message）。
+ * - 打电话先判：以前 GLM 就能正常打，单应用拨号不走 DeepSeek。
  * - 拿不准默认 DeepSeek：把复杂任务误判给 GLM 的代价更大——GLM 的 do() 词汇表里
  *   没有 zoom、没有找人、没有确定性发送，接了也做不成。
  *
@@ -21,18 +22,21 @@ object TaskRouter {
     /** 一次路由的结果：用的模式 + 选它的原因（写审计用）。 */
     data class Route(val mode: String, val reason: String)
 
+    // 打电话先判：含打电话/拨打/打给的任务一律 GLM（以前 GLM 就能正常打），
+    // 优先于下面所有 DeepSeek 规则。
+    private val CALL_PATTERN = Regex("打电话|打个电话|拨打|打给")
+
     // DeepSeek 信号：任一命中即 DeepSeek（顺序即优先级，只取第一条命中的原因）。
     private val DEEPSEEK_RULES = listOf(
         Regex("发消息|发微信|留言|发短信|发给") to "含发消息",
-        Regex("打电话|拨打|打给") to "含打电话",
         Regex("转账|转钱|转.{0,6}给|付款|付钱|查账单|还款|账单") to "涉及钱/账单",
         Regex("导航|路线|怎么走|怎么去") to "含导航",
         Regex("先.+再|然后|接着|再打开|再去") to "多步骤",
         Regex("找人|联系人|通讯录") to "需找人",
         Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(聊天|会话)") to "找人聊天",
         Regex("搜.{0,8}(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户)") to "搜找人",
-        Regex("给.+发|给.+打|给.+留言|给.+问") to "给人发消息/打电话",
-        Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(发|打|找|联系|留言)") to "找人发消息/打电话",
+        Regex("给.+发|给.+留言|给.+问") to "给人发消息",
+        Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(发|找|联系|留言)") to "找人发消息",
         Regex("(问|告诉|跟)(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户)") to "问人/找人",
     )
 
@@ -58,6 +62,9 @@ object TaskRouter {
     /** 只按文本路由，不看开关。 */
     fun route(taskText: String): Route {
         val t = taskText.trim()
+        // 打电话先判（用户 2026-11-13：以前 GLM 就能正常打）：含打电话/拨打/
+        // 打给的任务一律 GLM，优先于下面所有 DeepSeek 规则。
+        if (CALL_PATTERN.containsMatchIn(t)) return Route("glm", "打电话")
         for ((pattern, reason) in DEEPSEEK_RULES) {
             if (pattern.containsMatchIn(t)) return Route("deepseek", reason)
         }
