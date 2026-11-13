@@ -195,6 +195,11 @@ object LocalCommands {
 
         val appName = OPEN_APP.matchEntire(t)?.groupValues?.get(1)
         if (appName != null) {
+            // 路由规则先行（2026-11-13，Claude 审出）：“打开小红书搜新乡美食”
+            // 这类句式会被 OPEN_APP 当成应用名吞掉（子串兜底还会真把小红书打开、
+            // 搜的半句悄悄丢了）；命中路由规则的先让路给任务循环。放在打电话/
+            // 关闭/提醒/日历/场景之后：那些本地指令优先，不被这条抢走。
+            if (com.jarvis.app.task.TaskRouter.matchesDeepSeekRule(t)) return false
             val name = cleanName(appName).removeSuffix("应用").removeSuffix("软件").trim()
             if (!looksLikeLiteralName(name)) return false // 不像应用名，交还给聊天流程
             io.execute { openAppBg(ctx, name, speak) }

@@ -194,9 +194,10 @@ object TaskLoop {
     /** 任务句式判定（JarvisAgent 路由用）。纯聊天、单步打开应用、提问句都不算。 */
     fun looksLikeTask(text: String): Boolean {
         val t = text.trim()
-        // 下限放宽到 4 字（2026-11-13）：“查一下账单”只有 5 字，旧的 6 字门槛
-        // 把它挡在循环外；1–3 字的短句仍拦着，靠句式本身判，不靠长度猜。
-        if (t.length < 4) return false
+        // 规则优先（2026-11-13，Claude 审出）：“查账单”3 字以前被长度门槛挡在
+        // 规则判断之外；强规则命中直接算任务。长度只拦 1–2 字的短句（裸的
+        // “导航”“转账”动词不全，不进循环）。
+        if (t.length < 3) return false
         if (t.contains('？') || t.contains('?')) return false
         return IN_APP_SEND.containsMatchIn(t) ||
             SEND_TO.containsMatchIn(t) ||

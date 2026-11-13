@@ -27,18 +27,43 @@ object TaskRouter {
     private val CALL_PATTERN = Regex("打电话|打个电话|拨打|打给")
 
     // DeepSeek 信号：任一命中即 DeepSeek（顺序即优先级，只取第一条命中的原因）。
+    // 多步骤规则不在表里（见下面的 isMultiStepTask：裸“然后/接着”不算任务）。
     private val DEEPSEEK_RULES = listOf(
         Regex("发消息|发微信|留言|发短信|发给") to "含发消息",
         Regex("转账|转钱|转.{0,6}给|付款|付钱|查账单|还款|账单") to "涉及钱/账单",
         Regex("导航|路线|怎么走|怎么去") to "含导航",
-        Regex("先.+再|然后|接着|再打开|再去") to "多步骤",
-        Regex("找人|联系人|通讯录") to "需找人",
+        Regex("找人(?!聊天|说话|倾诉|解闷)|找联系人|通讯录里|在通讯录") to "需找人",
         Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(聊天|会话)") to "找人聊天",
         Regex("搜.{0,8}(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户)") to "搜找人",
-        Regex("给.+发|给.+留言|给.+问") to "给人发消息",
+        Regex("给.{0,16}发(个|条|张)?(消息|微信|信息|短信|语音|图片|位置|红包|文件)|给.{0,16}留言|给.{0,16}问") to "给人发消息",
         Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(发|找|联系|留言)") to "找人发消息",
         Regex("(问|告诉|跟)(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户)") to "问人/找人",
+        Regex("打开.{0,10}?(搜|查|找|买|订)") to "打开搜/查/买/订",
     )
+
+    // 多步骤（Claude 审出）：“先…再/然后/接着”裸用是日常口语（“我先洗个澡
+    // 再睡觉”“然后呢”），单独出现不算任务；必须同时提到应用名或动作动词
+    // （打开/发/打/查/搜/导航/转账…）才算数。
+    private val MULTI_STEP = Regex("先.+再|然后|接着|再打开|再去")
+    private val STEP_ACTION = Regex("打开|开启|启动|进入|发|打电话|拨打|查|搜|导航|转账|转钱|付款|付钱")
+    private fun isMultiStepTask(t: String): Boolean {
+        if (!MULTI_STEP.containsMatchIn(t)) return false
+        return mentionedApps(t).isNotEmpty() || STEP_ACTION.containsMatchIn(t)
+    }
+
+    /** 明确命中的 DeepSeek 规则原因；没命中返回 null（route() 末尾的“无法判断，
+     * 默认 DeepSeek”不走这里）。route() 与 matchesDeepSeekRule() 共用这一处，
+     * 两道门不再各管各的。 */
+    private fun deepSeekReason(t: String): String? {
+        if (CALL_PATTERN.containsMatchIn(t)) return null
+        for ((pattern, reason) in DEEPSEEK_RULES) {
+            if (pattern.containsMatchIn(t)) return reason
+        }
+        if (isMultiStepTask(t)) return "多步骤"
+        val apps = mentionedApps(t)
+        if (apps.size >= 2) return "跨应用（${apps.joinToString("、")}）"
+        return null
+    }
 
     // 跨应用：文本里出现两个以上已知应用名（长名优先排前面，避免“高德地图”被算成两个）。
     private val APP_CANONICAL = listOf(
@@ -65,11 +90,7 @@ object TaskRouter {
         // 打电话先判（用户 2026-11-13：以前 GLM 就能正常打）：含打电话/拨打/
         // 打给的任务一律 GLM，优先于下面所有 DeepSeek 规则。
         if (CALL_PATTERN.containsMatchIn(t)) return Route("glm", "打电话")
-        for ((pattern, reason) in DEEPSEEK_RULES) {
-            if (pattern.containsMatchIn(t)) return Route("deepseek", reason)
-        }
-        val apps = mentionedApps(t)
-        if (apps.size >= 2) return Route("deepseek", "跨应用（${apps.joinToString("、")}）")
+        deepSeekReason(t)?.let { return Route("deepseek", it) }
         for ((pattern, reason) in GLM_RULES) {
             if (pattern.containsMatchIn(t)) return Route("glm", reason)
         }
@@ -78,15 +99,10 @@ object TaskRouter {
 
     /** 只认明确命中的 DeepSeek 规则（发消息/钱/账单/导航/多步骤/找人/跨应用），
      * 不认 route() 末尾的“无法判断，默认 DeepSeek”——普通聊天/问句不能被当成任务。
-     * 供 TaskLoop.looksLikeTask 用：进任务循环的门与循环里的自动选模型用同一套
-     * 规则，两道门不再互相不认（2026-11-13 语音高德被聊天模型回绝的根子）。
-     * 打电话先判 GLM（与 route() 一致），不在这里算 DeepSeek。 */
-    fun matchesDeepSeekRule(text: String): Boolean {
-        val t = text.trim()
-        if (CALL_PATTERN.containsMatchIn(t)) return false
-        if (DEEPSEEK_RULES.any { (pattern, _) -> pattern.containsMatchIn(t) }) return true
-        return mentionedApps(t).size >= 2
-    }
+     * 供 TaskLoop.looksLikeTask 与 LocalCommands 用：进任务循环的门与循环里的
+     * 自动选模型用同一套规则，两道门不再互相不认（2026-11-13 语音高德被聊天
+     * 模型回绝的根子）。打电话先判 GLM（与 route() 一致），不在这里算 DeepSeek。 */
+    fun matchesDeepSeekRule(text: String): Boolean = deepSeekReason(text.trim()) != null
 
     /** 按开关 + 文本 + 断点定本次任务的模式：断点里有模式先沿用（续跑不换脑，
      * 中间改了开关也不影响）；手动档原样返回；"auto" 才走路由。 */
