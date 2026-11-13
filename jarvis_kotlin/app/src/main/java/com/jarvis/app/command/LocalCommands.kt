@@ -426,6 +426,80 @@ object LocalCommands {
     }
 
 
+    /**
+     * 常用应用包名直查表（键已小写；查前把名字 trim + lowercase）。
+     * 直查失败（包不存在、无启动界面、拉起抛异常）时一律回落到枚举，
+     * 所以表里即使有个别 ROM 上包名不同的条目也不会开错应用——
+     * 最坏只是直查没命中，走回老路。
+     */
+    private val WELL_KNOWN_APPS = mapOf(
+        "微信" to "com.tencent.mm",
+        "wechat" to "com.tencent.mm",
+        "qq" to "com.tencent.mobileqq",
+        "支付宝" to "com.eg.android.AlipayGphone",
+        "alipay" to "com.eg.android.AlipayGphone",
+        "淘宝" to "com.taobao.taobao",
+        "京东" to "com.jingdong.app.mall",
+        "抖音" to "com.ss.android.ugc.aweme",
+        "快手" to "com.smile.gifmaker",
+        "哔哩哔哩" to "tv.danmaku.bili",
+        "b站" to "tv.danmaku.bili",
+        // 第 6 批·断点 #9：补小红书、今日头条、微博、知乎、闲鱼（包名与
+        // AppKnowledge 一致）；小红书包名待真机 pm list packages 核实。
+        "小红书" to "com.xingin.xhs",
+        "红书" to "com.xingin.xhs",
+        "xiaohongshu" to "com.xingin.xhs",
+        "今日头条" to "com.ss.android.article.news",
+        "微博" to "com.sina.weibo",
+        "知乎" to "com.zhihu.android",
+        "闲鱼" to "com.taobao.idlefish",
+        "高德地图" to "com.autonavi.minimap",
+        "高德" to "com.autonavi.minimap",
+        "百度地图" to "com.baidu.BaiduMap",
+        "设置" to "com.android.settings",
+        // 第 6 批·断点 #9：电话/短信改走魅族包名（白名单里已有
+        // com.meizu.flyme.mms/dialer 作参照）；相机按魅族常见包名填，
+        // 待真机 pm list packages 核实。直查失败仍回落到标签枚举，
+        // 所以别家 ROM 上这三条不命中也不会开错应用。
+        "电话" to "com.meizu.flyme.dialer",
+        "拨号" to "com.meizu.flyme.dialer",
+        "短信" to "com.meizu.flyme.mms",
+        "相机" to "com.meizu.media.camera",
+        "相册" to "com.android.gallery3d"
+    )
+
+
+    /** C10 + M28：第 6 批改成精确→子串两级（别名在调用方的常用表里先认，
+     *  如“红书”→小红书、“拨号”→电话）：先按 label 精确匹配（忽略大小写），
+     *  只有零精确命中时才走子串兜底（label 含名字、或名字含 label，名字至少
+     *  2 字，label 为空时不参与反向包含）——先精确后子串，免得“微信读书”把
+     *  “微信”也带进来造成假多候选；同优先级多个候选都返回，调用方走澄清
+     *  问用户选哪个，绝不猜一个开。枚举异常不上吞，由调用方接住并如实回报。 */
+    private fun findAppCandidates(ctx: Context, name: String): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        val pm = ctx.packageManager
+        val query = name.trim()
+        for (app in pm.getInstalledApplications(0)) {
+            val label = pm.getApplicationLabel(app).toString()
+            if (label.equals(query, ignoreCase = true)) {
+                out.add(label to app.packageName)
+            }
+        }
+        if (out.isNotEmpty()) return out
+        if (query.length >= 2) {
+            for (app in pm.getInstalledApplications(0)) {
+                val label = pm.getApplicationLabel(app).toString()
+                if (label.contains(query, ignoreCase = true) ||
+                    (label.isNotEmpty() && query.contains(label, ignoreCase = true))
+                ) {
+                    out.add(label to app.packageName)
+                }
+            }
+        }
+        return out
+    }
+
+
     /** 按包名拉起一个应用，返回结果描述（不播报）；fullscreen 时走前台拉起。 */
     private fun launchPackage(ctx: Context, pkg: String, label: String, fullscreen: Boolean = false): String {
         // fullscreen 参数已无意义（Andee 没有全屏概念）：拉起统一走

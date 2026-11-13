@@ -6,12 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.core.content.ContextCompat
+import com.jarvis.app.command.DeviceCommands
 import com.jarvis.app.command.LocalCommands
-import com.jarvis.app.device.DeviceActionsController
-import com.jarvis.app.net.ToolSchemas
-import com.jarvis.app.screen.ScreenController
-import com.jarvis.app.task.BrowserController
-import com.jarvis.app.task.DeviceCommands
 import org.json.JSONObject
 
 /**
