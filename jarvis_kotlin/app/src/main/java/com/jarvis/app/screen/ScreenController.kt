@@ -464,47 +464,18 @@ class ScreenController(
             out.put("detail", "已是全屏，不用展开")
             return out
         }
-        // 先试 Shizuku shell 展开（框架第 4 步：实现在 WindowOps，按厂商选；
-        // 本机走 Flyme 实现）。成了直接返回；不成、或 Shizuku 不可用/未授权
-        // 时落回下面的拖动老路。
+        // 只试 Shizuku shell 展开（框架第 4 步：实现在 WindowOps，按厂商选；
+        // 本机走 Flyme 实现）。成了直接返回；不成直接报失败，不再拖动。
         if (WindowOps.tryShellExpand(service, targetPkg, before, this::appWindow, this::isFullscreen)) {
             out.put("expanded", true)
             out.put("detail", "小窗已展开成全屏（Shizuku shell）")
             return out
         }
-        // 横条在窗口最下方：往下拖横条展开成全屏（用户纠正：往下走是全屏，
-        // 往上走是小窗缩小比例——之前往上拖的方向反了）。
-        val startX = before.centerX()
-        val startY = before.bottom - 12
-        // 展开拖动只认目标包的前台（S2 的 expectedPkg）；目标还没到前台时
-        // swipe 会拒绝，展开如实报失败，不抛到任务循环里。
-        val dragged = runCatching {
-            // 第 5 批：展开拖动是内部机械动作、不用屏变快照（snapshot=false）——
-            // 成败由调用方重测窗口判定，不靠 screen_changed；快照还会多拍一张图。
-            swipe(startX, startY, screenW / 2, screenH - 5, 400, fling = false, expectedPkg = targetPkg, snapshot = false)
-            true
-        }.onFailure { Log.w("Body", "expandFloatingApp: drag refused: ${it.message}") }
-            .getOrDefault(false)
-        if (!dragged) {
-            out.put("expanded", false)
-            out.put("detail", "展开拖动未执行（目标应用不在前台），展开失败")
-            // 小窗诊断（Claude 复审修法批）：目标没到前台、拖动都发不出去——
-            // 恰恰是最值得诊断的情况（之前只有“拖了但没全屏”才抓）。
-            WindowOps.captureWindowDump(service, targetPkg)
-            return out
-        }
-        try { Thread.sleep(900) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-        val after = appWindow(targetPkg)
-        if (after != null && isFullscreen(after)) {
-            out.put("expanded", true)
-            out.put("detail", "小窗已展开成全屏")
-        } else {
-            out.put("expanded", false)
-            out.put("detail", "拖动后仍是小窗，展开失败")
-            // 小窗诊断（框架第 4 步）：两次都失败才抓一次 dumpsys 快照记进审计，
-            // 下次看日志就知道 Flyme 把这个窗口当成什么，再决定复刻哪条路。
-            WindowOps.captureWindowDump(service, targetPkg)
-        }
+        // 拖动兜底已删（2026-11-13 用户令：Andee 没有拖动展开，画蛇添足）：
+        // Shizuku shell 不成就是不成，不再拖。诊断照抓一次，日志里看得见。
+        out.put("expanded", false)
+        out.put("detail", "Shizuku shell 未能展开（仍是小窗）")
+        WindowOps.captureWindowDump(service, targetPkg)
         return out
     }
 
@@ -1478,40 +1449,7 @@ class ScreenController(
      * 分享面板、选择器、权限弹窗、安装器都住在系统包里）时，包名不一致是预期的，
      * 不是手势会落错应用的证据，直接放行。门禁本身不删：非交接、非系统面、
      * 前台是另一个普通应用时，照旧拒绝。
-     *
-     * 输入法放行（2026-11-13，用户点头）：前台是输入法包时直接放行——输入法
-     * 只是盖在当前应用上的悬浮窗，不可能是“另一个应用”；点输入框弹起键盘后
-     * 再按包名比对会把 type/tap 全拦掉（2026-11-13 微信发消息、高德搜地点
-     * 两次都死在这一步）。认法与 TaskLoop.isImePackage 同款。
      */
-    /** 本机已启用的输入法包名（现查一次后缓存；每任务开始时由 TaskLoop 调 clearImeCache() 清掉重查，服务存活期间新装/启用输入法才生效）。 */
-    @Volatile
-    private var cachedImePackages: Set<String>? = null
-
-    /** 任务开始时清掉输入法缓存（TaskLoop 调）：不然服务存活期间新装/启用
-     * 的输入法永远查不到，注释“下次跑任务重查”就是空话（Claude 审出）。 */
-    fun clearImeCache() {
-        cachedImePackages = null
-    }
-
-    /** 是不是输入法包：包名含 "inputmethod" 的直接认（搜狗、Gboard 同款）；其余的查本机已启用的输入法列表（百度等包名里没这串的靠它认）。 */
-    private fun isImePackage(pkg: String): Boolean {
-        if (pkg.isEmpty()) return false
-        if ("inputmethod" in pkg) return true
-        val pkgs = cachedImePackages ?: run {
-            val queried = try {
-                val imm = service.getSystemService(Context.INPUT_METHOD_SERVICE)
-                    as? android.view.inputmethod.InputMethodManager
-                imm?.enabledInputMethodList?.map { it.packageName }?.toSet().orEmpty()
-            } catch (_: Exception) {
-                emptySet()
-            }
-            cachedImePackages = queried
-            queried
-        }
-        return pkg in pkgs
-    }
-
     private fun requireForeground(expectedPkg: String? = lastDumpPkg, handover: Boolean = false) {
         val fg = foregroundPkg()
         if (fg.isNullOrEmpty()) {
@@ -1526,8 +1464,6 @@ class ScreenController(
                     "then dump its screen; this gesture was NOT sent"
             )
         }
-        // 输入法是盖在当前应用上的悬浮窗，不是另一个应用：放行（见 isImePackage）。
-        if (isImePackage(fg)) return
         if (handover || fg in HANDOVER_SYSTEM_PKGS) return
         if (!expectedPkg.isNullOrEmpty() && fg != expectedPkg) {
             throw IllegalStateException(

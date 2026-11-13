@@ -8,7 +8,7 @@ package com.jarvis.app.screen
  * 这一处：平台差异收在实现里，调用方只认 WindowOps。
  *
  * 实现按厂商选：本机是魅族（Build.MANUFACTURER == "Meizu"）走 Flyme 实现，
- * 其余走原生实现。原生实现目前是空壳（返回 false、落回拖动老路）——本机
+ * 其余走原生实现。原生实现目前是空壳（返回 false，调用方直接报失败）——本机
  * 是 Flyme，没有第二台原生 ROM 可验，不硬写一条没验过的路。
  *
  * Flyme 实现 = 现有行为原样搬过来（Shizuku shell `am start
@@ -18,7 +18,7 @@ package com.jarvis.app.screen
  */
 object WindowOps {
 
-    /** 小窗展开：按厂商选实现；展开不了返回 false，调用方落回拖动老路。 */
+    /** 小窗展开：按厂商选实现；展开不了返回 false，调用方直接报失败。 */
     fun tryShellExpand(
         ctx: android.content.Context,
         targetPkg: String,
@@ -140,7 +140,7 @@ object FlymeWindowOps : WindowExpander {
 }
 
 /** 原生实现：空壳。没有第二台原生 ROM 可验，不硬写一条没验过的路；
- * 展开不了就返回 false，调用方落回拖动老路。 */
+ * 展开不了就返回 false，调用方直接报失败。 */
 object AospWindowOps : WindowExpander {
     override fun tryExpand(
         ctx: android.content.Context,

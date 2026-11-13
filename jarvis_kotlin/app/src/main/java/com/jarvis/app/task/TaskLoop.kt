@@ -267,11 +267,9 @@ object TaskLoop {
         val controller = existingController ?: ScreenController(svc, TapMarkerUi(svc))
         val ownsController = existingController == null
         if (ownsController) JarvisAccessibilityService.screenController = controller
-        // 输入法缓存每任务清一次（Claude 审出：两处 cachedImePackages 只写不
-        // 清，服务存活期间新装/启用输入法不生效）；ScreenController 那份经
-        // clearImeCache() 清，TaskLoop 自己这份直接置空。
+        // 输入法缓存每任务清一次（TaskLoop 自己这份；ScreenController 的输入法
+        // 放行已删，不再有那份缓存）。
         cachedImePackages = null
-        controller.clearImeCache()
         AuditLog.append(ctx, "任务循环", taskText, "开始（上限 $MAX_STEPS 步）")
         TakeoverBorder.show()
         // 跨应用任务期球沉底沿（右下角，留半个球可见、可点；任务结束回原位）——
@@ -3107,20 +3105,16 @@ else -> return StepResult("$kind 缺少 eid、sel、cell 或坐标", false, null
 // 第 3 批：longPress 与 tap 同门进补救——盲树上被拒的长按以前只能由模型自己
 // zoom 处理，但 autoglm-phone 的 do() 表达不出 on="zoom"，等于没路走。
 if ((kind != "tap" && kind != "longPress") || on != "screen" || e.message?.startsWith("refused:") != true) throw e
-// 2026-11-12 精度修法：模型给了原始 x,y 就以它为中心裁图（zoomAimAt），不再
-// 经 cellFromNorm 量化成格子——格子中心会偏离模型想点的具体像素；只给了
-// cell 时才走 zoomAim(cell, part)（cell 本身就是模型选的目标，没有更细的
-// 坐标可保）。小写 cell 是 zoom 图内的格子，全屏 tap/longPress 不能用，照旧拒绝。
-// 拍图只为登记 zoom（zoomRegion/zoomAtMs）——图本身不再回喂模型，图中央
-// 就是自动落点/长按的落点；拍图失败也按原拒绝处理。
+// 自动补救走格子 zoom（2026-11-13 用户令删 zoom 精度，回到 Andee 的节奏）：
+// 模型给了 cell 就以它为中心裁图；只给了 x,y 就经 cellFromNorm 量化成格子
+// 再裁——格子中心可能偏离模型想点的具体像素，偏了由模型自己重拍 zoom 处理，
+// 不再自动吃原始坐标。小写 cell 是 zoom 图内的格子，全屏 tap/longPress
+// 不能用，照旧拒绝。拍图只为登记 zoom（zoomRegion/zoomAtMs）——图本身不再
+// 回喂模型，图中央就是自动落点/长按的落点；拍图失败也按原拒绝处理。
 runCatching {
-if (action.has("x") && action.has("y")) {
-controller.zoomAimAt(action.optInt("x", 500), action.optInt("y", 500))
-} else {
-val zoomCell = cell ?: throw e
+val zoomCell = cell ?: if (action.has("x") && action.has("y")) cellFromNorm(action.optInt("x", 500), action.optInt("y", 500)) else throw e
 if (zoomCell.any { it.isLowerCase() }) throw e
 controller.zoomAim(zoomCell, part)
-}
 }.getOrNull() ?: throw e
 // flow 方向的落地（2026-11-05）：zoom 图已到手，目标就在图中央（十字准星处）。
 // 直接在 zoom 图中央落点/长按，不用再问模型——autoglm-phone 的 do() 格式

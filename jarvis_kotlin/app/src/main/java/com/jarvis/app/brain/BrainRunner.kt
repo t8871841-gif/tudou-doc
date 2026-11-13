@@ -88,7 +88,6 @@ object BrainRunner {
         val controller = existingController ?: ScreenController(svc, TapMarkerUi(svc))
         val ownsController = existingController == null
         if (ownsController) JarvisAccessibilityService.screenController = controller
-        controller.clearImeCache()
         AuditLog.append(ctx, "任务大脑", taskText, "开始（LocalBrain，上限 ${JarvisBrain.MAX_STEPS} 步）")
         TakeoverBorder.show()
         OrbController.setTaskHidden(true)
