@@ -418,9 +418,9 @@ object TaskLoop {
         var loopNote: String? = null
         // 自动选模型·第 1 批：本次任务用哪个脑子开头就定死——手动档取开关值，
         // "auto" 按任务文本路由；自动档下选了谁写进审计（手动档不写，不刷屏）。
-        // 断点续跑（resumeFrom）也走同一条路由：规则只认任务文本，同一任务
-        // 每次都定到同一个脑子；第 2 批再把定好的模式存进断点、续跑直接沿用。
-        val runRoute = TaskRouter.resolve(ctx, taskText)
+        // 第 2 批：断点续跑（resumeFrom）带模式时直接沿用，不再重定——中间改了
+        // 开关也不会换脑；旧断点没有模式时按老路重定。
+        val runRoute = TaskRouter.resolve(ctx, taskText, resumeFrom?.mode)
         val runMode = runRoute.mode
         if (JarvisPrefs.getModelMode(ctx) == "auto") {
             AuditLog.append(
@@ -457,7 +457,7 @@ object TaskLoop {
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                             notes = notes.toList(),
-                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
                         )
                         stoppedWithResume = true
                         finalReply = "任务停在第 $step 步。已做到：${history.lastOrNull() ?: "还没开始动手"}。说「继续」可以从断点接着做。"
@@ -480,7 +480,7 @@ object TaskLoop {
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                             notes = notes.toList(),
-                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
                         )
                         stoppedWithResume = true
                         finalReply = "手机锁了，解锁后我再继续。已停在第 ${step - 1} 步，解锁后说「继续」可以接着做。"
@@ -506,7 +506,7 @@ object TaskLoop {
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                             notes = notes.toList(),
-                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
                         )
                         stoppedWithResume = true
                         finalReply = "无障碍服务掉了，任务停在第 ${step - 1} 步。到设置里重新开关一次 Jarvis 无障碍服务，然后说「继续」可以接着做。"
@@ -657,7 +657,7 @@ object TaskLoop {
                             plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                             screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                             notes = notes.toList(),
-                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                            loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
                         )
                         stoppedWithResume = true
                         finalReply = "屏幕连续 $BLACK_FRAME_LIMIT 次都是黑的（被保护、读不到内容），这个任务做不了，已停在第 ${step - 1} 步。换个能看的界面再说「继续」可以接着做。"
@@ -1217,7 +1217,7 @@ object TaskLoop {
                                     plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                                     screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                                     notes = notes.toList(),
-                                    loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                                    loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
                                 )
                                 stoppedWithResume = true
                                 finalReply = "任务卡在第 $step 步：在${pkg.ifEmpty { "未知界面" }}对同一目标反复做「${describeAction(action)}」，在同一界面反复打转，已停下。说「继续」可以接着做。"
@@ -1413,7 +1413,7 @@ object TaskLoop {
                 plan = subgoalResumePlanTexts(subgoals), completed = subgoalCompletedTexts(subgoals),
                 screenSig = prevScreenSig.takeIf { it.isNotEmpty() },
                 notes = notes.toList(),
-                loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures
+                loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures, mode = runMode
             )
             finalReply = if (saveResume) {
                 "任务跑满了步数上限（累计 $step 步）还没完成，已停下。最后进展：${history.lastOrNull() ?: "没有进展"}。说「继续」可以接着做。"

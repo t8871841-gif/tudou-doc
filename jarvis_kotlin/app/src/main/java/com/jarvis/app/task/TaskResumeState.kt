@@ -54,7 +54,11 @@ object TaskResumeState {
         val loopSeen: Map<String, Int> = emptyMap(),
         /** 第 5 批·断点续跑恢复连续失败计数（断点 #13）：断点时 consecutiveFailures
          * 的值；旧断点没有该字段时默认 0。只放内存，不落盘。 */
-        val consecutiveFailures: Int = 0
+        val consecutiveFailures: Int = 0,
+        /** 自动选模型·第 2 批：断点登记时本次任务用的模式（"glm"/"deepseek"/"custom"）；
+         * 续跑时直接沿用，不再按开关或任务文本重定——中间改了开关也不会换脑；
+         * 旧断点没有该字段时为 null，按老路重定。只放内存，不落盘。 */
+        val mode: String? = null
     )
 
     private data class Pending(val info: ResumeInfo, val expiresAt: Long)
@@ -99,7 +103,8 @@ object TaskResumeState {
     fun offer(taskText: String, history: List<String>, stepsDone: Int, foregroundPkg: String? = null,
               plan: List<String> = emptyList(), completed: List<String> = emptyList(),
               screenSig: String? = null, notes: List<String> = emptyList(),
-              loopSeen: Map<String, Int> = emptyMap(), consecutiveFailures: Int = 0): Boolean {
+              loopSeen: Map<String, Int> = emptyMap(), consecutiveFailures: Int = 0,
+              mode: String? = null): Boolean {
         val now = System.currentTimeMillis()
         val existing = pending
         if (existing != null && now <= existing.expiresAt) {
@@ -112,7 +117,8 @@ object TaskResumeState {
                 plan = plan.toList(), completed = completed.toList(),
                 screenSig = screenSig?.takeIf { it.isNotEmpty() },
                 notes = notes.toList(),
-                loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures),
+                loopSeen = loopSeen.toMap(), consecutiveFailures = consecutiveFailures,
+                mode = mode),
             now + TTL_MS
         )
         return true

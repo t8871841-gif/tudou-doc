@@ -223,6 +223,8 @@ object CustomClient {
      * 按模型开关取配置：GLM 模式用内置 glm-4v-plus + 智谱地址，自定义模式用视觉三项
      * （留空则回退到自定义大模型）；模型是否真支持图片输入取决于后端，
      * 这里按 OpenAI 多模态消息格式（image_url + data URL）发送。
+     * 自动档下按 GLM 走（任务循环不调这里——任务模型是直接带图问的，路由在第 1 批
+     * 已跟好；这里只供语音看屏幕/点目标、技能步骤与设置页的视觉测试用）。
      * L3：与 ask / askStream 同款取消守卫（mySeq + isAlive），取消后回调不再执行。
      */
     fun askVision(

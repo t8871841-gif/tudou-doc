@@ -69,8 +69,12 @@ object TaskRouter {
         return Route("deepseek", "无法判断，默认 DeepSeek")
     }
 
-    /** 按开关 + 文本定本次任务的模式：手动档原样返回；"auto" 才走路由。 */
-    fun resolve(ctx: Context, taskText: String): Route {
+    /** 按开关 + 文本 + 断点定本次任务的模式：断点里有模式先沿用（续跑不换脑，
+     * 中间改了开关也不影响）；手动档原样返回；"auto" 才走路由。 */
+    fun resolve(ctx: Context, taskText: String, resumeMode: String? = null): Route {
+        if (resumeMode == "glm" || resumeMode == "deepseek" || resumeMode == "custom") {
+            return Route(resumeMode, "断点续跑沿用")
+        }
         return when (val global = JarvisPrefs.getModelMode(ctx)) {
             "deepseek" -> Route("deepseek", "手动 DeepSeek")
             "custom" -> Route("custom", "手动自定义")
