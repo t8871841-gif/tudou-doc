@@ -2534,7 +2534,7 @@ private fun uiTreeSummary(dump: JSONObject, prefix: String): String {
     }
 }
 
-private fun dispatchToolCall(ctx: Context, controller: ScreenController, call: DeepSeekLlmClient.ToolCall): StepResult {
+internal fun dispatchToolCall(ctx: Context, controller: ScreenController, call: DeepSeekLlmClient.ToolCall): StepResult {
     // 根治第 3 批·发送定型是 Jarvis 自加的工具（method "task.send_chat"），
     // 不在 1:1 工具表里，methodOf 查不到——在这里先认出来。
     val method = if (call.name == "send_chat_message") "task.send_chat"
