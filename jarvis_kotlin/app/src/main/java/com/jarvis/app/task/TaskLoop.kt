@@ -194,12 +194,18 @@ object TaskLoop {
     /** 任务句式判定（JarvisAgent 路由用）。纯聊天、单步打开应用、提问句都不算。 */
     fun looksLikeTask(text: String): Boolean {
         val t = text.trim()
-        if (t.length < 6) return false
+        // 下限放宽到 4 字（2026-11-13）：“查一下账单”只有 5 字，旧的 6 字门槛
+        // 把它挡在循环外；1–3 字的短句仍拦着，靠句式本身判，不靠长度猜。
+        if (t.length < 4) return false
         if (t.contains('？') || t.contains('?')) return false
         return IN_APP_SEND.containsMatchIn(t) ||
             SEND_TO.containsMatchIn(t) ||
             SEND_AFTER.containsMatchIn(t) ||
-            OPEN_THEN.containsMatchIn(t)
+            OPEN_THEN.containsMatchIn(t) ||
+            // 路由规则同款（2026-11-13）：进循环的门与循环里的自动选模型用同一套
+            // DeepSeek 规则——“打开高德导航到郑州火车站”这类句式不再掉进聊天；
+            // 只认明确命中的规则，普通聊天/问句不进循环。原四种句式照旧保留。
+            TaskRouter.matchesDeepSeekRule(t)
     }
 
     /** 急停：自增序号，正在跑的循环下一步检查时自行中止（与 Agent 的 genSeq 急停并行）。 */

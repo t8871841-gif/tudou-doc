@@ -76,6 +76,18 @@ object TaskRouter {
         return Route("deepseek", "无法判断，默认 DeepSeek")
     }
 
+    /** 只认明确命中的 DeepSeek 规则（发消息/钱/账单/导航/多步骤/找人/跨应用），
+     * 不认 route() 末尾的“无法判断，默认 DeepSeek”——普通聊天/问句不能被当成任务。
+     * 供 TaskLoop.looksLikeTask 用：进任务循环的门与循环里的自动选模型用同一套
+     * 规则，两道门不再互相不认（2026-11-13 语音高德被聊天模型回绝的根子）。
+     * 打电话先判 GLM（与 route() 一致），不在这里算 DeepSeek。 */
+    fun matchesDeepSeekRule(text: String): Boolean {
+        val t = text.trim()
+        if (CALL_PATTERN.containsMatchIn(t)) return false
+        if (DEEPSEEK_RULES.any { (pattern, _) -> pattern.containsMatchIn(t) }) return true
+        return mentionedApps(t).size >= 2
+    }
+
     /** 按开关 + 文本 + 断点定本次任务的模式：断点里有模式先沿用（续跑不换脑，
      * 中间改了开关也不影响）；手动档原样返回；"auto" 才走路由。 */
     fun resolve(ctx: Context, taskText: String, resumeMode: String? = null): Route {
