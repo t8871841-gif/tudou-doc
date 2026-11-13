@@ -97,8 +97,11 @@ object EdgeTts {
     @Volatile private var handshakeRetryAfterMs = 0L
     @Volatile private var lastProgressAt = 0L
     @Volatile private var stallFired = false
-    private var stallWatchdog: Runnable? = null
-    private var stallWatchdogSeq = -1
+    // 复审修法批：这两个字段原来没加 @Volatile——arm/disarm 跑在 io 线程，
+    // 看门狗 Runnable 自己触发时（run 里）跑在主线程，跨线程写同一字段没有
+    // 可见性保证；同组的 lastProgressAt/stallFired 都有，补齐。
+    @Volatile private var stallWatchdog: Runnable? = null
+    @Volatile private var stallWatchdogSeq = -1
 
     // H3 播报侧音频焦点（内联实现，不新建共享文件；对齐 Andee AudioFocusGate 的
     // USAGE_ASSISTANT + AUDIOFOCUS_GAIN_TRANSIENT）：播报前申请，播完/取消/失速时释放；

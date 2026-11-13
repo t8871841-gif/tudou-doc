@@ -81,45 +81,6 @@ class ScreenController(
     private val ownArea: () -> Rect? = { ownOverlayBounds(service) },
 ) {
 
-    /**
-     * Runs a capture with our own windows blanked. Set by the dispatcher, which
-     * owns the overlays; null where there are none, and then the capture just runs.
-     *
-     * Needed because the effect snapshot after a tap is taken from inside [tap],
-     * i.e. inside the dispatcher's gesture passthrough, which only makes the ball
-     * untouchable and leaves it drawn. Without this the brain's `after_shot` shows
-     * the ball over whatever sits in the bottom-right corner — a field report had
-     * it read the ball as covering Alipay's 我的 tab and abandon the route.
-     */
-    @Volatile
-    var shotGuard: ((() -> JSONObject) -> JSONObject)? = null
-
-    private fun guardedShot(shot: () -> JSONObject): JSONObject =
-        shotGuard?.invoke(shot) ?: shot()
-
-    /**
-     * Wraps a single injected gesture — [tap], [longPress], [swipe] — so the
-     * dispatcher can get the ball window out of the way when the stroke would
-     * land under it. The target rect is the stroke's bounding box in pixels;
-     * the wrapper decides whether moving the overlay is worth it.
-     *
-     * Measured on this hardware (2026-10-09, Alipay bottom tabs): without this,
-     * taps that landed inside the ball window's 168 dp frame returned
-     * `completed:true, screen_changed:true` from the accessibility layer but the
-     * target app never saw them — Android marks a stroke "obscured" when any
-     * untrusted overlay sits on it, and payment apps drop obscured taps. Making
-     * the overlay non-touchable (what `passthroughForGesture` already does) is
-     * not enough: an invisible non-touchable overlay still contributes to the
-     * obscuration ceiling.
-     *
-     * Null in a caller with no overlay to park.
-     */
-    @Volatile
-    var gestureGuard: ((android.graphics.Rect, () -> JSONObject) -> JSONObject)? = null
-
-    private fun guardedGesture(target: android.graphics.Rect, body: () -> JSONObject): JSONObject =
-        gestureGuard?.invoke(target, body) ?: body()
-
     /** Last meaningful accessibility event from a non-overlay app. */
     private val lastContentEventMs = AtomicLong(0L)
 
@@ -527,6 +488,9 @@ class ScreenController(
         if (!dragged) {
             out.put("expanded", false)
             out.put("detail", "展开拖动未执行（目标应用不在前台），展开失败")
+            // 小窗诊断（Claude 复审修法批）：目标没到前台、拖动都发不出去——
+            // 恰恰是最值得诊断的情况（之前只有“拖了但没全屏”才抓）。
+            WindowOps.captureWindowDump(service, targetPkg)
             return out
         }
         try { Thread.sleep(900) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
@@ -544,13 +508,6 @@ class ScreenController(
         return out
     }
 
-    /**
-     * 第 2 批·Shizuku shell 展开（评估）：以 shell 身份跑
-     * `am start --windowingMode 1 -n <launcher 组件>`，把目标应用的窗口
-     * 直接改成全屏模式；等一下再重测窗口，铺满屏幕（≥80%）才算成。
-     * Shizuku 不可用 / 未授权 / 没有 launcher 组件时整段跳过，只写审计、
-     * 不抛异常、不阻塞，调用方落回拖动老路。只供 expandFloatingApp 调。
-     */
     /** 该包名的应用窗口（取最大的一个）；没有返回 null。 */
     private fun appWindow(targetPkg: String): Rect? {
         val windows = runCatching { service.windows }.getOrNull() ?: return null
@@ -2681,13 +2638,11 @@ class ScreenController(
         val beforePx = if (before.optBoolean("blind")) snapFrame ?: pixelSignature() else null
         // Andee 对齐：上一圈还亮着时先藏起来——注入落点正好是圈坐着的位置。
         marker?.hideNow()
-        // M15: 落点在球下时球先让开（Andee wireScreen 的 gestureGuard 同款思路，
-        // 本工程由 OrbController.dodgeIfNeeded 落地，按 ownArea 的球框判定）。
+        // M15: 落点在球下时球先让开（由 OrbController.dodgeIfNeeded 落地，
+        // 按 ownArea 的球框判定；复审修法批删了 Andee 同款的 gestureGuard 死接线）。
         val dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x, y)
         val result = try {
-            guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
-                runGesture(GestureDescription.Builder().addStroke(stroke).build(), 3000L)
-            }
+            runGesture(GestureDescription.Builder().addStroke(stroke).build(), 3000L)
         } finally {
             if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
@@ -3025,7 +2980,7 @@ class ScreenController(
                     // reveal, then give the post a beat to land.
                     marker?.revealNow()
                     Thread.sleep(80)
-                    result.put("after_shot", guardedShot { screenshot("tap_after") })
+                    result.put("after_shot", screenshot("tap_after"))
                 }
             }
             // The NEW screen's element list, so the brain can chain its next
@@ -3095,7 +3050,7 @@ class ScreenController(
                     val ry = (tapY * 1000f / screenH).toInt()
                     val size = 300
                     val hUnits = (size * screenH.toFloat() / screenW).toInt().coerceAtLeast(1)
-                    result.put("miss_shot", guardedShot { lookRegion(rx, ry, size, hUnits) })
+                    result.put("miss_shot", lookRegion(rx, ry, size, hUnits))
                 }
             }
         }
@@ -3197,7 +3152,6 @@ class ScreenController(
             maxOf(x1, x2) + 4, maxOf(y1, y2) + 4,
         )
         val result = try {
-            guardedGesture(target) {
             if (fling) {
                 val stroke = GestureDescription.StrokeDescription(path, 0L, dur)
                 runGesture(GestureDescription.Builder().addStroke(stroke).build(), dur + 2000)
@@ -3228,7 +3182,6 @@ class ScreenController(
                     }
                 }
                 moved
-            }
             }
         } finally {
             if (dodged) com.jarvis.app.OrbController.restoreDodge()
@@ -3286,7 +3239,7 @@ class ScreenController(
         if (!changed && blindTree && !pixelTold) result.put("screen_changed_unknown", true)
         result.put("screen_changed", changed)
         if (changed) {
-            runCatching { result.put("after_shot", guardedShot { screenshot("fling_after") }) }
+            runCatching { result.put("after_shot", screenshot("fling_after")) }
         } else {
             result.put(
                 "fling_note",
@@ -3327,7 +3280,7 @@ class ScreenController(
         }
         result.put("screen_changed", changed)
         if (changed) {
-            runCatching { result.put("after_shot", guardedShot { screenshot(shotReason) }) }
+            runCatching { result.put("after_shot", screenshot(shotReason)) }
         }
     }
 
@@ -3384,9 +3337,7 @@ class ScreenController(
         // Andee 对齐：落点在球下时球先让开，手势完恢复。
         val dodged = com.jarvis.app.OrbController.dodgeIfNeeded(x, y)
         val result = try {
-            guardedGesture(android.graphics.Rect(x - 4, y - 4, x + 4, y + 4)) {
-                runGesture(GestureDescription.Builder().addStroke(stroke).build(), dur + 2000)
-            }
+            runGesture(GestureDescription.Builder().addStroke(stroke).build(), dur + 2000)
         } finally {
             if (dodged) com.jarvis.app.OrbController.restoreDodge()
         }
@@ -5914,8 +5865,9 @@ class ScreenController(
          * 比 144dp 的落点标记小，是最小的那张常驻覆盖层。球被收起/藏起时窗口
          * 还在，bounds 照常可用；球没起来时返回 null，等同于旧的默认行为。
          * 像素比对（[signatureOf]/[snapToShape]）与手势让位都按这块区域遮/让，
-         * 对应 Andee `wireScreen` 的 gestureGuard/shotGuard（见 [tap] 里的
-         * dodgeIfNeeded 与 [screenshot] 里的 setVisibleForCapture）。
+         * 对应 Andee `wireScreen` 的同款思路（见 [tap] 里的
+         * dodgeIfNeeded 与 [screenshot] 里的 setVisibleForCapture；
+         * 复审修法批删了 gestureGuard/shotGuard 死接线）。
          */
         private fun ownOverlayBounds(service: AccessibilityService): Rect? {
             val windows = runCatching { service.windows }.getOrNull() ?: return null

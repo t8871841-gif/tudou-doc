@@ -24,8 +24,9 @@
   也释。建轨本身包 try/catch（排雷 D 批），失败报 onDone(false) 并关看门狗。
 - `focusRequest` / `focusManager` / `focusHeld` / `focusSeq` / `focusPaused`：
   焦点状态，acquire/abandon 成对；finally 里释焦点。
-- `lastProgressAt` / `stallFired` / `stallWatchdog`：失速看门狗，arm/disarm
-  成对；20 秒无进展调 stop()。
+- `lastProgressAt` / `stallFired` / `stallWatchdog` / `stallWatchdogSeq`：失速看门狗，arm/disarm
+  成对；20 秒无进展调 stop()。stallWatchdog 与 stallWatchdogSeq 的 @Volatile 是
+  复审修法批补的（原来没有——arm/disarm 跑 io 线程，Runnable 触发时跑主线程）。
 - `handshakeRetryAfterMs` / `earconQuietUntil` / `earconLastPlayAt`：时间戳，
   自己过期，不用清。
 - `callListenerAttached`：一次性挂接守卫，监听器活到进程结束，设计如此。
@@ -45,7 +46,8 @@
   即失效（ZOOM_CONFIRM_MS）。
 - `observedSize` / `observedSizeAtMs`：屏幕尺寸缓存，带时间戳。
 - `typedBlindAt` / `screenMovedAtMs`：时间戳，不用清。
-- `shotGuard` / `gestureGuard`：**死接线**（见开放项）。
+- `shotGuard` / `gestureGuard`：**已删**（2026-11-13 复审修法批：全仓无赋值，
+  球的躲避与截图隐藏走 OrbController 直接调用；字段与 `?:` 包装、7 处调用点一并清理）。
 
 ### JarvisAgent.kt（11 处）——owner：JarvisAgent
 - `genSeq`：代际计数，状态切换/急停自增，老的异步回调靠它失效。
@@ -92,7 +94,5 @@
 
 ## 开放项
 
-- `ScreenController.shotGuard` / `gestureGuard`：Andee wireScreen 同款
-  接线，全仓没有任何赋值处，永远是 null、永远走 `?:` 兜底。要么接上，要么
-  删掉——单独一批做，不在这一步动。
+- ~~`ScreenController.shotGuard` / `gestureGuard`~~：已删（2026-11-13 复审修法批）。
 - 未逐项核对的模块：下次改到哪个文件，就把那个文件的清单补进上面。

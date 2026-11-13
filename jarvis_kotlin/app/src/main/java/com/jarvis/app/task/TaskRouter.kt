@@ -26,29 +26,53 @@ object TaskRouter {
     // 优先于下面所有 DeepSeek 规则。
     private val CALL_PATTERN = Regex("打电话|打个电话|拨打|打给")
 
+    // 人群词（收件人/找的人）：Claude 复审修法批加了老板/领导——“跟老板说一下”
+    // 这类话没它进不了任务循环（isTaskText 只认明确命中的规则，没有兜底）。
+    private const val PEOPLE_WORDS =
+        "老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户|老板|领导"
+
     // DeepSeek 信号：任一命中即 DeepSeek（顺序即优先级，只取第一条命中的原因）。
     // 多步骤规则不在表里（见下面的 isMultiStepTask：裸“然后/接着”不算任务）。
     private val DEEPSEEK_RULES = listOf(
         Regex("发消息|发微信|留言|发短信|发给") to "含发消息",
         Regex("转账|转钱|转.{0,6}给|付款|付钱|查账单|还款|账单") to "涉及钱/账单",
         Regex("导航|路线|怎么走|怎么去") to "含导航",
-        Regex("找人(?!聊天|说话|倾诉|解闷)|找联系人|通讯录里|在通讯录") to "需找人",
-        Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(聊天|会话)") to "找人聊天",
-        Regex("搜.{0,8}(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户)") to "搜找人",
+        // 找人否定预查（复审修法批）：零宽预查必须紧跟“找人”才生效，自然说法
+        // 里夹个填充词就失效（“找人跟我聊天”）；改成 0–4 字间隙内不出现陪伴词
+        // 才算找人，陪伴词也扩到聊聊/唠嗑/诉苦/吐槽/聊会。
+        Regex("找人(?!.{0,4}(聊天|说话|倾诉|解闷|聊聊|唠嗑|诉苦|吐槽|聊会|聊会儿))|找联系人|通讯录里|在通讯录") to "需找人",
+        Regex("($PEOPLE_WORDS).{0,4}(聊天|会话)") to "找人聊天",
+        Regex("搜.{0,8}($PEOPLE_WORDS)") to "搜找人",
         Regex("给.{0,16}发(个|条|张)?(消息|微信|信息|短信|语音|图片|位置|红包|文件)|给.{0,16}留言|给.{0,16}问") to "给人发消息",
-        Regex("(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户).{0,4}(发|找|联系|留言)") to "找人发消息",
-        Regex("(问|告诉|跟)(老婆|老公|女儿|儿子|妈妈|爸爸|老妈|老爸|朋友|同事|客户)") to "问人/找人",
-        Regex("打开.{0,10}?(搜|查|找|买|订)") to "打开搜/查/买/订",
+        Regex("($PEOPLE_WORDS).{0,4}(发|找|联系|留言)") to "找人发消息",
+        Regex("(问|告诉|跟)($PEOPLE_WORDS)") to "问人/找人",
     )
 
-    // 多步骤（Claude 审出）：“先…再/然后/接着”裸用是日常口语（“我先洗个澡
-    // 再睡觉”“然后呢”），单独出现不算任务；必须同时提到应用名或动作动词
-    // （打开/发/打/查/搜/导航/转账…）才算数。
-    private val MULTI_STEP = Regex("先.+再|然后|接着|再打开|再去")
-    private val STEP_ACTION = Regex("打开|开启|启动|进入|发|打电话|拨打|查|搜|导航|转账|转钱|付款|付钱")
+    // “打开X搜/查/找/买/订”单独一档（复审修法批）：它不再是 DEEPSEEK_RULES
+    // 里的一条，而是 route() 里的一个优先级位置——排在 GLM 设备规则之后、
+    // GLM“只打开”规则之前。原因有二：它会把“打开设置查电量”这类设备查询
+    // 也吞掉，而 GLM 的电量规则必须先赢；但 GLM 的“只打开”正则（1–8 字）
+    // 又会把“打开小红书搜新乡美食”吞掉，所以“只打开”必须排在它后面。
+    // matchesDeepSeekRule 里它照旧算 DeepSeek（进循环的门不变）。
+    private val OPEN_RULE = Regex("打开.{0,10}?(搜|查|找|买|订)")
+
+    // 多步骤（Claude 审出，复审修法批重写）：旧版只看“标记和动作同时出现”，
+    // “我查了一下，然后你说的对”这种毫不相干的两半句也会被算成多步骤。
+    // 新版要求动作跟在标记后面：“先…再”结构里动作可在句中任意处（先A再B
+    // 本身就是计划）；“然后/接着/再去”后面 8 字内必须跟动作动词；“再打开”
+    // 自带动作，只需提到应用名。动作表补了告诉/关闭/退出。
+    private val MULTI_STEP_FIRST = Regex("先.+再")
+    private val MULTI_STEP_THEN =
+        Regex("(然后|接着|再去).{0,8}(打开|开启|启动|进入|发|打电话|拨打|查|搜|导航|转账|转钱|付款|付钱|告诉|关闭|退出)")
+    private val MULTI_STEP_REOPEN = Regex("再打开")
+    private val STEP_ACTION =
+        Regex("打开|开启|启动|进入|发|打电话|拨打|查|搜|导航|转账|转钱|付款|付钱|告诉|关闭|退出")
     private fun isMultiStepTask(t: String): Boolean {
-        if (!MULTI_STEP.containsMatchIn(t)) return false
-        return mentionedApps(t).isNotEmpty() || STEP_ACTION.containsMatchIn(t)
+        if (MULTI_STEP_REOPEN.containsMatchIn(t)) return mentionedApps(t).isNotEmpty()
+        if (MULTI_STEP_FIRST.containsMatchIn(t)) {
+            return mentionedApps(t).isNotEmpty() || STEP_ACTION.containsMatchIn(t)
+        }
+        return MULTI_STEP_THEN.containsMatchIn(t)
     }
 
     /** 明确命中的 DeepSeek 规则原因；没命中返回 null（route() 末尾的“无法判断，
@@ -76,15 +100,22 @@ object TaskRouter {
         "闲鱼" to "闲鱼", "QQ" to "QQ", "拼多多" to "拼多多", "美团" to "美团",
     )
 
-    // GLM 信号：单应用简单操作。
+    // GLM 信号：单应用简单操作（设备查询/天气/调设置）。
     private val GLM_RULES = listOf(
         Regex("电量|电池|几点了|现在.{0,2}时间") to "查状态/时间",
         Regex("天气") to "查天气",
-        Regex("^打开[\\u4e00-\\u9fa5a-zA-Z0-9]{1,8}(吧|一下|呀)?$") to "只打开一个应用",
         Regex("(亮度|音量).{0,2}调|调.{0,2}(亮度|音量)|(设|订|定).{0,2}闹钟") to "调设备设置",
     )
 
-    /** 只按文本路由，不看开关。 */
+    // “只打开一个应用”单独一条（复审修法批）：它必须排在 OPEN_RULE 后面判，
+    // 否则“打开小红书搜新乡美食”会被它吞掉（“小红书搜新乡美食”正好 8 字）。
+    private val OPEN_APP_PATTERN =
+        Regex("^打开[\\u4e00-\\u9fa5a-zA-Z0-9]{1,8}(吧|一下|呀)?$")
+
+    /** 只按文本路由，不看开关。优先级（复审修法批）：打电话 → DeepSeek 规则
+     * → GLM 设备规则 → OPEN_RULE（打开搜/查/买/订）→ GLM“只打开”→ 默认 DeepSeek。
+     * OPEN_RULE 与“只打开”夹在中间是刻意的：前者怕 GLM 设备规则被吞（“打开设置
+     * 查电量”），后者怕它自己吞掉带动作的打开句（“打开小红书搜新乡美食”）。 */
     fun route(taskText: String): Route {
         val t = taskText.trim()
         // 打电话先判（用户 2026-11-13：以前 GLM 就能正常打）：含打电话/拨打/
@@ -94,15 +125,21 @@ object TaskRouter {
         for ((pattern, reason) in GLM_RULES) {
             if (pattern.containsMatchIn(t)) return Route("glm", reason)
         }
+        if (OPEN_RULE.containsMatchIn(t)) return Route("deepseek", "打开搜/查/买/订")
+        if (OPEN_APP_PATTERN.containsMatchIn(t)) return Route("glm", "只打开一个应用")
         return Route("deepseek", "无法判断，默认 DeepSeek")
     }
 
-    /** 只认明确命中的 DeepSeek 规则（发消息/钱/账单/导航/多步骤/找人/跨应用），
-     * 不认 route() 末尾的“无法判断，默认 DeepSeek”——普通聊天/问句不能被当成任务。
-     * 供 TaskLoop.looksLikeTask 与 LocalCommands 用：进任务循环的门与循环里的
-     * 自动选模型用同一套规则，两道门不再互相不认（2026-11-13 语音高德被聊天
-     * 模型回绝的根子）。打电话先判 GLM（与 route() 一致），不在这里算 DeepSeek。 */
-    fun matchesDeepSeekRule(text: String): Boolean = deepSeekReason(text.trim()) != null
+    /** 只认明确命中的 DeepSeek 规则（发消息/钱/账单/导航/多步骤/找人/跨应用
+     * + OPEN_RULE 的打开搜/查/买/订），不认 route() 末尾的“无法判断，默认
+     * DeepSeek”——普通聊天/问句不能被当成任务。供 TaskLoop.looksLikeTask 与
+     * LocalCommands 用：进任务循环的门与循环里的自动选模型用同一套规则，两道
+     * 门不再互相不认（2026-11-13 语音高德被聊天模型回绝的根子）。打电话先判
+     * GLM（与 route() 一致），不在这里算 DeepSeek。 */
+    fun matchesDeepSeekRule(text: String): Boolean {
+        val t = text.trim()
+        return deepSeekReason(t) != null || OPEN_RULE.containsMatchIn(t)
+    }
 
     // ---- 意图层收敛（框架第 2 步，2026-11-13）----
     // “这是不是任务”只在这里判。原来散在四处的分类正则——TaskLoop 的四种
@@ -126,8 +163,9 @@ object TaskRouter {
     // 批九守卫（原 LocalCommands.TASK_SHAPED）：句中带「给<人>发信息/发消息/
     // 发微信」的多步任务句式不是单纯开应用，不能在本地指令里按应用名吞掉
     // （"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），放行给
-    // 任务路由。注意：这里只认这个窄句式，不认整套 isTaskText——提醒/日历/
-    // 场景等本地指令还在后面，整套判进来会把它们抢走。
+    // 任务路由。注意：这里只认这个窄句式，不认整套 isTaskText；调用点在
+    // tryHandle 的 OPEN_APP 正前方（复审修法批移位）——提醒/日历/场景都已
+    // 先试过，整套判进来会把它们抢走。
     private val SEND_SHAPE = Regex("给.{1,16}?(发信息|发消息|发微信|发短信|发送)")
     fun isSendShape(text: String): Boolean = SEND_SHAPE.containsMatchIn(text.trim())
 

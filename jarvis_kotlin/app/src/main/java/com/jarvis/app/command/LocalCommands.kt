@@ -118,7 +118,6 @@ object LocalCommands {
         // H11：问句检查不再放在打电话/打开应用匹配之前——"帮我打开微信好吗"
         // "打电话给妈妈可以吗"先走指令匹配，匹配不上、走到最后才判是不是疑问句。
         // 见文末 isQuestion：含祈使动词（打开/打电话…）的不是纯疑问句。
-        if (com.jarvis.app.task.TaskRouter.isSendShape(t)) return false
 
         // 第二梯队批五：定时提醒句式（"10分钟后提醒我…""晚上10点提醒我…"）优先于
         // 「打开应用」「打电话」判定——这类句子里常常带"我"这种不像应用名/人名的词，
@@ -190,6 +189,14 @@ object LocalCommands {
             io.execute { callContactBg(ctx, name, speak) }
             return true
         }
+
+        // 批九守卫（Claude 复审修法批移位）：句中带「给<人>发信息/发消息/发微信」
+        // 的多步任务句式不是单纯开应用，不能在本地指令里按应用名吞掉。
+        // 位置改到 OPEN_APP 正前方——原来在 DeviceCommands 后面、提醒/日历/场景
+        // 之前，“明天早上8点提醒我给妈妈发微信”会被它先拦掉、提醒分支永远看不到，
+        // 随后进任务循环当场发消息，“明天”的调度意图整个丢了。挪到这里后提醒/
+        // 日历/场景/拆解/关闭/打电话都先试过，没命中才轮到这条守卫。
+        if (com.jarvis.app.task.TaskRouter.isSendShape(t)) return false
 
         val appName = OPEN_APP.matchEntire(t)?.groupValues?.get(1)
         if (appName != null) {
