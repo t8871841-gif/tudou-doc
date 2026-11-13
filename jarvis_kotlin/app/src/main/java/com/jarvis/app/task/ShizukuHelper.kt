@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit
  *   （10 秒）；主线程上的调用不等（会死锁），这次先回 null，绑定好后下次调用可用。
  * - runShell 没有 ctx 参数：绑定要的 Context 靠各入口（isShizukuAvailable /
  *   requestPermission / forceStopPackage / pairingState）进来时顺手记下来。两处
- *   调用方（tryShellExpand、关应用）都是先调 isShizukuAvailable 再调
+ *   调用方（WindowOps.FlymeWindowOps.tryExpand、关应用）都是先调 isShizukuAvailable 再调
  *   runShell/forceStopPackage，所以用到时一定已经记下来了。
  *
  * 纪律：所有函数都不抛异常——Shizuku 没装、没启动、没授权、命令超时、退出码非 0，
@@ -143,7 +143,7 @@ object ShizukuHelper {
 
     /**
      * 跑一条命令，回 stdout（截断到约 2000 字）+ 退出码。
-     * 超时 / 起不来 / 抛异常时回 exitCode = -1。小窗展开（tryShellExpand）经这里走 shell。
+     * 超时 / 起不来 / 抛异常时回 exitCode = -1。小窗展开（WindowOps.FlymeWindowOps.tryExpand）经这里走 shell。
      */
     fun runShell(cmd: Array<String>, timeoutMs: Long = DEFAULT_TIMEOUT_MS): ShellResult {
         val result = runProcess(cmd, clampTimeout(timeoutMs)) ?: return ShellResult("", -1)
