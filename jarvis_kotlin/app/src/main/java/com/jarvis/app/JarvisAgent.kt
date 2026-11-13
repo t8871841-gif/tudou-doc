@@ -288,13 +288,11 @@ object JarvisAgent {
     // 三期新增：两类问法在进 GLM 聊天之前先分流到视觉看屏通道。
     private val TAP_INTENT = Regex("^(帮我)?点(一下|击)?\\s*(.+)$")
     private val SCREEN_QUESTION = Regex("(屏幕上|这上面|这是什么|这是啥|这个(按钮|图标|东西)|这上边)")
-    // 发信息缺收件人：以“发信息/发消息/发微信/发短信”开头、却没写给谁的句式。
-    // 三个任务句式（IN_APP_SEND/SEND_TO/OPEN_THEN）都要求收件人或动作词，
-    // 这种裸发句式命中不了，掉进闲聊会被模型鹦鹉学舌（真机：“发信息我晚上
-    // 回家吃饭”→“你晚上回家吃饭吧”）。问句不算（带吗/？/怎么/为什么等），
-    // 避免“发信息要钱吗”这类求知句被误拦。
-    private val BARE_SEND = Regex("^(帮我)?发(个|条)?(信息|消息|微信|短信)")
-    private val BARE_SEND_QUESTION = Regex("(吗|？|\\?|怎么|为什么|为何|多少|是不是|能不能|会不会)")
+    // 发信息缺收件人见 TaskRouter.isBareSend/isBareSendQuestion（框架第 2 步收敛）：
+    // 以“发信息/发消息/发微信/发短信”开头、却没写给谁的句式。任务句式都要求
+    // 收件人或动作词，这种裸发句式命中不了，掉进闲聊会被模型鹦鹉学舌（真机：
+    // “发信息我晚上回家吃饭”→“你晚上回家吃饭吧”）。问句不算，避免“发信息
+    // 要钱吗”这类求知句被误拦。
 
     // M7：语音退出命令（Andee VoiceExitCommand 同款，归一化后整句精确匹配才认，
     // 问怎么退出、复述命令都不算；命中且是用户主动说的就停掉助手回 idle）。
@@ -487,10 +485,10 @@ object JarvisAgent {
             }
             return
         }
-        // 发信息缺收件人：先反问，不当闲聊回掉（见 BARE_SEND 注释）。
+        // 发信息缺收件人：先反问，不当闲聊回掉（规则见 TaskRouter.isBareSend）。
         // 带给/向/跟的不拦：收件人可能写在动词后面（如“发信息给老婆”），
         // 那是任务句式词序没覆盖的另一缺口，不在这里错问。
-        if (BARE_SEND.containsMatchIn(text) && !BARE_SEND_QUESTION.containsMatchIn(text) &&
+        if (com.jarvis.app.task.TaskRouter.isBareSend(text) && !com.jarvis.app.task.TaskRouter.isBareSendQuestion(text) &&
             !text.contains("给") && !text.contains("向") && !text.contains("跟")
         ) {
             AuditLog.append(ctx, "任务路由", text, "发信息缺收件人，反问")

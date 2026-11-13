@@ -86,11 +86,9 @@ object LocalCommands {
     private val CLOSE_APP = Regex("^$POLITE_PREFIX_GROUP(?:关闭|关掉|退出)\\s*(.+)$")
     private val CLOSE_APP_BA = Regex("^${POLITE_PREFIX_GROUP}把\\s*(.+?)\\s*(?:关了|关掉|关闭)$")
 
-    // 批九守卫：句中带「给<人>发信息/发消息/发微信」的多步任务句式不是单纯开应用，
-    // 不能在这里按应用名吞掉（"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），
-    // 放行给 JarvisAgent 的任务路由（task/TaskLoop）。
-    private val TASK_SHAPED = Regex("给.{1,16}?(发信息|发消息|发微信|发短信|发送)")
-
+    // 批九守卫见 TaskRouter.isSendShape（框架第 2 步收敛）：句中带「给<人>发信息/
+    // 发消息/发微信」的多步任务句式不是单纯开应用，不能在这里按应用名吞掉，
+    // 放行给任务路由。正则已搬进 TaskRouter，这里只留调用。
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "LocalCommands").apply { isDaemon = true } }
     private val main = Handler(Looper.getMainLooper())
 
@@ -120,7 +118,7 @@ object LocalCommands {
         // H11：问句检查不再放在打电话/打开应用匹配之前——"帮我打开微信好吗"
         // "打电话给妈妈可以吗"先走指令匹配，匹配不上、走到最后才判是不是疑问句。
         // 见文末 isQuestion：含祈使动词（打开/打电话…）的不是纯疑问句。
-        if (TASK_SHAPED.containsMatchIn(t)) return false
+        if (com.jarvis.app.task.TaskRouter.isSendShape(t)) return false
 
         // 第二梯队批五：定时提醒句式（"10分钟后提醒我…""晚上10点提醒我…"）优先于
         // 「打开应用」「打电话」判定——这类句子里常常带"我"这种不像应用名/人名的词，

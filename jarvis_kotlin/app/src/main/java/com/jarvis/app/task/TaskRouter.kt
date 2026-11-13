@@ -104,6 +104,52 @@ object TaskRouter {
      * 模型回绝的根子）。打电话先判 GLM（与 route() 一致），不在这里算 DeepSeek。 */
     fun matchesDeepSeekRule(text: String): Boolean = deepSeekReason(text.trim()) != null
 
+    // ---- 意图层收敛（框架第 2 步，2026-11-13）----
+    // “这是不是任务”只在这里判。原来散在四处的分类正则——TaskLoop 的四种
+    // 发消息句式、LocalCommands 的 TASK_SHAPED、JarvisAgent 的 BARE_SEND——
+    // 全部搬到这里，调用方只调函数，不再各自持有正则。
+    // 分工（状态机不并进来）：PendingClarification / SkillResumeState /
+    // TaskResumeState 管“有没有待续的事”（状态），TaskRouter 只管“这句话是
+    // 什么意图”（分类）；TripLoop 管行程分类（领域内）。分发顺序见 JarvisAgent
+    // .handleUtterance：澄清 → 断点续跑 → 本地指令 → 行程 → 任务 → 聊天。
+    private val SEND_SHAPES = listOf(
+        // 「在<应用>里/上给<人>发信息…」「给<人>发微信…」「打开/用<应用>…发/给…」。
+        // M25：「发信息给老婆」——"发"在前、"给/向/跟+人名"在后的词序，SEND_TO 只认"给"在"发"前。
+        // 保守优先：必须同时出现「应用或发送动作」与「收件/发送对象」两类信号才算任务；
+        // 拿不准放行原流程（聊天/技能/单步指令）。
+        Regex("在.{1,12}?(上|里|中).{0,10}?(给|向|跟).{1,16}?(发信息|发消息|发微信|发短信|发送|留言)"),
+        Regex("(给|向|跟).{1,16}?(发微信|发信息|发消息|发短信|发送消息|发条消息)"),
+        Regex("发(个|条|送)?(信息|消息|微信|短信).{0,8}?(给|向|跟).{1,16}?"),
+        Regex("^(打开|开启|启动|进入|用).{1,14}?(给|向|发|帮我).{2,}"),
+    )
+
+    // 批九守卫（原 LocalCommands.TASK_SHAPED）：句中带「给<人>发信息/发消息/
+    // 发微信」的多步任务句式不是单纯开应用，不能在本地指令里按应用名吞掉
+    // （"打开微信给桑田发信息" 会被误当成开「微信给桑田发信息」），放行给
+    // 任务路由。注意：这里只认这个窄句式，不认整套 isTaskText——提醒/日历/
+    // 场景等本地指令还在后面，整套判进来会把它们抢走。
+    private val SEND_SHAPE = Regex("给.{1,16}?(发信息|发消息|发微信|发短信|发送)")
+    fun isSendShape(text: String): Boolean = SEND_SHAPE.containsMatchIn(text.trim())
+
+    // 发信息缺收件人（原 JarvisAgent.BARE_SEND）：裸的“发消息/发个信息”且
+    // 不带疑问词、收件人也不在动词后——先反问，不当闲聊回掉。问句不算（带吗/
+    // ？/怎么/为什么等），避免“发信息要钱吗”这类求知句被误拦。
+    private val BARE_SEND = Regex("^(帮我)?发(个|条)?(信息|消息|微信|短信)")
+    private val BARE_SEND_QUESTION = Regex("(吗|？|\\?|怎么|为什么|为何|多少|是不是|能不能|会不会)")
+    fun isBareSend(text: String): Boolean = BARE_SEND.containsMatchIn(text)
+    fun isBareSendQuestion(text: String): Boolean = BARE_SEND_QUESTION.containsMatchIn(text)
+
+    /** “这是不是任务”——唯一入口。纯聊天、单步打开应用、提问句都不算。
+     * 原 TaskLoop.looksLikeTask 的整套逻辑，原样搬过来（长度门槛 3 字 +
+     * 问号排除 + 四种发消息句式 + DeepSeek 规则）；TaskLoop 那边只留一个
+     * 薄别名，调用方不用改。 */
+    fun isTaskText(text: String): Boolean {
+        val t = text.trim()
+        if (t.length < 3) return false
+        if (t.contains('？') || t.contains('?')) return false
+        return SEND_SHAPES.any { it.containsMatchIn(t) } || matchesDeepSeekRule(t)
+    }
+
     /** 按开关 + 文本 + 断点定本次任务的模式：断点里有模式先沿用（续跑不换脑，
      * 中间改了开关也不影响）；手动档原样返回；"auto" 才走路由。 */
     fun resolve(ctx: Context, taskText: String, resumeMode: String? = null): Route {

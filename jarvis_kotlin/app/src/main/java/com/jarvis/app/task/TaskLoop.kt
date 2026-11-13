@@ -182,32 +182,10 @@ object TaskLoop {
     @Volatile
     private var currentAliveSeq = -1
 
-    // 「在<应用>里/上给<人>发信息…」「给<人>发微信…」「打开/用<应用>…发/给…」。
-    // M25：「发信息给老婆」——"发"在前、"给/向/跟+人名"在后的词序，SEND_TO 只认"给"在"发"前。
-    // 保守优先：必须同时出现「应用或发送动作」与「收件/发送对象」两类信号才算任务；
-    // 拿不准放行原流程（聊天/技能/单步指令）。
-    private val IN_APP_SEND = Regex("在.{1,12}?(上|里|中).{0,10}?(给|向|跟).{1,16}?(发信息|发消息|发微信|发短信|发送|留言)")
-    private val SEND_TO = Regex("(给|向|跟).{1,16}?(发微信|发信息|发消息|发短信|发送消息|发条消息)")
-    private val SEND_AFTER = Regex("发(个|条|送)?(信息|消息|微信|短信).{0,8}?(给|向|跟).{1,16}?")
-    private val OPEN_THEN = Regex("^(打开|开启|启动|进入|用).{1,14}?(给|向|发|帮我).{2,}")
-
-    /** 任务句式判定（JarvisAgent 路由用）。纯聊天、单步打开应用、提问句都不算。 */
-    fun looksLikeTask(text: String): Boolean {
-        val t = text.trim()
-        // 规则优先（2026-11-13，Claude 审出）：“查账单”3 字以前被长度门槛挡在
-        // 规则判断之外；强规则命中直接算任务。长度只拦 1–2 字的短句（裸的
-        // “导航”“转账”动词不全，不进循环）。
-        if (t.length < 3) return false
-        if (t.contains('？') || t.contains('?')) return false
-        return IN_APP_SEND.containsMatchIn(t) ||
-            SEND_TO.containsMatchIn(t) ||
-            SEND_AFTER.containsMatchIn(t) ||
-            OPEN_THEN.containsMatchIn(t) ||
-            // 路由规则同款（2026-11-13）：进循环的门与循环里的自动选模型用同一套
-            // DeepSeek 规则——“打开高德导航到郑州火车站”这类句式不再掉进聊天；
-            // 只认明确命中的规则，普通聊天/问句不进循环。原四种句式照旧保留。
-            TaskRouter.matchesDeepSeekRule(t)
-    }
+    /** 任务句式判定（JarvisAgent 路由用）。纯聊天、单步打开应用、提问句都不算。
+     * 薄别名：整套逻辑在 TaskRouter.isTaskText（框架第 2 步收敛），这里只留
+     * 调用方不用改的入口。 */
+    fun looksLikeTask(text: String): Boolean = TaskRouter.isTaskText(text)
 
     /** 急停：自增序号，正在跑的循环下一步检查时自行中止（与 Agent 的 genSeq 急停并行）。 */
     fun cancelInFlight() {
