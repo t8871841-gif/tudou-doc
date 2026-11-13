@@ -87,7 +87,7 @@ object TakeoverBorder {
                             setColor(Color.parseColor("#CC1A1A1A"))
                         }
                         setOnClickListener {
-                            com.jarvis.app.task.TaskLoop.cancelInFlight()
+                            com.jarvis.app.brain.BrainRunner.stopCurrent()
                             OrbController.emergencyStop()
                         }
                     }

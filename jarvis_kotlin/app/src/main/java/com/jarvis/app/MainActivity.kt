@@ -1141,7 +1141,7 @@ class MainActivity : Activity() {
             "speaking" -> "正在说话"
             else -> "待命"
         }
-        val jobsRunning = com.jarvis.app.task.TaskLoop.isRunning()
+        val jobsRunning = com.jarvis.app.brain.BrainRunner.isRunning()
         val jobsDesc = if (jobsRunning) "跨应用任务进行中"
             else if (pendingCount > 0) "$pendingCount 条提醒已安排"
             else "暂无后台任务"

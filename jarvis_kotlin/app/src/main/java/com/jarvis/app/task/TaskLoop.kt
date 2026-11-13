@@ -193,6 +193,11 @@ object TaskLoop {
     }
 
     /**
+     * 换脑后停用（2026-11-13，第 5 批）：任务入口改走 brain/BrainRunner.runTask
+     * （LocalBrain）。本文件只留执行层（execute / dispatchToolCall /
+     * sendChatMessage 等）供 JarvisDispatcher 用；循环、计划、Reflector、
+     * 断点续跑随大脑一起退役（断点“继续”已取消）。
+     *
      * 执行一个多步任务。[isAlive] 由调用方给（Agent 的代次检查）；[onReply] 只会被
      * 调用一次，内容是给用户的一句结果（完成说明或卡在哪一步的如实说明）。
      * [onProgress] 是 M18 的每步播报：每步执行前按动作种类推一句（如“正在点按……”），
@@ -205,6 +210,7 @@ object TaskLoop {
      * 让尾随 lambda 绑错（jk-v55 的教训）。onProgress 带默认值、放在 onReply
      * 之前，尾随 lambda 仍绑到 onReply。
      */
+    @Deprecated("任务入口改走 BrainRunner.runTask；TaskLoop 只留执行层供 JarvisDispatcher 用")
     fun run(
         ctx: Context, taskText: String, isAlive: () -> Boolean,
         resumeFrom: TaskResumeState.ResumeInfo? = null,

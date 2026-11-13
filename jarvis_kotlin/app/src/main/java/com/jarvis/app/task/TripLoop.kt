@@ -2,6 +2,7 @@ package com.jarvis.app.task
 
 import android.content.Context
 import com.jarvis.app.AuditLog
+import com.jarvis.app.brain.BrainRunner
 import com.jarvis.app.net.CustomClient
 import org.json.JSONObject
 import java.io.File
@@ -646,71 +647,59 @@ object TripLoop {
             AuditLog.append(ctx, "行程规划", "核实跳过", "模型没给地点和路线，没什么可核实的")
             return null
         }
-        // 核实子任务是内部任务：先把用户自己的断点取走（TaskLoop.run 开头会清断点），
-        // 核实完再还回来，免得用户一句“继续”被内部任务顶掉。
-        val savedBreakpoint = TaskResumeState.take()
-        try {
-            val placeResult = if (places.isNotEmpty()) {
-                val list = places.take(10)
-                // S18：超量截断记一笔（只核前 10 个，剩下的在 done 分支标注“未核实”）。
-                if (places.size > 10) AuditLog.append(ctx, "行程规划", "核实截断", "地点共 ${places.size} 个，只核前 10 个")
-                AuditLog.append(ctx, "行程规划", "核实地点", list.joinToString("、"))
-                runVerifyTask(
-                    ctx,
-                    "打开高德地图，依次搜索以下地点，搜完告诉我每个地方存不存在、地址是什么（只报结果，不用导航）：${list.joinToString("、")}",
-                    isAliveFn
-                )
-            } else "（没有要核实的地点）"
-            val routeResult = if (legs.isNotEmpty()) {
-                val list = legs.take(8)
-                if (legs.size > 8) AuditLog.append(ctx, "行程规划", "核实截断", "路线共 ${legs.size} 段，只核前 8 段")
-                AuditLog.append(ctx, "行程规划", "核实路线", list.joinToString("、"))
-                runVerifyTask(
-                    ctx,
-                    "打开高德地图，依次查以下几段路的驾车路线，告诉我每段的距离和大概开车时间：${list.joinToString("、")}",
-                    isAliveFn
-                )
-            } else "（没有要核实的路线）"
-            // S17：核验失败串不是高德事实，绝不能当成“不存在”喂给改行程模型。
-            // 两路都失败直接返回 null、原样保存（调用方会注明未核实）；只有明确
-            // “不存在/地址是 X”的结果才进 revise；单路失败单独标记、不进模型输入。
-            val placeFailed = places.isNotEmpty() && isVerifyFailure(placeResult)
-            val routeFailed = legs.isNotEmpty() && isVerifyFailure(routeResult)
-            if (placeFailed && routeFailed) {
-                AuditLog.append(ctx, "行程规划", "核实失败", "地点和路线两路都没拿到结果，不喂给改行程模型，原样保存")
-                return null
-            }
-            val placeForModel = if (placeFailed) {
-                "（地点核实失败，这次没核实到——不要当成不存在，保留原样）"
-            } else placeResult
-            val routeForModel = if (routeFailed) {
-                "（路线核实失败，这次没核实到——保留原样）"
-            } else routeResult
-            // 按核实结果改行程。
-            val userText = "原行程（目的地：$dest）：\n$itinerary\n\n" +
-                "地点核实结果（高德）：\n$placeForModel\n\n" +
-                "路线核实结果（高德）：\n$routeForModel\n\n" +
-                "现在只输出下一步的一个 JSON 动作。"
-            val reply = try {
-                askModel(ctx, TRIP_REVISE_PROMPT, userText)
-            } catch (e: Exception) {
-                AuditLog.append(ctx, "行程规划", "改行程问模型失败", e.message ?: "")
-                return null
-            } ?: return null
-            val action = parseAction(reply) ?: return null
-            if (action.optString("action") != "done") return null
-            val newSummary = action.optString("summary").ifBlank { summary }
-            val newItinerary = action.optString("itinerary").ifBlank { itinerary }
-            AuditLog.append(ctx, "行程规划", "核实改行程", "已按高德结果改")
-            return newSummary to newItinerary
-        } finally {
-            // S16：先清后还——核验任务已在 runVerifyTask 超时/打断时
-            // cancelInFlight 停掉，核验本身不写用户断点（saveResume=false，
-            // 待 TaskLoop 那路落地）；这里清掉核验可能留下的内部断点，
-            // 再把用户原来的断点还回来。顺序不能反：先还后清会把用户断点清掉。
-            TaskResumeState.clear()
-            if (savedBreakpoint != null) TaskResumeState.restore(savedBreakpoint)
+        val placeResult = if (places.isNotEmpty()) {
+            val list = places.take(10)
+            // S18：超量截断记一笔（只核前 10 个，剩下的在 done 分支标注“未核实”）。
+            if (places.size > 10) AuditLog.append(ctx, "行程规划", "核实截断", "地点共 ${places.size} 个，只核前 10 个")
+            AuditLog.append(ctx, "行程规划", "核实地点", list.joinToString("、"))
+            runVerifyTask(
+                ctx,
+                "打开高德地图，依次搜索以下地点，搜完告诉我每个地方存不存在、地址是什么（只报结果，不用导航）：${list.joinToString("、")}",
+                isAliveFn
+            )
+        } else "（没有要核实的地点）"
+        val routeResult = if (legs.isNotEmpty()) {
+            val list = legs.take(8)
+            if (legs.size > 8) AuditLog.append(ctx, "行程规划", "核实截断", "路线共 ${legs.size} 段，只核前 8 段")
+            AuditLog.append(ctx, "行程规划", "核实路线", list.joinToString("、"))
+            runVerifyTask(
+                ctx,
+                "打开高德地图，依次查以下几段路的驾车路线，告诉我每段的距离和大概开车时间：${list.joinToString("、")}",
+                isAliveFn
+            )
+        } else "（没有要核实的路线）"
+        // S17：核验失败串不是高德事实，绝不能当成“不存在”喂给改行程模型。
+        // 两路都失败直接返回 null、原样保存（调用方会注明未核实）；只有明确
+        // “不存在/地址是 X”的结果才进 revise；单路失败单独标记、不进模型输入。
+        val placeFailed = places.isNotEmpty() && isVerifyFailure(placeResult)
+        val routeFailed = legs.isNotEmpty() && isVerifyFailure(routeResult)
+        if (placeFailed && routeFailed) {
+            AuditLog.append(ctx, "行程规划", "核实失败", "地点和路线两路都没拿到结果，不喂给改行程模型，原样保存")
+            return null
         }
+        val placeForModel = if (placeFailed) {
+            "（地点核实失败，这次没核实到——不要当成不存在，保留原样）"
+        } else placeResult
+        val routeForModel = if (routeFailed) {
+            "（路线核实失败，这次没核实到——保留原样）"
+        } else routeResult
+        // 按核实结果改行程。
+        val userText = "原行程（目的地：$dest）：\n$itinerary\n\n" +
+            "地点核实结果（高德）：\n$placeForModel\n\n" +
+            "路线核实结果（高德）：\n$routeForModel\n\n" +
+            "现在只输出下一步的一个 JSON 动作。"
+        val reply = try {
+            askModel(ctx, TRIP_REVISE_PROMPT, userText)
+        } catch (e: Exception) {
+            AuditLog.append(ctx, "行程规划", "改行程问模型失败", e.message ?: "")
+            return null
+        } ?: return null
+        val action = parseAction(reply) ?: return null
+        if (action.optString("action") != "done") return null
+        val newSummary = action.optString("summary").ifBlank { summary }
+        val newItinerary = action.optString("itinerary").ifBlank { itinerary }
+        AuditLog.append(ctx, "行程规划", "核实改行程", "已按高德结果改")
+        return newSummary to newItinerary
     }
 
     /** S17：核验失败串（超时 / 被打断 / 没返回结果 / 停在某一步）——不是高德事实。 */
@@ -720,18 +709,15 @@ object TripLoop {
     }
 
     /**
-     * 调一次 TaskLoop 去高德核实，阻塞等结果。TaskLoop 的 onReply 只在 alive 时
-     * 才调（不 alive 时不调），所以不能一次等满超时：每 10 秒看一眼是不是被
-     * 打断了，超时或被打断都返回说明，不卡住行程。
-     * S16：超时/打断返回前调 TaskLoop.cancelInFlight() 把后台核验任务停掉，
-     * 别让它继续点高德；停完等 1.5 秒，让它走到 alive 检查、把内部断点写出来，
-     * 好让 verifyAndRevise 的 finally 用一次 clear() 清掉、再还用户断点。
-     * 核验本身传 saveResume=false（TaskLoop.run 已有该参数），根本不写断点，
-     * 上面的 1.5 秒等待只是双保险。
+     * 调一次 LocalBrain 去高德核实，阻塞等结果（见 BrainRunner.runTaskBlocking）。
+     * onFinal 只在 alive 时才回结果，所以不能一次等满超时：每 10 秒看一眼
+     * 是不是被打断了，超时或被打断都返回说明，不卡住行程。
+     * LocalBrain 没有断点，verifyAndRevise 里再没有 take/restore 舞蹈；
+     * 超时/打断时 runTaskBlocking 内部 stopCurrent，核验随即停下。
      */
     private fun runVerifyTask(ctx: Context, taskText: String, isAliveFn: () -> Boolean): String {
-        // 差距 8c：高德核验子任务驱动屏幕，球沉底沿。TaskLoop.run 自己的 runBlocking 里也会挂，
-        // 这里再显式挂一次，覆盖入队到起跑之间的窗口；恢复由 TaskLoop 的 finally 和下面的
+        // 差距 8c：高德核验子任务驱动屏幕，球沉底沿。BrainRunner.runTask 里也会挂，
+        // 这里再显式挂一次，覆盖入队到起跑之间的窗口；恢复由 BrainRunner 的清理和下面的
         // finally 双重做（setTaskHidden 是幂等标志位，不会互相顶掉）。
         com.jarvis.app.OrbController.setTaskHidden(true)
         try {
@@ -742,41 +728,11 @@ object TripLoop {
     }
 
     private fun runVerifyTaskInner(ctx: Context, taskText: String, isAliveFn: () -> Boolean): String {
-        val latch = CountDownLatch(1)
-        var result: String? = null
-        TaskLoop.run(ctx, taskText, isAlive = isAliveFn, saveResume = false) { reply ->
-            result = reply
-            latch.countDown()
-        }
-        val deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS
-        while (true) {
-            if (!isAliveFn()) {
-                TaskLoop.cancelInFlight()
-                sleepQuietly(1500)
-                return "核实被打断（用户发了新指令），没拿到结果"
-            }
-            val remaining = deadline - System.currentTimeMillis()
-            if (remaining <= 0) {
-                TaskLoop.cancelInFlight()
-                sleepQuietly(1500)
-                return "核实超时（${VERIFY_TIMEOUT_MS / 1000 / 60} 分钟没跑完），没拿到结果"
-            }
-            if (latch.await(minOf(remaining, 10_000), TimeUnit.MILLISECONDS)) break
-        }
-        // 注意：result 是被闭包改写的 var，判空前先存到 val 再用，
-        // 否则智能转换失效（jk-v63 编译错的教训）。
-        val r = result
-        if (r.isNullOrBlank()) return "核实没返回结果"
-        return r
+        // 换脑：核实子任务走同一个 BrainRunner，阻塞等结果；超时/打断的
+        // 返回串与原来一字不差（isVerifyFailure 靠前缀认它们）。
+        return BrainRunner.runTaskBlocking(ctx, taskText, isAliveFn, VERIFY_TIMEOUT_MS)
     }
 
-    private fun sleepQuietly(ms: Long) {
-        try {
-            Thread.sleep(ms)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-    }
 
     private fun extractStringList(arr: org.json.JSONArray?): List<String> {
         if (arr == null) return emptyList()

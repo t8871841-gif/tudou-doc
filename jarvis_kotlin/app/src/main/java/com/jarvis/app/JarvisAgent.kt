@@ -189,7 +189,7 @@ object JarvisAgent {
         TtsRouter.stop()
         OfflineAsrSession.stop()
         ScreenVisionAgent.cancelInFlight()
-        com.jarvis.app.task.TaskLoop.cancelInFlight() // 批九：跨应用任务循环一并急停
+        com.jarvis.app.brain.BrainRunner.stopCurrent() // 换脑：跨应用任务大脑一并急停
         com.jarvis.app.task.TripLoop.cancelInFlight() // 行程规划阶段 0：规划循环一并急停
         com.jarvis.app.skill.SkillRunner.cancelInFlight() // S19：技能一并急停
         TakeoverBorder.hide()
@@ -374,38 +374,6 @@ object JarvisAgent {
                 return
             }
         }
-        // 跨应用任务断点续跑（同 SkillResumeState 的薄状态机）：任务被 STOP 停下
-        // 或跑满步数后，用户说“继续”就从断点接着做，不是从头来。没命中就清掉
-        // 待处理状态，交还下面继续处理。
-        if (com.jarvis.app.task.TaskResumeState.hasPending()) {
-            val resume = com.jarvis.app.task.TaskResumeState.tryResolve(text)
-            if (resume != null) {
-                onUserText?.invoke(text)
-                setState(ctx, "thinking")
-                AuditLog.append(ctx, "任务续跑", resume.taskText, "从第 ${resume.stepsDone + 1} 步接着做")
-                if (resume.foregroundPkgMismatch) {
-                    // M22：续跑时前台已不是断点时的应用，现场可能变了，先提醒用户。
-                    // 只进面板气泡，不语音，避免与任务播报重叠。
-                    val pkgName = resume.foregroundPkg ?: "原来那个应用"
-                    onReplyText?.invoke("提醒：你现在不在${pkgName}里，现场可能变了，我先按断点接着做，不对你就喊停。")
-                    AuditLog.append(ctx, "任务续跑", resume.taskText, "前台包名与断点时不符（断点：$pkgName），已提醒用户")
-                }
-                com.jarvis.app.task.TaskLoop.run(
-                    ctx, resume.taskText, isAlive = { mySeq == genSeq },
-                    // 差距 6、7：任务运行时置 working（与 thinking 区分，球转速另有一档），
-                    // 每步的 onProgress 叙述（“正在点按……”）既推状态也推气泡，不断线。
-                    onProgress = { prog ->
-                        if (mySeq == genSeq) {
-                            setState(ctx, OrbController.STATE_WORKING)
-                            OrbController.showBubble(prog)
-                        }
-                    },
-                    onReply = { reply -> speakReply(ctx, mySeq, reply) },
-                    resumeFrom = resume
-                )
-                return
-            }
-        }
         // 批三：先拦截显式记忆指令；未命中再取长期记忆，随问答一起注入。
         scope.launch {
             if (mySeq != genSeq) return@launch
@@ -420,10 +388,10 @@ object JarvisAgent {
             val mem = MemoryService.getInjectableMemories(ctx, text)
             if (mySeq != genSeq) return@launch
             // 批四：技能命中先于视觉意图判定（命中即重播，不再走现场流程）
-            // 批九：多步任务句式不参与技能匹配——它必须走任务循环现场执行，
+            // 批九：多步任务句式不参与技能匹配——它必须走任务大脑现场执行，
             // 不能被一段同名技能的旧录像顶替（见 handleUtterance 里的任务路由）。
             val skill = if (JarvisPrefs.isSkillEnabled(ctx) &&
-                !com.jarvis.app.task.TaskLoop.looksLikeTask(text)
+                !com.jarvis.app.task.TaskRouter.isTaskText(text)
             ) {
                 SkillService.match(ctx, text)
             } else {
@@ -441,14 +409,14 @@ object JarvisAgent {
         if (LocalCommands.tryHandle(ctx, text, speak = { reply -> speakReply(ctx, mySeq, reply) }, runJs = onRunHudJs)) return
         // 行程规划阶段 0（2026-11-05）：行程规划任务进规划循环（TripLoop），不走跨应用任务循环。
         // 规划走 glm-4.5（聊天模型通道），动作是问清信息、出按天排的行程，不是点按屏幕。
-        // 放在 TaskLoop 之前：行程句式不该被当成跨应用任务；
+        // 放在任务大脑之前：行程句式不该被当成跨应用任务；
         // 阶段 2（2026-11-05）：改行程 / 看行程也进 TripLoop（只改已存行程的指定部分、
         // 或读最新存档）。改行程句式带任务排除：跨应用任务里也可能出现
         // “第二天改…”（如“在微信上给桑田发信息：第二天改去华山吃饭”），那句必须
-        // 归 TaskLoop，不能被改行程抢走。
+        // 归任务大脑，不能被改行程抢走。
         // S13：待问问题未答时，只有像回答的下一句（非任务，见 looksLikeTripAnswer）
         // 才当成回答接着排；问天气/打招呼等无关语句不再被吞，走正常路由。
-        val notTask = !com.jarvis.app.task.TaskLoop.looksLikeTask(text)
+        val notTask = !com.jarvis.app.task.TaskRouter.isTaskText(text)
         val tripHit = com.jarvis.app.task.TripLoop.looksLikeTripTask(text) ||
             (com.jarvis.app.task.TripLoop.looksLikeTripRevision(text) &&
                 com.jarvis.app.task.TripLoop.hasSavedTrip(ctx) && notTask) ||
@@ -463,17 +431,18 @@ object JarvisAgent {
             }
             return
         }
-        // 批九：多步跨应用任务句式（「在微信上给桑田发信息：…」）进任务循环
-        // （移植的 ScreenController + task/TaskLoop 步进驱动）。放在技能之后、
+        // 批九：多步跨应用任务句式（「在微信上给桑田发信息：…」）进任务大脑
+        // （LocalBrain + JarvisDispatcher，见 brain/BrainRunner）。放在技能之后、
         // TAP_INTENT 之前：技能匹配在上层已对任务句式让行（见 submitText 处），
         // 到这里 skill 必为 null；单步「点一下X」仍归下面的 TAP_INTENT。
         // jk-v14 的失败正是这类句式一条意图都没命中、掉进聊天被模型复述。
-        if (com.jarvis.app.task.TaskLoop.looksLikeTask(text)) {
+        if (com.jarvis.app.task.TaskRouter.isTaskText(text)) {
             setState(ctx, "thinking")
-            AuditLog.append(ctx, "任务路由", text, "命中多步任务句式，进任务循环")
-            com.jarvis.app.task.TaskLoop.run(
+            AuditLog.append(ctx, "任务路由", text, "命中多步任务句式，进任务大脑（LocalBrain）")
+            com.jarvis.app.brain.BrainRunner.runTask(
                 ctx, text, isAlive = { mySeq == genSeq },
-                // 差距 6、7：同上，任务期逐步骤推 working 状态（见断点续跑那路的注释）。
+                // 任务期逐步骤推 working 状态（与 thinking 区分，球转速另有一档），
+                // 每步的 onProgress 叙述既推状态也推气泡，不断线。
                 onProgress = { prog ->
                     if (mySeq == genSeq) {
                         setState(ctx, OrbController.STATE_WORKING)
