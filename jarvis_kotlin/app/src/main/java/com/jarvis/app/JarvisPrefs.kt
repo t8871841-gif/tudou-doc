@@ -33,10 +33,11 @@ object JarvisPrefs {
     private fun p(ctx: Context): SharedPreferences =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    /** 模型开关：返回 "glm"、"custom" 或 "deepseek"，默认 "glm"。旧的 task_brain 值自动迁移。 */
+    /** 模型开关：返回 "glm"、"custom"、"deepseek" 或 "auto"，默认 "glm"。旧的 task_brain 值自动迁移。
+     * "auto" 是自动选模型：聊天固定走 GLM，任务按文本路由（见 TaskRouter）。 */
     fun getModelMode(ctx: Context): String {
         val saved = p(ctx).getString(KEY_MODEL_MODE, null)
-        if (saved == "glm" || saved == "custom" || saved == "deepseek") return saved
+        if (saved == "glm" || saved == "custom" || saved == "deepseek" || saved == "auto") return saved
         // 旧版迁移：task_brain 里 autoglm/agnes 都算 GLM，custom 保持自定义。
         val old = p(ctx).getString(KEY_TASK_BRAIN, "autoglm") ?: "autoglm"
         val mode = if (old == "custom") "custom" else "glm"
@@ -44,7 +45,7 @@ object JarvisPrefs {
         return mode
     }
     fun setModelMode(ctx: Context, v: String) {
-        val mode = if (v == "custom") "custom" else if (v == "deepseek") "deepseek" else "glm"
+        val mode = if (v == "custom") "custom" else if (v == "deepseek") "deepseek" else if (v == "auto") "auto" else "glm"
         p(ctx).edit().putString(KEY_MODEL_MODE, mode).apply()
     }
 

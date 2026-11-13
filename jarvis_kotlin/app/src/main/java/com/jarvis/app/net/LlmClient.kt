@@ -123,9 +123,13 @@ private object DeepSeekAdapter : LlmClient {
         isAlive: (() -> Boolean)?,
         onResult: (String) -> Unit, onError: (String) -> Unit
     ) {
-        val base = JarvisPrefs.getTaskBaseUrl(ctx)
-        val model = JarvisPrefs.getTaskModel(ctx)
-        val key = JarvisPrefs.getTaskKey(ctx)
+        // 适配器本身就是 DeepSeek：地址/模型是内置常量、Key 读 DeepSeek 单独的栏位，
+        // 不跟全局开关走——否则 "auto" 模式下这里会读到 GLM 的值（getTaskBaseUrl/
+        // getTaskModel/getTaskKey 在 "auto" 下都回落到 GLM）。行为与手动 DeepSeek
+        // 模式一字不变（那时三个 getter 本来就返回这三个值）。
+        val base = JarvisPrefs.DEEPSEEK_BASE_URL
+        val model = JarvisPrefs.DEEPSEEK_MODEL
+        val key = JarvisPrefs.getDeepSeekKey(ctx)
         if (base.isBlank() || model.isBlank()) {
             onError("未配置 DeepSeek 接口地址或模型名，内置默认值丢失")
             return
@@ -192,8 +196,9 @@ object LlmRegistry {
     /** 任务大脑 client（DeepSeekLlmClient 适配）：Andee 同款原生调用，文本模式。 */
     const val NAME_DEEPSEEK = "deepseek"
 
-    /** 任务大脑：按模型开关取，与改前 askModel 的 if/else 一一对应（加 DeepSeek 分支）。 */
-    fun taskClient(ctx: Context): LlmClient = when (JarvisPrefs.getModelMode(ctx)) {
+    /** 任务大脑：按模式取，与改前 askModel 的 if/else 一一对应（加 DeepSeek 分支）。
+     * mode 非空时按它取（自动选模型时 TaskLoop 传本次任务定好的模式）；空时读开关。 */
+    fun taskClient(ctx: Context, mode: String? = null): LlmClient = when (mode ?: JarvisPrefs.getModelMode(ctx)) {
         "custom" -> CustomLlmClient
         "deepseek" -> DeepSeekAdapter
         else -> AutoGlmLlmClient

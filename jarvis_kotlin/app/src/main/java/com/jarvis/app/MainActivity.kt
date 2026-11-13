@@ -937,7 +937,8 @@ class MainActivity : Activity() {
 
         /**
          * 原生模型信息（JSON 字符串）：只含模型 id、Key 是否已填、本地模型开关。
-         * Key 本身绝不返回。provider 跟模型开关走（getModelMode：glm 默认 / custom / deepseek）。
+         * Key 本身绝不返回。provider 跟模型开关走（getModelMode：glm 默认 / custom / deepseek / auto；
+         * auto 下聊天仍是 GLM，这里报 glm 是对的）。
          */
         @JavascriptInterface
         fun getModelInfo(): String {
@@ -2677,15 +2678,18 @@ class MainActivity : Activity() {
         }
         root.addView(section)
 
-        // 模型开关：GLM（默认，内置智谱）/ 自定义（下面三项自己填）/ DeepSeek（内置 deepseek-flash）。聊天、任务、看屏都跟着走。
-        root.addView(segmentedRow("模型", listOf("GLM", "自定义", "DeepSeek"),
-            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; "deepseek" -> 2; else -> 0 }) { i ->
-            val next = when (i) { 1 -> "custom"; 2 -> "deepseek"; else -> "glm" }
+        // 模型开关：GLM（默认，内置智谱）/ 自定义（下面三项自己填）/ DeepSeek（内置 deepseek-flash）
+        // / 自动（简单任务 GLM，跨应用多步骤 DeepSeek，见 TaskRouter；聊天固定走 GLM）。
+        // 聊天、任务、看屏都跟着走（自动档下任务按路由走、聊天仍走 GLM）。
+        root.addView(segmentedRow("模型", listOf("GLM", "自定义", "DeepSeek", "自动"),
+            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; "deepseek" -> 2; "auto" -> 3; else -> 0 }) { i ->
+            val next = when (i) { 1 -> "custom"; 2 -> "deepseek"; 3 -> "auto"; else -> "glm" }
             JarvisPrefs.setModelMode(this, next)
             toast(
                 when (next) {
                     "custom" -> "改用自定义模型"
                     "deepseek" -> "改用 DeepSeek（deepseek-flash）"
+                    "auto" -> "自动选模型（简单任务 GLM，跨应用多步骤 DeepSeek）"
                     else -> "改用 GLM（内置智谱）"
                 }
             )
@@ -2703,7 +2707,8 @@ class MainActivity : Activity() {
         })
 
         // DeepSeek 的 Key 单独一个栏位（不顶掉上面共用的 Key）；地址和模型是内置的，不用填。
-        root.addView(sectionTitle("DeepSeek Key（仅 DeepSeek 模式使用）"))
+        // 自动模式下路由到 DeepSeek 的任务也用这把 Key。
+        root.addView(sectionTitle("DeepSeek Key（DeepSeek 与自动模式使用）"))
         val deepSeekKeyInput = EditText(this).apply {
             hint = "DeepSeek API Key（sk-…）"; setTextColor(Color.WHITE)
             setText(JarvisPrefs.getDeepSeekKey(this@MainActivity))

@@ -416,6 +416,18 @@ object TaskLoop {
         // 贴一次、贴完清掉，不让它每轮重复刷；历史里那笔记录还在，模型回头能对上号。
         // 只在提示词组装段消费，不在观察段重算（它来自上一轮执行前的判定，不是本轮观察）。
         var loopNote: String? = null
+        // 自动选模型·第 1 批：本次任务用哪个脑子开头就定死——手动档取开关值，
+        // "auto" 按任务文本路由；自动档下选了谁写进审计（手动档不写，不刷屏）。
+        // 断点续跑（resumeFrom）也走同一条路由：规则只认任务文本，同一任务
+        // 每次都定到同一个脑子；第 2 批再把定好的模式存进断点、续跑直接沿用。
+        val runRoute = TaskRouter.resolve(ctx, taskText)
+        val runMode = runRoute.mode
+        if (JarvisPrefs.getModelMode(ctx) == "auto") {
+            AuditLog.append(
+                ctx, "任务循环", "自动选模型",
+                "任务「${taskText.take(24)}」→ ${if (runMode == "deepseek") "DeepSeek" else "GLM"}（${runRoute.reason}）"
+            )
+        }
         running = true
         try {
             // 续跑时步数接着上次的编号（历史里的“第 N 步”才连贯），但新跑的
@@ -919,11 +931,11 @@ object TaskLoop {
                 var toolHasRealAction = false
                 var toolSwitchExpected = false
                 var toolTypeText: String? = null
-                // 根治第 2 批·DeepSeek 工具模式：模型开关是 deepseek 时走原生工具调用
+                // 根治第 2 批·DeepSeek 工具模式：本次任务定的是 deepseek 时走原生工具调用
                 // （Andee LocalBrain.runTurn 的机制）：新观察当 user 消息续进
                 // toolMessages，模型回 tool_calls 就分发、回 done/fail 工具就收尾；
                 // 没调工具只写了文字时当这一步没动作，告诉模型下轮调工具。
-                val toolMode = JarvisPrefs.getModelMode(ctx) == "deepseek"
+                val toolMode = runMode == "deepseek"
                 if (toolMode) {
                     if (toolMessages.isEmpty()) {
                         toolMessages += JSONObject().put("role", "system").put("content", SYSTEM_PROMPT_TOOLS)
@@ -998,7 +1010,7 @@ object TaskLoop {
                     attempt++
                     // 每步问模型前固定停 1 秒，降速、别一分钟内连着发多次请求撞限流。
                     try { Thread.sleep(1000) } catch (_: InterruptedException) { /* 继续 */ }
-                    val (reply, err) = askModel(ctx, askText, sendImage) { alive() }
+                    val (reply, err) = askModel(ctx, askText, sendImage, runMode) { alive() }
                     if (!alive()) return
                     if (err != null) {
                         // 2026-10-24 跨应用修复第 2 件：问模型失败不再直接判死。
@@ -1738,16 +1750,18 @@ private fun isImePackage(ctx: Context, pkg: String): Boolean {
 /** 同步等一轮模型回复（askOnce 是回调式，这里用闩锁包成同步，跑在循环线程上）。
  * M11：不等满 200 秒——每 200ms 轮询一次闩锁，每轮检查任务是否还存活，
  * 不存活就提前返回，急停不用等模型回话。L2：isAlive 同时传给任务 client
- * （接口的 askOnce 接受 isAlive，见 net/LlmClient.kt），不要只靠外层闩锁轮询兜底。 */
-private fun askModel(ctx: Context, userText: String, image: String?, isAlive: () -> Boolean = { true }): Pair<String?, String?> {
+ * （接口的 askOnce 接受 isAlive，见 net/LlmClient.kt），不要只靠外层闩锁轮询兜底。
+ * 自动选模型·第 1 批：mode 非空时按它取 client（本次任务定好的模式）；空时读开关。 */
+private fun askModel(ctx: Context, userText: String, image: String?, mode: String? = null, isAlive: () -> Boolean = { true }): Pair<String?, String?> {
 val latch = CountDownLatch(1)
 var reply: String? = null
 var error: String? = null
-// 第十五批·LLM 注册表：任务大脑经注册表按模型开关取（自定义 → CustomClient
-// 适配、GLM → AutoGLMClient 适配），分发在 LlmRegistry.taskClient 里；这里
-// 只认 LlmClient 接口，不再硬编码用哪个 client。行为与改前一字不变：同一模式
-// 下还是原来那个 client、同一回调、同一超时（MODEL_TIMEOUT_SEC 闩锁在下面）。
-LlmRegistry.taskClient(ctx).askOnce(
+// 第十五批·LLM 注册表：任务大脑经注册表按模式取（自定义 → CustomClient
+// 适配、GLM → AutoGLMClient 适配、DeepSeek → DeepSeek 适配），分发在
+// LlmRegistry.taskClient 里；这里只认 LlmClient 接口，不再硬编码用哪个
+// client。行为与改前一字不变：同一模式下还是原来那个 client、同一回调、
+// 同一超时（MODEL_TIMEOUT_SEC 闩锁在下面）。
+LlmRegistry.taskClient(ctx, mode).askOnce(
 ctx, SYSTEM_PROMPT, userText, image,
 isAlive = isAlive,
 onResult = { reply = it; latch.countDown() },
