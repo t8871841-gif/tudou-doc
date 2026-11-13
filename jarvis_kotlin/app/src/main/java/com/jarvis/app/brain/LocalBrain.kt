@@ -1,6 +1,7 @@
 package com.jarvis.app.brain
 
 import android.util.Log
+import com.jarvis.app.R
 import com.jarvis.app.net.DeepSeekLlmClient as LlmClient
 import com.jarvis.app.net.LlmHttpException
 import com.jarvis.app.net.ToolSchemas
@@ -1079,7 +1080,7 @@ class LocalBrain(
      */
     private fun systemPrompt(): String = LocalPrompt.withPersona(
         "",
-        JarvisBrain.activeScene(appContext)?.let { Notebook.scene(appContext, it) },
+        JarvisBrain.activeScene(appContext),
     )
 
     /**

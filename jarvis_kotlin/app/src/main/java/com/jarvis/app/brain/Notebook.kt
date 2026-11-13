@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import com.jarvis.app.R
 import com.jarvis.app.brain.AppLocale
 import org.json.JSONArray
 import org.json.JSONObject

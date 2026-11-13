@@ -4,6 +4,7 @@ import android.content.Context
 import com.jarvis.app.AuditLog
 import com.jarvis.app.JarvisAccessibilityService
 import com.jarvis.app.OrbController
+import com.jarvis.app.R
 import com.jarvis.app.TakeoverBorder
 import com.jarvis.app.screen.ScreenController
 import com.jarvis.app.screen.TapMarkerUi
