@@ -539,7 +539,9 @@ object EdgeTts {
                             // 预取 PCM 写轨道失败即 break：这句及之后都没播，续播从这句开始。
                             recordFailure(i, "AudioTrack.write 失败", true)
                             // 语音诊断批：补一行写轨诊断，reason 字符串不动。
-                            com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句写轨诊断", lastWriteDiag)
+                            // seq过期=true 说明写失败前已被停/顶掉（stop() 会 mySeq++），
+                            // 不是轨道自己死的——Claude 审出的最可疑线索，靠这行实锤。
+                            com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句写轨诊断", "$lastWriteDiag；seq过期=${seq != mySeq}")
                             break
                         }
                         sentenceDone = true
@@ -615,9 +617,15 @@ object EdgeTts {
                         streamingDecoderDead = true
                         // 在途的预取停掉（它走同一条流式路，必失败）；共享会话还攺着半截
                         // turn 的帧，不能再用：关掉、改逐句。
+                        // 僵尸预取（Claude 审出）：阻塞的 SSLSocket 读不响应 interrupt()，
+                        // 光 cancel(true) 叫不停它——单线程 prefetchIo 会被它占到
+                        // soTimeout（45 秒），下一句的整段预取排在后面。直接关
+                        // prefetchSocket（与 stop() 同款），让阻塞的读立刻抛异常退出。
                         prefetchFuture?.cancel(true)
                         prefetchFuture = null
                         prefetchIndex = -1
+                        prefetchSocket?.let { runCatching { it.close() } }
+                        prefetchSocket = null
                         if (session != null) {
                             closeSession(session)
                             session = null
@@ -641,7 +649,7 @@ object EdgeTts {
                     recordFailure(i, result.reason ?: "取音/解码失败", stoppedHere)
                     // 语音诊断批：写轨失败时补一行写轨诊断，reason 字符串不动。
                     if (result.reason == "AudioTrack.write 失败") {
-                        com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句写轨诊断", lastWriteDiag)
+                        com.jarvis.app.AuditLog.append(ctx, "语音播报", "Edge 第 ${i + 1}/${sentences.size} 句写轨诊断", "$lastWriteDiag；seq过期=${seq != mySeq}")
                     }
                     // 第一句就失败当整体失败；写轨道失败说明轨道已死，后面也不用再试。
                     if (stoppedHere) break
