@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="cache" path="/" />
+    <!-- 导出审计日志：AuditLog 存在 filesDir/jarvis_audit.log，用 FileProvider 分享出去。 -->
+    <files-path name="files" path="." />
 </paths>

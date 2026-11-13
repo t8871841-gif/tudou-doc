@@ -54,6 +54,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
@@ -3647,6 +3648,27 @@ class MainActivity : Activity() {
         })
         root.addView(btn("清空日志") {
             AuditLog.clear(this); logView.text = "暂无记录"; toast("已清空")
+        })
+        // 导出日志：用系统分享把 filesDir/jarvis_audit.log 发出去（微信/文件管理/邮箱都行）；
+        // 文件名须与 AuditLog.FILE_NAME 一致（"jarvis_audit.log"）。
+        root.addView(btn("导出日志") {
+            val logFile = File(filesDir, "jarvis_audit.log")
+            if (!logFile.exists()) {
+                toast("暂无日志可导出")
+                return@btn
+            }
+            try {
+                val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", logFile)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_SUBJECT, "Jarvis 操作审计日志")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(send, "导出日志"))
+            } catch (e: Exception) {
+                toast("导出失败：${e.javaClass.simpleName}")
+            }
         })
         root.addView(logView)
     }
