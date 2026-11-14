@@ -364,7 +364,7 @@ class MainActivity : Activity() {
             addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
             return
         }
-        snap.forEach { e -> addBubble(e.text, mine = e.role == ChatHistory.Role.USER, record = false) }
+        snap.forEach { e -> addBubble(e.text, mine = e.role == ChatHistory.Role.USER, record = false, ts = e.ts) }
     }
 
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
@@ -1910,12 +1910,14 @@ class MainActivity : Activity() {
     /** M36：气泡带角色/时间头（Andee HistoryListView 同款：我 · 15:31 / 助手 · 15:31），
      * 正文 maxLines = 6 + ellipsize = END（长回答只露前 6 行，不再是无界整段）。
      * C14：record=true 时同时推 HUD 字幕并记进 ChatHistory 单例（落盘）；从单例重建
-     * 气泡时 record=false，只渲染不重复记、不重复推字幕。 */
-    private fun addBubble(text: String, mine: Boolean, record: Boolean = true) {
+     * 气泡时 record=false，只渲染不重复记、不重复推字幕；重建时传 ts=存过的时间戳，
+     * 气泡显示原来时间（否则重建会把全部气泡重标成当时时间），新消息不传 ts，取当前时间。 */
+    private fun addBubble(text: String, mine: Boolean, record: Boolean = true, ts: Long = 0L) {
         val color = HudPalette.colorFor(JarvisAgent.currentState())
-        val ts = System.currentTimeMillis()
+        // 重建气泡时调用方传存过的时间戳（ChatHistory.Entry.ts）；新消息不传，取当前时间。
+        val showTs = if (ts != 0L) ts else System.currentTimeMillis()
         val headText = (if (mine) "我" else "助手") + " · " +
-            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
+            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(showTs))
         // 内容列：两行文字（用户/助手共用；内边距与原来气泡一字不差）。
         val headView = TextView(this).apply {
             this.text = headText

@@ -24,9 +24,10 @@ object JarvisPrefs {
     const val GLM_CHAT_MODEL = "glm-4.5"
     // 2026-11-14：GLM-4V-Plus 虽然会看图，但不支持 OpenAI function calling（智谱官方
     // 模型列表里只有 GLM-4.6V 标注"原生支持工具调用"），所以永远不发 tool_calls。
-    // 改用 glm-4.6v：同一接口、同一请求格式，原生支持工具调用，且仍是视觉模型。
-    const val GLM_TASK_MODEL = "glm-4.6v"
-    const val GLM_VISION_MODEL = "glm-4v-plus"
+    // 2026-11-14：glm-4.6v 与 glm-4v-plus 同时报 429（疑似账号额度/限流），任务与视觉
+    // 一起改用免费的 glm-4.6v-flash；Flash 是否支持工具调用待真机验证，不行改回 glm-4.6v。
+    const val GLM_TASK_MODEL = "glm-4.6v-flash"
+    const val GLM_VISION_MODEL = "glm-4.6v-flash" // 免费；与任务模型同款，视觉不用调工具
 
     // DeepSeek 内置配置（Andee 默认同款）：聊天、任务、视觉都走 deepseek-flash（V4.1 Flash，带视觉）。
     const val DEEPSEEK_BASE_URL = "https://api.deepseek.com"
