@@ -1616,9 +1616,9 @@ class MainActivity : Activity() {
         refreshSettingsGear()
     }
 
-    /** 原生面板三块内容重渲染：每次都现算（天气读缓存、设备状态现读现算、
+    /** 原生面板内容重渲染：每次都现算（天气读缓存、设备状态现读现算、
      * 日程读当天提醒），所以状态变了、提醒改了、天气到货了，面板都能跟上。
-     * 顺序是用户定的：天气、设备实时状态、日程。音乐区已删（用户用系统播放器）；
+     * 顺序是用户定的：天气、设备实时状态、日程、文件。音乐区已删（用户用系统播放器）；
      * Agent 调度（BRAIN/JOBS/LEARNING/REVIEW）与工作汇报也已删（用户不用）；
      * HUD 那边仍用 computeAgentRows 推送，不受影响。 */
     private fun renderNativePanel() {
@@ -1653,6 +1653,13 @@ class MainActivity : Activity() {
         } else {
             renderScheduleRows(lastScheduleRows)
         }
+        // 4. 文件（2026-11-14）：附件入口放这里，不占麦克风行（铅笔旁会跟设置齿轮冲突）。
+        panelList.addView(panelSectionTitle("文件"))
+        val attachedName = AttachStore.name
+        if (attachedName != null) {
+            panelList.addView(panelLine("已添加：$attachedName，等你提问"))
+        }
+        panelList.addView(btn("添加文件") { openAttachPicker() })
         if (::panelScroll.isInitialized && savedScrollY > 0) {
             panelScroll.post { panelScroll.scrollTo(0, savedScrollY) }
         }
@@ -2555,15 +2562,6 @@ class MainActivity : Activity() {
             }
         }
         micCenter.addView(glassWrapButton(keyboardToggle, 22f), LinearLayout.LayoutParams(dp(44), dp(44)))
-        // 附件（2026-11-14）：对话框加文件——点一下弹系统文件选择器，选好交给模型读内容回答问题。
-        val attachButton = ImageButton(this@MainActivity).apply {
-            setImageResource(android.R.drawable.ic_menu_add)
-            background = null
-            attachPressScale(this)
-            contentDescription = "添加文件"
-            setOnClickListener { openAttachPicker() }
-        }
-        micCenter.addView(glassWrapButton(attachButton, 22f), LinearLayout.LayoutParams(dp(44), dp(44)))
         micRow.addView(micCenter)
 
         settingsGearButton = ImageButton(this@MainActivity).apply {
