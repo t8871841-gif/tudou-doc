@@ -193,9 +193,16 @@ object AppKnowledge {
      */
     fun forTask(taskText: String): String {
         if (taskText.isEmpty()) return ""
+        // “QQ音乐 / QQ浏览器”是别的 App：先把这两个词拿掉，免得 "QQ" 子串
+        // 误命中 QQ 聊天的知识。
+        val text = taskText
+            .replace("QQ音乐", "", ignoreCase = true)
+            .replace("QQ浏览器", "", ignoreCase = true)
         val pkgs = linkedSetOf<String>()
         for ((name, pkg) in NAME_TO_PKG) {
-            if (name in taskText) pkgs += pkg
+            // QQ 是字母：大小写不敏感（语音出大写、手打可能是小写）。
+            val hit = if (name == "QQ") text.contains(name, ignoreCase = true) else name in text
+            if (hit) pkgs += pkg
         }
         if (pkgs.isEmpty()) return GENERIC_GUIDE
         return pkgs.mapNotNull { KNOWLEDGE[it] }.joinToString("\n\n")
