@@ -22,9 +22,10 @@ object JarvisPrefs {
     // GLM 内置配置（智谱）：聊天、任务、视觉各用对应的模型，地址统一。
     const val GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
     const val GLM_CHAT_MODEL = "glm-4.5"
-    // 2026-11-14：任务原来用 autoglm-phone，但它不发 OpenAI 工具调用、只念思路，
-    // 任务跑不起来（10:15 三条实证）。改用 glm-4v-plus：会看图、会调工具，视觉自测已通过。
-    const val GLM_TASK_MODEL = "glm-4v-plus"
+    // 2026-11-14：GLM-4V-Plus 虽然会看图，但不支持 OpenAI function calling（智谱官方
+    // 模型列表里只有 GLM-4.6V 标注"原生支持工具调用"），所以永远不发 tool_calls。
+    // 改用 glm-4.6v：同一接口、同一请求格式，原生支持工具调用，且仍是视觉模型。
+    const val GLM_TASK_MODEL = "glm-4.6v"
     const val GLM_VISION_MODEL = "glm-4v-plus"
 
     // DeepSeek 内置配置（Andee 默认同款）：聊天、任务、视觉都走 deepseek-flash（V4.1 Flash，带视觉）。
