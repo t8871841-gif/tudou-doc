@@ -675,13 +675,14 @@ class LocalBrain(
                                 "get_topic before answering about a detail, and never say it did not " +
                                 "happen)\n$topics"
                         } +
-                        // App usage knowledge for the app(s) this task names.
+                        // App usage knowledge for the app(s) this task names,
+                        // or the generic guide when it names no known app.
                         // Dead code since TaskLoop went away; this is its new
-                        // reader. Empty for tasks that name no known app.
+                        // reader. Empty only for a wordless turn.
                         if (appKnowledge.isEmpty()) {
                             ""
                         } else {
-                            "\n\n(你要用的应用 — 先读再动手；界面结构与容易踩的坑)\n$appKnowledge"
+                            "\n\n(你要用的应用 — 先读再动手)\n$appKnowledge"
                         },
                 )
         }

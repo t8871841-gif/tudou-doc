@@ -176,8 +176,18 @@ object AppKnowledge {
     )
 
     /**
-     * 返回任务文本里提到的应用的用法知识（去重后拼起来），没提到返回 ""。
-     * LocalBrain 每回合在 user 消息里附上。
+     * 没有专属知识的应用走的通用办法（LocalPrompt 110/116/117/121 行的中文浓缩）。
+     * forTask 没匹配到任何应用时返回这段，而不是空——没条目的应用也得有章法。
+     */
+    private const val GENERIC_GUIDE =
+        "这个应用没有专属知识，按通用办法走：先读树，读不到就截图看图；" +
+        "要找某个东西用应用内的搜索框，别靠翻页硬找；页面不对先在当前页找入口，" +
+        "别按返回、别重开应用；等加载 3→5→10→20 秒递增，别连发同一个等待；" +
+        "读不到就如实说，别编。"
+
+    /**
+     * 返回任务文本里提到的应用的用法知识（去重后拼起来）；没提到任何已知
+     * 应用时返回通用办法。LocalBrain 每回合在 user 消息里附上。
      */
     fun forTask(taskText: String): String {
         if (taskText.isEmpty()) return ""
@@ -185,7 +195,7 @@ object AppKnowledge {
         for ((name, pkg) in NAME_TO_PKG) {
             if (name in taskText) pkgs += pkg
         }
-        if (pkgs.isEmpty()) return ""
+        if (pkgs.isEmpty()) return GENERIC_GUIDE
         return pkgs.mapNotNull { KNOWLEDGE[it] }.joinToString("\n\n")
     }
 
