@@ -5,8 +5,10 @@ import com.jarvis.app.AuditLog
 
 /**
  * 分应用用法知识（借鉴 Mika 的 knowledge/apps/<id>/APP.md）。
- * 每个应用一份简短知识：界面结构 + 容易踩的坑。TaskLoop 每步在前台应用
- * 匹配到包名时，把对应知识追加进给模型的 userText，让模型不用每步现猜。
+ * 每个应用一份简短知识：界面结构 + 容易踩的坑。LocalBrain 每回合按任务
+ * 文本匹配应用名（forTask），把对应知识追加进给模型的 user 消息——与
+ * notebook index 同一个位置、同一个道理：按回合变化的东西不进 system prompt。
+ * forPackage 仍按前台包名查，供以后按步刷新时用。
  *
  * 目前 15 个应用（微信 + QQ/抖音/小红书/哔哩哔哩/快手/今日头条/微博/知乎/
  * 闲鱼/淘宝/京东 + 支付宝/高德/百度地图），内容改编自 Mika 的 knowledge/apps/<id>/APP.md（Apache-2.0），
@@ -144,6 +146,48 @@ object AppKnowledge {
             "默认是驾车，要看清再选；导航模式是全屏，退出要点退出或返回；" +
             "地图可以拖动和缩放，点地图上的图标会弹出地点卡片。"
     )
+
+    /**
+     * 任务文本里提到的应用名 → 包名。名字与 TaskRouter.APP_CANONICAL 的
+     * 规范名对齐；花呗/借呗是支付宝的功能词，任务只说功能不说应用时也命中。
+     * 新应用只须在这里加一行名字，再在 KNOWLEDGE 里加一条。
+     */
+    private val NAME_TO_PKG = listOf(
+        "微信" to "com.tencent.mm",
+        "QQ" to "com.tencent.mobileqq",
+        "抖音" to "com.ss.android.ugc.aweme",
+        "小红书" to "com.xingin.xhs",
+        "哔哩哔哩" to "tv.danmaku.bili",
+        "B站" to "tv.danmaku.bili",
+        "快手" to "com.smile.gifmaker",
+        "今日头条" to "com.ss.android.article.news",
+        "头条" to "com.ss.android.article.news",
+        "微博" to "com.sina.weibo",
+        "知乎" to "com.zhihu.android",
+        "闲鱼" to "com.taobao.idlefish",
+        "淘宝" to "com.taobao.taobao",
+        "京东" to "com.jingdong.app.mall",
+        "支付宝" to "com.eg.android.AlipayGphone",
+        "花呗" to "com.eg.android.AlipayGphone",
+        "借呗" to "com.eg.android.AlipayGphone",
+        "高德地图" to "com.autonavi.minimap",
+        "高德" to "com.autonavi.minimap",
+        "百度地图" to "com.baidu.BaiduMap",
+    )
+
+    /**
+     * 返回任务文本里提到的应用的用法知识（去重后拼起来），没提到返回 ""。
+     * LocalBrain 每回合在 user 消息里附上。
+     */
+    fun forTask(taskText: String): String {
+        if (taskText.isEmpty()) return ""
+        val pkgs = linkedSetOf<String>()
+        for ((name, pkg) in NAME_TO_PKG) {
+            if (name in taskText) pkgs += pkg
+        }
+        if (pkgs.isEmpty()) return ""
+        return pkgs.mapNotNull { KNOWLEDGE[it] }.joinToString("\n\n")
+    }
 
     /**
      * L14：每条知识的适用版本 / 最后核实日期。只填已知信息，未知的留空、

@@ -6,6 +6,7 @@ import com.jarvis.app.R
 import com.jarvis.app.net.DeepSeekLlmClient as LlmClient
 import com.jarvis.app.net.LlmHttpException
 import com.jarvis.app.net.ToolSchemas
+import com.jarvis.app.task.AppKnowledge
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -588,6 +589,10 @@ class LocalBrain(
             // paying for itself once there is something to remember.
             val index = Notebook.indexForPrompt(appContext)
             val scenes = Notebook.scenesForPrompt(appContext)
+            // The usage notes for the app(s) this task names — same position
+            // and same reason as the notebook index: per-turn material rides
+            // on the user message, never in the system prompt.
+            val appKnowledge = AppKnowledge.forTask(userText)
             // The pages it has made, the same way and for the same reason: a
             // tool answers a question the brain thought to ask, and 「上次那个表格」
             // is exactly the question it does not know to ask. `list_pages` has
@@ -669,6 +674,14 @@ class LocalBrain(
                                 "summary you may have of one is not the whole story — read it back with " +
                                 "get_topic before answering about a detail, and never say it did not " +
                                 "happen)\n$topics"
+                        } +
+                        // App usage knowledge for the app(s) this task names.
+                        // Dead code since TaskLoop went away; this is its new
+                        // reader. Empty for tasks that name no known app.
+                        if (appKnowledge.isEmpty()) {
+                            ""
+                        } else {
+                            "\n\n(你要用的应用 — 先读再动手；界面结构与容易踩的坑)\n$appKnowledge"
                         },
                 )
         }
