@@ -3777,15 +3777,17 @@ class MainActivity : Activity() {
         root.addView(btn("清空日志") {
             AuditLog.clear(this); logView.text = "暂无记录"; toast("已清空")
         })
-        // 导出日志：用系统分享把 filesDir/jarvis_audit.log 发出去（微信/文件管理/邮箱都行）；
-        // 文件名须与 AuditLog.FILE_NAME 一致（"jarvis_audit.log"）。
+        // 导出日志（2026-11-14，用户：导出到手机文档）：先存一份带时间戳的副本到
+        // 系统“文档”目录（MediaStore，Android 10+，不用额外权限）；文件名须与
+        // AuditLog.FILE_NAME 一致（"jarvis_audit.log"）的是源文件。存不进去时
+        // 回落到原来的系统分享。
         root.addView(btn("导出日志") {
             val logFile = File(filesDir, "jarvis_audit.log")
             if (!logFile.exists()) {
                 toast("暂无日志可导出")
                 return@btn
             }
-            try {
+            val share = {
                 val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", logFile)
                 val send = Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
@@ -3794,8 +3796,27 @@ class MainActivity : Activity() {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 startActivity(Intent.createChooser(send, "导出日志"))
+            }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())
+            val name = "jarvis_audit_$stamp.log"
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                        put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOCUMENTS)
+                    }
+                    val uri = contentResolver.insert(android.provider.MediaStore.Files.getContentUri("external"), values)
+                        ?: throw IllegalStateException("MediaStore insert 返回空")
+                    contentResolver.openOutputStream(uri)?.use { out -> logFile.inputStream().copyTo(out) }
+                        ?: throw IllegalStateException("打不开文档输出流")
+                    toast("已保存到 文档/$name")
+                } else {
+                    share()
+                }
             } catch (e: Exception) {
-                toast("导出失败：${e.javaClass.simpleName}")
+                // 存文档失败时回落到系统分享，别让一次导出直接死掉。
+                try { share() } catch (_: Exception) { toast("导出失败：${e.javaClass.simpleName}") }
             }
         })
         root.addView(logView)

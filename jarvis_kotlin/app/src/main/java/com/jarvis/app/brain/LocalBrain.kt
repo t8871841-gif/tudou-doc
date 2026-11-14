@@ -1,6 +1,7 @@
 package com.jarvis.app.brain
 
 import android.util.Log
+import com.jarvis.app.AuditLog
 import com.jarvis.app.R
 import com.jarvis.app.net.DeepSeekLlmClient as LlmClient
 import com.jarvis.app.net.LlmHttpException
@@ -704,6 +705,24 @@ class LocalBrain(
             )
 
             BrainTrace.step(gen, step, reply.content, reply.reasoning, reply.toolCalls.size, reply.promptTokens)
+            // 大脑步骤进审计日志（2026-11-14，用户：日志里要详细）：每步记模型、
+            // 工具调用（名 + 截断参数）和模型正文前 200 字；无工具调用的步也能一眼
+            // 看出来（GLM 档两次失败就是这么定位的）。只记真实用户回合，不记
+            // 静默/收割回合。
+            if (!internal) {
+                val calls = reply.toolCalls.joinToString("；") { tc ->
+                    val a = tc.argumentsRaw.take(80)
+                    if (a.isEmpty()) tc.name else "${tc.name}($a)"
+                }
+                val preview = reply.content.trim().take(200)
+                AuditLog.append(
+                    appContext,
+                    userText,
+                    "第 $step 步（模型 ${cfg.model}）",
+                    if (reply.toolCalls.isEmpty()) "无工具调用，模型正文：$preview"
+                    else "${reply.toolCalls.size} 个工具调用：$calls；模型正文：$preview",
+                )
+            }
             history += reply.assistantMessage
 
             if (reply.toolCalls.isEmpty()) {
@@ -744,6 +763,7 @@ class LocalBrain(
                 if (repeats >= MAX_REPEATS) {
                     Log.w(TAG, "same call $MAX_REPEATS× in a row: $sig")
                     BrainTrace.end(gen, "same call $MAX_REPEATS× in a row: ${tc.name}")
+                    if (!internal) AuditLog.append(appContext, userText, "第 $step 步", "连续 $MAX_REPEATS 次相同调用，已停止：${tc.name}")
                     if (!internal) {
                         onFinal(
                             AppLocale.str(
@@ -771,6 +791,7 @@ class LocalBrain(
 
         Log.w(TAG, "hit max steps ($maxSteps)")
         BrainTrace.end(gen, "hit max steps ($maxSteps)")
+        if (!internal) AuditLog.append(appContext, userText, "第 $maxSteps 步", "达到上限 $maxSteps 步，已停止")
         if (!internal) {
             onFinal(
                 AppLocale.str(
