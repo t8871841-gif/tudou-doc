@@ -6,7 +6,7 @@ import com.jarvis.app.JarvisPrefs
 /**
  * 自动选模型·第 1 批：按任务文本定本次任务用哪个脑子。
  *
- * - 简单任务（单应用、查状态、调设置、打电话）→ GLM（autoglm-phone，专为手机任务调过）；
+ * - 简单任务（单应用、查状态、调设置、打电话）→ GLM（glm-4v-plus；autoglm-phone 不发工具调用，2026-11-14 改）；
  * - 跨应用多步骤（找人/发消息、钱/账单、导航、多步骤、两个以上应用）→ DeepSeek
  *   （原生工具调用 + search_contacts + send_chat_message）。
  * - 打电话先判：以前 GLM 就能正常打，单应用拨号不走 DeepSeek。

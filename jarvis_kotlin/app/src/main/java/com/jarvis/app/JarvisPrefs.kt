@@ -22,7 +22,9 @@ object JarvisPrefs {
     // GLM 内置配置（智谱）：聊天、任务、视觉各用对应的模型，地址统一。
     const val GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
     const val GLM_CHAT_MODEL = "glm-4.5"
-    const val GLM_TASK_MODEL = "autoglm-phone"
+    // 2026-11-14：任务原来用 autoglm-phone，但它不发 OpenAI 工具调用、只念思路，
+    // 任务跑不起来（10:15 三条实证）。改用 glm-4v-plus：会看图、会调工具，视觉自测已通过。
+    const val GLM_TASK_MODEL = "glm-4v-plus"
     const val GLM_VISION_MODEL = "glm-4v-plus"
 
     // DeepSeek 内置配置（Andee 默认同款）：聊天、任务、视觉都走 deepseek-flash（V4.1 Flash，带视觉）。
@@ -95,7 +97,7 @@ object JarvisPrefs {
     fun getChatKey(ctx: Context): String =
         if (getModelMode(ctx) == "deepseek") getDeepSeekKey(ctx) else getCustomKey(ctx)
 
-    /** 任务用的模型名：GLM 模式用 autoglm-phone，自定义模式用用户填的模型，DeepSeek 模式用 deepseek-flash。 */
+    /** 任务用的模型名：GLM 模式用 glm-4v-plus，自定义模式用用户填的模型，DeepSeek 模式用 deepseek-flash。 */
     fun getTaskModel(ctx: Context): String = when (getModelMode(ctx)) {
         "custom" -> getCustomModel(ctx)
         "deepseek" -> DEEPSEEK_MODEL
