@@ -504,6 +504,22 @@ object JarvisAgent {
         // 调配关或本地没就绪 → 云端优先、云端失败再用本地兜底。本地现在会带一份精简版
         // 记忆（见 MemoryService.getInjectableMemories 的 topN 参数），不再是完全空着问。
         setState(ctx, "thinking")
+        // 附件（2026-11-14）：语音提问也带附件。图片走视觉，文本拼进问题；只走云端，不走本地小模型。
+        val attachImage = AttachStore.imageB64
+        val attachText = AttachStore.text
+        val attachName = AttachStore.name
+        if (attachImage != null) {
+            AttachStore.clear()
+            CustomClient.askVision(ctx, text, attachImage,
+                onResult = { answer -> if (mySeq == genSeq) speakReply(ctx, mySeq, answer) },
+                onError = { msg -> if (mySeq == genSeq) speakReply(ctx, mySeq, "看图失败：$msg") })
+            return
+        }
+        if (attachText != null) {
+            AttachStore.clear()
+            askCustom(ctx, mySeq, "附件《${attachName}》的内容如下：\n$attachText\n\n问题：$text", memoryContext, localTried = false)
+            return
+        }
         val localReady = JarvisPrefs.isLocalLlmEnabled(ctx) && LocalLlm.isReady(ctx)
         if (localReady && JarvisPrefs.isLocalLlmPrefer(ctx) && !ChatRouter.cloudFirst(ctx, text)) {
             scope.launch {

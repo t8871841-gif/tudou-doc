@@ -28,6 +28,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -106,6 +107,8 @@ class MainActivity : Activity() {
         const val REQ_PICK_PORTRAIT_BG = 5153
         // D 批·对话区背景图（与舞台图分开），图库选图（ACTION_OPEN_DOCUMENT 回调）。
         const val REQ_PICK_DIALOGUE_BG = 5154
+        // 附件（2026-11-14）：对话框加文件，系统文件选择器回调。
+        const val REQ_PICK_ATTACH_FILE = 5155
         // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
@@ -2011,6 +2014,85 @@ class MainActivity : Activity() {
     }
 
     /** S23：只有 submitText 受理成功后才清输入框；被上一条占用时文字保留，并提示稍等。 */
+    /** 附件（2026-11-14）：弹系统文件选择器，任意类型；拿持久授权，下次打开还能读。 */
+    private fun openAttachPicker() {
+        try {
+            val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(i, REQ_PICK_ATTACH_FILE)
+        } catch (e: Exception) {
+            toast("打不开文件选择器：${e.message}")
+        }
+    }
+
+    /**
+     * 附件（2026-11-14）：读选中的文件，存进 AttachStore，等下一句提问一起发给模型。
+     * 图片压到最长边 1024 再转 JPEG 发视觉；文本最多取 2 万字；其他类型先不支持，直说。
+     */
+    private fun handleAttachUri(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (e: Exception) {
+            // 拿不到持久授权也先用着：本次能读，下次打开可能失效。
+        }
+        uiScope.launch(Dispatchers.IO) {
+            try {
+                var displayName: String? = null
+                contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) displayName = c.getString(0)
+                }
+                val name = displayName ?: uri.lastPathSegment ?: "文件"
+                val mime = contentResolver.getType(uri) ?: ""
+                val ext = name.substringAfterLast('.', "").lowercase()
+                val textExts = setOf("txt", "md", "markdown", "csv", "json", "log", "xml", "yaml", "yml", "ini", "properties", "srt", "vtt")
+                val imageExts = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic")
+                when {
+                    mime.startsWith("image/") || ext in imageExts -> {
+                        val b64 = readImageAsJpegB64(uri) ?: throw IllegalStateException("图片解不开")
+                        AttachStore.putImage(name, b64)
+                        AuditLog.append(this@MainActivity, "附件", name, "已添加图片，等提问")
+                        withContext(Dispatchers.Main) { addBubble("已添加图片：$name，问我吧", mine = false) }
+                    }
+                    mime.startsWith("text/") || mime == "application/json" || ext in textExts -> {
+                        val raw = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                        if (raw.isBlank()) {
+                            withContext(Dispatchers.Main) { toast("文件是空的，没内容可读") }
+                        } else {
+                            val clipped = raw.take(AttachStore.MAX_TEXT_CHARS)
+                            AttachStore.putText(name, clipped)
+                            AuditLog.append(this@MainActivity, "附件", name, "已添加文本 ${clipped.length} 字，等提问")
+                            withContext(Dispatchers.Main) {
+                                val more = if (raw.length > clipped.length) "（只取了前 ${clipped.length} 字）" else ""
+                                addBubble("已添加文件：$name（${clipped.length} 字）$more，问我吧", mine = false)
+                            }
+                        }
+                    }
+                    else -> withContext(Dispatchers.Main) { toast("还读不了这种文件，先支持文本和图片") }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("文件没读成：${e.message}") }
+            }
+        }
+    }
+
+    /** 附件：图片按最长边 1024 等比压，再转 JPEG 85 发视觉（askVision 要的就是 JPEG base64）。 */
+    private fun readImageAsJpegB64(uri: Uri): String? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (longest / sample > 1024) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
+        val out = java.io.ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    }
+
     private fun sendChat() {
         val text = chatInput.text.toString().trim()
         if (text.isEmpty()) return
@@ -2091,6 +2173,37 @@ class MainActivity : Activity() {
             }
             // 第一梯队批一：注入改按这句话做相关性检索，不再是「最近 15 条全量拼」。
             val mem = MemoryService.getInjectableMemories(this@MainActivity, q)
+            // 附件（2026-11-14）：带文件提问——图片走视觉模型，文本把内容拼进问题里。
+            // 只进云端问答：本地小模型上下文装不下文件，直接跳过；本地指令/天气上面已过。
+            val attachImage = AttachStore.imageB64
+            val attachText = AttachStore.text
+            val attachName = AttachStore.name
+            if (attachImage != null) {
+                releaseInFinally = false
+                AttachStore.clear()
+                CustomClient.askVision(this@MainActivity, q, attachImage,
+                    onResult = { reply ->
+                        runOnUiThread {
+                            setChatInFlight(false)
+                            addBubble(reply, mine = false)
+                            speakReplyIfEnabled(reply)
+                        }
+                        triggerMemoryExtraction(q, reply)
+                    },
+                    onError = { msg ->
+                        runOnUiThread {
+                            setChatInFlight(false)
+                            addBubble("看图失败：$msg", mine = false)
+                        }
+                    })
+                return@launch
+            }
+            if (attachText != null) {
+                releaseInFinally = false
+                AttachStore.clear()
+                askChatCustom("附件《${attachName}》的内容如下：\n$attachText\n\n问题：$q", mem, localTried = false)
+                return@launch
+            }
             // 批十调配 + 第二梯队批六再调配：智能调配开时 ChatRouter 综合内容/网络/电量/
             // 隐私信号判定，不只是"问答云端、闲聊本地"（与语音同路）
             val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
@@ -2442,6 +2555,15 @@ class MainActivity : Activity() {
             }
         }
         micCenter.addView(glassWrapButton(keyboardToggle, 22f), LinearLayout.LayoutParams(dp(44), dp(44)))
+        // 附件（2026-11-14）：对话框加文件——点一下弹系统文件选择器，选好交给模型读内容回答问题。
+        val attachButton = ImageButton(this@MainActivity).apply {
+            setImageResource(android.R.drawable.ic_menu_add)
+            background = null
+            attachPressScale(this)
+            contentDescription = "添加文件"
+            setOnClickListener { openAttachPicker() }
+        }
+        micCenter.addView(glassWrapButton(attachButton, 22f), LinearLayout.LayoutParams(dp(44), dp(44)))
         micRow.addView(micCenter)
 
         settingsGearButton = ImageButton(this@MainActivity).apply {
@@ -3447,6 +3569,14 @@ class MainActivity : Activity() {
                 refreshDialogueBgStatus()
                 refreshDialogueBackground()
                 toast("对话区背景图已换")
+            }
+            return
+        }
+        // 附件（2026-11-14）：对话框选文件回调，读内容存起来，等下一句提问。
+        if (requestCode == REQ_PICK_ATTACH_FILE) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                handleAttachUri(uri)
             }
             return
         }
