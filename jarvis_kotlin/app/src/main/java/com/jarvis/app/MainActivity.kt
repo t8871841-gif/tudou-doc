@@ -17,6 +17,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.Base64
 import android.util.Log
@@ -516,11 +517,13 @@ class MainActivity : Activity() {
         scrollOriloChatToBottom()
     }
 
-    /** 对话区里的一行：用户靠右白字、助手靠左冰蓝色；字号 15 不动。 */
+    /** 对话区里的一行：黑体黑字（照原版截图，浅底黑字对比最稳）；用户靠右、助手靠左；
+     *  字号 15 不动。 */
     private fun oriloChatRow(text: String, mine: Boolean): TextView = TextView(this).apply {
         this.text = text
         textSize = 15f
-        setTextColor(if (mine) Color.WHITE else HudPalette.ICE)
+        setTextColor(Color.BLACK)
+        typeface = Typeface.DEFAULT_BOLD
         gravity = if (mine) Gravity.END else Gravity.START
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         setPadding(0, dp(4), 0, dp(4))
