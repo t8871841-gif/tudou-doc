@@ -131,6 +131,11 @@ class MainActivity : Activity() {
     private var isResumed = false
     private lateinit var homePanel: LinearLayout
     private lateinit var contentView: LinearLayout
+    // Orilo 主界面第 1 批：Orilo 面板（homePanel 里的另一套主界面，与舞台/对话二选一显示）
+    // + 一行内容 + 水滴主视觉；底部麦克风行两套风格共用，不另建。
+    private lateinit var oriloPanel: LinearLayout
+    private lateinit var oriloLineText: TextView
+    private var oriloDroplet: OriloDropletView? = null
     // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 2/3）。
     private lateinit var rootLayout: FrameLayout
     private lateinit var stageLayout: FrameLayout
@@ -292,6 +297,10 @@ class MainActivity : Activity() {
         // 开面板时两者互换显示，stageLayout（上 2/3）不动，buildBottomPanel() 始终可见。
         buildNativePanel()
         homePanel.addView(panelScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        // Orilo 主界面第 1 批：Orilo 面板与对话区同占下 1/3 权重位置（权重 1），初始藏起；
+        // 切 Orilo 时舞台/对话/原生面板三者藏起、只留它 + 共用的底部麦克风行。放 bottomPanel
+        // 前面：竖排里后加的在下，Orilo 面板必须在麦克风行上面。
+        homePanel.addView(buildOriloPanel(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         homePanel.addView(buildBottomPanel())
         contentView.addView(homePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -322,6 +331,8 @@ class MainActivity : Activity() {
         // HUD WebView 常驻（只建一次），竖屏藏起来停渲染，横屏全屏显示；再按当前方向摆一次。
         setupHudWebView(root)
         applyOrientationLayout()
+        // Orilo 主界面第 1 批：按设置里的风格摆主界面（经典 / Orilo 二选一）。
+        applyMainStyle()
 
         // 第 2 步：状态变化同时推给 HUD（setState）；问答文字走 addBubble 时一并推给 HUD 字幕
         // （addBubble 是打字与语音两条路的唯一汇合点——语音回复走 onReplyText、打字回复走
@@ -389,10 +400,74 @@ class MainActivity : Activity() {
         return stage
     }
 
+    // ---------- Orilo 主界面第 1 批：水滴主视觉面板 ----------
+    // 结构：标题 + 一颗大水滴 + 一行内容（最新一句助手回复）；输入/麦克风/设置走下面共用的
+    // buildBottomPanel，不另建。Orilo 档下舞台/对话/原生面板三者藏起，只留它。
+    private fun buildOriloPanel(): LinearLayout {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(dp(24), dp(32), dp(24), dp(8))
+        }
+        panel.addView(TextView(this).apply {
+            text = "Jarvis"
+            textSize = 28f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        })
+        // 水滴占满标题与内容行之间的剩余空间，居中 220dp。
+        val dropWrap = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        oriloDroplet = OriloDropletView(this).apply {
+            setStateColor(HudPalette.colorFor(JarvisAgent.currentState()))
+        }
+        dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
+        panel.addView(dropWrap)
+        oriloLineText = TextView(this).apply {
+            textSize = 15f
+            setTextColor(HudPalette.ICE)
+            gravity = Gravity.CENTER
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, dp(12), 0, dp(8))
+        }
+        panel.addView(oriloLineText)
+        refreshOriloLine()
+        oriloPanel = panel
+        return panel
+    }
+
+    /** 主界面风格切换的唯一入口：经典 ↔ Orilo；切 Orilo 时原生面板关掉（第 1 批 Orilo 里
+     * 没有左滑面板，天气/日程走语音），HUD WebView 的暂停走 applyOrientationLayout 的 Orilo 分支。 */
+    private fun applyMainStyle() {
+        if (!::oriloPanel.isInitialized) return
+        val orilo = JarvisPrefs.isOriloStyle(this)
+        stageLayout.visibility = if (orilo) View.GONE else View.VISIBLE
+        chatScroll.visibility = if (orilo || hudPanelOpen) View.GONE else View.VISIBLE
+        panelScroll.visibility = if (!orilo && hudPanelOpen) View.VISIBLE else View.GONE
+        oriloPanel.visibility = if (orilo) View.VISIBLE else View.GONE
+        if (orilo) {
+            if (hudPanelOpen) hudPanelOpen = false
+            refreshOriloLine()
+        }
+        refreshSettingsGear()
+    }
+
+    /** Orilo 的一行内容：最新一句助手回复；没有记录时放问候语。 */
+    private fun refreshOriloLine() {
+        if (!::oriloLineText.isInitialized) return
+        val last = ChatHistory.snapshot().lastOrNull { it.role == ChatHistory.Role.ASSISTANT }
+        oriloLineText.text = last?.text
+            ?: "你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。"
+    }
+
     private fun onAgentStateChanged(state: String) {
         // 主界面已无状态文字（舞台与 SYSTEM ACTIVE 行均按用户要求删除），
         // 状态只靠徽章/悬浮球颜色与动效表达；唤醒词胶囊已撤，开关在设置里。
         updateMicFx(state)
+        // Orilo 第 1 批：水滴颜色跟状态走，与悬浮球同款配色。
+        oriloDroplet?.setStateColor(HudPalette.colorFor(state))
         // 原生竖屏面板开着时，大脑那格的 Agent 调度跟着状态刷新。
         if (hudPanelOpen) renderNativePanel()
     }
@@ -550,6 +625,15 @@ class MainActivity : Activity() {
             hudWebView.visibility = View.GONE
             hudWebView.onPause()
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            return
+        }
+        if (JarvisPrefs.isOriloStyle(this)) {
+            // Orilo 第 1 批：横竖屏都显示 Orilo 面板，HUD WebView 始终暂停（省电），不走经典的方向分支。
+            contentView.visibility = View.VISIBLE
+            hudWebView.visibility = View.GONE
+            hudWebView.onPause()
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            refreshSettingsGear()
             return
         }
         if (landscape) {
@@ -1597,6 +1681,8 @@ class MainActivity : Activity() {
     /** 原生面板开合的唯一入口：开时 chatScroll 藏、panelScroll 显并渲染一次；
      * 关时反过来，对话记录滑到底。stageLayout（上 2/3）不做任何改动。 */
     private fun setNativePanel(open: Boolean) {
+        // Orilo 第 1 批：Orilo 里没有左滑面板，打开请求直接忽略。
+        if (JarvisPrefs.isOriloStyle(this)) return
         if (open == hudPanelOpen) return
         hudPanelOpen = open
         if (open) {
@@ -1914,6 +2000,8 @@ class MainActivity : Activity() {
      * 气泡显示原来时间（否则重建会把全部气泡重标成当时时间），新消息不传 ts，取当前时间。 */
     private fun addBubble(text: String, mine: Boolean, record: Boolean = true, ts: Long = 0L) {
         val color = HudPalette.colorFor(JarvisAgent.currentState())
+        // Orilo 第 1 批：助手的新回复同步到 Orilo 的一行内容（经典档下这行藏着，更新了也看不见）。
+        if (!mine && ::oriloLineText.isInitialized) oriloLineText.text = text
         // 重建气泡时调用方传存过的时间戳（ChatHistory.Entry.ts）；新消息不传，取当前时间。
         val showTs = if (ts != 0L) ts else System.currentTimeMillis()
         val headText = (if (mine) "我" else "助手") + " · " +
@@ -3125,6 +3213,14 @@ class MainActivity : Activity() {
     private fun buildHomeScreenSection(root: LinearLayout) {
         root.addView(TextView(this).apply {
             text = "主界面"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
+        })
+        // Orilo 主界面第 1 批：主界面风格切换（经典 / Orilo），默认经典；切完重建 Activity 立即生效，
+        // 两种效果都保留，随时能切回来（Orilo 里设置齿轮还在底部，随时能进设置）。
+        root.addView(segmentedRow("主界面风格", listOf("经典", "Orilo"),
+            if (JarvisPrefs.isOriloStyle(this)) 1 else 0) { i ->
+            JarvisPrefs.setMainStyle(this, if (i == 1) JarvisPrefs.MAIN_STYLE_ORILO else JarvisPrefs.MAIN_STYLE_CLASSIC)
+            toast(if (i == 1) "已切到 Orilo 风格" else "已切回经典风格")
+            recreate()
         })
         portraitBgStatusText = TextView(this).apply {
             textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)

@@ -11,6 +11,8 @@ object JarvisPrefs {
     private const val FILE = "jarvis_settings"
     // 模型开关：GLM（默认，内置智谱）/ 自定义（用户自己填的三项）/ DeepSeek（内置 deepseek-flash）。聊天、任务、看屏都跟着走。
     private const val KEY_MODEL_MODE = "model_mode"
+    // Orilo 主界面第 1 批：主界面风格 classic（默认）/ orilo，设置「主界面」里切换，两种都保留。
+    private const val KEY_MAIN_STYLE = "main_ui_style"
     private const val KEY_TASK_BRAIN = "task_brain" // 旧键，仅用于迁移
     private const val KEY_CUSTOM_BASE_URL = "custom_base_url"
     private const val KEY_CUSTOM_MODEL = "custom_model"
@@ -52,6 +54,20 @@ object JarvisPrefs {
         val mode = if (v == "custom") "custom" else if (v == "deepseek") "deepseek" else if (v == "auto") "auto" else "glm"
         p(ctx).edit().putString(KEY_MODEL_MODE, mode).apply()
     }
+
+    // ---------- Orilo 主界面风格（2026-11-15 第 1 批） ----------
+
+    const val MAIN_STYLE_CLASSIC = "classic"
+    const val MAIN_STYLE_ORILO = "orilo"
+
+    fun getMainStyle(ctx: Context): String {
+        val v = p(ctx).getString(KEY_MAIN_STYLE, MAIN_STYLE_CLASSIC) ?: MAIN_STYLE_CLASSIC
+        return if (v == MAIN_STYLE_ORILO) MAIN_STYLE_ORILO else MAIN_STYLE_CLASSIC
+    }
+    fun setMainStyle(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_MAIN_STYLE, if (v == MAIN_STYLE_ORILO) MAIN_STYLE_ORILO else MAIN_STYLE_CLASSIC).apply()
+    }
+    fun isOriloStyle(ctx: Context): Boolean = getMainStyle(ctx) == MAIN_STYLE_ORILO
 
     // ---------- 自定义大模型（OpenAI 兼容接口，仅自定义模式使用） ----------
 
