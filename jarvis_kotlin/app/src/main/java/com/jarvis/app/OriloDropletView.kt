@@ -130,7 +130,9 @@ class OriloDropletView @JvmOverloads constructor(
         typeface = Typeface.DEFAULT_BOLD
         setShadowLayer(6f, 0f, 2f, 0x40000000)
     }
-    private var idleIndicatorAlpha = 0f
+    // 初始就是 1：View 生来就是待机态（awake=false），冷启动第一帧就有 Z；
+    // 之前是 0，setAwake(false) 又直接 return，冷启动要过一次干活→待机才冒出来。
+    private var idleIndicatorAlpha = 1f
     private var idleIndicatorAnimator: ValueAnimator? = null
 
     // ---------- 动态水滴：待机缩小（睡觉的感觉）+ 原地动 ----------
