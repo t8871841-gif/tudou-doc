@@ -3,6 +3,7 @@ package com.jarvis.app
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RadialGradient
@@ -16,7 +17,8 @@ import kotlin.math.sin
 /**
  * Orilo 主界面第 1 批（2026-11-15 用户补的要求）：整页流动液态玻璃底。
  * 底色是蓝紫纵向渐变（照用户给的 Orilo/Henry 截图），两团淡色光斑沿不同周期缓慢漂移，
- * 整个页面看起来在流动。只在可见时跑动画（藏起就停，省电）。
+ * 底色本身还 30 秒一圈慢慢偏色（蓝 → 紫粉 → 蓝），整个页面看起来在流动。
+ * 只在可见时跑动画（藏起就停，省电）。
  * 挂在根布局上、内容列之下：Orilo 档下 homePanel 背景置空，整页（含底部麦克风行）都透出它。
  */
 class OriloBackgroundView @JvmOverloads constructor(
@@ -33,6 +35,8 @@ class OriloBackgroundView @JvmOverloads constructor(
     private var ay = 0.24f
     private var bx = 0.74f
     private var by = 0.72f
+    // 底色偏色量（度）：0 → 60 → 0，30 秒一圈，蓝 → 紫粉 → 蓝。
+    private var hueShift = 0f
 
     private var flowAnimator: ValueAnimator? = null
 
@@ -68,6 +72,8 @@ class OriloBackgroundView @JvmOverloads constructor(
                 ay = 0.26f + 0.14f * cos(t * 0.7f)
                 bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f)
                 by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f)
+                // 底色偏色：0 → 60 → 0 度，蓝 → 紫粉 → 蓝（cos 在两端都回 0，不断档）。
+                hueShift = 30f - 30f * cos(t)
                 invalidate()
             }
             start()
@@ -79,15 +85,23 @@ class OriloBackgroundView @JvmOverloads constructor(
         flowAnimator = null
     }
 
+    /** 底色随时间慢慢偏色（蓝 → 紫粉 → 蓝，30 秒一圈），照视频里整页色调流动的样子。 */
+    private fun hueColor(h: Float, s: Float, v: Float): Int =
+        Color.HSVToColor(floatArrayOf((h + hueShift) % 360f, s, v))
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-        // 底色：上浅下深的蓝紫渐变（截图那味）。
+        // 底色：上浅下深的蓝紫渐变（截图那味），色相随 hueShift 慢慢偏（蓝 → 紫粉 → 蓝）。
         basePaint.shader = LinearGradient(
             0f, 0f, w * 0.25f, h,
-            intArrayOf(0xFF7A86F2.toInt(), 0xFF4A5FE8.toInt(), 0xFF5B54E8.toInt()),
+            intArrayOf(
+                hueColor(232f, 0.50f, 0.95f),
+                hueColor(232f, 0.68f, 0.91f),
+                hueColor(243f, 0.64f, 0.91f),
+            ),
             floatArrayOf(0f, 0.55f, 1f),
             Shader.TileMode.CLAMP,
         )

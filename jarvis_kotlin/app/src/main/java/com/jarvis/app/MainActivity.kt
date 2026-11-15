@@ -433,7 +433,7 @@ class MainActivity : Activity() {
         val dropWrap = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        // 水滴不跟状态走（2026-11-15 用户要求）：固定玻璃色，第 3 批陀螺仪再动它。
+        // 水滴颜色不跟状态（固定玻璃色）；大小跟待机走（setAwake：待机缩、干活胀）。
         oriloDroplet = OriloDropletView(this)
         dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
         panel.addView(dropWrap)
@@ -486,6 +486,9 @@ class MainActivity : Activity() {
         // 主界面已无状态文字（舞台与 SYSTEM ACTIVE 行均按用户要求删除），
         // 状态只靠徽章/悬浮球颜色与动效表达；唤醒词胶囊已撤，开关在设置里。
         updateMicFx(state)
+        // Orilo 第 1 批：水滴大小跟待机走——待机（idle）缩、有睡觉的感觉，干活胀回满；
+        // 颜色不跟状态（水滴是固定玻璃色）。非 idle 一律算干活。
+        oriloDroplet?.setAwake(state != "idle")
         // 原生竖屏面板开着时，大脑那格的 Agent 调度跟着状态刷新。
         if (hudPanelOpen) renderNativePanel()
     }

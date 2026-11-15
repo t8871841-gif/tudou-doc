@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.util.AttributeSet
 import android.view.View
+import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import kotlin.math.min
 import kotlin.math.sin
@@ -20,8 +21,9 @@ import kotlin.math.sin
  * 画法照用户给的 Orilo/Henry 截图（workspace/user/files/4386_0_dzts.png）：
  * 一颗清水滴——本身几乎透明（透出后面的流动底），右下方一团软影、右上一道亮高光、
  * 左下一点小高光、底部一圈亮边。颜色是固定的玻璃色，不跟 JarvisAgent 状态走。
- * 动态：上下慢漂（±8dp，6 秒一圈）+ 轻微呼吸缩放，只在可见时跑动画（藏起就停，省电）。
- * 陀螺仪联动是第 3 批的事，本批只做自主慢漂。
+ * 动态（2026-11-15 用户看视频后定）：待机时缩小、有睡觉的感觉——大小跟待机走：
+ * idle 缩到 0.8 倍、干活胀回满，700ms 平滑过渡；平时再叠一层慢呼吸（6 秒一圈）。
+ * 颜色固定玻璃色，不跟状态走。陀螺仪联动是第 3 批的事。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -46,55 +48,88 @@ class OriloDropletView @JvmOverloads constructor(
         alpha = 60
     }
 
-    private var driftAnimator: ValueAnimator? = null
+    // ---------- 动态水滴：待机缩小（睡觉的感觉）+ 慢呼吸 ----------
+    // 大小跟待机走：idle 0.8 倍、干活 1.0 倍，700ms 平滑过渡；呼吸与慢漂 6 秒一圈。
+    // 只在可见时跑呼吸动画：onVisibilityChanged 会在祖先显隐变化时也回调，isShown 兜底。
+    private var awake = false
+    private var currentScale = IDLE_SCALE
+    private var breathT = 0f
+    private val driftAmpPx = 5f * resources.displayMetrics.density
+    private var scaleAnimator: ValueAnimator? = null
+    private var motionAnimator: ValueAnimator? = null
 
-    // ---------- 动态水滴：自主慢漂 ----------
-    // 只在可见时跑：onVisibilityChanged 会在祖先显隐变化时也回调，isShown 兜底。
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        updateDriftAnim()
+    init {
+        applyMotion()
     }
 
-    override fun onDetachedFromWindow() {
-        stopDriftAnim()
-        super.onDetachedFromWindow()
-    }
-
-    override fun onVisibilityChanged(changedView: View, visibility: Int) {
-        super.onVisibilityChanged(changedView, visibility)
-        updateDriftAnim()
-    }
-
-    private fun updateDriftAnim() {
-        if (isShown) startDriftAnim() else stopDriftAnim()
-    }
-
-    private fun startDriftAnim() {
-        if (driftAnimator != null) return
-        val ampPx = 8f * resources.displayMetrics.density
-        driftAnimator = ValueAnimator.ofFloat(0f, (Math.PI * 2).toFloat()).apply {
-            duration = 6000L
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = LinearInterpolator()
+    /** 调用方在状态变化时调：待机（idle）缩、干活胀。颜色不跟状态，只动大小。 */
+    fun setAwake(awake: Boolean) {
+        if (this.awake == awake) return
+        this.awake = awake
+        val target = if (awake) AWAKE_SCALE else IDLE_SCALE
+        scaleAnimator?.cancel()
+        scaleAnimator = ValueAnimator.ofFloat(currentScale, target).apply {
+            duration = 700L
+            interpolator = DecelerateInterpolator()
             addUpdateListener {
-                val t = animatedValue as Float
-                // 慢漂：上下 8dp + 轻微呼吸缩放；translation/scale 走合成层，不重画。
-                translationY = sin(t) * ampPx
-                val s = 1f + 0.02f * sin(t + 1.2f)
-                scaleX = s
-                scaleY = s
+                currentScale = animatedValue as Float
+                applyMotion()
             }
             start()
         }
     }
 
-    private fun stopDriftAnim() {
-        driftAnimator?.cancel()
-        driftAnimator = null
+    private fun applyMotion() {
+        val breath = 1f + 0.015f * sin(breathT)
+        scaleX = currentScale * breath
+        scaleY = currentScale * breath
+        translationY = sin(breathT) * driftAmpPx
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        updateMotionAnim()
+    }
+
+    override fun onDetachedFromWindow() {
+        stopMotionAnim()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        updateMotionAnim()
+    }
+
+    private fun updateMotionAnim() {
+        if (isShown) startMotionAnim() else stopMotionAnim()
+    }
+
+    private fun startMotionAnim() {
+        if (motionAnimator != null) return
+        motionAnimator = ValueAnimator.ofFloat(0f, (Math.PI * 2).toFloat()).apply {
+            duration = 6000L
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            addUpdateListener {
+                breathT = animatedValue as Float
+                applyMotion()
+            }
+            start()
+        }
+    }
+
+    private fun stopMotionAnim() {
+        motionAnimator?.cancel()
+        motionAnimator = null
         translationY = 0f
-        scaleX = 1f
-        scaleY = 1f
+        scaleX = currentScale
+        scaleY = currentScale
+    }
+
+    companion object {
+        private const val IDLE_SCALE = 0.8f
+        private const val AWAKE_SCALE = 1.0f
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -115,10 +150,10 @@ class OriloDropletView @JvmOverloads constructor(
             RectF(cx - r * 0.75f, cy + r * 0.75f, cx + r * 0.95f, cy + r * 1.3f),
             shadowPaint,
         )
-        // 体：清水滴——顶部带一点亮、边缘带一点背景蓝的折射感，中间几乎透明。
+        // 体：清水滴——顶部带一点亮、边缘带一点淡淡的白，中间几乎透明；底色偏色时也不串色。
         bodyPaint.shader = RadialGradient(
             cx - r * 0.3f, cy - r * 0.45f, r * 1.5f,
-            intArrayOf(0x59FFFFFF, 0x14FFFFFF, 0x08FFFFFF, 0x2EB9C2FF),
+            intArrayOf(0x59FFFFFF, 0x14FFFFFF, 0x08FFFFFF, 0x1AFFFFFF),
             floatArrayOf(0f, 0.35f, 0.7f, 1f),
             Shader.TileMode.CLAMP,
         )
