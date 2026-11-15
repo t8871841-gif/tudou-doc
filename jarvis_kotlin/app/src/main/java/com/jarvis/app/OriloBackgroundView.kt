@@ -49,6 +49,14 @@ import kotlin.math.sin
  * 真机上看着就是一片均匀的蓝或紫。这批改成真正的颜色混合（mix，不是相加），
  * 且把两个光斑换成明显偏离底色的饱和色（左上偏品红紫、右下偏靛蓝），这样光斑会
  * 读成清楚的色块（照目标截图左上那片粉紫、右下那片蓝的反差），不会被底色吃掉。
+ *
+ * 2026-11-15 第 5 批（用户发了 orilo 原版的真机录屏，逐帧看了一遍）：之前当成
+ * "30 秒一圈、两团色斑挪位置"的理解是错的——原版是一团"光晕"在呼吸式涨缩：从一小片
+ * 淡淡的紫粉，大概 10 秒左右涨到几乎盖住大半屏幕（同时水滴也跟着被照得发白），再收
+ * 回去，一圈大概 12~13 秒。关键是**强度（半径 × 浓度）在呼吸**，不只是位置在挪。
+ * 这批把周期从 30000ms 改成 13000ms，并在 `FlowPhase` 里加了 `bloom`（0→1→0 的呼吸
+ * 强度），两团光斑的半径和强度现在都乘了这个 `bloom`——弱的时候一小片，强的时候
+ * 接近盖满屏幕，这才是原版"活"的真正来源。
  */
 class OriloBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -72,6 +80,7 @@ class OriloBackgroundView @JvmOverloads constructor(
     private var bx = 0f
     private var by = 0f
     private var hueShift = 0f
+    private var bloom = 0f
 
     private var flowAnimator: ValueAnimator? = null
 
@@ -128,7 +137,7 @@ class OriloBackgroundView @JvmOverloads constructor(
      *  不存在"两份公式抄错一处就对不上"的风险。 */
     private fun recomputePhase() {
         val p = phaseAt(SystemClock.uptimeMillis())
-        ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift
+        ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift; bloom = p.bloom
     }
 
     /** 底色随时间慢慢偏色（蓝 → 紫粉 → 蓝，30 秒一圈），照视频里整页色调流动的样子。 */
@@ -164,10 +173,10 @@ class OriloBackgroundView @JvmOverloads constructor(
         s.setFloatUniform("uFbmScale", TUNE_FBM_SCALE)
         s.setFloatUniform("uFlowSpeedX", TUNE_FLOW_SPEED_X)
         s.setFloatUniform("uFlowSpeedY", TUNE_FLOW_SPEED_Y)
-        s.setFloatUniform("uBlobAStrength", TUNE_BLOB_A_STRENGTH)
-        s.setFloatUniform("uBlobARadiusFrac", TUNE_BLOB_A_RADIUS_FRAC)
-        s.setFloatUniform("uBlobBStrength", TUNE_BLOB_B_STRENGTH)
-        s.setFloatUniform("uBlobBRadiusFrac", TUNE_BLOB_B_RADIUS_FRAC)
+        s.setFloatUniform("uBlobAStrength", bloomedStrength(TUNE_BLOB_A_STRENGTH, bloom))
+        s.setFloatUniform("uBlobARadiusFrac", bloomedRadiusFrac(TUNE_BLOB_A_RADIUS_FRAC, bloom))
+        s.setFloatUniform("uBlobBStrength", bloomedStrength(TUNE_BLOB_B_STRENGTH, bloom))
+        s.setFloatUniform("uBlobBRadiusFrac", bloomedRadiusFrac(TUNE_BLOB_B_RADIUS_FRAC, bloom))
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 
@@ -184,28 +193,36 @@ class OriloBackgroundView @JvmOverloads constructor(
         )
         canvas.drawRect(0f, 0f, w, h, basePaint)
         // 第 4 批：兜底路径的光斑颜色也换成跟着色器路径一致的饱和品红/靛蓝（原来的浅蓝浅紫
-        // 太接近底色，容易被吃掉），alpha 调高到接近着色器那边 mix 的视觉效果。
+        // 太接近底色，容易被吃掉）。第 5 批：半径和 alpha 也跟着 bloom 呼吸涨缩。
+        val radiusA = w * bloomedRadiusFrac(TUNE_BLOB_A_RADIUS_FRAC, bloom)
+        val alphaA = (0x8F * bloomedStrength(1f, bloom)).toInt().coerceIn(0, 0xFF)
         blobPaintA.shader = RadialGradient(
-            ax * w, ay * h, w * 0.55f,
-            intArrayOf(0x8FFF64C8.toInt(), 0x00FF64C8),
+            ax * w, ay * h, radiusA,
+            intArrayOf((alphaA shl 24) or 0xFF64C8, 0x00FF64C8),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawRect(0f, 0f, w, h, blobPaintA)
+        val radiusB = w * bloomedRadiusFrac(TUNE_BLOB_B_RADIUS_FRAC, bloom)
+        val alphaB = (0x85 * bloomedStrength(1f, bloom)).toInt().coerceIn(0, 0xFF)
         blobPaintB.shader = RadialGradient(
-            bx * w, by * h, w * 0.6f,
-            intArrayOf(0x857646E0.toInt(), 0x007646E0),
+            bx * w, by * h, radiusB,
+            intArrayOf((alphaB shl 24) or 0x7646E0, 0x007646E0),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawRect(0f, 0f, w, h, blobPaintB)
     }
 
-    /** 某一挂钟时刻的流动相位：两团光斑的页面相对坐标 + 底色偏色量。 */
-    data class FlowPhase(val ax: Float, val ay: Float, val bx: Float, val by: Float, val hueShift: Float)
+    /** 某一挂钟时刻的流动相位：两团光斑的页面相对坐标 + 底色偏色量 + 呼吸强度（0..1）。 */
+    data class FlowPhase(
+        val ax: Float, val ay: Float, val bx: Float, val by: Float,
+        val hueShift: Float, val bloom: Float,
+    )
 
     companion object {
-        const val FLOW_PERIOD_MS = 30000L
+        /** 第 5 批：按原版录屏实测的节奏改成约 13 秒一圈（原来是猜的 30 秒，慢了一倍多）。 */
+        const val FLOW_PERIOD_MS = 13000L
 
         // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL、不用改下面的着色器代码 ======
         // 改完重新编译装机就能看到效果；这几个数两个 View（背景 + 水滴）共用同一份，
@@ -246,12 +263,25 @@ class OriloBackgroundView @JvmOverloads constructor(
                 bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f),
                 by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f),
                 hueShift = 30f - 30f * cos(t),
+                // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
+                // 这样"光晕涨缩"跟"光晕挪位置"不会每圈都卡在同一个点上重复。
+                bloom = 0.5f + 0.5f * sin(t * 0.85f - (Math.PI / 2).toFloat()),
             )
         }
 
         /** 底色随时间慢慢偏色用的 HSV 转换，供两个 View 共用（避免重复实现一份换色逻辑）。 */
         fun hueColor(baseHue: Float, s: Float, v: Float, hueShift: Float): Int =
             Color.HSVToColor(floatArrayOf((baseHue + hueShift) % 360f, s, v))
+
+        /** 第 5 批新增：光斑半径随 bloom 呼吸——弱的时候只有基准值的一半出头，
+         *  强的时候涨到基准值的接近 1.5 倍，接近盖满屏幕。两个 View 共用，保证同步。 */
+        fun bloomedRadiusFrac(baseFrac: Float, bloom: Float): Float =
+            baseFrac * (0.55f + 0.9f * bloom)
+
+        /** 第 5 批新增：光斑浓度随 bloom 呼吸——弱的时候很淡，强的时候接近基准值的 1.5 倍
+         *  （会被 main() 里的 mix 自动夹到 1.0，所以峰值时是"完全显示光斑色"）。 */
+        fun bloomedStrength(baseStrength: Float, bloom: Float): Float =
+            (baseStrength * (0.35f + 1.15f * bloom)).coerceIn(0f, 1f)
 
         // AGSL：两层 fbm 噪声先扭一下采样坐标（玻璃后面的内容在"晃"），
         // 扭完的坐标再算三色渐变 + 两团光斑——光斑不再是刚性圆形平移，
