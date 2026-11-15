@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * 行程规划循环（阶段 0，2026-11-05）：独立循环，不塞进 TaskLoop。
  * TaskLoop 是“看屏点按”，规划是“问清信息、出按天排的行程”，动作空间、
- * 提示词、终止条件全不同；只共用 CustomClient（glm-4.5 聊天模型通道）
+ * 提示词、终止条件全不同；只共用 CustomClient（glm-4.7-flash 聊天模型通道）
  * 和 AuditLog。阶段 0 只出文字行程、存文件，不碰高德 App（那是阶段 1）。
  *
  * 行程文件存在应用私有目录 trips/ 下：<时间>-<目的地>.md；进行中的
@@ -405,7 +405,7 @@ object TripLoop {
                     if (lastError.isNotEmpty()) append("上一步的问题：").append(lastError).append('\n')
                     append("现在只输出下一步的一个 JSON 动作。")
                 }
-                // ---------- 问模型（glm-4.5 聊天模型通道） ----------
+                // ---------- 问模型（glm-4.7-flash 聊天模型通道） ----------
                 // M19：网络/超时/429 失败不烧规划步数（step-- 抵掉本轮 step++），
                 // 只记连续失败；连续失败到 MAX_ASK_FAILS 次才判停。
                 val reply = try {

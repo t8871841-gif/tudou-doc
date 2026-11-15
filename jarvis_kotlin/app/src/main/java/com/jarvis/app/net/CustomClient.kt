@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 对话大脑：GLM / 自定义大模型（OpenAI 兼容的 /chat/completions 接口）。
- * 按模型开关（JarvisPrefs.getModelMode）取配置：GLM 模式用内置智谱（聊天 glm-4.5），
+ * 按模型开关（JarvisPrefs.getModelMode）取配置：GLM 模式用内置智谱（聊天 glm-4.7-flash），
  * 自定义模式用设置里用户填的地址/模型；Key 两种模式共用同一个 API Key 栏位。
  * 未配置时直接报错，不发请求。
  *

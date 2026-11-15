@@ -23,7 +23,7 @@ object JarvisPrefs {
 
     // GLM 内置配置（智谱）：聊天、任务、视觉各用对应的模型，地址统一。
     const val GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-    const val GLM_CHAT_MODEL = "glm-4.5"
+    const val GLM_CHAT_MODEL = "glm-4.7-flash"
     // 2026-11-14：GLM-4V-Plus 虽然会看图，但不支持 OpenAI function calling（智谱官方
     // 模型列表里只有 GLM-4.6V 标注"原生支持工具调用"），所以永远不发 tool_calls。
     // 2026-11-14：glm-4.6v 与 glm-4v-plus 同时报 429（疑似账号额度/限流），任务与视觉
@@ -104,7 +104,7 @@ object JarvisPrefs {
         else -> GLM_BASE_URL
     }
 
-    /** 对话用的模型名：GLM 模式用 glm-4.5，自定义模式用用户填的模型，DeepSeek 模式用 deepseek-flash。 */
+    /** 对话用的模型名：GLM 模式用 glm-4.7-flash，自定义模式用用户填的模型，DeepSeek 模式用 deepseek-flash。 */
     fun getChatModel(ctx: Context): String = when (getModelMode(ctx)) {
         "custom" -> getCustomModel(ctx)
         "deepseek" -> DEEPSEEK_MODEL

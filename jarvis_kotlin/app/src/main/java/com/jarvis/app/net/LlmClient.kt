@@ -179,7 +179,7 @@ private object DeepSeekAdapter : LlmClient {
  * - 聊天 client chatClient：改前 askReflect / askManager 统一走
  *   CustomClient.askOnce——核验要 A/B/C 自由文本、规划要计划块自由文本，
  *   GLM 模式的任务 client 只回 JSON 动作串、问不出来。聊天 client 与模式
- *   开关无关（CustomClient 内部按开关解析聊天模型：GLM 模式 glm-4.5 /
+ *   开关无关（CustomClient 内部按开关解析聊天模型：GLM 模式 glm-4.7-flash /
  *   自定义模式用户填的模型），所以 chatClient 不取 ctx。
  * - 按名取 client(name)：未登记的名字直接抛 IllegalArgumentException，
  *   不静默回落到默认 client——静默回落会把“配错了名”藏成“走了默认模型”，

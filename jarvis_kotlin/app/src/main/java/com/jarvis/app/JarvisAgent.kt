@@ -408,7 +408,7 @@ object JarvisAgent {
         // 不能写尾随 lambda——尾随 lambda 会被当成最后一个参数 runJs，导致 speak 缺失。
         if (LocalCommands.tryHandle(ctx, text, speak = { reply -> speakReply(ctx, mySeq, reply) }, runJs = onRunHudJs)) return
         // 行程规划阶段 0（2026-11-05）：行程规划任务进规划循环（TripLoop），不走跨应用任务循环。
-        // 规划走 glm-4.5（聊天模型通道），动作是问清信息、出按天排的行程，不是点按屏幕。
+        // 规划走 glm-4.7-flash（聊天模型通道），动作是问清信息、出按天排的行程，不是点按屏幕。
         // 放在任务大脑之前：行程句式不该被当成跨应用任务；
         // 阶段 2（2026-11-05）：改行程 / 看行程也进 TripLoop（只改已存行程的指定部分、
         // 或读最新存档）。改行程句式带任务排除：跨应用任务里也可能出现
