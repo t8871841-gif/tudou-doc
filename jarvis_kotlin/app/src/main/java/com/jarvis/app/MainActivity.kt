@@ -136,6 +136,9 @@ class MainActivity : Activity() {
     private lateinit var oriloPanel: LinearLayout
     private lateinit var oriloLineText: TextView
     private var oriloDroplet: OriloDropletView? = null
+    // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
+    // 插在对话背景照片层之上、设置页与内容列之下；Orilo 档才显示。
+    private lateinit var oriloBackgroundView: OriloBackgroundView
     // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 2/3）。
     private lateinit var rootLayout: FrameLayout
     private lateinit var stageLayout: FrameLayout
@@ -328,6 +331,15 @@ class MainActivity : Activity() {
         }.also { root.addView(it, 1) }
         refreshDialogueBackground()
 
+        // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
+        // 插 index 2：对话背景照片层（index 1）之上、设置页与内容列之下；Orilo 档才显示，
+        // 经典档藏起，盖住照片层（Orilo 整页就是流动底，不露对话照片）。
+        oriloBackgroundView = OriloBackgroundView(this).apply {
+            visibility = View.GONE
+        }
+        root.addView(oriloBackgroundView, 2, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+
         // HUD WebView 常驻（只建一次），竖屏藏起来停渲染，横屏全屏显示；再按当前方向摆一次。
         setupHudWebView(root)
         applyOrientationLayout()
@@ -401,8 +413,10 @@ class MainActivity : Activity() {
     }
 
     // ---------- Orilo 主界面第 1 批：水滴主视觉面板 ----------
-    // 结构：标题 + 一颗大水滴 + 一行内容（最新一句助手回复）；输入/麦克风/设置走下面共用的
-    // buildBottomPanel，不另建。Orilo 档下舞台/对话/原生面板三者藏起，只留它。
+    // 结构：标题 + 一颗动态水滴 + 一行内容（最新一句助手回复）；输入/麦克风/设置走下面共用的
+    // buildBottomPanel，不另建。对话不加液态玻璃（整屏已是液态玻璃）。
+    // 整页流动底是根布局上的 OriloBackgroundView（applyMainStyle 里开关），本面板背景透明。
+    // Orilo 档下舞台/对话/原生面板三者藏起，只留它。
     private fun buildOriloPanel(): LinearLayout {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -419,9 +433,8 @@ class MainActivity : Activity() {
         val dropWrap = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        oriloDroplet = OriloDropletView(this).apply {
-            setStateColor(HudPalette.colorFor(JarvisAgent.currentState()))
-        }
+        // 水滴不跟状态走（2026-11-15 用户要求）：固定玻璃色，第 3 批陀螺仪再动它。
+        oriloDroplet = OriloDropletView(this)
         dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
         panel.addView(dropWrap)
         oriloLineText = TextView(this).apply {
@@ -447,6 +460,13 @@ class MainActivity : Activity() {
         chatScroll.visibility = if (orilo || hudPanelOpen) View.GONE else View.VISIBLE
         panelScroll.visibility = if (!orilo && hudPanelOpen) View.VISIBLE else View.GONE
         oriloPanel.visibility = if (orilo) View.VISIBLE else View.GONE
+        // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底是根布局上的全屏层；
+        // Orilo 档下显示它，并把 homePanel 背景置空、让流动底透满整页（含底部麦克风行）。
+        // 经典档藏起它，homePanel 背景不动（对话背景图那路在 refreshDialogueBackground 里管）。
+        if (::oriloBackgroundView.isInitialized) {
+            oriloBackgroundView.visibility = if (orilo) View.VISIBLE else View.GONE
+        }
+        if (orilo) homePanel.background = null
         if (orilo) {
             if (hudPanelOpen) hudPanelOpen = false
             refreshOriloLine()
@@ -466,8 +486,6 @@ class MainActivity : Activity() {
         // 主界面已无状态文字（舞台与 SYSTEM ACTIVE 行均按用户要求删除），
         // 状态只靠徽章/悬浮球颜色与动效表达；唤醒词胶囊已撤，开关在设置里。
         updateMicFx(state)
-        // Orilo 第 1 批：水滴颜色跟状态走，与悬浮球同款配色。
-        oriloDroplet?.setStateColor(HudPalette.colorFor(state))
         // 原生竖屏面板开着时，大脑那格的 Agent 调度跟着状态刷新。
         if (hudPanelOpen) renderNativePanel()
     }
@@ -1577,7 +1595,8 @@ class MainActivity : Activity() {
         if (uriStr.isBlank()) {
             iv.visibility = View.GONE
             iv.setImageDrawable(null)
-            homePanel.background = deepSpaceBackground()
+            // Orilo 档下 homePanel 背景由 applyMainStyle 置空（透出流动底），这里别盖回去。
+            if (!JarvisPrefs.isOriloStyle(this)) homePanel.background = deepSpaceBackground()
             settingsScroll.background = deepSpaceBackground()
             return
         }
@@ -1589,7 +1608,8 @@ class MainActivity : Activity() {
         if (uri == null) {
             iv.visibility = View.GONE
             iv.setImageDrawable(null)
-            homePanel.background = deepSpaceBackground()
+            // Orilo 档下 homePanel 背景由 applyMainStyle 置空（透出流动底），这里别盖回去。
+            if (!JarvisPrefs.isOriloStyle(this)) homePanel.background = deepSpaceBackground()
             settingsScroll.background = deepSpaceBackground()
             return
         }
@@ -1598,13 +1618,20 @@ class MainActivity : Activity() {
             withContext(Dispatchers.Main) {
                 if (bmp != null) {
                     iv.setImageBitmap(bmp)
-                    iv.visibility = View.VISIBLE
-                    homePanel.background = dialogueScrim()
+                    // Orilo 档下整页是流动液态玻璃底（根布局全屏层，盖在照片层之上），
+                    // 照片不显示、homePanel 背景置空，免得暗罩子压住流动底。
+                    if (JarvisPrefs.isOriloStyle(this@MainActivity)) {
+                        iv.visibility = View.GONE
+                    } else {
+                        iv.visibility = View.VISIBLE
+                        homePanel.background = dialogueScrim()
+                    }
                     settingsScroll.background = dialogueScrim()
                 } else {
                     iv.visibility = View.GONE
                     iv.setImageDrawable(null)
-                    homePanel.background = deepSpaceBackground()
+                    // Orilo 档下 homePanel 背景由 applyMainStyle 置空（透出流动底），这里别盖回去。
+                    if (!JarvisPrefs.isOriloStyle(this@MainActivity)) homePanel.background = deepSpaceBackground()
                     settingsScroll.background = deepSpaceBackground()
                 }
             }
