@@ -131,12 +131,18 @@ class MainActivity : Activity() {
     private var isResumed = false
     private lateinit var homePanel: LinearLayout
     private lateinit var contentView: LinearLayout
-    // Orilo 主界面第 1 批：Orilo 面板（homePanel 里的另一套主界面，与舞台/对话二选一显示）
-    // + 一行内容 + 水滴主视觉；底部麦克风行两套风格共用，不另建。
+    // Orilo 主界面第 5 批：Orilo 面板（homePanel 里的另一套主界面，与舞台/对话二选一显示）
+    // 上半水滴主视觉 + 下半对话区（滚动、液态玻璃）；底部麦克风行两套风格共用，不另建。
     private lateinit var oriloPanel: LinearLayout
-    private lateinit var oriloLineText: TextView
-    // Orilo 第 1 批（2026-11-15 用户要求）：一行内容打字机效果——照视频，正文一句一句打出来。
+    private lateinit var oriloChatList: LinearLayout
+    private lateinit var oriloChatScroll: ScrollView
+    // Orilo 对话区打字机：新助手回复一句一句打进最新一行（2026-11-15 用户要求，照视频）。
     private var oriloTypeRunnable: Runnable? = null
+    private var oriloTypingRow: TextView? = null
+    private var oriloTypingFullText: String = ""
+    // renderHistoryBubbles 重建经典气泡时为 true：addBubble 的 Orilo 同步跳过它，
+    // 对话区由 refreshOriloChat 全量重建（问候语那句 record=true，不能只靠 record 区分）。
+    private var rebuildingBubbles = false
     private var oriloDroplet: OriloDropletView? = null
     // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
     // 插在对话背景照片层之上、设置页与内容列之下；Orilo 档才显示。
@@ -385,11 +391,18 @@ class MainActivity : Activity() {
         if (!::chatList.isInitialized) return
         chatList.removeAllViews()
         val snap = ChatHistory.snapshot()
-        if (snap.isEmpty()) {
-            addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
-            return
+        // 重建期间 addBubble 的 Orilo 同步跳过（对话区由 refreshOriloChat 全量重建）；
+        // 问候语那句 record=true，不能只靠 record 区分。
+        rebuildingBubbles = true
+        try {
+            if (snap.isEmpty()) {
+                addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
+                return
+            }
+            snap.forEach { e -> addBubble(e.text, mine = e.role == ChatHistory.Role.USER, record = false, ts = e.ts) }
+        } finally {
+            rebuildingBubbles = false
         }
-        snap.forEach { e -> addBubble(e.text, mine = e.role == ChatHistory.Role.USER, record = false, ts = e.ts) }
     }
 
     // ---------- 中央区域：竖屏静图舞台（彻底融合第 1 步） ----------
@@ -414,24 +427,18 @@ class MainActivity : Activity() {
         return stage
     }
 
-    // ---------- Orilo 主界面第 1 批：水滴主视觉面板 ----------
-    // 结构：标题 + 一颗动态水滴 + 一行内容（最新一句助手回复）；输入/麦克风/设置走下面共用的
-    // buildBottomPanel，不另建。对话不加液态玻璃（整屏已是液态玻璃）。
+    // ---------- Orilo 主界面第 5 批：水滴主视觉面板 ----------
+    // 结构：上半一颗动态水滴（居中）+ 下半对话区（滚动、整块液态玻璃、字号 15 不动）；
+    // 标题已删（2026-11-15 用户要求）。输入/麦克风/设置走下面共用的 buildBottomPanel，不另建。
     // 整页流动底是根布局上的 OriloBackgroundView（applyMainStyle 里开关），本面板背景透明。
     // Orilo 档下舞台/对话/原生面板三者藏起，只留它。
     private fun buildOriloPanel(): LinearLayout {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(dp(24), dp(32), dp(24), dp(8))
+            setPadding(dp(24), dp(16), dp(24), dp(8))
         }
-        panel.addView(TextView(this).apply {
-            text = "Jarvis"
-            textSize = 28f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-        })
-        // 水滴占满标题与内容行之间的剩余空间，居中 220dp。
+        // 上半：水滴占一半空间，居中 220dp。
         val dropWrap = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
@@ -439,16 +446,29 @@ class MainActivity : Activity() {
         oriloDroplet = OriloDropletView(this)
         dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
         panel.addView(dropWrap)
-        oriloLineText = TextView(this).apply {
-            textSize = 15f
-            setTextColor(HudPalette.ICE)
-            gravity = Gravity.CENTER
-            maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(0, dp(12), 0, dp(8))
+        // 下半：对话区——整块液态玻璃板（参数与经典气泡同一套），里面是可滚动的对话记录。
+        oriloChatList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
-        panel.addView(oriloLineText)
-        refreshOriloLine()
+        oriloChatScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            addView(oriloChatList, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val chatGlass = LiquidGlassView(this).apply {
+            setCornerRadii(dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
+            material = GlassMaterial.CLEAR
+            refractionHeight = 80f
+            bevelWidth = 32f
+            dispersionStrength = 0.05f
+            enableSensorHighlight = true
+            enablePressEffect = false
+            enableDynamicBackground = true
+            backdropSource = rootLayout
+            addView(oriloChatScroll, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+        panel.addView(chatGlass, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        refreshOriloChat()
         oriloPanel = panel
         return panel
     }
@@ -469,46 +489,81 @@ class MainActivity : Activity() {
             oriloBackgroundView.visibility = if (orilo) View.VISIBLE else View.GONE
         }
         if (orilo) homePanel.background = null
-        if (!orilo) cancelOriloTyping() // 经典档下那行藏着，打字机不用跑。
+        if (!orilo) cancelOriloTyping() // 经典档下对话区藏着，打字机不用跑。
         if (orilo) {
             if (hudPanelOpen) hudPanelOpen = false
-            refreshOriloLine()
+            refreshOriloChat()
         }
         refreshSettingsGear()
     }
 
-    /** Orilo 的一行内容：最新一句助手回复；没有记录时放问候语。 */
-    private fun refreshOriloLine() {
-        if (!::oriloLineText.isInitialized) return
-        val last = ChatHistory.snapshot().lastOrNull { it.role == ChatHistory.Role.ASSISTANT }
-        typeOriloLine(last?.text
-            ?: "你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。")
+    /** Orilo 对话区：按 ChatHistory 重建全部行（用户右、助手左，字号 15 不动）；
+     * 没有记录时放一句问候语。 */
+    private fun refreshOriloChat() {
+        if (!::oriloChatList.isInitialized) return
+        cancelOriloTyping()
+        oriloTypingRow = null
+        oriloTypingFullText = ""
+        oriloChatList.removeAllViews()
+        val entries = ChatHistory.snapshot()
+        if (entries.isEmpty()) {
+            oriloChatList.addView(oriloChatRow("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", false))
+        } else {
+            for (e in entries) {
+                oriloChatList.addView(oriloChatRow(e.text, e.role == ChatHistory.Role.USER))
+            }
+        }
+        scrollOriloChatToBottom()
     }
 
-    // ---------- Orilo 一行内容：打字机效果（2026-11-15 用户要求） ----------
-    // 照视频：正文一句一句打出来。新回复来时取消上一次、从头打。
+    /** 对话区里的一行：用户靠右白字、助手靠左冰蓝色；字号 15 不动。 */
+    private fun oriloChatRow(text: String, mine: Boolean): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 15f
+        setTextColor(if (mine) Color.WHITE else HudPalette.ICE)
+        gravity = if (mine) Gravity.END else Gravity.START
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        setPadding(0, dp(4), 0, dp(4))
+    }
+
+    private fun scrollOriloChatToBottom() {
+        if (!::oriloChatScroll.isInitialized) return
+        oriloChatScroll.post { oriloChatScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    // ---------- Orilo 对话区：打字机效果（2026-11-15 用户要求） ----------
+    // 照视频：正文一句一句打出来。新回复来时先把上一条没打完的行补成整句，再新起一行打这条。
     // 速度按长度自适应（总长约 1.2~2.2 秒）；超过 120 字直接整句显示（打字机打不完）。
-    private fun typeOriloLine(text: String) {
+    private fun typeOriloChat(text: String) {
+        // 上一条没打完的行先补成整句（不然列表里会留半句）。
+        oriloTypingRow?.let { if (oriloTypingFullText.isNotEmpty()) it.text = oriloTypingFullText }
+        oriloTypingRow = null
         cancelOriloTyping()
-        if (text.isEmpty()) {
-            oriloLineText.text = ""
-            return
-        }
+        if (text.isEmpty() || !::oriloChatList.isInitialized) return
+        val row = oriloChatRow("", false)
+        oriloChatList.addView(row)
+        if (oriloChatList.childCount > 100) oriloChatList.removeViewAt(0)
+        scrollOriloChatToBottom()
         if (!JarvisPrefs.isOriloStyle(this) || text.length > 120) {
-            // 经典档下这行藏着，打了也看不见，直接放整句。
-            oriloLineText.text = text
+            // 经典档下对话区藏着，打了也看不见，直接放整句。
+            row.text = text
             return
         }
+        oriloTypingRow = row
+        oriloTypingFullText = text
         val interval = (1200L / text.length).coerceIn(18L, 40L)
         var shown = 0
         val runnable = object : Runnable {
             override fun run() {
                 shown++
-                oriloLineText.text = text.substring(0, shown.coerceAtMost(text.length))
+                row.text = text.substring(0, shown.coerceAtMost(text.length))
+                scrollOriloChatToBottom()
                 if (shown < text.length) {
                     main.postDelayed(this, interval)
                 } else {
                     oriloTypeRunnable = null
+                    oriloTypingRow = null
+                    oriloTypingFullText = ""
                 }
             }
         }
@@ -2069,8 +2124,17 @@ class MainActivity : Activity() {
      * 气泡显示原来时间（否则重建会把全部气泡重标成当时时间），新消息不传 ts，取当前时间。 */
     private fun addBubble(text: String, mine: Boolean, record: Boolean = true, ts: Long = 0L) {
         val color = HudPalette.colorFor(JarvisAgent.currentState())
-        // Orilo 第 1 批：助手的新回复同步到 Orilo 的一行内容（打字机打出来；经典档下这行藏着，更新了也看不见）。
-        if (!mine && ::oriloLineText.isInitialized) typeOriloLine(text)
+        // Orilo 第 5 批：新消息同步到 Orilo 对话区（用户右、助手左；助手的新回复打字机打出来）。
+        // 只跟新消息（record=true 且不在重建中）；重建气泡时对话区由 refreshOriloChat 全量重建。
+        if (record && !rebuildingBubbles && ::oriloChatList.isInitialized && JarvisPrefs.isOriloStyle(this)) {
+            if (mine) {
+                oriloChatList.addView(oriloChatRow(text, true))
+                if (oriloChatList.childCount > 100) oriloChatList.removeViewAt(0)
+                scrollOriloChatToBottom()
+            } else {
+                typeOriloChat(text)
+            }
+        }
         // 重建气泡时调用方传存过的时间戳（ChatHistory.Entry.ts）；新消息不传，取当前时间。
         val showTs = if (ts != 0L) ts else System.currentTimeMillis()
         val headText = (if (mine) "我" else "助手") + " · " +
@@ -2177,6 +2241,7 @@ class MainActivity : Activity() {
         // 否则下次页面加载还会把清掉之前的对话推回 HUD 字幕记录。
         ChatHistory.clear()
         addBubble("你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。", mine = false)
+        refreshOriloChat() // 对话区同步清空，只留问候语。
     }
 
     /** S23：只有 submitText 受理成功后才清输入框；被上一条占用时文字保留，并提示稍等。 */
