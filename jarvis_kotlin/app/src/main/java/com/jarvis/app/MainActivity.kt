@@ -3386,14 +3386,18 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "主界面"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
         })
-        // Orilo 主界面第 1 批：主界面风格切换（经典 / Orilo），默认经典；切完重建 Activity 立即生效，
-        // 两种效果都保留，随时能切回来（Orilo 里设置齿轮还在底部，随时能进设置）。
-        root.addView(segmentedRow("主界面风格", listOf("经典", "Orilo"),
+        // Orilo 主界面第 6 批（2026-11-16 用户要求）：主界面风格切换，显示名改成“贾维斯 / 动态水滴”
+        // （内部还是经典 / Orilo 两个值）；切完重建 Activity 立即生效，两种效果都保留，
+        // 随时能切回来（动态水滴里设置齿轮还在底部，随时能进设置）。
+        root.addView(segmentedRow("主界面风格", listOf("贾维斯", "动态水滴"),
             if (JarvisPrefs.isOriloStyle(this)) 1 else 0) { i ->
             JarvisPrefs.setMainStyle(this, if (i == 1) JarvisPrefs.MAIN_STYLE_ORILO else JarvisPrefs.MAIN_STYLE_CLASSIC)
-            toast(if (i == 1) "已切到 Orilo 风格" else "已切回经典风格")
+            toast(if (i == 1) "已切到动态水滴风格" else "已切回贾维斯风格")
             recreate()
         })
+        // 下面三组（竖屏背景图 / 对话区背景图 / 竖屏舞台模式）只属于贾维斯档：
+        // 动态水滴档下没有舞台、不用选背景图，直接 return 藏起来（2026-11-16 用户要求）。
+        if (JarvisPrefs.isOriloStyle(this)) return
         portraitBgStatusText = TextView(this).apply {
             textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
         }
