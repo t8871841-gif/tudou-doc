@@ -135,6 +135,8 @@ class MainActivity : Activity() {
     // + 一行内容 + 水滴主视觉；底部麦克风行两套风格共用，不另建。
     private lateinit var oriloPanel: LinearLayout
     private lateinit var oriloLineText: TextView
+    // Orilo 第 1 批（2026-11-15 用户要求）：一行内容打字机效果——照视频，正文一句一句打出来。
+    private var oriloTypeRunnable: Runnable? = null
     private var oriloDroplet: OriloDropletView? = null
     // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
     // 插在对话背景照片层之上、设置页与内容列之下；Orilo 档才显示。
@@ -467,6 +469,7 @@ class MainActivity : Activity() {
             oriloBackgroundView.visibility = if (orilo) View.VISIBLE else View.GONE
         }
         if (orilo) homePanel.background = null
+        if (!orilo) cancelOriloTyping() // 经典档下那行藏着，打字机不用跑。
         if (orilo) {
             if (hudPanelOpen) hudPanelOpen = false
             refreshOriloLine()
@@ -478,8 +481,44 @@ class MainActivity : Activity() {
     private fun refreshOriloLine() {
         if (!::oriloLineText.isInitialized) return
         val last = ChatHistory.snapshot().lastOrNull { it.role == ChatHistory.Role.ASSISTANT }
-        oriloLineText.text = last?.text
-            ?: "你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。"
+        typeOriloLine(last?.text
+            ?: "你好，先生。我是 Jarvis，打字发消息或点麦克风说话都行。")
+    }
+
+    // ---------- Orilo 一行内容：打字机效果（2026-11-15 用户要求） ----------
+    // 照视频：正文一句一句打出来。新回复来时取消上一次、从头打。
+    // 速度按长度自适应（总长约 1.2~2.2 秒）；超过 120 字直接整句显示（打字机打不完）。
+    private fun typeOriloLine(text: String) {
+        cancelOriloTyping()
+        if (text.isEmpty()) {
+            oriloLineText.text = ""
+            return
+        }
+        if (!JarvisPrefs.isOriloStyle(this) || text.length > 120) {
+            // 经典档下这行藏着，打了也看不见，直接放整句。
+            oriloLineText.text = text
+            return
+        }
+        val interval = (1200L / text.length).coerceIn(18L, 40L)
+        var shown = 0
+        val runnable = object : Runnable {
+            override fun run() {
+                shown++
+                oriloLineText.text = text.substring(0, shown.coerceAtMost(text.length))
+                if (shown < text.length) {
+                    main.postDelayed(this, interval)
+                } else {
+                    oriloTypeRunnable = null
+                }
+            }
+        }
+        oriloTypeRunnable = runnable
+        main.post(runnable)
+    }
+
+    private fun cancelOriloTyping() {
+        oriloTypeRunnable?.let { main.removeCallbacks(it) }
+        oriloTypeRunnable = null
     }
 
     private fun onAgentStateChanged(state: String) {
@@ -2030,8 +2069,8 @@ class MainActivity : Activity() {
      * 气泡显示原来时间（否则重建会把全部气泡重标成当时时间），新消息不传 ts，取当前时间。 */
     private fun addBubble(text: String, mine: Boolean, record: Boolean = true, ts: Long = 0L) {
         val color = HudPalette.colorFor(JarvisAgent.currentState())
-        // Orilo 第 1 批：助手的新回复同步到 Orilo 的一行内容（经典档下这行藏着，更新了也看不见）。
-        if (!mine && ::oriloLineText.isInitialized) oriloLineText.text = text
+        // Orilo 第 1 批：助手的新回复同步到 Orilo 的一行内容（打字机打出来；经典档下这行藏着，更新了也看不见）。
+        if (!mine && ::oriloLineText.isInitialized) typeOriloLine(text)
         // 重建气泡时调用方传存过的时间戳（ChatHistory.Entry.ts）；新消息不传，取当前时间。
         val showTs = if (ts != 0L) ts else System.currentTimeMillis()
         val headText = (if (mine) "我" else "助手") + " · " +
@@ -4049,6 +4088,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         stopMicFx()
+        cancelOriloTyping() // 打字机停掉，别让它在 Activity 销毁后还发消息。
         stopHudPeriodicRefresh()
         if (::hudWebView.isInitialized) {
             // WebView 必须从父布局摘掉再 destroy，否则下次打开可能白屏。
