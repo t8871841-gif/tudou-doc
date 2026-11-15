@@ -48,6 +48,13 @@ import kotlin.math.sin
  * 边缘锐利度这些容易想调的数字集中到 companion 里的 `TUNE_*` 常量（见下方
  * "调参区"），改完重新编译装机就能看效果，不用动 AGSL 代码本身。噪声/光斑那几个
  * 跟 OriloBackgroundView 共用同一份常量（直接引用它的 `TUNE_*`），不在这里重复。
+ *
+ * 2026-11-15 第 4 批（用户反馈真机截图"玻璃球不对，没有原版的灵动"）：根因是
+ * 上一批只写了菲涅尔边缘反光（哪个方向都一样亮），没有"球面哪边朝光、哪边背光"
+ * 的明暗渐变——缺了这个，球看着就是一个发光的扁平色块，不是一个有受光面的球。
+ * 这批加了一个固定光源方向的漫反射项（左上方向打光），球面会有真正的明暗过渡；
+ * 同时背景那边的光斑混合方式也同步改了（见 OriloBackgroundView 第 4 批说明），
+ * fieldAt() 跟着同步更新，保证水滴里"看到"的布纹跟背景长得一样。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -187,6 +194,10 @@ class OriloDropletView @JvmOverloads constructor(
         const val TUNE_TINT_STRENGTH = 0.6f
         /** 边缘白色高光（菲涅尔反光，不是那两颗定向高光）的强度。 */
         const val TUNE_RIM_STRENGTH = 0.85f
+        /** 第 4 批新增：球面漫反射强度——固定一个左上方向的光源，球面会有明暗过渡，
+         *  这是让球看着"有受光面、是个球"而不是"一个发光扁平色块"的关键一笔。
+         *  调到 0 就是完全没有明暗过渡，退回第 3 批那种扁平效果。 */
+        const val TUNE_DIFFUSE_STRENGTH = 0.22f
 
         // AGSL：球面透镜——按法线把采样位置往外推，推完的页面坐标拿去算
         // OriloBackgroundView 那套三色渐变 + 两团光斑（公式细节见该文件companion，
@@ -220,6 +231,9 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float  uFresnelAlpha;
             uniform float  uTintStrength;
             uniform float  uRimStrength;
+            uniform float  uDiffuseStrength;
+            uniform float3 blobAColor;
+            uniform float3 blobBColor;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -261,12 +275,12 @@ class OriloDropletView @JvmOverloads constructor(
                     wgt
                 );
                 float2 pxA = wuv * iPageSize - blobA;
-                float fa = clamp(1.0 - length(pxA) / (iPageSize.x * uBlobARadiusFrac), 0.0, 1.0);
+                float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(pxA) / (iPageSize.x * uBlobARadiusFrac), 0.0, 1.0));
+                float3 colorOut = mix(base, blobAColor, fa * uBlobAStrength);
                 float2 pxB = wuv * iPageSize - blobB;
-                float fb = clamp(1.0 - length(pxB) / (iPageSize.x * uBlobBRadiusFrac), 0.0, 1.0);
-                return base
-                    + float3(0.30, 0.33, 1.0) * fa * uBlobAStrength
-                    + float3(0.32, 0.20, 1.0) * fb * uBlobBStrength;
+                float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(pxB) / (iPageSize.x * uBlobBRadiusFrac), 0.0, 1.0));
+                colorOut = mix(colorOut, blobBColor, fb * uBlobBStrength);
+                return colorOut;
             }
 
             half4 main(float2 fragCoord) {
@@ -285,9 +299,17 @@ class OriloDropletView @JvmOverloads constructor(
                 float3 cB = fieldAt(refractPx - float2(uChromaticOffset, uChromaticOffset * 0.5));
                 float3 refracted = float3(cR.r, cG.g, cB.b);
 
+                // 漫反射：固定一个左上、略朝向镜头的光源方向，球面法线跟它点乘，
+                // 越朝向光源的地方越亮——这才是"球"该有的明暗过渡，不是只有边缘亮。
+                float3 lightDir = normalize(float3(-0.45, -0.65, 0.6));
+                float3 normal = float3(n2, nz);
+                float diffuse = clamp(dot(normal, lightDir), 0.0, 1.0);
+
                 float edge = smoothstep(lensRadius * uEdgeSoftStart, lensRadius, dist);
                 float alpha = clamp(mix(uAlphaMin, uAlphaMax, edge) + fresnel * uFresnelAlpha, 0.0, 1.0);
-                float3 colorOut = refracted * uTintStrength + float3(1.0, 1.0, 1.0) * fresnel * uRimStrength;
+                float3 colorOut = refracted * uTintStrength
+                    + float3(1.0, 1.0, 1.0) * fresnel * uRimStrength
+                    + float3(1.0, 1.0, 1.0) * diffuse * uDiffuseStrength;
                 return half4(float4(colorOut * alpha, alpha));
             }
         """
@@ -335,6 +357,16 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("gradBot", Color.red(bot) / 255f, Color.green(bot) / 255f, Color.blue(bot) / 255f)
         s.setFloatUniform("blobA", phase.ax * pageW, phase.ay * pageH)
         s.setFloatUniform("blobB", phase.bx * pageW, phase.by * pageH)
+        val blobAColor = OriloBackgroundView.hueColor(
+            OriloBackgroundView.TUNE_BLOB_A_HUE, OriloBackgroundView.TUNE_BLOB_A_SAT,
+            OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift,
+        )
+        val blobBColor = OriloBackgroundView.hueColor(
+            OriloBackgroundView.TUNE_BLOB_B_HUE, OriloBackgroundView.TUNE_BLOB_B_SAT,
+            OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift,
+        )
+        s.setFloatUniform("blobAColor", Color.red(blobAColor) / 255f, Color.green(blobAColor) / 255f, Color.blue(blobAColor) / 255f)
+        s.setFloatUniform("blobBColor", Color.red(blobBColor) / 255f, Color.green(blobBColor) / 255f, Color.blue(blobBColor) / 255f)
         s.setFloatUniform("lensCenter", cx, cy)
         s.setFloatUniform("lensRadius", r)
         s.setFloatUniform("uWarpStrength", OriloBackgroundView.TUNE_WARP_STRENGTH)
@@ -354,6 +386,7 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("uFresnelAlpha", TUNE_FRESNEL_ALPHA)
         s.setFloatUniform("uTintStrength", TUNE_TINT_STRENGTH)
         s.setFloatUniform("uRimStrength", TUNE_RIM_STRENGTH)
+        s.setFloatUniform("uDiffuseStrength", TUNE_DIFFUSE_STRENGTH)
         canvas.drawCircle(cx, cy, r, paint)
     }
 

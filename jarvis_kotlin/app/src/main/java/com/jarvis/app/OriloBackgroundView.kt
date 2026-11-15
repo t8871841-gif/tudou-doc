@@ -42,6 +42,13 @@ import kotlin.math.sin
  * 容易想调的数字集中到 companion 里的 `TUNE_*` 常量（见下方"调参区"），改完重新
  * 编译装机就能看效果，不用动 AGSL 代码本身。这几个常量 OriloDropletView 也在用
  * （直接引用 `OriloBackgroundView.TUNE_*`），改这里两个 View 的"布"会一起变。
+ *
+ * 2026-11-15 第 4 批（用户反馈真机截图"背景和玻璃球都不对，没有原版的灵动"）：
+ * 背景这边的根因——上一批光斑是"原色 + 光斑颜色 × 强度"直接相加，光斑颜色本身
+ * 又跟底色一样偏浅蓝浅紫，加上去数值很快顶到死白，肉眼基本看不出色斑在哪，所以
+ * 真机上看着就是一片均匀的蓝或紫。这批改成真正的颜色混合（mix，不是相加），
+ * 且把两个光斑换成明显偏离底色的饱和色（左上偏品红紫、右下偏靛蓝），这样光斑会
+ * 读成清楚的色块（照目标截图左上那片粉紫、右下那片蓝的反差），不会被底色吃掉。
  */
 class OriloBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -149,6 +156,10 @@ class OriloBackgroundView @JvmOverloads constructor(
         s.setFloatUniform("gradBot", Color.red(bot) / 255f, Color.green(bot) / 255f, Color.blue(bot) / 255f)
         s.setFloatUniform("blobA", ax * w, ay * h)
         s.setFloatUniform("blobB", bx * w, by * h)
+        val blobAColor = hueColor(TUNE_BLOB_A_HUE, TUNE_BLOB_A_SAT, TUNE_BLOB_A_VAL)
+        val blobBColor = hueColor(TUNE_BLOB_B_HUE, TUNE_BLOB_B_SAT, TUNE_BLOB_B_VAL)
+        s.setFloatUniform("blobAColor", Color.red(blobAColor) / 255f, Color.green(blobAColor) / 255f, Color.blue(blobAColor) / 255f)
+        s.setFloatUniform("blobBColor", Color.red(blobBColor) / 255f, Color.green(blobBColor) / 255f, Color.blue(blobBColor) / 255f)
         s.setFloatUniform("uWarpStrength", TUNE_WARP_STRENGTH)
         s.setFloatUniform("uFbmScale", TUNE_FBM_SCALE)
         s.setFloatUniform("uFlowSpeedX", TUNE_FLOW_SPEED_X)
@@ -172,16 +183,18 @@ class OriloBackgroundView @JvmOverloads constructor(
             Shader.TileMode.CLAMP,
         )
         canvas.drawRect(0f, 0f, w, h, basePaint)
+        // 第 4 批：兜底路径的光斑颜色也换成跟着色器路径一致的饱和品红/靛蓝（原来的浅蓝浅紫
+        // 太接近底色，容易被吃掉），alpha 调高到接近着色器那边 mix 的视觉效果。
         blobPaintA.shader = RadialGradient(
             ax * w, ay * h, w * 0.55f,
-            intArrayOf(0x59B9C2FF.toInt(), 0x00B9C2FF),
+            intArrayOf(0x8FFF64C8.toInt(), 0x00FF64C8),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawRect(0f, 0f, w, h, blobPaintA)
         blobPaintB.shader = RadialGradient(
             bx * w, by * h, w * 0.6f,
-            intArrayOf(0x4DB388FF.toInt(), 0x00B388FF),
+            intArrayOf(0x857646E0.toInt(), 0x007646E0),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -205,14 +218,23 @@ class OriloBackgroundView @JvmOverloads constructor(
         const val TUNE_FLOW_SPEED_X = 0.02f
         /** 噪声纵向流动速度（越大流得越快）。 */
         const val TUNE_FLOW_SPEED_Y = 0.017f
-        /** 光斑 A（薰衣草，左上附近）强度：0..1，越大这团光斑越亮越显眼。 */
-        const val TUNE_BLOB_A_STRENGTH = 0.35f
+        /** 光斑 A（左上附近）混合强度：0..1，是跟底色"混合"的比例（不是相加），
+         *  1.0 就是光斑中心完全显示光斑色，0 就是看不见这团光斑。 */
+        const val TUNE_BLOB_A_STRENGTH = 0.55f
         /** 光斑 A 的影响半径，相对页面宽度的比例：越大这团光斑铺得越开。 */
         const val TUNE_BLOB_A_RADIUS_FRAC = 0.55f
-        /** 光斑 B（紫色，右下附近）强度：0..1。 */
-        const val TUNE_BLOB_B_STRENGTH = 0.30f
+        /** 光斑 A 的颜色（HSV）：第 4 批换成明显偏离底色的饱和品红紫，不然会被底色吃掉。 */
+        const val TUNE_BLOB_A_HUE = 312f
+        const val TUNE_BLOB_A_SAT = 0.55f
+        const val TUNE_BLOB_A_VAL = 0.98f
+        /** 光斑 B（右下附近）混合强度：0..1，同上是混合比例。 */
+        const val TUNE_BLOB_B_STRENGTH = 0.45f
         /** 光斑 B 的影响半径，相对页面宽度的比例。 */
         const val TUNE_BLOB_B_RADIUS_FRAC = 0.6f
+        /** 光斑 B 的颜色（HSV）：偏饱和靛蓝紫，跟光斑 A 的品红形成对比。 */
+        const val TUNE_BLOB_B_HUE = 255f
+        const val TUNE_BLOB_B_SAT = 0.62f
+        const val TUNE_BLOB_B_VAL = 0.85f
 
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
@@ -242,6 +264,8 @@ class OriloBackgroundView @JvmOverloads constructor(
             uniform float3 gradBot;
             uniform float2 blobA;
             uniform float2 blobB;
+            uniform float3 blobAColor;
+            uniform float3 blobBColor;
             uniform float  uWarpStrength;
             uniform float  uFbmScale;
             uniform float  uFlowSpeedX;
@@ -293,13 +317,11 @@ class OriloBackgroundView @JvmOverloads constructor(
                 );
 
                 float2 pxA = wuv * iResolution - blobA;
-                float fa = clamp(1.0 - length(pxA) / (iResolution.x * uBlobARadiusFrac), 0.0, 1.0);
+                float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(pxA) / (iResolution.x * uBlobARadiusFrac), 0.0, 1.0));
+                float3 colorOut = mix(base, blobAColor, fa * uBlobAStrength);
                 float2 pxB = wuv * iResolution - blobB;
-                float fb = clamp(1.0 - length(pxB) / (iResolution.x * uBlobBRadiusFrac), 0.0, 1.0);
-
-                float3 colorOut = base
-                    + float3(0.30, 0.33, 1.0) * fa * uBlobAStrength
-                    + float3(0.32, 0.20, 1.0) * fb * uBlobBStrength;
+                float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(pxB) / (iResolution.x * uBlobBRadiusFrac), 0.0, 1.0));
+                colorOut = mix(colorOut, blobBColor, fb * uBlobBStrength);
                 return half4(float4(colorOut, 1.0));
             }
         """
