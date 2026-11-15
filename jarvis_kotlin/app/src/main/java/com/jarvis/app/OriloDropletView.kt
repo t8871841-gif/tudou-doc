@@ -164,7 +164,7 @@ class OriloDropletView @JvmOverloads constructor(
         canvas.scale(1f, 0.45f)
         highlightPaint.shader = RadialGradient(
             0f, 0f, r * 0.3f,
-            intArrayOf(0xE6FFFFFF, 0x00FFFFFF),
+            intArrayOf(0xE6FFFFFF.toInt(), 0x00FFFFFF),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -177,7 +177,7 @@ class OriloDropletView @JvmOverloads constructor(
         canvas.scale(1f, 0.6f)
         smallHighlightPaint.shader = RadialGradient(
             0f, 0f, r * 0.14f,
-            intArrayOf(0xB3FFFFFF, 0x00FFFFFF),
+            intArrayOf(0xB3FFFFFF.toInt(), 0x00FFFFFF),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
