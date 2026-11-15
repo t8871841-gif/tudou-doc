@@ -43,6 +43,11 @@ import kotlin.math.sin
  * idle 缩到 0.8 倍、干活胀回满，700ms 平滑过渡；平时再叠一层慢呼吸（6 秒一圈）+
  * 轻微晃形；原地动，只缩放不平移，中心不动（2026-11-15 用户纠正过的行为，保留）。
  * 公开方法名（setAwake）、MainActivity 调用方式不变。
+ *
+ * 2026-11-15 第 3 批（用户要求"不用每次都发回来等改"）：折射强度/透明度/色散/
+ * 边缘锐利度这些容易想调的数字集中到 companion 里的 `TUNE_*` 常量（见下方
+ * "调参区"），改完重新编译装机就能看效果，不用动 AGSL 代码本身。噪声/光斑那几个
+ * 跟 OriloBackgroundView 共用同一份常量（直接引用它的 `TUNE_*`），不在这里重复。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -158,20 +163,30 @@ class OriloDropletView @JvmOverloads constructor(
         private const val IDLE_SCALE = 0.8f
         private const val AWAKE_SCALE = 1.0f
 
-        // ---------- 可调参数（真机调效果只改这里，数值不变、只是集中命名） ----------
-        // 折射强度：越大水滴里的背景扭得越厉害（46.0 是第一版拍的数；显花就调小）。
-        private const val LENS_BEND = 46.0f
-        // 色散偏移：RGB 三通道采样点的错开距离。
-        private const val DISPERSE_X = 2.2f
-        private const val DISPERSE_Y = 1.1f
-        // 菲涅尔：边缘增亮的陡峭程度（指数）与强度（透明度 / 白光）。
-        private const val FRESNEL_POWER = 2.5f
-        private const val FRESNEL_ALPHA = 0.55f
-        private const val FRESNEL_WHITE = 0.85f
-        // 折射像的亮度（0.6 = 压暗四成）与水滴透明度（中心 0.20 → 边缘 0.62）。
-        private const val REFRACT_DIM = 0.6f
-        private const val ALPHA_CENTER = 0.20f
-        private const val ALPHA_EDGE = 0.62f
+        // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL ======
+        // 噪声/光斑那几个（TUNE_WARP_STRENGTH 等）直接用 OriloBackgroundView 里的同名
+        // 常量，没有在这里重复一份——改那边的数，水滴里"看到"的布纹也会跟着变，两边
+        // 永远长得一样。下面这几个是水滴自己独有的（折射强度、透明度、色散……）。
+        /** 折射强度：水滴里背景被推开/放大的力度，越大越像鱼眼/放大镜，调到 0 就是不折射。
+         *  截图里的水滴偏"清澈到几乎看不见"，如果觉得现在的版本折射感太抢戏，先调小这个。 */
+        const val TUNE_REFRACT_BEND = 46f
+        /** 边缘增亮的锐利度：数字越大，只有最贴边的一圈才会亮；越小，大半个球面都偏亮。 */
+        const val TUNE_FRESNEL_POWER = 2.5f
+        /** 色散幅度（像素）：边缘红蓝分离的程度，越大越明显的"彩虹边"，调到 0 就是没有色散。 */
+        const val TUNE_CHROMATIC_OFFSET = 2.2f
+        /** 边缘增厚的起始位置，0..1（相对半径）：越小，变厚/变实的范围越宽，水滴显得越"肉"。 */
+        const val TUNE_EDGE_SOFT_START = 0.80f
+        /** 水滴中心的不透明度：越小中心越透，越接近"看不见水滴只看见一圈边"。 */
+        const val TUNE_ALPHA_MIN = 0.20f
+        /** 水滴边缘的不透明度：越大边缘越实。 */
+        const val TUNE_ALPHA_MAX = 0.62f
+        /** 边缘因菲涅尔额外叠加的不透明度：越大边缘看着越"厚实有质感"。 */
+        const val TUNE_FRESNEL_ALPHA = 0.55f
+        /** 背景颜色透进水滴的浓度：越大水滴里背景色越明显，越小越像一颗纯白/无色的玻璃珠。
+         *  如果觉得水滴看着"太有颜色、不够清水"，先调小这个（比如 0.3）。 */
+        const val TUNE_TINT_STRENGTH = 0.6f
+        /** 边缘白色高光（菲涅尔反光，不是那两颗定向高光）的强度。 */
+        const val TUNE_RIM_STRENGTH = 0.85f
 
         // AGSL：球面透镜——按法线把采样位置往外推，推完的页面坐标拿去算
         // OriloBackgroundView 那套三色渐变 + 两团光斑（公式细节见该文件companion，
@@ -188,6 +203,23 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float2 blobB;
             uniform float2 lensCenter;
             uniform float  lensRadius;
+            uniform float  uWarpStrength;
+            uniform float  uFbmScale;
+            uniform float  uFlowSpeedX;
+            uniform float  uFlowSpeedY;
+            uniform float  uBlobAStrength;
+            uniform float  uBlobARadiusFrac;
+            uniform float  uBlobBStrength;
+            uniform float  uBlobBRadiusFrac;
+            uniform float  uBend;
+            uniform float  uFresnelPower;
+            uniform float  uChromaticOffset;
+            uniform float  uEdgeSoftStart;
+            uniform float  uAlphaMin;
+            uniform float  uAlphaMax;
+            uniform float  uFresnelAlpha;
+            uniform float  uTintStrength;
+            uniform float  uRimStrength;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -216,10 +248,10 @@ class OriloDropletView @JvmOverloads constructor(
             float3 fieldAt(float2 pagePx) {
                 float2 uv = pagePx / iPageSize;
                 float2 warp = float2(
-                    fbm(uv * 2.2 + float2(iTime * 0.02, 0.0)),
-                    fbm(uv * 2.2 + float2(0.0, iTime * 0.017) + 9.3)
+                    fbm(uv * uFbmScale + float2(iTime * uFlowSpeedX, 0.0)),
+                    fbm(uv * uFbmScale + float2(0.0, iTime * uFlowSpeedY) + 9.3)
                 );
-                float2 wuv = uv + (warp - 0.5) * 0.16;
+                float2 wuv = uv + (warp - 0.5) * uWarpStrength;
                 float2 dir = float2(0.25, 1.0);
                 float t = clamp(dot(wuv, dir) / dot(dir, dir), 0.0, 1.0);
                 float wgt = step(0.55, t);
@@ -229,12 +261,12 @@ class OriloDropletView @JvmOverloads constructor(
                     wgt
                 );
                 float2 pxA = wuv * iPageSize - blobA;
-                float fa = clamp(1.0 - length(pxA) / (iPageSize.x * 0.55), 0.0, 1.0);
+                float fa = clamp(1.0 - length(pxA) / (iPageSize.x * uBlobARadiusFrac), 0.0, 1.0);
                 float2 pxB = wuv * iPageSize - blobB;
-                float fb = clamp(1.0 - length(pxB) / (iPageSize.x * 0.6), 0.0, 1.0);
+                float fb = clamp(1.0 - length(pxB) / (iPageSize.x * uBlobBRadiusFrac), 0.0, 1.0);
                 return base
-                    + float3(0.30, 0.33, 1.0) * fa * 0.35
-                    + float3(0.32, 0.20, 1.0) * fb * 0.30;
+                    + float3(0.30, 0.33, 1.0) * fa * uBlobAStrength
+                    + float3(0.32, 0.20, 1.0) * fb * uBlobBStrength;
             }
 
             half4 main(float2 fragCoord) {
@@ -245,18 +277,17 @@ class OriloDropletView @JvmOverloads constructor(
                 }
                 float2 n2 = local / lensRadius;
                 float nz = sqrt(max(0.0, 1.0 - dot(n2, n2)));
-                float fresnel = pow(1.0 - nz, ${FRESNEL_POWER});
-                float bend = ${LENS_BEND};
-                float2 refractPx = iOrigin + fragCoord + n2 * bend * (1.0 - nz);
+                float fresnel = pow(1.0 - nz, uFresnelPower);
+                float2 refractPx = iOrigin + fragCoord + n2 * uBend * (1.0 - nz);
 
-                float3 cR = fieldAt(refractPx + float2(${DISPERSE_X}, -${DISPERSE_Y}));
+                float3 cR = fieldAt(refractPx + float2(uChromaticOffset, -uChromaticOffset * 0.5));
                 float3 cG = fieldAt(refractPx);
-                float3 cB = fieldAt(refractPx - float2(${DISPERSE_X}, ${DISPERSE_Y}));
+                float3 cB = fieldAt(refractPx - float2(uChromaticOffset, uChromaticOffset * 0.5));
                 float3 refracted = float3(cR.r, cG.g, cB.b);
 
-                float edge = smoothstep(lensRadius * 0.80, lensRadius, dist);
-                float alpha = clamp(mix(${ALPHA_CENTER}, ${ALPHA_EDGE}, edge) + fresnel * ${FRESNEL_ALPHA}, 0.0, 1.0);
-                float3 colorOut = refracted * ${REFRACT_DIM} + float3(1.0, 1.0, 1.0) * fresnel * ${FRESNEL_WHITE};
+                float edge = smoothstep(lensRadius * uEdgeSoftStart, lensRadius, dist);
+                float alpha = clamp(mix(uAlphaMin, uAlphaMax, edge) + fresnel * uFresnelAlpha, 0.0, 1.0);
+                float3 colorOut = refracted * uTintStrength + float3(1.0, 1.0, 1.0) * fresnel * uRimStrength;
                 return half4(float4(colorOut * alpha, alpha));
             }
         """
@@ -306,6 +337,23 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("blobB", phase.bx * pageW, phase.by * pageH)
         s.setFloatUniform("lensCenter", cx, cy)
         s.setFloatUniform("lensRadius", r)
+        s.setFloatUniform("uWarpStrength", OriloBackgroundView.TUNE_WARP_STRENGTH)
+        s.setFloatUniform("uFbmScale", OriloBackgroundView.TUNE_FBM_SCALE)
+        s.setFloatUniform("uFlowSpeedX", OriloBackgroundView.TUNE_FLOW_SPEED_X)
+        s.setFloatUniform("uFlowSpeedY", OriloBackgroundView.TUNE_FLOW_SPEED_Y)
+        s.setFloatUniform("uBlobAStrength", OriloBackgroundView.TUNE_BLOB_A_STRENGTH)
+        s.setFloatUniform("uBlobARadiusFrac", OriloBackgroundView.TUNE_BLOB_A_RADIUS_FRAC)
+        s.setFloatUniform("uBlobBStrength", OriloBackgroundView.TUNE_BLOB_B_STRENGTH)
+        s.setFloatUniform("uBlobBRadiusFrac", OriloBackgroundView.TUNE_BLOB_B_RADIUS_FRAC)
+        s.setFloatUniform("uBend", TUNE_REFRACT_BEND)
+        s.setFloatUniform("uFresnelPower", TUNE_FRESNEL_POWER)
+        s.setFloatUniform("uChromaticOffset", TUNE_CHROMATIC_OFFSET)
+        s.setFloatUniform("uEdgeSoftStart", TUNE_EDGE_SOFT_START)
+        s.setFloatUniform("uAlphaMin", TUNE_ALPHA_MIN)
+        s.setFloatUniform("uAlphaMax", TUNE_ALPHA_MAX)
+        s.setFloatUniform("uFresnelAlpha", TUNE_FRESNEL_ALPHA)
+        s.setFloatUniform("uTintStrength", TUNE_TINT_STRENGTH)
+        s.setFloatUniform("uRimStrength", TUNE_RIM_STRENGTH)
         canvas.drawCircle(cx, cy, r, paint)
     }
 

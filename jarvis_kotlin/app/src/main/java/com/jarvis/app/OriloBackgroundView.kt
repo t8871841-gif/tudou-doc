@@ -37,6 +37,11 @@ import kotlin.math.sin
  *
  * 动画只在可见时跑（省电）；公开方法名、MainActivity 调用方式不变（这个 View 本来
  * 就没有被外部调用的公开方法，纯粹是挂在根布局上的背景层）。
+ *
+ * 2026-11-15 第 3 批（用户要求"不用每次都发回来等改"）：把折射/噪声/光斑强度这些
+ * 容易想调的数字集中到 companion 里的 `TUNE_*` 常量（见下方"调参区"），改完重新
+ * 编译装机就能看效果，不用动 AGSL 代码本身。这几个常量 OriloDropletView 也在用
+ * （直接引用 `OriloBackgroundView.TUNE_*`），改这里两个 View 的"布"会一起变。
  */
 class OriloBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -144,6 +149,14 @@ class OriloBackgroundView @JvmOverloads constructor(
         s.setFloatUniform("gradBot", Color.red(bot) / 255f, Color.green(bot) / 255f, Color.blue(bot) / 255f)
         s.setFloatUniform("blobA", ax * w, ay * h)
         s.setFloatUniform("blobB", bx * w, by * h)
+        s.setFloatUniform("uWarpStrength", TUNE_WARP_STRENGTH)
+        s.setFloatUniform("uFbmScale", TUNE_FBM_SCALE)
+        s.setFloatUniform("uFlowSpeedX", TUNE_FLOW_SPEED_X)
+        s.setFloatUniform("uFlowSpeedY", TUNE_FLOW_SPEED_Y)
+        s.setFloatUniform("uBlobAStrength", TUNE_BLOB_A_STRENGTH)
+        s.setFloatUniform("uBlobARadiusFrac", TUNE_BLOB_A_RADIUS_FRAC)
+        s.setFloatUniform("uBlobBStrength", TUNE_BLOB_B_STRENGTH)
+        s.setFloatUniform("uBlobBRadiusFrac", TUNE_BLOB_B_RADIUS_FRAC)
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 
@@ -181,6 +194,26 @@ class OriloBackgroundView @JvmOverloads constructor(
     companion object {
         const val FLOW_PERIOD_MS = 30000L
 
+        // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL、不用改下面的着色器代码 ======
+        // 改完重新编译装机就能看到效果；这几个数两个 View（背景 + 水滴）共用同一份，
+        // OriloDropletView 里引用的是 OriloBackgroundView.TUNE_*，改这里两边一起变。
+        /** 噪声扭曲幅度：越大背景"布"扭得越夸张，调到 0 就是纯渐变、完全不扭。 */
+        const val TUNE_WARP_STRENGTH = 0.16f
+        /** 噪声密度：越大纹理越碎越密，越小纹理越大团、更像缓慢的云雾。 */
+        const val TUNE_FBM_SCALE = 2.2f
+        /** 噪声横向流动速度（越大流得越快）。 */
+        const val TUNE_FLOW_SPEED_X = 0.02f
+        /** 噪声纵向流动速度（越大流得越快）。 */
+        const val TUNE_FLOW_SPEED_Y = 0.017f
+        /** 光斑 A（薰衣草，左上附近）强度：0..1，越大这团光斑越亮越显眼。 */
+        const val TUNE_BLOB_A_STRENGTH = 0.35f
+        /** 光斑 A 的影响半径，相对页面宽度的比例：越大这团光斑铺得越开。 */
+        const val TUNE_BLOB_A_RADIUS_FRAC = 0.55f
+        /** 光斑 B（紫色，右下附近）强度：0..1。 */
+        const val TUNE_BLOB_B_STRENGTH = 0.30f
+        /** 光斑 B 的影响半径，相对页面宽度的比例。 */
+        const val TUNE_BLOB_B_RADIUS_FRAC = 0.6f
+
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
@@ -198,18 +231,6 @@ class OriloBackgroundView @JvmOverloads constructor(
         fun hueColor(baseHue: Float, s: Float, v: Float, hueShift: Float): Int =
             Color.HSVToColor(floatArrayOf((baseHue + hueShift) % 360f, s, v))
 
-        // ---------- 可调参数（真机调效果只改这里，数值不变、只是集中命名） ----------
-        // 扭曲强度：越大背景扭得越厉害（觉得太闹就调小）。
-        private const val WARP_STRENGTH = 0.16f
-        // 噪声疏密：越大纹理越细碎。
-        private const val WARP_SCALE = 2.2f
-        // 流动速度：两层噪声各自的时间速度。
-        private const val TIME_SPEED_X = 0.02f
-        private const val TIME_SPEED_Y = 0.017f
-        // 两团光斑的增亮强度。
-        private const val BLOB_A_STRENGTH = 0.35f
-        private const val BLOB_B_STRENGTH = 0.30f
-
         // AGSL：两层 fbm 噪声先扭一下采样坐标（玻璃后面的内容在"晃"），
         // 扭完的坐标再算三色渐变 + 两团光斑——光斑不再是刚性圆形平移，
         // 而是整块"布"本身在流动变形，边缘也跟着抖，这才是液态玻璃该有的扭曲感。
@@ -221,6 +242,14 @@ class OriloBackgroundView @JvmOverloads constructor(
             uniform float3 gradBot;
             uniform float2 blobA;
             uniform float2 blobB;
+            uniform float  uWarpStrength;
+            uniform float  uFbmScale;
+            uniform float  uFlowSpeedX;
+            uniform float  uFlowSpeedY;
+            uniform float  uBlobAStrength;
+            uniform float  uBlobARadiusFrac;
+            uniform float  uBlobBStrength;
+            uniform float  uBlobBRadiusFrac;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -249,10 +278,10 @@ class OriloBackgroundView @JvmOverloads constructor(
             half4 main(float2 fragCoord) {
                 float2 uv = fragCoord / iResolution;
                 float2 warp = float2(
-                    fbm(uv * ${WARP_SCALE} + float2(iTime * ${TIME_SPEED_X}, 0.0)),
-                    fbm(uv * ${WARP_SCALE} + float2(0.0, iTime * ${TIME_SPEED_Y}) + 9.3)
+                    fbm(uv * uFbmScale + float2(iTime * uFlowSpeedX, 0.0)),
+                    fbm(uv * uFbmScale + float2(0.0, iTime * uFlowSpeedY) + 9.3)
                 );
-                float2 wuv = uv + (warp - 0.5) * ${WARP_STRENGTH};
+                float2 wuv = uv + (warp - 0.5) * uWarpStrength;
 
                 float2 dir = float2(0.25, 1.0);
                 float t = clamp(dot(wuv, dir) / dot(dir, dir), 0.0, 1.0);
@@ -264,13 +293,13 @@ class OriloBackgroundView @JvmOverloads constructor(
                 );
 
                 float2 pxA = wuv * iResolution - blobA;
-                float fa = clamp(1.0 - length(pxA) / (iResolution.x * 0.55), 0.0, 1.0);
+                float fa = clamp(1.0 - length(pxA) / (iResolution.x * uBlobARadiusFrac), 0.0, 1.0);
                 float2 pxB = wuv * iResolution - blobB;
-                float fb = clamp(1.0 - length(pxB) / (iResolution.x * 0.6), 0.0, 1.0);
+                float fb = clamp(1.0 - length(pxB) / (iResolution.x * uBlobBRadiusFrac), 0.0, 1.0);
 
                 float3 colorOut = base
-                    + float3(0.30, 0.33, 1.0) * fa * ${BLOB_A_STRENGTH}
-                    + float3(0.32, 0.20, 1.0) * fb * ${BLOB_B_STRENGTH};
+                    + float3(0.30, 0.33, 1.0) * fa * uBlobAStrength
+                    + float3(0.32, 0.20, 1.0) * fb * uBlobBStrength;
                 return half4(float4(colorOut, 1.0));
             }
         """
