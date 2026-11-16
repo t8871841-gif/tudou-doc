@@ -324,8 +324,9 @@ class OriloDropletView @JvmOverloads constructor(
         /** 边缘增厚的起始位置，0..1（相对半径）：越小，变厚/变实的范围越宽，水滴显得越"肉"。 */
         const val TUNE_EDGE_SOFT_START = 0.80f
         /** 水滴中心的不透明度：第 9 批按量测报告（中心跟背景亮度只差 0~15/255）大幅调低，
-         *  越小中心越透，越接近"看不见水滴只看见一圈边"。 */
-        const val TUNE_ALPHA_MIN = 0.08f
+         *  越小中心越透，越接近"看不见水滴只看见一圈边"。第 10 批再调低一档（0.08→0.05），
+         *  真机反馈内部还是偏奶白、背景光斑透不出来。 */
+        const val TUNE_ALPHA_MIN = 0.05f
         /** 水滴边缘的不透明度：第 9 批也调低了一点（配合"中心更透"的整体方向），
          *  越大边缘越实。 */
         const val TUNE_ALPHA_MAX = 0.50f
@@ -348,18 +349,19 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 9 批新增：顶部亮边彻底消失的夹角，cos(87°)≈0.05——比这个夹角更大
          *  （更偏向水滴两侧/下方）就完全没有顶部亮边了。 */
         const val TUNE_RIM_ARC_OUTER_COS = 0.05f
-        /** 第 4 批新增、第 7 批调弱：球面漫反射强度。采样目标截图发现球体中央其实相当平，
+        /** 第 4 批新增、第 7 批调弱、第 10 批再调弱：球面漫反射强度。采样目标截图发现球体中央其实相当平，
          *  不是明显的明暗渐变，所以这个只给一丝若有若无的立体感，不是主要观感来源，
          *  默认值比第 4 批小了一大截。调到 0 就是完全没有这一丝渐变。 */
-        const val TUNE_DIFFUSE_STRENGTH = 0.08f
+        const val TUNE_DIFFUSE_STRENGTH = 0.04f
         /** 第 7 批新增：贴着最外缘的窄暗带强度——采样目标截图发现边缘有一圈比球体内部和
          *  背景都暗的细边（玻璃全反射那种"黑边"感），这是让边缘看着"是玻璃"而不是
          *  "一张半透明贴纸"的关键细节。只在背光侧明显，朝光侧会被亮边盖掉。 */
         const val TUNE_DARK_BAND_STRENGTH = 0.4f
         /** 第 5 批新增：水滴跟着背景"光晕"一起发亮的强度——数值越大，光晕最强的那几秒
          *  水滴被照得越白越亮；调到 0 就是水滴亮度只跟折射出来的颜色有关，不跟光晕强度挂钩，
-         *  退回第 4 批那种"颜色变但亮度不变"的效果。 */
-        const val TUNE_AMBIENT_BOOST = 0.35f
+         *  退回第 4 批那种"颜色变但亮度不变"的效果。第 10 批从 0.35 砍到 0.15：它是内部
+         *  加白的大头，真机反馈内部偏奶白、背景光斑透不出来。 */
+        const val TUNE_AMBIENT_BOOST = 0.15f
         // 第 9 批：原来第 6/8 批"整体挤压成椭圆"的 TUNE_WOBBLE_AMPLITUDE 被下面这组
         // 按角度颤动的参数取代——量测报告说原版是边缘局部此起彼伏，不是整体变椭圆。
         // K 是角度上的"花瓣数"（必须是整数，不然 θ=0 和 θ=2π 接不上，边缘会裂开）；
@@ -368,24 +370,26 @@ class OriloDropletView @JvmOverloads constructor(
         // 三组叠加后的总波形理论上不会精确重复（量测报告：没有固定周期）。
         /** 第 9 批新增：颤动花瓣数 1（鼓缩 2 瓣，整体偏椭圆感的那一层）。 */
         const val TUNE_WOBBLE_K_1 = 2.0
-        /** 第 9 批新增：花瓣 1 的幅度——0.035 就是这一层单独最多让半径多鼓/缩 3.5%。 */
-        const val TUNE_WOBBLE_AMP_1 = 0.035
+        /** 第 9 批新增：花瓣 1 的幅度——0.012 就是这一层单独最多让半径多鼓/缩 1.2%。
+         *  第 10 批（2026-11-16 真机反馈“奇形怪状”）从 0.035 砍下来：原版每一帧都是
+         *  干净正圆，颤动只在动的时候才感觉得到，7.8% 总量太大、每帧都看着像疙瘩。 */
+        const val TUNE_WOBBLE_AMP_1 = 0.012
         /** 第 9 批新增：花瓣 1 转动的快慢（弧度/秒）。 */
         const val TUNE_WOBBLE_SPEED_1 = 0.23
         /** 第 9 批新增：颤动花瓣数 2（鼓缩 3 瓣，更碎一点的起伏）。 */
         const val TUNE_WOBBLE_K_2 = 3.0
-        const val TUNE_WOBBLE_AMP_2 = 0.025
+        const val TUNE_WOBBLE_AMP_2 = 0.008
         const val TUNE_WOBBLE_SPEED_2 = 0.15
         /** 第 9 批新增：颤动花瓣数 3（鼓缩 5 瓣，最碎的那一层，贡献"局部此起彼伏"的细节）。 */
         const val TUNE_WOBBLE_K_3 = 5.0
-        const val TUNE_WOBBLE_AMP_3 = 0.018
+        const val TUNE_WOBBLE_AMP_3 = 0.006
         const val TUNE_WOBBLE_SPEED_3 = 0.31
         /** 第 9 批新增：构成颤动轮廓 Path 用多少个点——点数越多边缘越顺滑，但每帧要多算
          *  几个三角函数；48 在普通手机上绰绰有余，没有卡顿的必要不建议调太高。 */
         const val WOBBLE_POINTS = 48
 
         /** 第 9 批新增：着色器自己那套"圆形裁切"的半径放宽倍数——颤动会让水滴边缘鼓出去
-         *  最多 `TUNE_WOBBLE_AMP_1+2+3` 这么多（当前约 7.8%），如果着色器自己还按原来的
+         *  最多 `TUNE_WOBBLE_AMP_1+2+3` 这么多（第 10 批起约 2.6%），如果着色器自己还按原来的
          *  半径硬裁切，鼓出去的部分会被着色器判成"圆外"直接透明，等于白鼓了。这个值要
          *  略大于 1+幅度总和，留点安全余量；改了上面几个 AMP 的话记得这个也要跟着调大。 */
         const val TUNE_SHAPE_MARGIN = 1.18f
@@ -569,15 +573,17 @@ class OriloDropletView @JvmOverloads constructor(
         val cy = height * 0.45f
         if (r <= 0f) return
 
-        // 影子：右下方一团软影（两条路径共用，照 Orilo 截图）。
+        // 影子：右下方一团软影（两条路径共用）。第 10 批按原版实测重调：影子中心最暗、
+        // 偏右下，向外平滑变淡——之前是均匀的一团淡影，中心不够实。核心 alpha 0x26→0x38，
+        // 中心再往右下挪一点（0.10r→0.18r，1.02r→1.08r），中间加一档过渡、影子铺得更开。
         shadowPaint.shader = RadialGradient(
-            cx + r * 0.1f, cy + r * 1.02f, r * 0.8f,
-            intArrayOf(0x26000000, 0x00000000),
-            floatArrayOf(0f, 1f),
+            cx + r * 0.18f, cy + r * 1.08f, r * 0.9f,
+            intArrayOf(0x38000000, 0x14000000, 0x00000000),
+            floatArrayOf(0f, 0.5f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawOval(
-            RectF(cx - r * 0.75f, cy + r * 0.75f, cx + r * 0.95f, cy + r * 1.3f),
+            RectF(cx - r * 0.8f, cy + r * 0.7f, cx + r * 1.0f, cy + r * 1.45f),
             shadowPaint,
         )
 
@@ -605,9 +611,9 @@ class OriloDropletView @JvmOverloads constructor(
         val s = runtimeShader ?: return
         val paint = shaderPaint ?: return
         val phase = OriloBackgroundView.phaseAt(SystemClock.uptimeMillis())
-        val top = OriloBackgroundView.hueColor(232f, 0.50f, 0.95f, phase.hueShift)
-        val mid = OriloBackgroundView.hueColor(232f, 0.68f, 0.91f, phase.hueShift)
-        val bot = OriloBackgroundView.hueColor(243f, 0.64f, 0.91f, phase.hueShift)
+        val top = OriloBackgroundView.hueColor(232f, 0.50f, 0.95f, phase.hueShift, phase.satScale)
+        val mid = OriloBackgroundView.hueColor(232f, 0.68f, 0.91f, phase.hueShift, phase.satScale)
+        val bot = OriloBackgroundView.hueColor(243f, 0.64f, 0.91f, phase.hueShift, phase.satScale)
         getLocationOnScreen(screenLoc)
         val pageW = resources.displayMetrics.widthPixels.toFloat()
         val pageH = resources.displayMetrics.heightPixels.toFloat()
@@ -621,11 +627,11 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("blobB", phase.bx * pageW, phase.by * pageH)
         val blobAColor = OriloBackgroundView.hueColor(
             OriloBackgroundView.TUNE_BLOB_A_HUE, OriloBackgroundView.TUNE_BLOB_A_SAT,
-            OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift,
+            OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale,
         )
         val blobBColor = OriloBackgroundView.hueColor(
             OriloBackgroundView.TUNE_BLOB_B_HUE, OriloBackgroundView.TUNE_BLOB_B_SAT,
-            OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift,
+            OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift, phase.satScale,
         )
         s.setFloatUniform("blobAColor", Color.red(blobAColor) / 255f, Color.green(blobAColor) / 255f, Color.blue(blobAColor) / 255f)
         s.setFloatUniform("blobBColor", Color.red(blobBColor) / 255f, Color.green(blobBColor) / 255f, Color.blue(blobBColor) / 255f)

@@ -28,7 +28,8 @@ import kotlin.math.sin
  * 扭完的坐标再去算三色渐变 + 两团光斑的颜色。API 33 以下（minSdk 24 兜底）保留
  * 第 1 批纯 Canvas 实现，不升级（旧设备没有 AGSL 管线）。
  *
- * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 30 秒偏色一圈：蓝→紫粉→蓝）
+ * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 13 秒一圈：蓝→青→乳白→青→蓝，
+ *  第 10 批改道，不经过品红/红）
  * 完全不变，只把相位来源从"动画器自身 elapsed 进度"改成"挂钟绝对时间取模"——这样
  * OriloDropletView 不管什么时候挂到窗口上，用同一份公式在同一个挂钟时刻必然算出
  * 完全相同的渐变色/光斑位置，两个 View 不用互相持有引用也不用传 Bitmap，水滴那边
@@ -80,6 +81,7 @@ class OriloBackgroundView @JvmOverloads constructor(
     private var bx = 0f
     private var by = 0f
     private var hueShift = 0f
+    private var satScale = 1f
     private var bloom = 0f
 
     private var flowAnimator: ValueAnimator? = null
@@ -137,12 +139,12 @@ class OriloBackgroundView @JvmOverloads constructor(
      *  不存在"两份公式抄错一处就对不上"的风险。 */
     private fun recomputePhase() {
         val p = phaseAt(SystemClock.uptimeMillis())
-        ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift; bloom = p.bloom
+        ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift; satScale = p.satScale; bloom = p.bloom
     }
 
-    /** 底色随时间慢慢偏色（蓝 → 紫粉 → 蓝，30 秒一圈），照视频里整页色调流动的样子。 */
+    /** 底色随时间慢慢偏色（蓝 → 青 → 乳白 → 青 → 蓝，13 秒一圈，第 10 批改道，不经过红），照视频里整页色调流动的样子。 */
     private fun hueColor(h: Float, s: Float, v: Float): Int =
-        Color.HSVToColor(floatArrayOf((h + hueShift) % 360f, s, v))
+        Color.HSVToColor(floatArrayOf((h + hueShift) % 360f, (s * satScale).coerceIn(0f, 1f), v))
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -214,10 +216,12 @@ class OriloBackgroundView @JvmOverloads constructor(
         canvas.drawRect(0f, 0f, w, h, blobPaintB)
     }
 
-    /** 某一挂钟时刻的流动相位：两团光斑的页面相对坐标 + 底色偏色量 + 呼吸强度（0..1）。 */
+    /** 某一挂钟时刻的流动相位：两团光斑的页面相对坐标 + 底色偏色量 + 呼吸强度（0..1）
+     *  + 饱和度系数（1..0.35，第 10 批新增：跟着色相一起走到青色那头时饱和度掉下来，
+     *  背景经过乳白相，不是一直浓到发艳）。 */
     data class FlowPhase(
         val ax: Float, val ay: Float, val bx: Float, val by: Float,
-        val hueShift: Float, val bloom: Float,
+        val hueShift: Float, val bloom: Float, val satScale: Float,
     )
 
     companion object {
@@ -240,16 +244,18 @@ class OriloBackgroundView @JvmOverloads constructor(
         const val TUNE_BLOB_A_STRENGTH = 0.55f
         /** 光斑 A 的影响半径，相对页面宽度的比例：越大这团光斑铺得越开。 */
         const val TUNE_BLOB_A_RADIUS_FRAC = 0.55f
-        /** 光斑 A 的颜色（HSV）：第 4 批换成明显偏离底色的饱和品红紫，不然会被底色吃掉。 */
-        const val TUNE_BLOB_A_HUE = 312f
+        /** 光斑 A 的颜色（HSV）：第 10 批从品红紫 312 改成青色 200——品红加漂移会走到
+         *  红（312+60=12），真机反馈“这种红不要，太艳丽”；青色加漂移只在蓝青之间走。 */
+        const val TUNE_BLOB_A_HUE = 200f
         const val TUNE_BLOB_A_SAT = 0.55f
         const val TUNE_BLOB_A_VAL = 0.98f
         /** 光斑 B（右下附近）混合强度：0..1，同上是混合比例。 */
         const val TUNE_BLOB_B_STRENGTH = 0.45f
         /** 光斑 B 的影响半径，相对页面宽度的比例。 */
         const val TUNE_BLOB_B_RADIUS_FRAC = 0.6f
-        /** 光斑 B 的颜色（HSV）：偏饱和靛蓝紫，跟光斑 A 的品红形成对比。 */
-        const val TUNE_BLOB_B_HUE = 255f
+        /** 光斑 B 的颜色（HSV）：第 10 批从靛蓝紫 255 改成蓝色 220，跟光斑 A 的青色
+         *  在同一段蓝青里，不再往紫粉那边偏。 */
+        const val TUNE_BLOB_B_HUE = 220f
         const val TUNE_BLOB_B_SAT = 0.62f
         const val TUNE_BLOB_B_VAL = 0.85f
 
@@ -262,16 +268,23 @@ class OriloBackgroundView @JvmOverloads constructor(
                 ay = 0.26f + 0.14f * cos(t * 0.7f),
                 bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f),
                 by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f),
-                hueShift = 30f - 30f * cos(t),
+                // 第 10 批：色相漂移改道——原来 0→+60，一路走到品红、红（312+60=12），
+                // 真机反馈太艳丽。改成 0→-30，只往青色那边走：蓝（232）→青（202），
+                // 光斑 A（200）→青（170），光斑 B（220）→青蓝（190），全程不经过红。
+                // 饱和度同时跟着走：走到青色那头时饱和度掉到 0.35，背景经过乳白相
+                // （像 Morning Coffee 图里乳白加浅青蓝那样），再漂回浓蓝。
+                hueShift = -15f + 15f * cos(t),
+                satScale = 0.35f + 0.65f * (0.5f + 0.5f * cos(t)),
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
                 // 这样"光晕涨缩"跟"光晕挪位置"不会每圈都卡在同一个点上重复。
                 bloom = 0.5f + 0.5f * sin(t * 0.85f - (Math.PI / 2).toFloat()),
             )
         }
 
-        /** 底色随时间慢慢偏色用的 HSV 转换，供两个 View 共用（避免重复实现一份换色逻辑）。 */
-        fun hueColor(baseHue: Float, s: Float, v: Float, hueShift: Float): Int =
-            Color.HSVToColor(floatArrayOf((baseHue + hueShift) % 360f, s, v))
+        /** 底色随时间慢慢偏色用的 HSV 转换，供两个 View 共用（避免重复实现一份换色逻辑）。
+         *  第 10 批：饱和度也跟着相位走（satScale），走到青色那头时颜色变淡、经过乳白相。 */
+        fun hueColor(baseHue: Float, s: Float, v: Float, hueShift: Float, satScale: Float = 1f): Int =
+            Color.HSVToColor(floatArrayOf((baseHue + hueShift) % 360f, (s * satScale).coerceIn(0f, 1f), v))
 
         /** 第 5 批新增：光斑半径随 bloom 呼吸——弱的时候只有基准值的一半出头，
          *  强的时候涨到基准值的接近 1.5 倍，接近盖满屏幕。两个 View 共用，保证同步。 */
