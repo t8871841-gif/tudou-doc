@@ -180,6 +180,18 @@ import kotlin.math.sin
  * 要能读出来），背景扭曲 0.16→0.25、纹理密度 2.2→2.8（让水滴内部有"扭曲
  * 的流动感"可看）。折射保持 120。都是估计值，真机说了算。
  *
+ * 2026-11-17 第 20 批（用户转发 DeepSeek 对第 19 批的审稿）：第 19 批的
+ * 功能逻辑没问题（跳变、取消待机都对），但渲染核心还有 3 个视觉炸弹：
+ * ① 顶部暗带用 dot(n2, topDir) 算会在顶部两侧各留一个黑斑（"熊猫眼"，
+ * v91 实测 30° 和 300° 各一个 -60 暗斑、顶部反而中性）——改成直接用
+ * Y 轴坐标：topDarkMask = 1.0 - smoothstep(-0.8, 0.2, n2.y)，顶部是一
+ * 整条柔和暗带；uTopDarkInnerCos/uTopDarkOuterCos 和 TUNE_TOP_DARK_* 两
+ * 个常量随之删掉。② 整圈白描边 alpha 100→30：100 的白线太生硬、像
+ * 塑料边框，真玻璃的边缘亮是折射出来的光、不该有实线边框。③ 折射边缘
+ * 收窄：TUNE_EDGE_SOFT_START 0.80→0.85（过渡带 0.20r→0.15r），折射
+ * 120 把远处颜色"扯"进来形成的横线/断层不那么显眼。另：大高光中间停
+ * 0x80→0xE6、位置 0.2→0.08（前 8% 极亮、之后光速褪去，核心别那么死板）。
+ */
  * 2026-11-17 第 19 批（用户令）：背景颜色变换不要固定时间——色相不再按
  * 120 秒慢慢转圈，改成跳变：平时色相不动（只有光斑位置/呼吸/饱和度在
  * 13 秒轴上慢慢变幻），隔 20–60 秒（随机）色相一瞬间跳到一个新值（跟现
@@ -213,7 +225,9 @@ class OriloDropletView @JvmOverloads constructor(
         // 第 17 批（DeepSeek 审）：25 在真机上大概率看不见、或像个塑料边缘，提到 50。
         // 第 18 批 50→100：新参考图（4454）的边缘是一圈亮的细边，不是黑的；
         // 暗带压下去之后，亮边要能读出来。
-        alpha = 100
+        // 第 20 批（DeepSeek 审）100→30：100 的白线太生硬、像塑料边框；
+        // 真玻璃的边缘亮是折射出来的光，不该有一条实线边框。留 30 一点意思。
+        alpha = 30
     }
 
     // ---------- 第 19 批（用户令）：Z 休息提示取消了，不再有待机/睡觉态——
@@ -348,8 +362,11 @@ class OriloDropletView @JvmOverloads constructor(
         const val TUNE_REFRACT_BEND = 120f
         /** 色散幅度（像素）：边缘红蓝分离的程度，越大越明显的"彩虹边"，调到 0 就是没有色散。 */
         const val TUNE_CHROMATIC_OFFSET = 2.2f
-        /** 边缘增厚的起始位置，0..1（相对半径）：越小，变厚/变实的范围越宽，水滴显得越"肉"。 */
-        const val TUNE_EDGE_SOFT_START = 0.80f
+        /** 边缘增厚的起始位置，0..1（相对半径）：越小，变厚/变实的范围越宽，水滴显得越"肉"。
+         *  第 20 批（DeepSeek 审）0.80→0.85：折射 120 会把远处的颜色"扯"到中间，
+         *  在过渡区形成一道突兀的横线/断层；把边缘收窄一点（过渡带从 0.20r 收到
+         *  0.15r），让那道缝不那么显眼。 */
+        const val TUNE_EDGE_SOFT_START = 0.85f
         /** 水滴中心的不透明度：第 9 批按量测报告（中心跟背景亮度只差 0~15/255）大幅调低，
          *  越小中心越透，越接近"看不见水滴只看见一圈边"。第 10 批再调低一档（0.08→0.05），
          *  真机反馈内部还是偏奶白、背景光斑透不出来。第 14 批（DeepSeek 审）再压到 0.01：
@@ -390,12 +407,7 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 13 批新增：底部"笑脸"亮弧彻底消失的夹角，cos(60°)≈0.50——比这个夹角更大
          *  （更偏向水滴两侧/上方）就完全没有底部亮弧了。 */
         const val TUNE_SMILE_OUTER_COS = 0.55f
-        /** 第 13 批新增：顶部暗带的半角，夹角余弦——cos(20°)≈0.94。原图顶部暗带只有
-         *  约 40° 宽（12 点附近最暗 -46），比第 9 批亮弧的 120° 窄得多，所以单独给
-         *  暗带一对更窄的余弦，不要复用亮弧那对。 */
-        const val TUNE_TOP_DARK_INNER_COS = 0.94f
-        /** 第 13 批新增：顶部暗带彻底消失的夹角，cos(40°)≈0.77。 */
-        const val TUNE_TOP_DARK_OUTER_COS = 0.77f
+        // 第 20 批（DeepSeek 审）：顶部暗带改用 n2.y 算之后，这对余弦不再用了，删掉。
         /** 第 4 批新增、第 7 批调弱、第 10 批再调弱：球面漫反射强度。采样目标截图发现球体中央其实相当平，
          *  不是明显的明暗渐变，所以这个只给一丝若有若无的立体感，不是主要观感来源，
          *  默认值比第 4 批小了一大截。调到 0 就是完全没有这一丝渐变。 */
@@ -494,8 +506,6 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float  uSmileStrength;
             uniform float  uSmileInnerCos;
             uniform float  uSmileOuterCos;
-            uniform float  uTopDarkInnerCos;
-            uniform float  uTopDarkOuterCos;
             uniform float  uDiffuseStrength;
             uniform float  uAmbientBoost;
             uniform float  uDarkBandStrength;
@@ -579,11 +589,14 @@ class OriloDropletView @JvmOverloads constructor(
                 // 实测一致。原图量测：顶部（12 点，约 40° 宽）最暗 -46，底部（6 点，
                 // 约 60° 宽）最亮 +40。第 9 批加的"顶部亮弧"方向反了（原图顶部是最暗
                 // 的点），第 13 批去掉；第 11 批删掉的底部亮弧其实原图有，只是很柔
-                // （+40，不是线），第 13 批以柔光的方式加回来。topDir 偏正上、略偏左；
-                // bottomDir 偏正下、略偏右。
-                float2 topDir = normalize(float2(-0.12, -0.99));
-                float cosAngle = dot(n2, topDir);
-                float topDarkMask = smoothstep(uTopDarkOuterCos, uTopDarkInnerCos, cosAngle);
+                // （+40，不是线），第 13 批以柔光的方式加回来。
+                // 第 20 批（DeepSeek 审）：顶部暗带别再用 dot(n2, topDir) 算——
+                // 在圆形球面上，点积的"帽"会在顶部两侧各留一个黑斑（"熊猫眼"，
+                // v91 实测 30° 和 300° 方向各有一个 -60 的暗斑、顶部反而中性）。
+                // 改成直接用 Y 轴坐标：顶部是一整条柔和的暗带，往下渐渐褪掉。
+                // 用 1.0 - smoothstep(...) 的写法，不用 edge0 > edge1 的反向
+                // smoothstep（那是未定义行为）。n2.y 在顶部 ≈ -1、底部 ≈ +1。
+                float topDarkMask = 1.0 - smoothstep(-0.8, 0.2, n2.y);
                 float2 bottomDir = normalize(float2(0.12, 0.99));
                 float cosBottom = dot(n2, bottomDir);
                 float smileMask = smoothstep(uSmileOuterCos, uSmileInnerCos, cosBottom);
@@ -714,8 +727,6 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("uSmileStrength", TUNE_SMILE_STRENGTH)
         s.setFloatUniform("uSmileInnerCos", TUNE_SMILE_INNER_COS)
         s.setFloatUniform("uSmileOuterCos", TUNE_SMILE_OUTER_COS)
-        s.setFloatUniform("uTopDarkInnerCos", TUNE_TOP_DARK_INNER_COS)
-        s.setFloatUniform("uTopDarkOuterCos", TUNE_TOP_DARK_OUTER_COS)
         s.setFloatUniform("uDiffuseStrength", TUNE_DIFFUSE_STRENGTH)
         s.setFloatUniform("uAmbientBoost", TUNE_AMBIENT_BOOST)
         s.setFloatUniform("uDarkBandStrength", TUNE_DARK_BAND_STRENGTH)
@@ -749,14 +760,16 @@ class OriloDropletView @JvmOverloads constructor(
         // 原图高光是锐利的"新月形"/斜长条。改成：位置稍往外挪（0.43/0.46，
         // 让它有被边缘"切割"的感觉）、转得更斜（-40°）、别压那么扁（0.4）、
         // 半径收一点（0.25r）、核心纯白 + 中间 0x80 柔光 + 迅速褪去。
+        // 第 20 批（DeepSeek 审）：中间停改成 0xE6、位置拉到 8%——前 8% 是极亮
+        // 的、之后光速褪去，白色核心别那么死板，更像新月。
         canvas.save()
         canvas.translate(cx + r * 0.43f, cy - r * 0.46f)
         canvas.rotate(-40f)
         canvas.scale(1f, 0.4f)
         highlightPaint.shader = RadialGradient(
             0f, 0f, r * 0.25f,
-            intArrayOf(0xFFFFFFFF.toInt(), 0x80FFFFFF.toInt(), 0x00FFFFFF),
-            floatArrayOf(0f, 0.2f, 1f),
+            intArrayOf(0xFFFFFFFF.toInt(), 0xE6FFFFFF.toInt(), 0x00FFFFFF),
+            floatArrayOf(0f, 0.08f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawCircle(0f, 0f, r * 0.25f, highlightPaint)
