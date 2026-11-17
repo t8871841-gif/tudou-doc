@@ -61,6 +61,13 @@ import kotlin.random.Random
  * 这批把周期从 30000ms 改成 13000ms，并在 `FlowPhase` 里加了 `bloom`（0→1→0 的呼吸
  * 强度），两团光斑的半径和强度现在都乘了这个 `bloom`——弱的时候一小片，强的时候
  * 接近盖满屏幕，这才是原版"活"的真正来源。
+ *
+ * 2026-11-17 第 22 批（用户发 Morning Coffee 参考视频，20 帧/秒量过）：
+ * 涟漪是一个点发出的连续波形、向外扩散（不是同心圆环、不是定时发圈），源点在
+ * 水滴左下（不是垂直底部），非常淡、单帧几乎看不见。做法：着色器里按到源点的
+ * 距离做正弦调制 sin(距离×频率 − 时间×速度)，随距离指数衰减；源点由
+ * MainActivity 按水滴实际落位算好、调 setRippleOrigin() 传进来。呼吸那半
+ * （幅度/速度）在 OriloDropletView，不在这里。
  */
 class OriloBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -86,6 +93,19 @@ class OriloBackgroundView @JvmOverloads constructor(
     private var hueShift = 0f
     private var satScale = 1f
     private var bloom = 0f
+
+    // ---------- 第 22 批：涟漪源点 ----------
+    // 水滴左下（7 点半方向）那个点，本 View 自身坐标（像素）。MainActivity 在水滴
+    // View 落位后算出来调 setRippleOrigin() 传进来；没传之前默认 (0,0)，涟漪
+    // 几乎不可见（decay 会把它压到角落里），不会画错地方。
+    private var rippleOriginX = 0f
+    private var rippleOriginY = 0f
+
+    /** 第 22 批：涟漪从哪个点往外扩——水滴左下，MainActivity 按水滴实际落位算好传进来。 */
+    fun setRippleOrigin(x: Float, y: Float) {
+        rippleOriginX = x
+        rippleOriginY = y
+    }
 
     private var flowAnimator: ValueAnimator? = null
 
@@ -197,6 +217,12 @@ class OriloBackgroundView @JvmOverloads constructor(
         s.setFloatUniform("uBlobARadiusFrac", bloomedRadiusFrac(TUNE_BLOB_A_RADIUS_FRAC, bloom))
         s.setFloatUniform("uBlobBStrength", bloomedStrength(TUNE_BLOB_B_STRENGTH, bloom))
         s.setFloatUniform("uBlobBRadiusFrac", bloomedRadiusFrac(TUNE_BLOB_B_RADIUS_FRAC, bloom))
+        // 第 22 批：涟漪——从左下源点往外扩的连续波形（不是一圈一圈画出来的环）。
+        s.setFloatUniform("uRippleOrigin", rippleOriginX, rippleOriginY)
+        s.setFloatUniform("uRippleStrength", TUNE_RIPPLE_STRENGTH)
+        s.setFloatUniform("uRippleFreq", TUNE_RIPPLE_FREQ)
+        s.setFloatUniform("uRippleSpeed", TUNE_RIPPLE_SPEED)
+        s.setFloatUniform("uRippleDecay", TUNE_RIPPLE_DECAY)
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 
@@ -296,6 +322,24 @@ class OriloBackgroundView @JvmOverloads constructor(
         const val TUNE_BLOB_B_SAT = 0.62f
         const val TUNE_BLOB_B_VAL = 0.85f
 
+        // ====== 第 22 批：涟漪（连续波形，从左下源点往外扩）======
+        // 参考视频实测：涟漪是一个点发出的连续波形、向外扩散，不是同心圆环、不是
+        // 定时发圈；源点在水滴左下（不是垂直底部）；非常淡，单帧几乎看不见，只有
+        // 动起来才感觉得到。做法：在背景着色器里按到源点的距离做正弦调制——
+        // sin(距离×频率 − 时间×速度)，随距离指数衰减。波峰向外跑的速度 =
+        // 速度/频率（px/秒），波长 = 2π/频率。
+        /** 涟漪亮度调制幅度（0..1）：0.03 就是亮度上下只动 3%，单帧几乎看不见，
+         *  只有动起来才感觉得到——跟参考一样淡。 */
+        const val TUNE_RIPPLE_STRENGTH = 0.03f
+        /** 涟漪空间频率（弧度/像素）：波长 = 2π/0.10 ≈ 63px，参考圆弧间距约 50–70px。 */
+        const val TUNE_RIPPLE_FREQ = 0.10f
+        /** 涟漪时间速度（弧度/秒）：波峰外扩速度 = 6.0/0.10 = 60px/秒，1.5 秒
+         *  （一圈呼吸）跑约 90px，约 1.5 个波长，温和、不抢戏。 */
+        const val TUNE_RIPPLE_SPEED = 6.0f
+        /** 涟漪随距离衰减（1/像素）：300px 处剩 e^(-1.2)≈0.30，500px 处剩 0.14，
+         *  约 300–500px 外基本看不见。 */
+        const val TUNE_RIPPLE_DECAY = 0.004f
+
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
@@ -351,6 +395,11 @@ class OriloBackgroundView @JvmOverloads constructor(
             uniform float  uBlobARadiusFrac;
             uniform float  uBlobBStrength;
             uniform float  uBlobBRadiusFrac;
+            uniform float2 uRippleOrigin;
+            uniform float  uRippleStrength;
+            uniform float  uRippleFreq;
+            uniform float  uRippleSpeed;
+            uniform float  uRippleDecay;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -399,6 +448,16 @@ class OriloBackgroundView @JvmOverloads constructor(
                 float2 pxB = wuv * iResolution - blobB;
                 float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(pxB) / (iResolution.x * uBlobBRadiusFrac), 0.0, 1.0));
                 colorOut = mix(colorOut, blobBColor, fb * uBlobBStrength);
+
+                // 第 22 批：涟漪——从左下源点往外扩的连续波形。sin 的波峰随时间向外跑
+                // （波峰速度 = uRippleSpeed / uRippleFreq），振幅随距离指数衰减。
+                // 很淡（uRippleStrength 只有 0.03），单帧几乎看不见。水滴本身盖住
+                // 源点附近那一块，所以波纹只在水滴外面看得见。
+                float rippleDist = length(fragCoord - uRippleOrigin);
+                float ripple = sin(rippleDist * uRippleFreq - iTime * uRippleSpeed)
+                    * exp(-rippleDist * uRippleDecay) * uRippleStrength;
+                colorOut += ripple;
+
                 return half4(float4(colorOut, 1.0));
             }
         """
