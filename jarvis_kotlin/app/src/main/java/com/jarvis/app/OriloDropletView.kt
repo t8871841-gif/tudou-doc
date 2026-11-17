@@ -122,6 +122,21 @@ import kotlin.math.sin
  *    新常量取代，不再使用。
  * 5. 高光位置、底部"笑脸"亮弧、影子位置、Z 的位置和淡入淡出、待机缩放 0.8 倍、
  *    13 秒光晕呼吸——这些量测报告说已经对的，一个字没动。
+ *
+ * 2026-11-17 第 13 批（用户拿 Henry 原图逐点量过：我们水滴"太突兀，用力过猛"）：
+ * 原图实测（水滴中心约 450,615，半径约 180）：顶部（12 点，约 40° 宽）是暗带、
+ * 最暗 -46；底部（6 点，约 60° 宽）是亮弧"笑脸"、最亮 +40、很柔和；影子核心
+ * 亮度 51（背景约 119），150px 内平滑褪净；内部只比背景亮约 +15，几乎全透明。
+ * 所以边缘是"上有暗带、下有亮弧"的方向性结构，而且每层都很淡。这批：
+ * 1. **顶部亮边去掉**：第 9 批加的顶部亮弧方向反了（原图顶部是最暗的点），
+ *    `TUNE_RIM_STRENGTH`/`TUNE_RIM_ARC_*`/`uFresnelAlpha` 全部删掉。
+ * 2. **暗带只留顶部**：原来整圈均匀的暗带改成只在顶部（新 `TUNE_TOP_DARK_*`，
+ *    约 40° 宽），底部不再变暗。
+ * 3. **底部"笑脸"以柔光加回来**：新 `TUNE_SMILE_*`（约 60° 宽，最亮 +40 的目标），
+ *    是着色器里的漫射亮斑、不是线；第 11 批删掉的 rimPaint 弧是硬线，别恢复它。
+ * 4. **内部再透一点**：`TUNE_TINT_STRENGTH` 0.3→0.2、`TUNE_RING_STRENGTH`
+ *    0.10→0.06、`TUNE_DIFFUSE_STRENGTH` 0.04→0.02、`TUNE_AMBIENT_BOOST` 0.15→0.10；
+ *    影子核心 0x42→0x30、铺得更开；整圈白描边 alpha 60→25。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -145,7 +160,8 @@ class OriloDropletView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeWidth = 2f
         color = Color.WHITE
-        alpha = 60
+        // 第 13 批：整圈白描边太抢戏（原图边缘不是整圈亮的），alpha 60→25。
+        alpha = 25
     }
 
     // ---------- 第 7 批新增：待机时的 💤 提示（两个 "Z"/"z"，淡入淡出） ----------
@@ -323,44 +339,46 @@ class OriloDropletView @JvmOverloads constructor(
         /** 水滴边缘的不透明度：第 9 批也调低了一点（配合"中心更透"的整体方向），
          *  越大边缘越实。 */
         const val TUNE_ALPHA_MAX = 0.50f
-        /** 边缘因亮边额外叠加的不透明度：越大边缘看着越"厚实有质感"。 */
-        const val TUNE_FRESNEL_ALPHA = 0.55f
         /** 背景颜色透进水滴的浓度（这是"边缘"位置的浓度上限，中心会按
          *  `tintEdgeFactor` 再打折，见 main() 里的说明）：越大水滴边缘背景色越明显，
          *  越小越像一颗纯白/无色的玻璃珠。第 9 批调低了默认值——量测报告说中心
-         *  几乎就是背景本身，之前的 0.6 让中心颜色太实。 */
-        const val TUNE_TINT_STRENGTH = 0.3f
+         *  几乎就是背景本身，之前的 0.6 让中心颜色太实。第 13 批再调低一档（0.3→0.2）：
+         *  用户反馈"用力过猛"，内部要再透一点。 */
+        const val TUNE_TINT_STRENGTH = 0.2f
         /** 中心相对边缘的折射强度折扣：中心是这个值 × TUNE_TINT_STRENGTH，边缘是
          *  完整的 TUNE_TINT_STRENGTH——越小中心越透明，环境色反射越集中在边缘。 */
         const val TUNE_TINT_CENTER_FACTOR = 0.35f
-        /** 朝光一侧边缘的白色高光强度（第 7 批起改成有方向的，不再是整圈一样亮）。 */
-        /** 第 11 批调低（0.6→0.25）：对着 henry-reference.png 做了 36 点环绕边缘的亮度
-         *  扫描，发现这张参考图里"顶部亮弧"这个方向其实是**最暗**的点（两颗高光自己的
-         *  光晕之外，边缘整体偏暗，正上方 12 点钟最暗）——跟第 9 批加这个效果时依据的
-         *  录像量测报告方向正好相反。猜测录像测的是动态效果、亮边方向可能跟场景一起漂移，
-         *  但现在这是固定方向，静态对不上。没有把握哪个对，先调弱、留着这个效果，
-         *  真机看完如果还是不像，大概率要么去掉、要么改成跟背景一起漂移方向。 */
-        const val TUNE_RIM_STRENGTH = 0.25f
-        /** 第 9 批新增：顶部亮边"弧"的半角，用夹角余弦表示——cos(62°)≈0.47，数字越大
-         *  （越接近 1）这段全亮的弧越窄；配合 `TUNE_RIM_ARC_OUTER_COS` 控制往外的
-         *  淡出范围，两个一起大致框出"10 点到 2 点"这段弧。 */
-        const val TUNE_RIM_ARC_INNER_COS = 0.47f
-        /** 第 9 批新增：顶部亮边彻底消失的夹角，cos(87°)≈0.05——比这个夹角更大
-         *  （更偏向水滴两侧/下方）就完全没有顶部亮边了。 */
-        const val TUNE_RIM_ARC_OUTER_COS = 0.05f
+        /** 第 13 批新增：底部"笑脸"亮弧的强度——一圈柔和的漫射亮斑（不是线），
+         *  目标是最亮处比背景亮约 +40/255（Henry 原图实测峰值）。第 11 批删掉的
+         *  rimPaint 弧是硬线，别恢复它；第 9 批的顶部亮弧方向反了，已整个删掉。 */
+        const val TUNE_SMILE_STRENGTH = 0.30f
+        /** 第 13 批新增：底部"笑脸"亮弧的半角，夹角余弦——cos(30°)≈0.87，数字越大
+         *  （越接近 1）这段全亮的弧越窄；配合 `TUNE_SMILE_OUTER_COS` 控制往外的
+         *  淡出范围，两个一起大致框出"4 点半到 7 点半"（约 60° 宽）这段弧。 */
+        const val TUNE_SMILE_INNER_COS = 0.87f
+        /** 第 13 批新增：底部"笑脸"亮弧彻底消失的夹角，cos(60°)≈0.50——比这个夹角更大
+         *  （更偏向水滴两侧/上方）就完全没有底部亮弧了。 */
+        const val TUNE_SMILE_OUTER_COS = 0.50f
+        /** 第 13 批新增：顶部暗带的半角，夹角余弦——cos(20°)≈0.94。原图顶部暗带只有
+         *  约 40° 宽（12 点附近最暗 -46），比第 9 批亮弧的 120° 窄得多，所以单独给
+         *  暗带一对更窄的余弦，不要复用亮弧那对。 */
+        const val TUNE_TOP_DARK_INNER_COS = 0.94f
+        /** 第 13 批新增：顶部暗带彻底消失的夹角，cos(40°)≈0.77。 */
+        const val TUNE_TOP_DARK_OUTER_COS = 0.77f
         /** 第 4 批新增、第 7 批调弱、第 10 批再调弱：球面漫反射强度。采样目标截图发现球体中央其实相当平，
          *  不是明显的明暗渐变，所以这个只给一丝若有若无的立体感，不是主要观感来源，
          *  默认值比第 4 批小了一大截。调到 0 就是完全没有这一丝渐变。 */
-        const val TUNE_DIFFUSE_STRENGTH = 0.04f
+        const val TUNE_DIFFUSE_STRENGTH = 0.02f
         /** 第 7 批新增：贴着最外缘的窄暗带强度——采样目标截图发现边缘有一圈比球体内部和
          *  背景都暗的细边（玻璃全反射那种"黑边"感），这是让边缘看着"是玻璃"而不是
-         *  "一张半透明贴纸"的关键细节。只在背光侧明显，朝光侧会被亮边盖掉。 */
+         *  "一张半透明贴纸"的关键细节。第 13 批起只在顶部出现（topDarkMask），
+         *  底部被"笑脸"亮弧盖住的位置不再变暗。 */
         const val TUNE_DARK_BAND_STRENGTH = 0.4f
         /** 第 5 批新增：水滴跟着背景"光晕"一起发亮的强度——数值越大，光晕最强的那几秒
          *  水滴被照得越白越亮；调到 0 就是水滴亮度只跟折射出来的颜色有关，不跟光晕强度挂钩，
          *  退回第 4 批那种"颜色变但亮度不变"的效果。第 10 批从 0.35 砍到 0.15：它是内部
-         *  加白的大头，真机反馈内部偏奶白、背景光斑透不出来。 */
-        const val TUNE_AMBIENT_BOOST = 0.15f
+         *  加白的大头，真机反馈内部偏奶白、背景光斑透不出来。第 13 批再砍到 0.10。 */
+        const val TUNE_AMBIENT_BOOST = 0.10f
         // 第 9 批：原来第 6/8 批"整体挤压成椭圆"的 TUNE_WOBBLE_AMPLITUDE 被下面这组
         // 按角度颤动的参数取代——量测报告说原版是边缘局部此起彼伏，不是整体变椭圆。
         // K 是角度上的"花瓣数"（必须是整数，不然 θ=0 和 θ=2π 接不上，边缘会裂开）；
@@ -393,8 +411,9 @@ class OriloDropletView @JvmOverloads constructor(
          *  略大于 1+幅度总和，留点安全余量；改了上面几个 AMP 的话记得这个也要跟着调大。 */
         const val TUNE_SHAPE_MARGIN = 1.18f
 
-        /** 第 9 批新增：内部折射环的强度——很淡的一圈，别调太大，抢了高光的戏就不像了。 */
-        const val TUNE_RING_STRENGTH = 0.10f
+        /** 第 9 批新增：内部折射环的强度——很淡的一圈，别调太大，抢了高光的戏就不像了。
+         *  第 13 批再调弱一档（0.10→0.06）：原图内部几乎全透明，环要更淡。 */
+        const val TUNE_RING_STRENGTH = 0.06f
         /** 第 9 批新增：折射环的横向半径（相对水滴半径，-1..1 本地坐标系下的尺度）。 */
         const val TUNE_RING_RADIUS_X = 0.55f
         /** 第 9 批新增：折射环的纵向半径——跟横向不一样，做成一个椭圆（量测报告原话：
@@ -431,16 +450,17 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float  uEdgeSoftStart;
             uniform float  uAlphaMin;
             uniform float  uAlphaMax;
-            uniform float  uFresnelAlpha;
             uniform float  uTintStrength;
             uniform float  uTintCenterFactor;
-            uniform float  uRimStrength;
+            uniform float  uSmileStrength;
+            uniform float  uSmileInnerCos;
+            uniform float  uSmileOuterCos;
+            uniform float  uTopDarkInnerCos;
+            uniform float  uTopDarkOuterCos;
             uniform float  uDiffuseStrength;
             uniform float  uAmbientBoost;
             uniform float  uDarkBandStrength;
             uniform float  uShapeMargin;
-            uniform float  uRimArcInnerCos;
-            uniform float  uRimArcOuterCos;
             uniform float  uRingStrength;
             uniform float  uRingRadiusX;
             uniform float  uRingRadiusY;
@@ -516,17 +536,23 @@ class OriloDropletView @JvmOverloads constructor(
                 float3 cB = fieldAt(refractPx - float2(uChromaticOffset, uChromaticOffset * 0.5));
                 float3 refracted = float3(cR.r, cG.g, cB.b);
 
-                // 第 9 批：顶部亮边改成真正的"弧"——按夹角（跟正上方的夹角余弦）做
-                // smoothstep，而不是第 7 批那种连续的方向权重，这样能明确框出"10 点到
-                // 2 点"这一段，过了范围就没有，不是无限淡出。topDir 偏正上、略偏左。
+                // 第 13 批：边缘改成方向性的——顶部暗带、底部亮弧（"笑脸"），跟 Henry 原图
+                // 实测一致。原图量测：顶部（12 点，约 40° 宽）最暗 -46，底部（6 点，
+                // 约 60° 宽）最亮 +40。第 9 批加的"顶部亮弧"方向反了（原图顶部是最暗
+                // 的点），第 13 批去掉；第 11 批删掉的底部亮弧其实原图有，只是很柔
+                // （+40，不是线），第 13 批以柔光的方式加回来。topDir 偏正上、略偏左；
+                // bottomDir 偏正下、略偏右。
                 float2 topDir = normalize(float2(-0.12, -0.99));
                 float cosAngle = dot(n2, topDir);
-                float arcMask = smoothstep(uRimArcOuterCos, uRimArcInnerCos, cosAngle);
+                float topDarkMask = smoothstep(uTopDarkOuterCos, uTopDarkInnerCos, cosAngle);
+                float2 bottomDir = normalize(float2(0.12, 0.99));
+                float cosBottom = dot(n2, bottomDir);
+                float smileMask = smoothstep(uSmileOuterCos, uSmileInnerCos, cosBottom);
                 float edge = smoothstep(lensRadius * uEdgeSoftStart, lensRadius, dist);
-                float rimBright = edge * arcMask;
+                float smileBright = edge * smileMask;
 
-                // 贴着最外缘的一圈窄暗带（玻璃全反射那种"黑边"）；亮弧覆盖的地方暗带会被
-                // 盖掉，亮弧够不到的地方（两侧、下方）暗带更明显。
+                // 贴着最外缘的一圈窄暗带（玻璃全反射那种"黑边"）；第 13 批起只在顶部出现
+                // （topDarkMask），底部被"笑脸"亮弧盖住的位置不再变暗。
                 float darkBand = smoothstep(lensRadius * 0.90, lensRadius * 0.975, dist)
                     * (1.0 - smoothstep(lensRadius * 0.975, lensRadius, dist));
 
@@ -552,13 +578,15 @@ class OriloDropletView @JvmOverloads constructor(
 
                 // 环境光耦合：水滴这个位置的"布"本身有多亮，光晕强的时候水滴跟着一起发白。
                 float ambientLum = (refracted.r + refracted.g + refracted.b) / 3.0;
-                float alpha = clamp(mix(uAlphaMin, uAlphaMax, edge) + rimBright * uFresnelAlpha, 0.0, 1.0);
+                // 第 13 批：不透明度不再因亮边额外叠加（顶部亮弧已删；底部"笑脸"是柔光，
+                // 不是实边），就是中心到边缘的 mix。
+                float alpha = clamp(mix(uAlphaMin, uAlphaMax, edge), 0.0, 1.0);
                 float3 colorOut = refracted * uTintStrength * tintEdgeFactor
-                    + float3(1.0, 1.0, 1.0) * rimBright * uRimStrength
+                    + float3(1.0, 1.0, 1.0) * smileBright * uSmileStrength
                     + float3(1.0, 1.0, 1.0) * diffuse * uDiffuseStrength
                     + float3(1.0, 1.0, 1.0) * ambientLum * uAmbientBoost
                     + float3(1.0, 1.0, 1.0) * ringGlow;
-                colorOut *= (1.0 - darkBand * uDarkBandStrength * (1.0 - arcMask));
+                colorOut *= (1.0 - darkBand * uDarkBandStrength * topDarkMask);
                 return half4(float4(colorOut * alpha, alpha));
             }
         """
@@ -575,14 +603,16 @@ class OriloDropletView @JvmOverloads constructor(
         // 影子：右下方一团软影（两条路径共用）。第 10 批按原版实测重调：影子中心最暗、
         // 偏右下，向外平滑变淡——之前是均匀的一团淡影，中心不够实。核心 alpha 0x26→0x38，
         // 中心再往右下挪一点（0.10r→0.18r，1.02r→1.08r），中间加一档过渡、影子铺得更开。
+        // 第 13 批：影子再放软一点——核心 0x42→0x30（原图核心虽暗但边缘褪得极慢，
+        // 我们的影子边界感太重），铺得更开（1.45r→1.6r）。
         shadowPaint.shader = RadialGradient(
             cx + r * 0.18f, cy + r * 1.08f, r * 0.9f,
-            intArrayOf(0x42000000, 0x18000000, 0x00000000),
-            floatArrayOf(0f, 0.5f, 1f),
+            intArrayOf(0x30000000, 0x14000000, 0x00000000),
+            floatArrayOf(0f, 0.45f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawOval(
-            RectF(cx - r * 0.8f, cy + r * 0.7f, cx + r * 1.0f, cy + r * 1.45f),
+            RectF(cx - r * 0.8f, cy + r * 0.7f, cx + r * 1.0f, cy + r * 1.6f),
             shadowPaint,
         )
 
@@ -649,16 +679,17 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("uEdgeSoftStart", TUNE_EDGE_SOFT_START)
         s.setFloatUniform("uAlphaMin", TUNE_ALPHA_MIN)
         s.setFloatUniform("uAlphaMax", TUNE_ALPHA_MAX)
-        s.setFloatUniform("uFresnelAlpha", TUNE_FRESNEL_ALPHA)
         s.setFloatUniform("uTintStrength", TUNE_TINT_STRENGTH)
         s.setFloatUniform("uTintCenterFactor", TUNE_TINT_CENTER_FACTOR)
-        s.setFloatUniform("uRimStrength", TUNE_RIM_STRENGTH)
+        s.setFloatUniform("uSmileStrength", TUNE_SMILE_STRENGTH)
+        s.setFloatUniform("uSmileInnerCos", TUNE_SMILE_INNER_COS)
+        s.setFloatUniform("uSmileOuterCos", TUNE_SMILE_OUTER_COS)
+        s.setFloatUniform("uTopDarkInnerCos", TUNE_TOP_DARK_INNER_COS)
+        s.setFloatUniform("uTopDarkOuterCos", TUNE_TOP_DARK_OUTER_COS)
         s.setFloatUniform("uDiffuseStrength", TUNE_DIFFUSE_STRENGTH)
         s.setFloatUniform("uAmbientBoost", TUNE_AMBIENT_BOOST)
         s.setFloatUniform("uDarkBandStrength", TUNE_DARK_BAND_STRENGTH)
         s.setFloatUniform("uShapeMargin", TUNE_SHAPE_MARGIN)
-        s.setFloatUniform("uRimArcInnerCos", TUNE_RIM_ARC_INNER_COS)
-        s.setFloatUniform("uRimArcOuterCos", TUNE_RIM_ARC_OUTER_COS)
         s.setFloatUniform("uRingStrength", TUNE_RING_STRENGTH)
         s.setFloatUniform("uRingRadiusX", TUNE_RING_RADIUS_X)
         s.setFloatUniform("uRingRadiusY", TUNE_RING_RADIUS_Y)
@@ -672,9 +703,10 @@ class OriloDropletView @JvmOverloads constructor(
 
     private fun drawBodyLegacy(canvas: Canvas, path: Path, cx: Float, cy: Float, r: Float) {
         // 体：清水滴——顶部带一点亮、边缘带一点淡淡的白，中间几乎透明；底色偏色时也不串色。
+        // 第 13 批：顶部亮再压一档（0x59→0x33），跟"顶部最暗"的新认识对齐。
         bodyPaint.shader = RadialGradient(
             cx - r * 0.3f, cy - r * 0.45f, r * 1.5f,
-            intArrayOf(0x59FFFFFF, 0x14FFFFFF, 0x08FFFFFF, 0x1AFFFFFF),
+            intArrayOf(0x33FFFFFF, 0x14FFFFFF, 0x08FFFFFF, 0x12FFFFFF),
             floatArrayOf(0f, 0.35f, 0.7f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -708,8 +740,9 @@ class OriloDropletView @JvmOverloads constructor(
         )
         canvas.drawCircle(0f, 0f, r * 0.14f, smallHighlightPaint)
         canvas.restore()
-        // 亮边：整圈淡淡描边。原先这里还有一道下半圈亮弧（35°→145°），第 11 批删掉：
-        // 原版水滴里面没有“笑脸”弧，亮弧在顶部边缘、已经在着色器里（arcMask）。
+        // 亮边：整圈淡淡描边（第 13 批 alpha 60→25）。第 11 批删掉的下半圈硬线亮弧
+        // 别恢复——底部"笑脸"亮弧在着色器里（smileMask，柔光）；顶部亮边已去掉
+        // （原图顶部最暗）。
         canvas.drawCircle(cx, cy, r - 1f, rimSoftPaint)
     }
 }
