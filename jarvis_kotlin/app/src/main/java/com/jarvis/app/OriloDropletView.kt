@@ -10,12 +10,10 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.RuntimeShader
 import android.graphics.Shader
-import android.graphics.Typeface
 import android.os.Build
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
-import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import kotlin.math.cos
 import kotlin.math.min
@@ -42,10 +40,11 @@ import kotlin.math.sin
  * 不变：着色器算的菲涅尔是各向同性的（不知道光从哪来），代替不了这几笔看起来像
  * 真的定向反光，所以两条路径画完各自的"球体"之后都叠这一层。
  *
- * 动态（不变）：水滴颜色固定玻璃色、不跟 JarvisAgent 状态走；大小跟待机走——
- * idle 缩到 0.8 倍、干活胀回满，700ms 平滑过渡；平时再叠一层慢呼吸（6 秒一圈）+
- * 轻微晃形；原地动，只缩放不平移，中心不动（2026-11-15 用户纠正过的行为，保留）。
- * 公开方法名（setAwake）、MainActivity 调用方式不变。
+ * 动态（第 19 批改了）：水滴颜色固定玻璃色、不跟 JarvisAgent 状态走；大小
+ * 永远满尺寸（不再有待机缩小、Z 休息提示取消了，水滴永远是醒着的、呆萌萌的）；
+ * 平时叠一层慢呼吸（6 秒一圈）+ 轻微晃形；原地动，只缩放不平移，中心不动
+ * （2026-11-15 用户纠正过的行为，保留）。
+ * 公开方法名（setAwake）、MainActivity 调用方式不变（setAwake 现在是空方法）。
  *
  * 2026-11-15 第 3 批（用户要求"不用每次都发回来等改"）：折射强度/透明度/色散/
  * 边缘锐利度这些容易想调的数字集中到 companion 里的 `TUNE_*` 常量（见下方
@@ -180,6 +179,13 @@ import kotlin.math.sin
  * 0.25（让折射颜色亮回来、边缘不再发黑），整圈白描边 alpha 50→100（亮边
  * 要能读出来），背景扭曲 0.16→0.25、纹理密度 2.2→2.8（让水滴内部有"扭曲
  * 的流动感"可看）。折射保持 120。都是估计值，真机说了算。
+ *
+ * 2026-11-17 第 19 批（用户令）：背景颜色变换不要固定时间——色相不再按
+ * 120 秒慢慢转圈，改成跳变：平时色相不动（只有光斑位置/呼吸/饱和度在
+ * 13 秒轴上慢慢变幻），隔 20–60 秒（随机）色相一瞬间跳到一个新值（跟现
+ * 在至少差 15°，方向随机，0..50 循环、青蓝到紫、不经过红）。Z 休息提示
+ * 取消、不要待机：水滴永远是醒着的、呆萌萌的——setAwake 改成空方法，不
+ * 缩（初始就是满尺寸）、颤动不再冻结、不画 Z。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -210,26 +216,16 @@ class OriloDropletView @JvmOverloads constructor(
         alpha = 100
     }
 
-    // ---------- 第 7 批新增：待机时的 💤 提示（两个 "Z"/"z"，淡入淡出） ----------
-    private val sleepPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        typeface = Typeface.DEFAULT_BOLD
-        setShadowLayer(6f, 0f, 2f, 0x40000000)
-    }
-    // 初始就是 1：View 生来就是待机态（awake=false），冷启动第一帧就有 Z；
-    // 之前是 0，setAwake(false) 又直接 return，冷启动要过一次干活→待机才冒出来。
-    private var idleIndicatorAlpha = 1f
-    private var idleIndicatorAnimator: ValueAnimator? = null
+    // ---------- 第 19 批（用户令）：Z 休息提示取消了，不再有待机/睡觉态——
+    // 水滴永远是醒着的、呆萌萌的，不缩、不冻、不画 Z。setAwake 还留着
+    // （MainActivity 还在调它），但现在是个空方法，什么也不做。 ----------
 
-    // ---------- 动态水滴：待机缩小（睡觉的感觉）+ 原地动 ----------
-    private var awake = false
-    private var currentScale = IDLE_SCALE
-    private var scaleAnimator: ValueAnimator? = null
+    // ---------- 动态水滴：永远满尺寸、原地动 ----------
+    private var currentScale = AWAKE_SCALE
     private var motionAnimator: ValueAnimator? = null
 
     // ---------- 第 9 批新增：按角度颤动的 Path（替换原来的 scaleX/Y 挤压） ----------
-    // 待机时冻结在这个时间点上，水滴形状保持不动；干活时置回 null，相位继续用挂钟时间走。
-    private var frozenWobbleTimeSec: Double? = null
+    // 第 19 批：不再冻结——水滴永远醒着，颤动相位一直用挂钟时间走。
     private val wobblePath = Path()
     private val wobblePts = FloatArray(WOBBLE_POINTS * 2)
 
@@ -241,36 +237,10 @@ class OriloDropletView @JvmOverloads constructor(
         applyMotion()
     }
 
-    /** 调用方在状态变化时调：待机（idle）缩、干活胀。颜色不跟状态，只动大小。
-     *  第 7 批：顺带把 💤 提示（"Z"/"z"）的淡入淡出也绑在这里——待机时淡入，
-     *  干活时淡出，不用调用方多传参数或多调一个方法。 */
-    fun setAwake(awake: Boolean) {
-        if (this.awake == awake) return
-        this.awake = awake
-        // 第 9 批：待机时把颤动相位冻结在这一刻（量测报告：待机时水滴形状不再颤动，
-        // Z 消失、干活恢复后才继续晃），干活时置回 null 让相位继续走挂钟时间。
-        frozenWobbleTimeSec = if (awake) null else SystemClock.uptimeMillis() / 1000.0
-        val target = if (awake) AWAKE_SCALE else IDLE_SCALE
-        scaleAnimator?.cancel()
-        scaleAnimator = ValueAnimator.ofFloat(currentScale, target).apply {
-            duration = 700L
-            interpolator = DecelerateInterpolator()
-            addUpdateListener {
-                currentScale = animatedValue as Float
-                applyMotion()
-            }
-            start()
-        }
-        idleIndicatorAnimator?.cancel()
-        idleIndicatorAnimator = ValueAnimator.ofFloat(idleIndicatorAlpha, if (awake) 0f else 1f).apply {
-            duration = 400L
-            startDelay = if (awake) 0L else 500L // 干活时立刻收起，待机时稍微等一下再冒出来，不要一停就弹
-            addUpdateListener {
-                idleIndicatorAlpha = animatedValue as Float
-                invalidate()
-            }
-            start()
-        }
+    /** 第 19 批：空方法。水滴不再有待机/睡觉态——永远满尺寸、永远颤动、
+     *  不画 Z。留着这个方法是让 MainActivity 的调用不用改。 */
+    fun setAwake(@Suppress("UNUSED_PARAMETER") awake: Boolean) {
+        // 故意什么都不做。
     }
 
     private fun applyMotion() {
@@ -364,7 +334,7 @@ class OriloDropletView @JvmOverloads constructor(
     }
 
     companion object {
-        private const val IDLE_SCALE = 0.8f
+        // 第 19 批：不再有待机缩小，IDLE_SCALE 删了；水滴永远满尺寸。
         private const val AWAKE_SCALE = 1.0f
 
         // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL ======
@@ -688,22 +658,12 @@ class OriloDropletView @JvmOverloads constructor(
 
         // 第 9 批：本体改成画"颤动 Path"而不是正圆——冻结时刻（待机）用 setAwake()
         // 里记下的时间，没冻结（干活）就用这一帧的挂钟时间，相位连续、没有接缝
-        // （跟第 8 批"去机械感"的道理一样）。
-        val tSec = frozenWobbleTimeSec ?: (SystemClock.uptimeMillis() / 1000.0)
+        // 第 19 批：颤动相位一直用挂钟时间走，不再冻结。
+        val tSec = SystemClock.uptimeMillis() / 1000.0
         val path = buildWobblePath(cx, cy, r, tSec)
 
         if (useShader) drawBodyWithShader(canvas, path, cx, cy, r) else drawBodyLegacy(canvas, path, cx, cy, r)
         drawHighlightsAndRim(canvas, cx, cy, r)
-        if (idleIndicatorAlpha > 0.01f) drawSleepIndicator(canvas, cx, cy, r)
-    }
-
-    /** 💤：待机时球右上角飘两个字，大的 "Z" 偏外、小的 "z" 贴着球边，照录屏里的位置摆。 */
-    private fun drawSleepIndicator(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        sleepPaint.alpha = (idleIndicatorAlpha * 255f).toInt().coerceIn(0, 255)
-        sleepPaint.textSize = r * 0.46f
-        canvas.drawText("Z", cx + r * 0.66f, cy - r * 0.82f, sleepPaint)
-        sleepPaint.textSize = r * 0.28f
-        canvas.drawText("z", cx + r * 0.44f, cy - r * 0.46f, sleepPaint)
     }
 
     private fun drawBodyWithShader(canvas: Canvas, path: Path, cx: Float, cy: Float, r: Float) {

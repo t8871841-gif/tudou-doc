@@ -10,12 +10,15 @@ import android.graphics.RadialGradient
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.random.Random
 
 /**
  * Orilo 主界面第 2 批（2026-11-15 用户反馈"动态玻璃差距不小"后的优化）：
@@ -86,6 +89,17 @@ class OriloBackgroundView @JvmOverloads constructor(
 
     private var flowAnimator: ValueAnimator? = null
 
+    // ---------- 第 19 批：色相跳变的定时器 ----------
+    // 每 20–60 秒（随机）跳一次色相，跳是瞬间的（直接改 hueShiftJump 的值，
+    // 下一帧就换色，没有过渡）。Handler 挂主线程，detach 时停掉。
+    private val hueJumpHandler = Handler(Looper.getMainLooper())
+    private val hueJumpRunnable = object : Runnable {
+        override fun run() {
+            jumpHue()
+            hueJumpHandler.postDelayed(this, 20000L + Random.nextInt(40000))
+        }
+    }
+
     init {
         if (useShader) {
             runtimeShader = RuntimeShader(AGSL_SOURCE)
@@ -96,10 +110,13 @@ class OriloBackgroundView @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         updateFlowAnim()
+        hueJumpHandler.removeCallbacks(hueJumpRunnable)
+        hueJumpHandler.postDelayed(hueJumpRunnable, 20000L + Random.nextInt(40000))
     }
 
     override fun onDetachedFromWindow() {
         stopFlowAnim()
+        hueJumpHandler.removeCallbacks(hueJumpRunnable)
         super.onDetachedFromWindow()
     }
 
@@ -228,10 +245,21 @@ class OriloBackgroundView @JvmOverloads constructor(
     companion object {
         /** 第 5 批：按原版录屏实测的节奏改成约 13 秒一圈（原来是猜的 30 秒，慢了一倍多）。 */
         const val FLOW_PERIOD_MS = 13000L
-        /** 第 12 批：色相漂移单独一根慢轴——原版背景是慢慢在紫和青蓝之间漂移，
-         *  22 秒的录像里色相几乎不动，另一张截图（11 月 16 日 07:59）才到淡青蓝；
-         *  13 秒转一圈太快了。色相一圈 120 秒，光晕呼吸（bloom）和位置还按 13 秒走。 */
-        const val HUE_PERIOD_MS = 120000L
+        /** 第 19 批（用户令）：色相不再按固定时间慢慢转圈——改成"跳变"：平时
+         *  色相不动（只有光斑位置/呼吸/饱和度在 13 秒轴上慢慢变幻），隔一段
+         *  不固定的时间（20–60 秒随机）色相一瞬间跳到一个新值。跳变的色相
+         *  存在这里（伴生对象），背景和水滴都从 phaseAt() 读同一份，保证
+         *  两边跳的是一样的颜色。范围还是 0..50（底色 232→282、光斑
+         *  200→250，全程青蓝到紫，最高 293°，不经过品红/红）。 */
+        @Volatile
+        var hueShiftJump = 0f
+        /** 挑一个新色相跳过去：跟现在至少差 15°（跳得能看出来），方向随机，
+         *  0..50 之间循环。直接赋值就是一瞬间，没有过渡动画。 */
+        fun jumpHue() {
+            val dir = if (Random.nextBoolean()) 1f else -1f
+            val jump = 15f + Random.nextFloat() * 20f
+            hueShiftJump = (hueShiftJump + dir * jump + 50f) % 50f
+        }
 
         // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL、不用改下面的着色器代码 ======
         // 改完重新编译装机就能看到效果；这几个数两个 View（背景 + 水滴）共用同一份，
@@ -272,19 +300,14 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
             val t = (uptimeMs % FLOW_PERIOD_MS) / FLOW_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
-            // 第 12 批：色相走慢轴（120 秒一圈），跟 13 秒的光晕呼吸分开。
-            val hueT = (uptimeMs % HUE_PERIOD_MS) / HUE_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
             return FlowPhase(
                 ax = 0.30f + 0.18f * sin(t * 0.9f),
                 ay = 0.26f + 0.14f * cos(t * 0.7f),
                 bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f),
                 by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f),
-                // 第 12 批：色相漂移改道——第 10 批只往青色走（0→-30），缺了紫；
-                // 原版是慢慢在紫（270–300°）和青蓝（200–220°）之间漂移，一直很淡、
-                // 很亮，从不到红。改成 0→+50：底色 232→282、光斑 A 200→250、
-                // 光斑 B 220→270，全程在青蓝到紫之间，最高只到 293°（紫），
-                // 不经过品红/红。饱和度还按 13 秒走，走到淡的那头经过乳白相。
-                hueShift = 25f - 25f * cos(hueT),
+                // 第 19 批：色相不再按时间慢慢转——直接读跳变值（hueShiftJump），
+                // 平时不动，跳的那一帧直接换色。饱和度还按 13 秒走，走到淡的那头经过乳白相。
+                hueShift = hueShiftJump,
                 satScale = 0.35f + 0.65f * (0.5f + 0.5f * cos(t)),
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
                 // 这样"光晕涨缩"跟"光晕挪位置"不会每圈都卡在同一个点上重复。
