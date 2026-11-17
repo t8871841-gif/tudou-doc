@@ -447,7 +447,7 @@ class MainActivity : Activity() {
         oriloDroplet = OriloDropletView(this)
         dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
         // 第 22 批：涟漪源点 = 水滴左下——水滴落位后算一次，传给背景 View。
-        oriloDroplet.post { updateRippleOrigin() }
+        oriloDroplet?.post { updateRippleOrigin() }
         panel.addView(dropWrap)
         // 下半：对话区——可滚动的对话记录，每条消息单独一个玻璃气泡（跟经典气泡同一套），
         // 不再是整块玻璃板（2026-11-16 用户要求跟经典一样）。
@@ -509,7 +509,7 @@ class MainActivity : Activity() {
         drop.getLocationOnScreen(loc)
         val bgLoc = IntArray(2)
         oriloBackgroundView.getLocationOnScreen(bgLoc)
-        val r = min(w, h) / 2f * 0.78f
+        val r = kotlin.math.min(w, h) / 2f * 0.78f
         val cx = loc[0] - bgLoc[0] + w / 2f
         val cy = loc[1] - bgLoc[1] + h * 0.45f
         // 左下 225°：x 减、y 加（y 朝下）。
