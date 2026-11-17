@@ -28,8 +28,8 @@ import kotlin.math.sin
  * 扭完的坐标再去算三色渐变 + 两团光斑的颜色。API 33 以下（minSdk 24 兜底）保留
  * 第 1 批纯 Canvas 实现，不升级（旧设备没有 AGSL 管线）。
  *
- * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 13 秒一圈：蓝→青→乳白→青→蓝，
- *  第 10 批改道，不经过品红/红）
+ * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 色相 120 秒一圈：青蓝↔紫，
+ *  光晕呼吸 13 秒一圈；第 12 批改道，不经过品红/红）
  * 完全不变，只把相位来源从"动画器自身 elapsed 进度"改成"挂钟绝对时间取模"——这样
  * OriloDropletView 不管什么时候挂到窗口上，用同一份公式在同一个挂钟时刻必然算出
  * 完全相同的渐变色/光斑位置，两个 View 不用互相持有引用也不用传 Bitmap，水滴那边
@@ -133,7 +133,8 @@ class OriloBackgroundView @JvmOverloads constructor(
         flowAnimator = null
     }
 
-    /** 相位完全按挂钟绝对时间算（不依赖动画器自身 elapsed）：30 秒一圈，蓝→紫粉→蓝。
+    /** 相位完全按挂钟绝对时间算（不依赖动画器自身 elapsed）：色相 120 秒一圈（青蓝↔紫），
+     *  光晕呼吸和光斑位置 13 秒一圈。
      *  公式提到了 companion 里的 phaseAt()，OriloDropletView 直接调用同一个函数，
      *  不是各写一份——保证两边任何时刻算出的光斑位置/偏色量在代码层面就是同一个来源，
      *  不存在"两份公式抄错一处就对不上"的风险。 */
@@ -142,7 +143,7 @@ class OriloBackgroundView @JvmOverloads constructor(
         ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift; satScale = p.satScale; bloom = p.bloom
     }
 
-    /** 底色随时间慢慢偏色（蓝 → 青 → 乳白 → 青 → 蓝，13 秒一圈，第 10 批改道，不经过红），照视频里整页色调流动的样子。 */
+    /** 底色随时间慢慢偏色（青蓝 ↔ 紫，色相 120 秒一圈，第 12 批改道，不经过红；饱和度按 13 秒走，走到淡的那头经过乳白相），照视频里整页色调流动的样子。 */
     private fun hueColor(h: Float, s: Float, v: Float): Int =
         Color.HSVToColor(floatArrayOf((h + hueShift) % 360f, (s * satScale).coerceIn(0f, 1f), v))
 
@@ -227,6 +228,10 @@ class OriloBackgroundView @JvmOverloads constructor(
     companion object {
         /** 第 5 批：按原版录屏实测的节奏改成约 13 秒一圈（原来是猜的 30 秒，慢了一倍多）。 */
         const val FLOW_PERIOD_MS = 13000L
+        /** 第 12 批：色相漂移单独一根慢轴——原版背景是慢慢在紫和青蓝之间漂移，
+         *  22 秒的录像里色相几乎不动，另一张截图（11 月 16 日 07:59）才到淡青蓝；
+         *  13 秒转一圈太快了。色相一圈 120 秒，光晕呼吸（bloom）和位置还按 13 秒走。 */
+        const val HUE_PERIOD_MS = 120000L
 
         // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL、不用改下面的着色器代码 ======
         // 改完重新编译装机就能看到效果；这几个数两个 View（背景 + 水滴）共用同一份，
@@ -263,17 +268,19 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
             val t = (uptimeMs % FLOW_PERIOD_MS) / FLOW_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
+            // 第 12 批：色相走慢轴（120 秒一圈），跟 13 秒的光晕呼吸分开。
+            val hueT = (uptimeMs % HUE_PERIOD_MS) / HUE_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
             return FlowPhase(
                 ax = 0.30f + 0.18f * sin(t * 0.9f),
                 ay = 0.26f + 0.14f * cos(t * 0.7f),
                 bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f),
                 by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f),
-                // 第 10 批：色相漂移改道——原来 0→+60，一路走到品红、红（312+60=12），
-                // 真机反馈太艳丽。改成 0→-30，只往青色那边走：蓝（232）→青（202），
-                // 光斑 A（200）→青（170），光斑 B（220）→青蓝（190），全程不经过红。
-                // 饱和度同时跟着走：走到青色那头时饱和度掉到 0.35，背景经过乳白相
-                // （像 Morning Coffee 图里乳白加浅青蓝那样），再漂回浓蓝。
-                hueShift = -15f + 15f * cos(t),
+                // 第 12 批：色相漂移改道——第 10 批只往青色走（0→-30），缺了紫；
+                // 原版是慢慢在紫（270–300°）和青蓝（200–220°）之间漂移，一直很淡、
+                // 很亮，从不到红。改成 0→+50：底色 232→282、光斑 A 200→250、
+                // 光斑 B 220→270，全程在青蓝到紫之间，最高只到 293°（紫），
+                // 不经过品红/红。饱和度还按 13 秒走，走到淡的那头经过乳白相。
+                hueShift = 25f - 25f * cos(hueT),
                 satScale = 0.35f + 0.65f * (0.5f + 0.5f * cos(t)),
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
                 // 这样"光晕涨缩"跟"光晕挪位置"不会每圈都卡在同一个点上重复。
