@@ -137,6 +137,16 @@ import kotlin.math.sin
  * 4. **内部再透一点**：`TUNE_TINT_STRENGTH` 0.3→0.2、`TUNE_RING_STRENGTH`
  *    0.10→0.06、`TUNE_DIFFUSE_STRENGTH` 0.04→0.02、`TUNE_AMBIENT_BOOST` 0.15→0.10；
  *    影子核心 0x42→0x30、铺得更开；整圈白描边 alpha 60→25。
+ *
+ * 2026-11-17 第 14 批（用户把第 13 批代码发给 DeepSeek 审，方向对、但渲染结果
+ * "太重、太实"，像实心塑料球、不像玻璃水滴）：参数给得太猛了，玻璃的质感来自对比——
+ * 边缘极度锐利（高光硬核）、内部极度虚无（高透明度）、暗部极度柔和（影子）。这批
+ * 全是调参，没动结构：透明度大砍（ALPHA_MIN 0.05→0.01、ALPHA_MAX 0.50→0.25）、
+ * 环境白光和漫反射再压（AMBIENT_BOOST 0.10→0.02、DIFFUSE 0.02→0.01）、染色再淡
+ * （TINT 0.2→0.08）、笑脸 0.30→0.12 且内外余弦放宽、暗带 0.4→0.15、影子核心
+ * 0x30→0x18 且褪得更快、铺得更开、高光改成硬核 + 极速衰减且椭圆压扁（0.45→0.3）。
+ * 保留意见：笑脸（0.12 × 边缘透明度 0.25 ≈ 0.03）和暗带（0.15）都比原图实测值
+ * （笑脸 +40、暗带 -46）弱不少，真机上可能淡到看不见，装了看效果再定。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -334,31 +344,34 @@ class OriloDropletView @JvmOverloads constructor(
         const val TUNE_EDGE_SOFT_START = 0.80f
         /** 水滴中心的不透明度：第 9 批按量测报告（中心跟背景亮度只差 0~15/255）大幅调低，
          *  越小中心越透，越接近"看不见水滴只看见一圈边"。第 10 批再调低一档（0.08→0.05），
-         *  真机反馈内部还是偏奶白、背景光斑透不出来。 */
-        const val TUNE_ALPHA_MIN = 0.05f
+         *  真机反馈内部还是偏奶白、背景光斑透不出来。第 14 批（DeepSeek 审）再压到 0.01：
+         *  内部要极度透明，玻璃感来自边缘和折射、不是中心那点白。 */
+        const val TUNE_ALPHA_MIN = 0.01f
         /** 水滴边缘的不透明度：第 9 批也调低了一点（配合"中心更透"的整体方向），
-         *  越大边缘越实。 */
-        const val TUNE_ALPHA_MAX = 0.50f
+         *  越大边缘越实。第 14 批（DeepSeek 审）0.50→0.25：边缘太实了，看着像实心球。 */
+        const val TUNE_ALPHA_MAX = 0.25f
         /** 背景颜色透进水滴的浓度（这是"边缘"位置的浓度上限，中心会按
          *  `tintEdgeFactor` 再打折，见 main() 里的说明）：越大水滴边缘背景色越明显，
          *  越小越像一颗纯白/无色的玻璃珠。第 9 批调低了默认值——量测报告说中心
          *  几乎就是背景本身，之前的 0.6 让中心颜色太实。第 13 批再调低一档（0.3→0.2）：
-         *  用户反馈"用力过猛"，内部要再透一点。 */
-        const val TUNE_TINT_STRENGTH = 0.2f
+         *  用户反馈"用力过猛"，内部要再透一点。第 14 批（DeepSeek 审）再压到 0.08。 */
+        const val TUNE_TINT_STRENGTH = 0.08f
         /** 中心相对边缘的折射强度折扣：中心是这个值 × TUNE_TINT_STRENGTH，边缘是
          *  完整的 TUNE_TINT_STRENGTH——越小中心越透明，环境色反射越集中在边缘。 */
         const val TUNE_TINT_CENTER_FACTOR = 0.35f
         /** 第 13 批新增：底部"笑脸"亮弧的强度——一圈柔和的漫射亮斑（不是线），
          *  目标是最亮处比背景亮约 +40/255（Henry 原图实测峰值）。第 11 批删掉的
-         *  rimPaint 弧是硬线，别恢复它；第 9 批的顶部亮弧方向反了，已整个删掉。 */
-        const val TUNE_SMILE_STRENGTH = 0.30f
+         *  rimPaint 弧是硬线，别恢复它；第 9 批的顶部亮弧方向反了，已整个删掉。
+         *  第 14 批（DeepSeek 审）0.30→0.12：0.30 在图上看着像一根亮线，太实了；
+         *  内外余弦也放宽一点（0.87→0.85、0.50→0.40），让亮带褪得更平滑。 */
+        const val TUNE_SMILE_STRENGTH = 0.12f
         /** 第 13 批新增：底部"笑脸"亮弧的半角，夹角余弦——cos(30°)≈0.87，数字越大
          *  （越接近 1）这段全亮的弧越窄；配合 `TUNE_SMILE_OUTER_COS` 控制往外的
          *  淡出范围，两个一起大致框出"4 点半到 7 点半"（约 60° 宽）这段弧。 */
-        const val TUNE_SMILE_INNER_COS = 0.87f
+        const val TUNE_SMILE_INNER_COS = 0.85f
         /** 第 13 批新增：底部"笑脸"亮弧彻底消失的夹角，cos(60°)≈0.50——比这个夹角更大
          *  （更偏向水滴两侧/上方）就完全没有底部亮弧了。 */
-        const val TUNE_SMILE_OUTER_COS = 0.50f
+        const val TUNE_SMILE_OUTER_COS = 0.40f
         /** 第 13 批新增：顶部暗带的半角，夹角余弦——cos(20°)≈0.94。原图顶部暗带只有
          *  约 40° 宽（12 点附近最暗 -46），比第 9 批亮弧的 120° 窄得多，所以单独给
          *  暗带一对更窄的余弦，不要复用亮弧那对。 */
@@ -368,17 +381,20 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 4 批新增、第 7 批调弱、第 10 批再调弱：球面漫反射强度。采样目标截图发现球体中央其实相当平，
          *  不是明显的明暗渐变，所以这个只给一丝若有若无的立体感，不是主要观感来源，
          *  默认值比第 4 批小了一大截。调到 0 就是完全没有这一丝渐变。 */
-        const val TUNE_DIFFUSE_STRENGTH = 0.02f
+        const val TUNE_DIFFUSE_STRENGTH = 0.01f
         /** 第 7 批新增：贴着最外缘的窄暗带强度——采样目标截图发现边缘有一圈比球体内部和
          *  背景都暗的细边（玻璃全反射那种"黑边"感），这是让边缘看着"是玻璃"而不是
          *  "一张半透明贴纸"的关键细节。第 13 批起只在顶部出现（topDarkMask），
-         *  底部被"笑脸"亮弧盖住的位置不再变暗。 */
-        const val TUNE_DARK_BAND_STRENGTH = 0.4f
+         *  底部被"笑脸"亮弧盖住的位置不再变暗。第 14 批（DeepSeek 审）0.4→0.15：
+         *  左侧和顶部太黑了，暗带要更淡。 */
+        const val TUNE_DARK_BAND_STRENGTH = 0.15f
         /** 第 5 批新增：水滴跟着背景"光晕"一起发亮的强度——数值越大，光晕最强的那几秒
          *  水滴被照得越白越亮；调到 0 就是水滴亮度只跟折射出来的颜色有关，不跟光晕强度挂钩，
          *  退回第 4 批那种"颜色变但亮度不变"的效果。第 10 批从 0.35 砍到 0.15：它是内部
-         *  加白的大头，真机反馈内部偏奶白、背景光斑透不出来。第 13 批再砍到 0.10。 */
-        const val TUNE_AMBIENT_BOOST = 0.10f
+         *  加白的大头，真机反馈内部偏奶白、背景光斑透不出来。第 13 批再砍到 0.10。
+         *  第 14 批（DeepSeek 审）再砍到 0.02：环境白光叠加太多，水滴自己发光
+         *  变成实心球了。 */
+        const val TUNE_AMBIENT_BOOST = 0.02f
         // 第 9 批：原来第 6/8 批"整体挤压成椭圆"的 TUNE_WOBBLE_AMPLITUDE 被下面这组
         // 按角度颤动的参数取代——量测报告说原版是边缘局部此起彼伏，不是整体变椭圆。
         // K 是角度上的"花瓣数"（必须是整数，不然 θ=0 和 θ=2π 接不上，边缘会裂开）；
@@ -603,16 +619,17 @@ class OriloDropletView @JvmOverloads constructor(
         // 影子：右下方一团软影（两条路径共用）。第 10 批按原版实测重调：影子中心最暗、
         // 偏右下，向外平滑变淡——之前是均匀的一团淡影，中心不够实。核心 alpha 0x26→0x38，
         // 中心再往右下挪一点（0.10r→0.18r，1.02r→1.08r），中间加一档过渡、影子铺得更开。
-        // 第 13 批：影子再放软一点——核心 0x42→0x30（原图核心虽暗但边缘褪得极慢，
-        // 我们的影子边界感太重），铺得更开（1.45r→1.6r）。
+        // 第 14 批（DeepSeek 审）：影子再放淡、褪得更快——核心 0x30→0x18，中间
+        // 0x14→0x08，中间点 0.45→0.35；铺得更开（渐变半径 0.9r→1.0r，椭圆左右
+        // 各放宽 0.2r）。原图影子核心暗、但极快地向外消散。
         shadowPaint.shader = RadialGradient(
-            cx + r * 0.18f, cy + r * 1.08f, r * 0.9f,
-            intArrayOf(0x30000000, 0x14000000, 0x00000000),
-            floatArrayOf(0f, 0.45f, 1f),
+            cx + r * 0.18f, cy + r * 1.08f, r * 1.0f,
+            intArrayOf(0x18000000, 0x08000000, 0x00000000),
+            floatArrayOf(0f, 0.35f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawOval(
-            RectF(cx - r * 0.8f, cy + r * 0.7f, cx + r * 1.0f, cy + r * 1.6f),
+            RectF(cx - r * 1.0f, cy + r * 0.7f, cx + r * 1.2f, cy + r * 1.6f),
             shadowPaint,
         )
 
@@ -714,28 +731,30 @@ class OriloDropletView @JvmOverloads constructor(
     }
 
     private fun drawHighlightsAndRim(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        // 大高光：右上一道斜的亮斑。
+        // 大高光：右上一道斜的亮斑。第 14 批（DeepSeek 审）：原来 RadialGradient 的
+        // 柔光像一坨奶油，没有玻璃锐利的反光感。改成硬核 + 极速衰减（前 15% 是纯白
+        // 硬核），椭圆压扁一点（0.45→0.3），更像条形光源的倒影。
         canvas.save()
         canvas.translate(cx + r * 0.42f, cy - r * 0.48f)
         canvas.rotate(-35f)
-        canvas.scale(1f, 0.45f)
+        canvas.scale(1f, 0.3f)
         highlightPaint.shader = RadialGradient(
             0f, 0f, r * 0.3f,
-            intArrayOf(0xE6FFFFFF.toInt(), 0x00FFFFFF),
-            floatArrayOf(0f, 1f),
+            intArrayOf(0xFFFFFFFF.toInt(), 0x40FFFFFF, 0x00FFFFFF),
+            floatArrayOf(0f, 0.15f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawCircle(0f, 0f, r * 0.3f, highlightPaint)
         canvas.restore()
-        // 小高光：左下一小点。
+        // 小高光：左下一小点。第 14 批：跟大高光同一套硬核 + 极速衰减。
         canvas.save()
         canvas.translate(cx - r * 0.45f, cy + r * 0.42f)
         canvas.rotate(-35f)
         canvas.scale(1f, 0.6f)
         smallHighlightPaint.shader = RadialGradient(
             0f, 0f, r * 0.14f,
-            intArrayOf(0xB3FFFFFF.toInt(), 0x00FFFFFF),
-            floatArrayOf(0f, 1f),
+            intArrayOf(0xB3FFFFFF.toInt(), 0x30FFFFFF, 0x00FFFFFF),
+            floatArrayOf(0f, 0.15f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawCircle(0f, 0f, r * 0.14f, smallHighlightPaint)
