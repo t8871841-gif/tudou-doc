@@ -68,6 +68,14 @@ import kotlin.random.Random
  * 距离做正弦调制 sin(距离×频率 − 时间×速度)，随距离指数衰减；源点由
  * MainActivity 按水滴实际落位算好、调 setRippleOrigin() 传进来。呼吸那半
  * （幅度/速度）在 OriloDropletView，不在这里。
+ *
+ * 2026-11-17 第 23 批（用户纠正：涟漪是沿着水珠自己的表面、水珠外面区域没有；
+ * 一束光模型）：v93 把涟漪做在背景上是错的——圈跑到水滴外面去了。改法：背景
+ * 上的涟漪删掉（外面没有圈），涟漪挪到 OriloDropletView 的着色器里（从左下源
+ * 点出发、沿着水滴表面往里扩，每 15 秒一波的波包）。背景这边只留"外面左下聚
+ * 光"：光透过水珠，照亮水珠外面左下一片区域——背景着色器里加一个柔和亮斑，
+ * 位置在水滴左下再往外 0.5r（1.5r 处、225° 方向），由 MainActivity 按水滴
+ * 实际落位算好、调 setCausticSpot() 传进来（位置 + 半径）。
  */
 class OriloBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -94,17 +102,23 @@ class OriloBackgroundView @JvmOverloads constructor(
     private var satScale = 1f
     private var bloom = 0f
 
-    // ---------- 第 22 批：涟漪源点 ----------
-    // 水滴左下（7 点半方向）那个点，本 View 自身坐标（像素）。MainActivity 在水滴
-    // View 落位后算出来调 setRippleOrigin() 传进来；没传之前默认 (0,0)，涟漪
-    // 几乎不可见（decay 会把它压到角落里），不会画错地方。
-    private var rippleOriginX = 0f
-    private var rippleOriginY = 0f
+    // ---------- 第 23 批：外面左下聚光 ----------
+    // 光透过水珠，照亮水珠外面左下一片区域。本 View 自身坐标（像素）。MainActivity
+    // 在水滴 View 落位后算出来调 setCausticSpot() 传进来（位置 + 半径）；没传之前
+    // 默认 (0,0)、半径 1px——半径不能是 0（smoothstep(0, 0, x) 是未定义行为），
+    // 1px 的亮斑在左上角、肉眼看不见，不会画错地方。
+    // 第 22 批的涟漪（setRippleOrigin / rippleOriginX/Y）已删——涟漪是沿着水珠
+    // 自己的表面、水珠外面区域没有，挪到 OriloDropletView 的着色器里了。
+    private var causticSpotX = 0f
+    private var causticSpotY = 0f
+    private var causticRadius = 1f
 
-    /** 第 22 批：涟漪从哪个点往外扩——水滴左下，MainActivity 按水滴实际落位算好传进来。 */
-    fun setRippleOrigin(x: Float, y: Float) {
-        rippleOriginX = x
-        rippleOriginY = y
+    /** 第 23 批：外面左下聚光在哪、多大——水滴左下再往外 0.5r（1.5r 处、225°
+     *  方向），MainActivity 按水滴实际落位算好传进来。 */
+    fun setCausticSpot(x: Float, y: Float, radiusPx: Float) {
+        causticSpotX = x
+        causticSpotY = y
+        causticRadius = radiusPx
     }
 
     private var flowAnimator: ValueAnimator? = null
@@ -217,12 +231,11 @@ class OriloBackgroundView @JvmOverloads constructor(
         s.setFloatUniform("uBlobARadiusFrac", bloomedRadiusFrac(TUNE_BLOB_A_RADIUS_FRAC, bloom))
         s.setFloatUniform("uBlobBStrength", bloomedStrength(TUNE_BLOB_B_STRENGTH, bloom))
         s.setFloatUniform("uBlobBRadiusFrac", bloomedRadiusFrac(TUNE_BLOB_B_RADIUS_FRAC, bloom))
-        // 第 22 批：涟漪——从左下源点往外扩的连续波形（不是一圈一圈画出来的环）。
-        s.setFloatUniform("uRippleOrigin", rippleOriginX, rippleOriginY)
-        s.setFloatUniform("uRippleStrength", TUNE_RIPPLE_STRENGTH)
-        s.setFloatUniform("uRippleFreq", TUNE_RIPPLE_FREQ)
-        s.setFloatUniform("uRippleSpeed", TUNE_RIPPLE_SPEED)
-        s.setFloatUniform("uRippleDecay", TUNE_RIPPLE_DECAY)
+        // 第 23 批：外面左下聚光——光透过水珠，照亮水珠外面左下一片区域。
+        // 位置和半径由 MainActivity 按水滴实际落位算好传进来。
+        s.setFloatUniform("uCausticSpot", causticSpotX, causticSpotY)
+        s.setFloatUniform("uCausticRadius", causticRadius)
+        s.setFloatUniform("uCausticStrength", TUNE_CAUSTIC_STRENGTH)
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 
@@ -322,23 +335,17 @@ class OriloBackgroundView @JvmOverloads constructor(
         const val TUNE_BLOB_B_SAT = 0.62f
         const val TUNE_BLOB_B_VAL = 0.85f
 
-        // ====== 第 22 批：涟漪（连续波形，从左下源点往外扩）======
-        // 参考视频实测：涟漪是一个点发出的连续波形、向外扩散，不是同心圆环、不是
-        // 定时发圈；源点在水滴左下（不是垂直底部）；非常淡，单帧几乎看不见，只有
-        // 动起来才感觉得到。做法：在背景着色器里按到源点的距离做正弦调制——
-        // sin(距离×频率 − 时间×速度)，随距离指数衰减。波峰向外跑的速度 =
-        // 速度/频率（px/秒），波长 = 2π/频率。
-        /** 涟漪亮度调制幅度（0..1）：0.03 就是亮度上下只动 3%，单帧几乎看不见，
-         *  只有动起来才感觉得到——跟参考一样淡。 */
-        const val TUNE_RIPPLE_STRENGTH = 0.03f
-        /** 涟漪空间频率（弧度/像素）：波长 = 2π/0.10 ≈ 63px，参考圆弧间距约 50–70px。 */
-        const val TUNE_RIPPLE_FREQ = 0.10f
-        /** 涟漪时间速度（弧度/秒）：波峰外扩速度 = 6.0/0.10 = 60px/秒，1.5 秒
-         *  （一圈呼吸）跑约 90px，约 1.5 个波长，温和、不抢戏。 */
-        const val TUNE_RIPPLE_SPEED = 6.0f
-        /** 涟漪随距离衰减（1/像素）：300px 处剩 e^(-1.2)≈0.30，500px 处剩 0.14，
-         *  约 300–500px 外基本看不见。 */
-        const val TUNE_RIPPLE_DECAY = 0.004f
+        // ====== 第 23 批：外面左下聚光（光透过水珠，照亮水珠外面左下一片）======
+        // 第 22 批的涟漪常量（TUNE_RIPPLE_*）已删——涟漪是沿着水珠自己的表面、
+        // 水珠外面区域没有，挪到 OriloDropletView 里了（强度/频率/速度/衰减/
+        // 周期都在那边）。背景这边只留外面聚光：一个柔和亮斑，位置在水滴左下
+        // 再往外 0.5r（1.5r 处、225° 方向），半径 0.6r——位置和半径都由
+        // MainActivity 按水滴实际落位算好传进来（uCausticSpot / uCausticRadius），
+        // 这里只定强度。
+        /** 外面左下聚光的峰值亮度（0..1）：0.10，就是那片区域亮 10%——光穿过水珠
+         *  散开了，比里面聚光（0.15）淡、比涟漪（0.03）浓。太亮像灯泡就往 0.06
+         *  降，太淡看不见就往 0.15 升。 */
+        const val TUNE_CAUSTIC_STRENGTH = 0.10f
 
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
@@ -395,11 +402,9 @@ class OriloBackgroundView @JvmOverloads constructor(
             uniform float  uBlobARadiusFrac;
             uniform float  uBlobBStrength;
             uniform float  uBlobBRadiusFrac;
-            uniform float2 uRippleOrigin;
-            uniform float  uRippleStrength;
-            uniform float  uRippleFreq;
-            uniform float  uRippleSpeed;
-            uniform float  uRippleDecay;
+            uniform float2 uCausticSpot;
+            uniform float  uCausticRadius;
+            uniform float  uCausticStrength;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -449,14 +454,13 @@ class OriloBackgroundView @JvmOverloads constructor(
                 float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(pxB) / (iResolution.x * uBlobBRadiusFrac), 0.0, 1.0));
                 colorOut = mix(colorOut, blobBColor, fb * uBlobBStrength);
 
-                // 第 22 批：涟漪——从左下源点往外扩的连续波形。sin 的波峰随时间向外跑
-                // （波峰速度 = uRippleSpeed / uRippleFreq），振幅随距离指数衰减。
-                // 很淡（uRippleStrength 只有 0.03），单帧几乎看不见。水滴本身盖住
-                // 源点附近那一块，所以波纹只在水滴外面看得见。
-                float rippleDist = length(fragCoord - uRippleOrigin);
-                float ripple = sin(rippleDist * uRippleFreq - iTime * uRippleSpeed)
-                    * exp(-rippleDist * uRippleDecay) * uRippleStrength;
-                colorOut += ripple;
+                // 第 23 批：外面左下聚光——光透过水珠，照亮水珠外面左下一片区域。
+                // 柔和亮斑，中心在水滴左下再往外 0.5r（uCausticSpot），半径
+                // uCausticRadius（0.6r），往外褪到 0。注意用 1.0 - smoothstep
+                // 的写法，不用 edge0 > edge1 的反向 smoothstep（未定义行为）。
+                float causticDist = length(fragCoord - uCausticSpot);
+                float caustic = (1.0 - smoothstep(0.0, uCausticRadius, causticDist)) * uCausticStrength;
+                colorOut += caustic;
 
                 return half4(float4(colorOut, 1.0));
             }

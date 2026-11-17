@@ -446,8 +446,8 @@ class MainActivity : Activity() {
         // 水滴颜色不跟状态（固定玻璃色）；大小跟待机走（setAwake：待机缩、干活胀）。
         oriloDroplet = OriloDropletView(this)
         dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
-        // 第 22 批：涟漪源点 = 水滴左下——水滴落位后算一次，传给背景 View。
-        oriloDroplet?.post { updateRippleOrigin() }
+        // 第 23 批：外面左下聚光 = 水滴左下再往外 0.5r——水滴落位后算一次，传给背景 View。
+        oriloDroplet?.post { updateCausticSpot() }
         panel.addView(dropWrap)
         // 下半：对话区——可滚动的对话记录，每条消息单独一个玻璃气泡（跟经典气泡同一套），
         // 不再是整块玻璃板（2026-11-16 用户要求跟经典一样）。
@@ -485,24 +485,26 @@ class MainActivity : Activity() {
         if (orilo) {
             if (hudPanelOpen) hudPanelOpen = false
             refreshOriloChat()
-            // 第 22 批：切到 Orilo 档时也重算一次涟漪源点（面板刚显示、落位可能变了）。
-            oriloDroplet?.post { updateRippleOrigin() }
+            // 第 23 批：切到 Orilo 档时也重算一次外面聚光位置（面板刚显示、落位可能变了）。
+            oriloDroplet?.post { updateCausticSpot() }
         }
         refreshSettingsGear()
     }
 
-    /** 第 22 批：涟漪源点 = 水滴左下（7 点半方向，225°）——按水滴 View 的实际落位算，
-     *  换算到背景 View 自身坐标（两个 View 都在同一个根布局里，用屏幕坐标相减），
-     *  传给背景 View 的着色器（uRippleOrigin）。水滴 onDraw 里圆心是 (w/2, h*0.45)、
-     *  半径是 min(w,h)/2*0.78，这里照同一套公式算，源点才对得上。没落位（宽高为 0）
-     *  就再 post 一次，等下一帧布局完。 */
-    private fun updateRippleOrigin() {
+    /** 第 23 批：外面左下聚光 = 水滴左下再往外 0.5r（1.5r 处、225° 方向），半径
+     *  0.6r——按水滴 View 的实际落位算，换算到背景 View 自身坐标（两个 View 都在
+     *  同一个根布局里，用屏幕坐标相减），传给背景 View 的着色器（uCausticSpot /
+     *  uCausticRadius）。水滴 onDraw 里圆心是 (w/2, h*0.45)、半径是
+     *  min(w,h)/2*0.78，这里照同一套公式算，位置才对得上。没落位（宽高为 0）
+     *  就再 post 一次，等下一帧布局完。第 22 批的涟漪源点（updateRippleOrigin）
+     *  已删——涟漪是沿着水珠自己的表面，挪到水滴着色器里了，不用 MainActivity 传。 */
+    private fun updateCausticSpot() {
         val drop = oriloDroplet ?: return
         if (!::oriloBackgroundView.isInitialized) return
         val w = drop.width.toFloat()
         val h = drop.height.toFloat()
         if (w <= 0f || h <= 0f) {
-            drop.post { updateRippleOrigin() }
+            drop.post { updateCausticSpot() }
             return
         }
         val loc = IntArray(2)
@@ -512,8 +514,9 @@ class MainActivity : Activity() {
         val r = kotlin.math.min(w, h) / 2f * 0.78f
         val cx = loc[0] - bgLoc[0] + w / 2f
         val cy = loc[1] - bgLoc[1] + h * 0.45f
-        // 左下 225°：x 减、y 加（y 朝下）。
-        oriloBackgroundView.setRippleOrigin(cx - r * 0.7071f, cy + r * 0.7071f)
+        // 左下 225°：x 减、y 加（y 朝下）。聚光中心在 1.5r 处（水滴左下 rim
+        // 再往外 0.5r），半径 0.6r。
+        oriloBackgroundView.setCausticSpot(cx - r * 1.5f * 0.7071f, cy + r * 1.5f * 0.7071f, r * 0.6f)
     }
 
     /** Orilo 对话区：按 ChatHistory 重建全部气泡（用户右、助手左，字号 15 不动）；

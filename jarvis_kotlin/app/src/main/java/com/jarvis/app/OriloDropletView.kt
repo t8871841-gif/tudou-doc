@@ -215,6 +215,27 @@ import kotlin.math.sin
  * 在至少差 15°，方向随机，0..50 循环、青蓝到紫、不经过红）。Z 休息提示
  * 取消、不要待机：水滴永远是醒着的、呆萌萌的——setAwake 改成空方法，不
  * 缩（初始就是满尺寸）、颤动不再冻结、不画 Z。
+ *
+ * 2026-11-17 第 23 批（用户给的一束光模型，终于找到感觉了）：水珠的光暗全由
+ * 一束从右上打进来的光决定——折射 + 散射。光打在右上表面：一部分反射（右上大
+ * 高光），一部分折进水里、往法线偏；水珠是凸透镜，光线会聚到对面左下（里面聚
+ * 光亮、穿出去照亮外面左下一片）；顶部暗带是菲涅尔反射（映上面暗处，连续的一
+ * 条带），底部笑脸同理（映下面亮的面）。熊猫眼是旧 dot(n2, topDir) 公式造的
+ * 假象，物理上不存在。这批按这个模型补：
+ * 1. **里面左下聚光**：着色器里加柔和亮斑（225°、0.6r 处），是"光"（加色项，
+ *    不走 alpha——水滴内部 alpha 只有 0.01，走 alpha 会被吃掉看不见），笑脸不动。
+ * 2. **涟漪挪到水滴表面**：v93 把涟漪做在背景上是错的——涟漪是沿着水珠自己的
+ *    表面、水珠外面区域没有。改法：背景上的涟漪删掉；涟漪做到水滴着色器里，从
+ *    左下源点出发、沿着水滴表面往里扩（往右上走）、随距离衰减；还是波包——
+ *    每 15 秒发一波，胀起来再衰减到零，平时没有（也是加色项，不走 alpha）。
+ * 3. **染色/漫反射砍掉**：TINT 0.25→0.02、DIFFUSE 0.05→0.01——水滴是清水
+ *    玻璃、跟背景同色，不自己带颜色和明暗；真实感来自光（聚光、高光、笑脸、
+ *    暗带、影子），不是人工染色。
+ * 4. **影子跟光走**：光从右上进，影子推到左下（中心 +0.18r→-0.18r，椭圆跟
+ *    着镜像），最深处贴水滴下缘、向外褪净。顶部暗带不动（那是边缘折射，不是影子）。
+ * 5. **高光跟着颤动游走**：大高光中心按颤动相位小幅游走（±0.05r，约 ±10px，
+ *    参考实测 ±11px），不再是固定点。外面左下的聚光亮斑在背景着色器里
+ *    （见 OriloBackgroundView 第 23 批）。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -404,8 +425,11 @@ class OriloDropletView @JvmOverloads constructor(
          *  用户反馈"用力过猛"，内部要再透一点。第 14 批（DeepSeek 审）再压到 0.08。
          *  第 18 批 0.08→0.25：0.08 有个副作用——它把折射颜色整体压暗，边缘
          *  alpha 又高，合出来就是一圈黑边（用户问"为什么周围一圈黑"）。提到
-         *  0.25，让折射颜色亮回来、边缘不再发黑，内部也能多带一点折射的色彩。 */
-        const val TUNE_TINT_STRENGTH = 0.25f
+         *  0.25，让折射颜色亮回来、边缘不再发黑，内部也能多带一点折射的色彩。
+         *  第 23 批（用户令"水滴跟背景同色"）0.25→0.02：水滴是清水玻璃，不自己
+         *  带颜色——染色砍到近零，内部就是折射过来的背景本身；真实感来自光
+         *  （聚光、高光、笑脸、暗带、影子），不是人工染色。 */
+        const val TUNE_TINT_STRENGTH = 0.02f
         /** 中心相对边缘的折射强度折扣：中心是这个值 × TUNE_TINT_STRENGTH，边缘是
          *  完整的 TUNE_TINT_STRENGTH——越小中心越透明，环境色反射越集中在边缘。 */
         const val TUNE_TINT_CENTER_FACTOR = 0.35f
@@ -433,8 +457,10 @@ class OriloDropletView @JvmOverloads constructor(
          *  不是明显的明暗渐变，所以这个只给一丝若有若无的立体感，不是主要观感来源，
          *  默认值比第 4 批小了一大截。调到 0 就是完全没有这一丝渐变。第 21 批
          *  （DeepSeek 审）0.01→0.05：背景太平、折射扭不出花样，给内部直接加
-         *  一点明暗——左上角稍亮、右下角稍暗，补一点体积感。 */
-        const val TUNE_DIFFUSE_STRENGTH = 0.05f
+         *  一点明暗——左上角稍亮、右下角稍暗，补一点体积感。第 23 批（用户令）
+         *  0.05→0.01：水滴是清水玻璃，不自己带明暗——漫反射砍到近零，内部的
+         *  明暗由那束光决定（右上入口亮、左下聚光亮），不是人工 shading。 */
+        const val TUNE_DIFFUSE_STRENGTH = 0.01f
         /** 第 7 批新增：贴着最外缘的窄暗带强度——采样目标截图发现边缘有一圈比球体内部和
          *  背景都暗的细边（玻璃全反射那种"黑边"感），这是让边缘看着"是玻璃"而不是
          *  "一张半透明贴纸"的关键细节。第 13 批起只在顶部出现（topDarkMask），
@@ -504,6 +530,47 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 9 批新增：折射环本身的粗细（越小越细、越像一条线；越大越像一片朦胧的光带）。 */
         const val TUNE_RING_WIDTH = 0.09f
 
+        // ====== 第 23 批：一束光模型（右上进、左下聚）+ 表面涟漪波包 ======
+        // 光从右上打进来，折进水里会聚到对面左下——里面左下亮（聚光），穿出去还
+        // 照亮外面左下一片（外面聚光在背景着色器里，见 OriloBackgroundView）。
+        // 聚光和涟漪都是"光"（加色项），不走 alpha——水滴内部 alpha 只有 0.01，
+        // 走 alpha 会被吃掉看不见；它们在 main() 的 return 里直接加到颜色上。
+        /** 里面左下聚光的峰值亮度（0..1）：参考视频实测左下里面比背景亮 +33/255
+         *  （≈0.13），这里取 0.15、留一点余量让它在真机上读得出来。太亮像灯泡
+         *  就往 0.10 降，太淡看不见就往 0.20 升。 */
+        const val TUNE_CAUSTIC_STRENGTH = 0.15f
+        /** 里面左下聚光中心离水滴圆心的距离（相对半径）：0.6r，225° 方向（左下）。
+         *  着色器里按 n2 坐标算，中心在 (-0.7071, +0.7071) * 0.6。 */
+        const val TUNE_CAUSTIC_CENTER_FRAC = 0.6f
+        /** 里面左下聚光的半径（相对半径）：亮斑从中心往外褪到 0 的距离，0.55r。
+         *  中心 0.6r + 半径 0.55r = 1.15r，刚好到水滴边缘、被颤动 Path 裁掉，
+         *  不会漏到水滴外面。 */
+        const val TUNE_CAUSTIC_RADIUS_FRAC = 0.55f
+        /** 涟漪亮度调制幅度（0..1）：0.03 就是亮度上下只动 3%，跟 v93 背景涟漪
+         *  同一个强度——v93 真机上这个强度读着正好（用户说"这次好多了"）。
+         *  涟漪现在在水滴表面上（不是背景上），强度不变。 */
+        const val TUNE_RIPPLE_STRENGTH = 0.03f
+        /** 涟漪空间频率（弧度/像素）：波长 = 2π/0.10 ≈ 63px，跟 v93 背景涟漪
+         *  同一个值（参考圆弧间距约 50–70px）。水滴直径约 430px，一波跨过去
+         *  约 7 个波长。 */
+        const val TUNE_RIPPLE_FREQ = 0.10f
+        /** 涟漪时间速度（弧度/秒）：波峰外扩速度 = 6.0/0.10 = 60px/秒，跟 v93
+         *  同一个值。波包前 3–4 秒能跑约 180–240px（约半个水滴），再往后包络
+         *  衰减、看不见了。 */
+        const val TUNE_RIPPLE_SPEED = 6.0f
+        /** 涟漪随距离衰减（1/像素）：300px 处剩 e^(-1.2)≈0.30，500px 处剩 0.14，
+         *  跟 v93 同一个值。 */
+        const val TUNE_RIPPLE_DECAY = 0.004f
+        /** 涟漪波包的周期（秒）：每 15 秒从左下源点发一波（用户令）。包络 =
+         *  smoothstep(0, 0.5, cycle) * exp(-cycle / 3.0)，cycle = iTime 对 15
+         *  取模——0.5 秒内胀起来、3 秒时间常数衰减，到 15 秒时剩 e^(-5)≈0.007，
+         *  下一波开始时包络是 0，不会"砰"一下跳出来。 */
+        const val TUNE_RIPPLE_PERIOD = 15.0f
+        /** 大高光跟着颤动游走的幅度（相对半径）：0.05r，在用户手机上约 ±10px
+         *  （参考实测高光在 ±11px 内游走）。游走由颤动速度（4.2/2.9/5.6）驱动，
+         *  跟水滴颤动同步、不是另外一套时钟。 */
+        const val TUNE_HIGHLIGHT_WANDER_FRAC = 0.05f
+
         // AGSL：球面透镜——按法线把采样位置往外推，推完的页面坐标拿去算
         // OriloBackgroundView 那套三色渐变 + 两团光斑（公式细节见该文件companion，
         // 这里的 fbm/hash 与它逐字一致，保证两边"布"的纹理长得一样）。
@@ -548,6 +615,14 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float2 uRingCenter;
             uniform float3 blobAColor;
             uniform float3 blobBColor;
+            uniform float  uCausticStrength;
+            uniform float  uCausticCenterFrac;
+            uniform float  uCausticRadiusFrac;
+            uniform float  uRippleStrength;
+            uniform float  uRippleFreq;
+            uniform float  uRippleSpeed;
+            uniform float  uRippleDecay;
+            uniform float  uRipplePeriod;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -670,7 +745,33 @@ class OriloDropletView @JvmOverloads constructor(
                     + float3(1.0, 1.0, 1.0) * ambientLum * uAmbientBoost
                     + float3(1.0, 1.0, 1.0) * ringGlow;
                 colorOut *= (1.0 - darkBand * uDarkBandStrength * topDarkMask);
-                return half4(float4(colorOut * alpha, alpha));
+
+                // 第 23 批：里面左下聚光——光从右上打进来、折进水里会聚到对面左下。
+                // 中心在 225°（左下）、0.6r 处，柔和亮斑、往外褪到 0。参考实测左下
+                // 里面比背景亮 +33/255（≈0.13），这里取 0.15。注意用 1.0 - smoothstep
+                // 的写法，不用 edge0 > edge1 的反向 smoothstep（未定义行为，第 20 批
+                // 讲过这个坑）。
+                float2 causticDir = float2(-0.7071, 0.7071);
+                float causticDist = length(n2 - causticDir * uCausticCenterFrac);
+                float caustic = (1.0 - smoothstep(0.0, uCausticRadiusFrac, causticDist)) * uCausticStrength;
+
+                // 第 23 批：涟漪在水滴自己的表面上（不是背景上）——从左下源点（225°、
+                // rim 上）出发、沿着水滴表面往里扩（往右上走）、随距离衰减。波包：
+                // 每 15 秒发一波，0.5 秒内胀起来、3 秒时间常数衰减到零，平时没有。
+                // 源点在水滴本地坐标里（不用 MainActivity 传），波峰随时间向外跑
+                // （波峰速度 = uRippleSpeed / uRippleFreq），包络在周期边界是 0，
+                // 相位跳变看不见。
+                float2 rippleSrc = float2(-0.7071, 0.7071) * lensRadius;
+                float rippleDist = length(local - rippleSrc);
+                float rippleCycle = mod(iTime, uRipplePeriod);
+                float rippleEnv = smoothstep(0.0, 0.5, rippleCycle) * exp(-rippleCycle / 3.0);
+                float ripple = sin(rippleDist * uRippleFreq - uRippleSpeed * rippleCycle)
+                    * exp(-rippleDist * uRippleDecay) * uRippleStrength * rippleEnv;
+
+                // 聚光和涟漪都是"光"（加色项），直接加到颜色上、不走 alpha——水滴
+                // 内部 alpha 只有 0.01，走 alpha 会被吃掉看不见。alpha 通道还是
+                // 原来的值（水滴本身几乎透明，背景透过它显示；光是叠加上去的）。
+                return half4(float4(colorOut * alpha + float3(1.0) * (caustic + ripple), alpha));
             }
         """
     }
@@ -689,14 +790,18 @@ class OriloDropletView @JvmOverloads constructor(
         // 第 14 批（DeepSeek 审）：影子再放淡、褪得更快——核心 0x30→0x18，中间
         // 0x14→0x08，中间点 0.45→0.35；铺得更开（渐变半径 0.9r→1.0r，椭圆左右
         // 各放宽 0.2r）。原图影子核心暗、但极快地向外消散。
+        // 第 23 批（用户令"影子跟光走"）：光从右上打进来，影子推到左下——中心
+        // +0.18r→-0.18r，椭圆跟着镜像（左宽右窄，原来是右宽左窄）；最深处还是
+        // 贴水滴下缘（cy + 1.08r 不动）、向外褪净。顶部暗带不动（那是边缘折射，
+        // 不是影子）。
         shadowPaint.shader = RadialGradient(
-            cx + r * 0.18f, cy + r * 1.08f, r * 1.0f,
+            cx - r * 0.18f, cy + r * 1.08f, r * 1.0f,
             intArrayOf(0x18000000, 0x08000000, 0x00000000),
             floatArrayOf(0f, 0.35f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawOval(
-            RectF(cx - r * 1.0f, cy + r * 0.7f, cx + r * 1.2f, cy + r * 1.6f),
+            RectF(cx - r * 1.2f, cy + r * 0.7f, cx + r * 1.0f, cy + r * 1.6f),
             shadowPaint,
         )
 
@@ -707,7 +812,7 @@ class OriloDropletView @JvmOverloads constructor(
         val path = buildWobblePath(cx, cy, r, tSec)
 
         if (useShader) drawBodyWithShader(canvas, path, cx, cy, r) else drawBodyLegacy(canvas, path, cx, cy, r)
-        drawHighlightsAndRim(canvas, cx, cy, r)
+        drawHighlightsAndRim(canvas, cx, cy, r, tSec)
     }
 
     private fun drawBodyWithShader(canvas: Canvas, path: Path, cx: Float, cy: Float, r: Float) {
@@ -770,6 +875,15 @@ class OriloDropletView @JvmOverloads constructor(
         // 流场移形）；ax/ay 在 0.12~0.48 一带晃，这里重新映射到水滴本地 -1..1 坐标系
         // 里一个比较居中、留得出椭圆范围的小范围漂移。
         s.setFloatUniform("uRingCenter", (phase.ax - 0.30f) * 2.0f, (phase.ay - 0.26f) * 2.2f)
+        // 第 23 批：一束光模型——里面左下聚光 + 水滴表面涟漪波包。
+        s.setFloatUniform("uCausticStrength", TUNE_CAUSTIC_STRENGTH)
+        s.setFloatUniform("uCausticCenterFrac", TUNE_CAUSTIC_CENTER_FRAC)
+        s.setFloatUniform("uCausticRadiusFrac", TUNE_CAUSTIC_RADIUS_FRAC)
+        s.setFloatUniform("uRippleStrength", TUNE_RIPPLE_STRENGTH)
+        s.setFloatUniform("uRippleFreq", TUNE_RIPPLE_FREQ)
+        s.setFloatUniform("uRippleSpeed", TUNE_RIPPLE_SPEED)
+        s.setFloatUniform("uRippleDecay", TUNE_RIPPLE_DECAY)
+        s.setFloatUniform("uRipplePeriod", TUNE_RIPPLE_PERIOD)
         canvas.drawPath(path, paint)
     }
 
@@ -785,7 +899,7 @@ class OriloDropletView @JvmOverloads constructor(
         canvas.drawPath(path, bodyPaint)
     }
 
-    private fun drawHighlightsAndRim(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+    private fun drawHighlightsAndRim(canvas: Canvas, cx: Float, cy: Float, r: Float, tSec: Double) {
         // 大高光：右上一道斜的亮斑。第 17 批（DeepSeek 审）：原来压太扁（0.3）
         // 加 RadialGradient 柔光，容易画成两头尖尖的细长橄榄球、像一道划痕；
         // 原图高光是锐利的"新月形"/斜长条。改成：位置稍往外挪（0.43/0.46，
@@ -795,8 +909,13 @@ class OriloDropletView @JvmOverloads constructor(
         // 的、之后光速褪去，白色核心别那么死板，更像新月。
         // 第 21 批（DeepSeek 审）：中间停改成纯白、位置收到 5%——高光中心像
         // 针尖一样亮，再锐利一点点。
+        // 第 23 批：大高光跟着颤动游走——参考实测高光在 ±11px 内游走。游走由颤动
+        // 速度（4.2/2.9/5.6）驱动，跟水滴颤动同步；两组不同速度/相位的正弦叠加，
+        // 走得不规则、不是画圈。幅度 ±0.05r（用户手机上约 ±10px）。
+        val wanderX = (sin(TUNE_WOBBLE_SPEED_1 * tSec) * 0.7 + sin(TUNE_WOBBLE_SPEED_2 * tSec + 1.3) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
+        val wanderY = (cos(TUNE_WOBBLE_SPEED_3 * tSec + 0.7) * 0.7 + cos(TUNE_WOBBLE_SPEED_1 * tSec + 2.1) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
         canvas.save()
-        canvas.translate(cx + r * 0.43f, cy - r * 0.46f)
+        canvas.translate(cx + r * 0.43f + wanderX, cy - r * 0.46f + wanderY)
         canvas.rotate(-40f)
         canvas.scale(1f, 0.4f)
         highlightPaint.shader = RadialGradient(
