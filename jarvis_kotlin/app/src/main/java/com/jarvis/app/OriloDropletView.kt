@@ -236,6 +236,28 @@ import kotlin.math.sin
  * 5. **高光跟着颤动游走**：大高光中心按颤动相位小幅游走（±0.05r，约 ±10px，
  *    参考实测 ±11px），不再是固定点。外面左下的聚光亮斑在背景着色器里
  *    （见 OriloBackgroundView 第 23 批）。
+ *
+ * 2026-11-17 第 24 批（用户发 jk-v94 截图 4534 两次纠正）：①"水珠表面阴影
+ * 不合理，不符合物理"——量过：边缘（0.95r）比外面背景暗 -12 到 -20，横跨左
+ * 和上（165° 到 300°），最暗在左上（225°，-20.4），而不是只在顶部；最外缘
+ * （0.99r）整圈都暗（142–159），最暗在左（180°，142.1）。根因两个：顶部暗带
+ * 用的 n2.y 掩码太宽（盖整个上半圈 146°），第 23 批把染色/漫反射砍到近零、
+ * 水滴自己的颜色变暗、边缘 alpha 又高（0.22），暗颜色盖住了亮背景。②"水滴
+ * 表面的阴影超出水滴外围——阴影可以在水滴表面扩散，不能超出水滴表面"——量过：
+ * 底部最暗点在 1.02r（145.9），比边缘本身（0.99r，147.8）还暗，暗区从水滴
+ * 里面一直连到外面 1.3r。根因：下面那片影子（cast shadow）的椭圆顶在
+ * cy+0.7r，伸进水滴里面 0.3r，跟水滴下半的暗边连成一片。改法三处：
+ * 1. **暗带改回余弦掩码**：cosTop = -n2.y，内 cos 0.98（11.5° 内全暗）、
+ *    外 cos 0.94（20° 外全亮），总宽 ~40°，跟原图实测一致。第 20 批删的是
+ *    dot(n2, topDir) 那个"帽"（会留熊猫眼），余弦掩码跟笑脸一样、按夹角
+ *    smoothstep，不会出熊猫眼。
+ * 2. **加亮边（菲涅尔）**：边缘映的是亮背景，应该是亮的、不是暗的。只在边缘
+ *    （edge）起作用、顶部除外（topDarkMask 那里是暗带），强度 0.80（估计值，
+ *    真机上太亮就降、太淡就升），把边缘亮回背景亮度（新参考图 4454 的边缘
+ *    就是亮的细边、不是黑的）。
+ * 3. **影子椭圆顶挪到水滴底边**：从 cy+0.7r 挪到 cy+1.0r，不伸进水滴里面，
+ *    影子只留在水滴下面（椭圆顶贴水滴底边、相切）。影子中心 cy+1.08r 不动、
+ *    位置还是左下。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -452,7 +474,15 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 13 批新增：底部"笑脸"亮弧彻底消失的夹角，cos(60°)≈0.50——比这个夹角更大
          *  （更偏向水滴两侧/上方）就完全没有底部亮弧了。 */
         const val TUNE_SMILE_OUTER_COS = 0.55f
-        // 第 20 批（DeepSeek 审）：顶部暗带改用 n2.y 算之后，这对余弦不再用了，删掉。
+        /** 第 24 批：顶部暗带改回余弦掩码（跟笑脸同套做法）——第 20 批的 n2.y 掩码
+         *  太宽（n2.y < 0.2 就起作用，盖住整个上半圈 146°），真机上暗带横跨左和上、
+         *  最暗在左上（225°，-20），不是原图那种只在顶部 ~40° 宽的带。余弦掩码只在
+         *  顶部起作用：cosTop = -n2.y，顶部是 1、离开顶部 20° 是 0.94。内 cos 0.98
+         *  （11.5° 内全暗）、外 cos 0.94（20° 外全亮），暗带总宽 ~40°，跟原图
+         *  实测一致。第 20 批删的是 dot(n2, topDir) 那个"帽"（会在顶部两侧留熊猫眼），
+         *  不是余弦掩码本身——余弦掩码是按夹角 smoothstep，跟笑脸一样，不会出熊猫眼。 */
+        const val TUNE_TOP_DARK_INNER_COS = 0.98f
+        const val TUNE_TOP_DARK_OUTER_COS = 0.94f
         /** 第 4 批新增、第 7 批调弱、第 10 批再调弱：球面漫反射强度。采样目标截图发现球体中央其实相当平，
          *  不是明显的明暗渐变，所以这个只给一丝若有若无的立体感，不是主要观感来源，
          *  默认值比第 4 批小了一大截。调到 0 就是完全没有这一丝渐变。第 21 批
@@ -472,6 +502,13 @@ class OriloDropletView @JvmOverloads constructor(
          *  用户问"为什么周围一圈黑"；新参考图（4454）的边缘是亮的、不是黑的，
          *  暗带只能留一点点意思。 */
         const val TUNE_DARK_BAND_STRENGTH = 0.10f
+        /** 第 24 批新增：亮边（菲涅尔）强度——边缘映的是亮背景，应该是亮的，不是暗的。
+         *  第 23 批把染色/漫反射砍到近零后，水滴自己的颜色太暗，边缘 alpha 又高
+         *  （0.22），暗颜色盖住亮背景，整圈都发暗（v94 实测最外缘 142–159）。
+         *  亮边只在边缘（edge）起作用、顶部除外（topDarkMask 那里是暗带），把边缘
+         *  亮回背景亮度（新参考图 4454 的边缘就是亮的细边、不是黑的）。0.80 是估计值，
+         *  真机上太亮就降、太淡就升。 */
+        const val TUNE_RIM_STRENGTH = 0.80f
         /** 第 5 批新增：水滴跟着背景"光晕"一起发亮的强度——数值越大，光晕最强的那几秒
          *  水滴被照得越白越亮；调到 0 就是水滴亮度只跟折射出来的颜色有关，不跟光晕强度挂钩，
          *  退回第 4 批那种"颜色变但亮度不变"的效果。第 10 批从 0.35 砍到 0.15：它是内部
@@ -607,6 +644,9 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float  uDiffuseStrength;
             uniform float  uAmbientBoost;
             uniform float  uDarkBandStrength;
+            uniform float  uTopDarkInnerCos;
+            uniform float  uTopDarkOuterCos;
+            uniform float  uRimStrength;
             uniform float  uShapeMargin;
             uniform float  uRingStrength;
             uniform float  uRingRadiusX;
@@ -696,13 +736,15 @@ class OriloDropletView @JvmOverloads constructor(
                 // 约 60° 宽）最亮 +40。第 9 批加的"顶部亮弧"方向反了（原图顶部是最暗
                 // 的点），第 13 批去掉；第 11 批删掉的底部亮弧其实原图有，只是很柔
                 // （+40，不是线），第 13 批以柔光的方式加回来。
-                // 第 20 批（DeepSeek 审）：顶部暗带别再用 dot(n2, topDir) 算——
-                // 在圆形球面上，点积的"帽"会在顶部两侧各留一个黑斑（"熊猫眼"，
-                // v91 实测 30° 和 300° 方向各有一个 -60 的暗斑、顶部反而中性）。
-                // 改成直接用 Y 轴坐标：顶部是一整条柔和的暗带，往下渐渐褪掉。
-                // 用 1.0 - smoothstep(...) 的写法，不用 edge0 > edge1 的反向
-                // smoothstep（那是未定义行为）。n2.y 在顶部 ≈ -1、底部 ≈ +1。
-                float topDarkMask = 1.0 - smoothstep(-0.8, 0.2, n2.y);
+                // 第 24 批：顶部暗带改回余弦掩码（跟笑脸同套做法）——第 20 批的 n2.y
+                // 掩码太宽（n2.y < 0.2 就起作用，盖住整个上半圈 146°），真机上暗带
+                // 横跨左和上、最暗在左上（225°，-20），不是原图那种只在顶部 ~40° 宽
+                // 的带。cosTop = -n2.y，顶部是 1、离开顶部 20° 是 0.94；内 cos 0.98
+                // （11.5° 内全暗）、外 cos 0.94（20° 外全亮），总宽 ~40°。第 20 批
+                // 删的是 dot(n2, topDir) 那个"帽"（会在顶部两侧留熊猫眼），余弦掩码
+                // 是按夹角 smoothstep，跟笑脸一样，不会出熊猫眼。
+                float cosTop = -n2.y;
+                float topDarkMask = smoothstep(uTopDarkOuterCos, uTopDarkInnerCos, cosTop);
                 float2 bottomDir = normalize(float2(0.12, 0.99));
                 float cosBottom = dot(n2, bottomDir);
                 float smileMask = smoothstep(uSmileOuterCos, uSmileInnerCos, cosBottom);
@@ -744,6 +786,14 @@ class OriloDropletView @JvmOverloads constructor(
                     + float3(1.0, 1.0, 1.0) * diffuse * uDiffuseStrength
                     + float3(1.0, 1.0, 1.0) * ambientLum * uAmbientBoost
                     + float3(1.0, 1.0, 1.0) * ringGlow;
+                // 第 24 批：亮边（菲涅尔）——边缘映的是亮背景，应该是亮的，不是暗的。
+                // 只在边缘（edge）起作用，顶部除外（topDarkMask 那里是暗带、映上面
+                // 暗处）。第 23 批染色/漫反射砍到近零后，水滴自己的颜色太暗、边缘
+                // alpha 又高，整圈都发暗（v94 实测最外缘 142–159）；亮边把边缘亮回
+                // 背景亮度（新参考图 4454 的边缘就是亮的细边、不是黑的）。加色项，
+                // 直接加到颜色上；暗带乘法在它之后、只在顶部起作用，不会把它压暗。
+                float rimBright = edge * (1.0 - topDarkMask) * uRimStrength;
+                colorOut += float3(1.0, 1.0, 1.0) * rimBright;
                 colorOut *= (1.0 - darkBand * uDarkBandStrength * topDarkMask);
 
                 // 第 23 批：里面左下聚光——光从右上打进来、折进水里会聚到对面左下。
@@ -794,6 +844,11 @@ class OriloDropletView @JvmOverloads constructor(
         // +0.18r→-0.18r，椭圆跟着镜像（左宽右窄，原来是右宽左窄）；最深处还是
         // 贴水滴下缘（cy + 1.08r 不动）、向外褪净。顶部暗带不动（那是边缘折射，
         // 不是影子）。
+        // 第 24 批（用户令"阴影不能超出水滴表面"）：影子椭圆顶从 cy+0.7r 挪到
+        // cy+1.0r（水滴底边）——原来顶伸进水滴里面 0.3r，跟水滴下半的暗边连成
+        // 一片，底部最暗点落在水滴外面（1.02r），看着像表面阴影漏出去了。现在
+        // 影子只留在水滴下面（椭圆顶贴水滴底边、相切，不伸进水滴），表面阴影
+        // （暗边/暗带）只在水滴里面。影子中心 cy+1.08r 不动、位置还是左下。
         shadowPaint.shader = RadialGradient(
             cx - r * 0.18f, cy + r * 1.08f, r * 1.0f,
             intArrayOf(0x18000000, 0x08000000, 0x00000000),
@@ -801,7 +856,7 @@ class OriloDropletView @JvmOverloads constructor(
             Shader.TileMode.CLAMP,
         )
         canvas.drawOval(
-            RectF(cx - r * 1.2f, cy + r * 0.7f, cx + r * 1.0f, cy + r * 1.6f),
+            RectF(cx - r * 1.2f, cy + r * 1.0f, cx + r * 1.0f, cy + r * 1.6f),
             shadowPaint,
         )
 
@@ -866,6 +921,10 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("uDiffuseStrength", TUNE_DIFFUSE_STRENGTH)
         s.setFloatUniform("uAmbientBoost", TUNE_AMBIENT_BOOST)
         s.setFloatUniform("uDarkBandStrength", TUNE_DARK_BAND_STRENGTH)
+        // 第 24 批：顶部暗带余弦掩码（~40° 宽）+ 亮边（菲涅尔）。
+        s.setFloatUniform("uTopDarkInnerCos", TUNE_TOP_DARK_INNER_COS)
+        s.setFloatUniform("uTopDarkOuterCos", TUNE_TOP_DARK_OUTER_COS)
+        s.setFloatUniform("uRimStrength", TUNE_RIM_STRENGTH)
         s.setFloatUniform("uShapeMargin", TUNE_SHAPE_MARGIN)
         s.setFloatUniform("uRingStrength", TUNE_RING_STRENGTH)
         s.setFloatUniform("uRingRadiusX", TUNE_RING_RADIUS_X)
