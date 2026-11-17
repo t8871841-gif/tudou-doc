@@ -141,13 +141,6 @@ class OriloDropletView @JvmOverloads constructor(
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val smallHighlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 3f
-        color = Color.WHITE
-        alpha = 140
-        strokeCap = Paint.Cap.ROUND
-    }
     private val rimSoftPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 2f
@@ -341,7 +334,13 @@ class OriloDropletView @JvmOverloads constructor(
          *  完整的 TUNE_TINT_STRENGTH——越小中心越透明，环境色反射越集中在边缘。 */
         const val TUNE_TINT_CENTER_FACTOR = 0.35f
         /** 朝光一侧边缘的白色高光强度（第 7 批起改成有方向的，不再是整圈一样亮）。 */
-        const val TUNE_RIM_STRENGTH = 0.6f
+        /** 第 11 批调低（0.6→0.25）：对着 henry-reference.png 做了 36 点环绕边缘的亮度
+         *  扫描，发现这张参考图里"顶部亮弧"这个方向其实是**最暗**的点（两颗高光自己的
+         *  光晕之外，边缘整体偏暗，正上方 12 点钟最暗）——跟第 9 批加这个效果时依据的
+         *  录像量测报告方向正好相反。猜测录像测的是动态效果、亮边方向可能跟场景一起漂移，
+         *  但现在这是固定方向，静态对不上。没有把握哪个对，先调弱、留着这个效果，
+         *  真机看完如果还是不像，大概率要么去掉、要么改成跟背景一起漂移方向。 */
+        const val TUNE_RIM_STRENGTH = 0.25f
         /** 第 9 批新增：顶部亮边"弧"的半角，用夹角余弦表示——cos(62°)≈0.47，数字越大
          *  （越接近 1）这段全亮的弧越窄；配合 `TUNE_RIM_ARC_OUTER_COS` 控制往外的
          *  淡出范围，两个一起大致框出"10 点到 2 点"这段弧。 */
@@ -578,7 +577,7 @@ class OriloDropletView @JvmOverloads constructor(
         // 中心再往右下挪一点（0.10r→0.18r，1.02r→1.08r），中间加一档过渡、影子铺得更开。
         shadowPaint.shader = RadialGradient(
             cx + r * 0.18f, cy + r * 1.08f, r * 0.9f,
-            intArrayOf(0x38000000, 0x14000000, 0x00000000),
+            intArrayOf(0x42000000, 0x18000000, 0x00000000),
             floatArrayOf(0f, 0.5f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -709,9 +708,8 @@ class OriloDropletView @JvmOverloads constructor(
         )
         canvas.drawCircle(0f, 0f, r * 0.14f, smallHighlightPaint)
         canvas.restore()
-        // 亮边：整圈淡淡描边 + 下半圈亮弧（35°→145° 经过正下方 90°）。
+        // 亮边：整圈淡淡描边。原先这里还有一道下半圈亮弧（35°→145°），第 11 批删掉：
+        // 原版水滴里面没有“笑脸”弧，亮弧在顶部边缘、已经在着色器里（arcMask）。
         canvas.drawCircle(cx, cy, r - 1f, rimSoftPaint)
-        val rimRect = RectF(cx - r * 0.82f, cy - r * 0.82f, cx + r * 0.82f, cy + r * 0.82f)
-        canvas.drawArc(rimRect, 35f, 110f, false, rimPaint)
     }
 }

@@ -3,5 +3,10 @@
     <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">#0B0E14</item>
         <item name="android:statusBarColor">#0B0E14</item>
+        <!-- 第 11 批：关掉系统深色模式的 force-dark。没这行时，手机一切到深色模式
+             （如日落自动切换），系统会把 View/Canvas 的颜色反色：黑字变白字、
+             白色高光变黑斑，而 AGSL 着色器画的内容不反——这就是 v89 上气泡白字、
+             高光发黑的原因。v88 是白天截的，深色模式没开，所以看着正常。 -->
+        <item name="android:forceDarkAllowed">false</item>
     </style>
 </resources>
