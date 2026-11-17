@@ -236,10 +236,14 @@ class OriloBackgroundView @JvmOverloads constructor(
         // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL、不用改下面的着色器代码 ======
         // 改完重新编译装机就能看到效果；这几个数两个 View（背景 + 水滴）共用同一份，
         // OriloDropletView 里引用的是 OriloBackgroundView.TUNE_*，改这里两边一起变。
-        /** 噪声扭曲幅度：越大背景"布"扭得越夸张，调到 0 就是纯渐变、完全不扭。 */
-        const val TUNE_WARP_STRENGTH = 0.16f
-        /** 噪声密度：越大纹理越碎越密，越小纹理越大团、更像缓慢的云雾。 */
-        const val TUNE_FBM_SCALE = 2.2f
+        /** 噪声扭曲幅度：越大背景"布"扭得越夸张，调到 0 就是纯渐变、完全不扭。
+         *  第 18 批 0.16→0.25：背景太素、折射 120 也看不出区别——水滴内部
+         *  采样到的颜色跟周围差不多。把布纹加粗一点，让水滴内部有"扭曲的
+         *  流动感"可看；背景本身也会更有纹理。 */
+        const val TUNE_WARP_STRENGTH = 0.25f
+        /** 噪声密度：越大纹理越碎越密，越小纹理越大团、更像缓慢的云雾。
+         *  第 18 批 2.2→2.8：配合扭曲幅度，让纹理更碎一点，折射扭起来更明显。 */
+        const val TUNE_FBM_SCALE = 2.8f
         /** 噪声横向流动速度（越大流得越快）。 */
         const val TUNE_FLOW_SPEED_X = 0.02f
         /** 噪声纵向流动速度（越大流得越快）。 */
