@@ -269,6 +269,18 @@ import kotlin.math.sin
  * 一起删掉，亮边由着色器里的 uRimStrength（菲涅尔，跟着颤动路径走）负责。
  * 用户还顺带提了高光裁剪（clipPath 限制高光在水滴内部、别溢出边缘），这次
  * 没做——先只删白圈，等用户点头再动高光。
+ *
+ * 2026-11-19 第 26 批（用户令，参考视频 24fps×5s 实测）：水滴的颤动还不自然。
+ * 实测 5 秒 120 帧、8 个角度：①水滴不是圆的，是水滴形——底部 225px、顶部
+ * 196px，差 15%，下面鼓、上面收。②颤动不是一起呼吸，是左右晃——右边鼓出去
+ * 时左边正好缩进来（0° 与 180° 相关性 -0.79），像水在左右晃。③颤动不规律、
+ * 很碎——5 秒里方向反转 21–54 次，纯正弦波 5 秒只反转 2、3 次；慢晃上面还
+ * 叠了很多小而快的抖动。改法：①加静态水滴形 TUNE_SHAPE_TEARDROP=0.07
+ * （cos(theta-π/2)，底部 +1、顶部 -1）。②K=2 的 SPEED_1 4.2→3.0，主周期
+ * 对到实测的约 2.1 秒。③加第 4 组高频小幅（K=7、AMP=0.005、SPEED=13.0、
+ * 约 0.48 秒一圈）补碎抖。TUNE_SHAPE_MARGIN 1.18 不用动（1+0.07+0.052=
+ * 1.122 < 1.18）。注意：透明度问题（用户 09:48 说参考图水滴很透、
+ * 我们这个不透）这次没动，等用户点头再改 ALPHA/TINT/DIFFUSE。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -337,9 +349,17 @@ class OriloDropletView @JvmOverloads constructor(
      *  第 8 批一样）。返回的是"半径倍数"，1.0 就是不鼓不缩。 */
     private fun wobbleFactor(theta: Double, tSec: Double): Double {
         return 1.0 +
+            // 第 26 批（参考视频 24fps×5s 实测）：水滴形——下面鼓、上面收，
+            // 底部半径比顶部大 ~15%（实测底部 225px、顶部 196px）。cos(theta-π/2)
+            // 在底部（θ=90°，屏幕坐标 y 向下）为 +1、顶部（θ=270°）为 -1。
+            TUNE_SHAPE_TEARDROP * cos(theta - Math.PI / 2) +
             TUNE_WOBBLE_AMP_1 * cos(TUNE_WOBBLE_K_1 * theta + TUNE_WOBBLE_SPEED_1 * tSec) +
             TUNE_WOBBLE_AMP_2 * cos(TUNE_WOBBLE_K_2 * theta + TUNE_WOBBLE_SPEED_2 * tSec) +
-            TUNE_WOBBLE_AMP_3 * cos(TUNE_WOBBLE_K_3 * theta + TUNE_WOBBLE_SPEED_3 * tSec)
+            TUNE_WOBBLE_AMP_3 * cos(TUNE_WOBBLE_K_3 * theta + TUNE_WOBBLE_SPEED_3 * tSec) +
+            // 第 26 批：碎抖——实测 5 秒里方向反转 21–54 次，纯正弦波 5 秒只反转
+            // 2、3 次；慢晃上面还叠了很多小而快的抖动。第 4 组高频小幅（K=7、
+            // 0.5%、约 0.48 秒一圈）补这个碎抖。
+            TUNE_WOBBLE_AMP_4 * cos(TUNE_WOBBLE_K_4 * theta + TUNE_WOBBLE_SPEED_4 * tSec)
     }
 
     /** 把当前（或冻结的）颤动形状算成一个闭合 Path，供 onDraw() 画水滴本体用。
@@ -537,8 +557,11 @@ class OriloDropletView @JvmOverloads constructor(
         const val TUNE_WOBBLE_AMP_1 = 0.020
         /** 第 9 批新增：花瓣 1 转动的快慢（弧度/秒）。
          *  第 22 批（参考视频实测约 1.5 秒一圈，周期 = 2π/SPEED）0.23→4.2，
-         *  约 1.5 秒一圈；三组速度不成整数比，波形不重复。 */
-        const val TUNE_WOBBLE_SPEED_1 = 4.2
+         *  约 1.5 秒一圈；三组速度不成整数比，波形不重复。
+         *  第 26 批（参考视频 24fps×5s 实测：主周期约 2.1 秒）4.2→3.0，
+         *  约 2.1 秒一圈；K=2 这一层是左右晃的主力（对边反相关 -0.79），
+         *  周期要跟实测主周期对上。 */
+        const val TUNE_WOBBLE_SPEED_1 = 3.0
         /** 第 9 批新增：颤动花瓣数 2（鼓缩 3 瓣，更碎一点的起伏）。 */
         const val TUNE_WOBBLE_K_2 = 3.0
         /** 第 22 批：0.008→0.015。 */
@@ -551,6 +574,20 @@ class OriloDropletView @JvmOverloads constructor(
         const val TUNE_WOBBLE_AMP_3 = 0.012
         /** 第 22 批：0.31→5.6，约 1.1 秒一圈。 */
         const val TUNE_WOBBLE_SPEED_3 = 5.6
+        /** 第 26 批新增：水滴形的静态幅度——底部半径比顶部大多少的一半。
+         *  参考视频 24fps×5s 实测：底部 225px、顶部 196px，差 ~15%，
+         *  所以一半是 0.07；cos(theta-π/2) 在底部为 +1、顶部为 -1。
+         *  这是静态形状（不随时间变），只决定水滴是"下面鼓、上面收"的水滴形、
+         *  不是正圆。DeepSeek 早建议过这个形状，一直等用户点头才做。 */
+        const val TUNE_SHAPE_TEARDROP = 0.07
+        /** 第 26 批新增：颤动花瓣数 4（鼓缩 7 瓣，最碎的抖动层）。 */
+        const val TUNE_WOBBLE_K_4 = 7.0
+        /** 第 26 批新增：花瓣 4 的幅度——0.005 就是这一层单独最多让半径多鼓/缩 0.5%，
+         *  只补"碎抖"的手感，不抢主颤动的戏。 */
+        const val TUNE_WOBBLE_AMP_4 = 0.005
+        /** 第 26 批新增：花瓣 4 转动的快慢（弧度/秒）——13.0 约 0.48 秒一圈，
+         *  5 秒里反转约 20 次，加上前三组的慢晃，合起来接近实测的 21–54 次反转。 */
+        const val TUNE_WOBBLE_SPEED_4 = 13.0
         /** 第 9 批新增：构成颤动轮廓 Path 用多少个点——点数越多边缘越顺滑，但每帧要多算
          *  几个三角函数；48 在普通手机上绰绰有余，没有卡顿的必要不建议调太高。 */
         const val WOBBLE_POINTS = 48
