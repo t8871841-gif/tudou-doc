@@ -28,8 +28,9 @@ import kotlin.math.sin
  * 扭完的坐标再去算三色渐变 + 两团光斑的颜色。API 33 以下（minSdk 24 兜底）保留
  * 第 1 批纯 Canvas 实现，不升级（旧设备没有 AGSL 管线）。
  *
- * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 色相连续缓慢漂移：青蓝↔紫，
- *  第 30 批改，2–5°/秒，不再跳变；光晕呼吸 13 秒一圈；第 12 批改道，不经过品红/红）
+ * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 色相连续缓慢漂移：青↔蓝↔紫，
+ *  第 31 批改，2–5°/秒，不再跳变，偶尔褪成乳白；光晕呼吸 13 秒一圈；第 12 批改道，
+ *  不经过品红/红）
  * 完全不变，只把相位来源从"动画器自身 elapsed 进度"改成"挂钟绝对时间取模"——这样
  * OriloDropletView 不管什么时候挂到窗口上，用同一份公式在同一个挂钟时刻必然算出
  * 完全相同的渐变色/光斑位置，两个 View 不用互相持有引用也不用传 Bitmap，水滴那边
@@ -183,8 +184,9 @@ class OriloBackgroundView @JvmOverloads constructor(
         ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift; satScale = p.satScale; bloom = p.bloom
     }
 
-    /** 底色随时间慢慢偏色（青蓝 ↔ 紫，连续缓慢漂移，第 12 批改道，不经过红；
-     *  第 30 批：饱和度跟色相耦合，变蓝时浓、变紫时淡），照视频里整页色调流动的样子。 */
+    /** 底色随时间慢慢偏色（青 ↔ 蓝 ↔ 紫，连续缓慢漂移，第 12 批改道，不经过红；
+     *  第 31 批：饱和度跟色相耦合，变蓝/青时浓、变紫时淡；偶尔褪成乳白相），
+     *  照视频里整页色调流动的样子。 */
     private fun hueColor(h: Float, s: Float, v: Float): Int =
         Color.HSVToColor(floatArrayOf((h + hueShift) % 360f, (s * satScale).coerceIn(0f, 1f), v))
 
@@ -337,14 +339,26 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
             val t = (uptimeMs % FLOW_PERIOD_MS) / FLOW_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
-            // 第 30 批（Henry 视频 30fps 实测）：色相连续缓慢漂移，不再跳变。
-            // 两组不成整数比的正弦叠加（31 秒和 47 秒），漂移不重复、没有固定
-            // 周期；hueShift 0..50，最快漂移约 4.4°/秒（实测 2–5°/秒）。
-            // 饱和度跟色相耦合：变蓝（hueShift 小）时饱和度高，变紫（hueShift 大）
-            // 时饱和度低——实测蓝 0.68–0.70、紫 0.45；satScale 1.0→0.65。
+            // 第 31 批（用户令：背景要蓝、紫、青、乳白轮着变，颜色转化随机）：
+            // 色相范围拉到 -45..+50（第 30 批是 0..50，只到蓝紫），青（约 190°）
+            // 和紫（约 282°）都能走到。两组不成整数比的正弦叠加（53 秒和 79 秒），
+            // 漂移不重复、没有固定周期；最快漂移约 4.9°/秒（实测 2–5°/秒）。
+            // 饱和度跟色相耦合：变蓝/青（hueShift 小）时饱和度高，变紫（hueShift 大）
+            // 时饱和度低。hueShift -45→1.0、+50→0.70。
+            // 乳白相：偶尔（约每 2–3 分钟一次、持续十来秒）饱和度压到很低，背景褪成
+            // 乳白。用一个长周期正弦（173 秒）+ 高阈值 smoothstep，平时为 0、峰值
+            // 附近才起作用；三个周期（53/79/173）不成整数比，颜色转化没有固定周期。
+            // 阈值 0.96（不是 0.88）：正弦峰顶很宽，阈值低了乳白相会拖到 27 秒，
+            // 太长；0.96 时明显褪白约 15 秒，是一段"相位"、不是常态。
+            // 注意：光斑 A 底色 200° 在色相最青时到 155°（偏绿），是同一套 hueShift
+            // 一起移的副作用；主渐变（232°）到 187° 是青，整体还是青蓝调。
             val tSec = uptimeMs / 1000.0
-            val hueShift = (25.0 + 15.0 * sin(2.0 * Math.PI * tSec / 31.0) + 10.0 * sin(2.0 * Math.PI * tSec / 47.0)).toFloat()
-            val satScale = (1.0f - 0.35f * (hueShift / 50f)).coerceIn(0.65f, 1.0f)
+            val hueShift = (2.5 + 27.5 * sin(2.0 * Math.PI * tSec / 53.0) + 20.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
+            val baseSat = (1.0f - 0.30f * ((hueShift + 45f) / 95f)).coerceIn(0.70f, 1.0f)
+            val milkyRaw = (0.5f + 0.5f * sin(2.0 * Math.PI * tSec / 173.0)).toFloat()
+            val milkyT = ((milkyRaw - 0.96f) / (1.0f - 0.96f)).coerceIn(0f, 1f)
+            val milky = milkyT * milkyT * (3f - 2f * milkyT)
+            val satScale = (baseSat * (1.0f - 0.8f * milky)).coerceIn(0.14f, 1.0f)
             return FlowPhase(
                 ax = 0.30f + 0.18f * sin(t * 0.9f),
                 ay = 0.26f + 0.14f * cos(t * 0.7f),
