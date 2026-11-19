@@ -300,13 +300,33 @@ import kotlin.math.sin
  * 背景 177，也是透明的，但它看着像实心玻璃球：上面暗带、下面笑脸亮弧、
  * 高光纯白、下面影子漆黑，四边的反差把球框出来了，中心再透也不空。
  * 所以不加中心白（ALPHA_MIN 保持 0.01f），只加强四边的反差：①笑脸
- * 0.50→0.75、OUTER_COS 0.55→0.60（底部亮一大块；若真机太硬变实线，再拉
- * 到 0.65 让它褪得更慢）。②暗带 0.10→0.35（顶部压出一层看得见的暗；只在
+ * 0.50→0.75、OUTER_COS 0.55→0.60（底部亮一大块；若真机太硬变实线，把 OUTER_COS
+ * 往下调到 0.50 让它褪得更慢——第 29 批纠正：0.65 更接近 0.85、过渡更窄只会更硬，
+ * 0.65 的方向是反的）。②暗带 0.10→0.35（顶部压出一层看得见的暗；只在
  * 顶部 ~40° 宽的余弦掩码里起作用，不是整圈，第 18 批的黑边不会回来）。
  * ③影子加深：核心 0x18→0x38、中间 0x08→0x14，渐变停点保持 (0f, 0.35f, 1f)
  * （核心虽暗、35% 半径处就开始快速消散，不糊成一大团黑）。④大高光改胖改软：
  * scale (1, 0.4)→(1, 0.55)，渐变停点 [0, 0.05, 1]→[0, 0.35, 1]
  * （现在是针尖、5% 白核就没了；参考图是新月，35% 白核再慢慢淡出）。
+ *
+ * 2026-11-19 第 30 批（用户令"这批全部改完再构建"，Henry 视频 30fps×994 帧实测）：
+ * 用户两个模型纠正 + 四条实测改进，一次全做：①去静态水滴形——水滴本质是圆，
+ * 所谓水滴形是某个时刻的形变；TUNE_SHAPE_TEARDROP 0.07→0.0，瞬时水滴形由 K=1
+ * 左右晃产生（第 26 批的静态项是错的）。②涟漪改多点——原来只有一个源点（左下
+ * 225°），现在 3 个源点（225°左下、315°右下、135°左上），各错开 5 秒轮流起波，
+ * 每 5 秒有一波从不同点出发；单点周期还是 15 秒。③背景色相跳变改连续漂移——
+ * 994 帧量出来根本没有跳变，色相是连续缓慢漂移（2–5°/秒，20–25 秒走完蓝↔紫
+ * 一圈）；跳变定时器和 jumpHue() 全删（见 OriloBackgroundView），色相改成两组
+ * 不成整数比的正弦叠加（31 秒和 47 秒），漂移不重复。④饱和度跟色相耦合——
+ * 变蓝时浓、变紫时淡（实测蓝 0.68–0.70、紫 0.45），satScale 1.0→0.65，13 秒
+ * 余弦饱和度作废。⑤水滴中心漂移——中心在框中心附近 ±7px 不规则漂移，两组
+ * 慢正弦叠加（约 7 秒和 12 秒），幅度 0.05r；cx/cy 一次漂移到位，颤动 Path、
+ * 着色器 lensCenter、影子、高光全用同一个 cx/cy。⑥高光游走加大 + 位置外推——
+ * 游走 0.05r→0.11r（实测 ±25px），位置 (0.43, -0.46)→(0.41, -0.57)，距圆心
+ * 0.63r→0.70r（实测核心在 0.80r；再往外推外缘就伸出水滴了）。⑦第 5 组高频
+ * 小幅（K=9、AMP=0.004、SPEED=20.0、约 0.31 秒一圈）补碎抖——4 组模拟的 5 秒
+ * 反转数只有 10–19 次，实测 21–54 次。五组总量 0.056，最大半径倍数 1.056 <
+ * TUNE_SHAPE_MARGIN 1.18，安全。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -369,15 +389,20 @@ class OriloDropletView @JvmOverloads constructor(
         scaleY = currentScale
     }
 
-    /** 第 9 批新增：按角度算这一刻（或冻结时刻）水滴边缘该鼓出/缩进多少，3 组不成
+    /** 第 9 批新增：按角度算这一刻（或冻结时刻）水滴边缘该鼓出/缩进多少，5 组不成
      *  整数比的频率叠加在角度 θ 和时间 t 上——θ 上必须是整数倍频率（不然 θ=0 和
      *  θ=2π 接不上，边缘会有裂缝），t 上则要连续（不能用会循环重置的值，道理跟
-     *  第 8 批一样）。返回的是"半径倍数"，1.0 就是不鼓不缩。 */
+     *  第 8 批一样）。返回的是"半径倍数"，1.0 就是不鼓不缩。
+     *  第 30 批：静态水滴形项归零（TUNE_SHAPE_TEARDROP=0.0，用户纠正——水滴
+     *  本质是圆，水滴形是某个时刻的形变），瞬时水滴形由 K=1 左右晃产生。 */
     private fun wobbleFactor(theta: Double, tSec: Double): Double {
         return 1.0 +
             // 第 26 批（参考视频 24fps×5s 实测）：水滴形——下面鼓、上面收，
             // 底部半径比顶部大 ~15%（实测底部 225px、顶部 196px）。cos(theta-π/2)
             // 在底部（θ=90°，屏幕坐标 y 向下）为 +1、顶部（θ=270°）为 -1。
+            // 第 30 批：这一项已归零（TUNE_SHAPE_TEARDROP=0.0）——用户纠正，
+            // 水滴形是某个时刻的形变、不是静态形状，留着这一行是让结构还在、
+            // 以后想调回来只改常数就行。
             TUNE_SHAPE_TEARDROP * cos(theta - Math.PI / 2) +
             TUNE_WOBBLE_AMP_1 * cos(TUNE_WOBBLE_K_1 * theta + TUNE_WOBBLE_SPEED_1 * tSec) +
             TUNE_WOBBLE_AMP_2 * cos(TUNE_WOBBLE_K_2 * theta + TUNE_WOBBLE_SPEED_2 * tSec) +
@@ -385,7 +410,10 @@ class OriloDropletView @JvmOverloads constructor(
             // 第 26 批：碎抖——实测 5 秒里方向反转 21–54 次，纯正弦波 5 秒只反转
             // 2、3 次；慢晃上面还叠了很多小而快的抖动。第 4 组高频小幅（K=7、
             // 0.5%、约 0.48 秒一圈）补这个碎抖。
-            TUNE_WOBBLE_AMP_4 * cos(TUNE_WOBBLE_K_4 * theta + TUNE_WOBBLE_SPEED_4 * tSec)
+            TUNE_WOBBLE_AMP_4 * cos(TUNE_WOBBLE_K_4 * theta + TUNE_WOBBLE_SPEED_4 * tSec) +
+            // 第 30 批：第 5 组更高频小幅（K=9、0.4%、约 0.31 秒一圈）——4 组
+            // 模拟的 5 秒反转数只有 10–19 次，实测 21–54 次，再补一组往上靠。
+            TUNE_WOBBLE_AMP_5 * cos(TUNE_WOBBLE_K_5 * theta + TUNE_WOBBLE_SPEED_5 * tSec)
     }
 
     /** 把当前（或冻结的）颤动形状算成一个闭合 Path，供 onDraw() 画水滴本体用。
@@ -623,9 +651,10 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 26 批新增：水滴形的静态幅度——底部半径比顶部大多少的一半。
          *  参考视频 24fps×5s 实测：底部 225px、顶部 196px，差 ~15%，
          *  所以一半是 0.07；cos(theta-π/2) 在底部为 +1、顶部为 -1。
-         *  这是静态形状（不随时间变），只决定水滴是"下面鼓、上面收"的水滴形、
-         *  不是正圆。DeepSeek 早建议过这个形状，一直等用户点头才做。 */
-        const val TUNE_SHAPE_TEARDROP = 0.07
+         *  第 30 批（用户纠正）：水滴本质是圆形，所谓水滴形是某个时刻的形变，
+         *  不是静态形状——把瞬时形变焊死成永久形状是错的。静态项归零（0.0），
+         *  瞬时水滴形改由 K=1 左右晃产生（某一刻一侧鼓、一侧缩，就是水滴形）。 */
+        const val TUNE_SHAPE_TEARDROP = 0.0f
         /** 第 26 批新增：颤动花瓣数 4（鼓缩 7 瓣，最碎的抖动层）。 */
         const val TUNE_WOBBLE_K_4 = 7.0
         /** 第 26 批新增：花瓣 4 的幅度——0.005 就是这一层单独最多让半径多鼓/缩 0.5%，
@@ -634,14 +663,27 @@ class OriloDropletView @JvmOverloads constructor(
         /** 第 26 批新增：花瓣 4 转动的快慢（弧度/秒）——13.0 约 0.48 秒一圈，
          *  5 秒里反转约 20 次，加上前三组的慢晃，合起来接近实测的 21–54 次反转。 */
         const val TUNE_WOBBLE_SPEED_4 = 13.0
+        /** 第 30 批新增：颤动花瓣数 5（鼓缩 9 瓣，最碎的抖动层）——Henry 视频
+         *  30fps 实测：半径颤动没有干净周期，是 1–2 秒相关时间的快抖；4 组
+         *  正弦模拟的 5 秒反转数只有 10–19 次，实测 21–54 次。再加一组高频
+         *  小幅往上补。K=9 是奇数（对边反相，跟 K=1、3、5、7 同套道理）。 */
+        const val TUNE_WOBBLE_K_5 = 9.0
+        /** 第 30 批新增：花瓣 5 的幅度——0.004 就是这一层单独最多让半径多鼓/缩
+         *  0.4%，只补"碎抖"的手感，不抢主颤动的戏。五组总量 0.020+0.015+0.012
+         *  +0.005+0.004=0.056，最大半径倍数 1.056 < TUNE_SHAPE_MARGIN 1.18，安全。 */
+        const val TUNE_WOBBLE_AMP_5 = 0.004
+        /** 第 30 批新增：花瓣 5 转动的快慢（弧度/秒）——20.0 约 0.31 秒一圈，
+         *  5 秒里单这一组就反转约 32 次，合起来往实测的 21–54 次靠。 */
+        const val TUNE_WOBBLE_SPEED_5 = 20.0
         /** 第 9 批新增：构成颤动轮廓 Path 用多少个点——点数越多边缘越顺滑，但每帧要多算
          *  几个三角函数；48 在普通手机上绰绰有余，没有卡顿的必要不建议调太高。 */
         const val WOBBLE_POINTS = 48
 
         /** 第 9 批新增：着色器自己那套"圆形裁切"的半径放宽倍数——颤动会让水滴边缘鼓出去
-         *  最多 `TUNE_WOBBLE_AMP_1+2+3` 这么多（第 10 批起约 2.6%），如果着色器自己还按原来的
+         *  最多 `TUNE_WOBBLE_AMP_1+2+3+4+5` 这么多（第 30 批起约 5.6%），如果着色器自己还按原来的
          *  半径硬裁切，鼓出去的部分会被着色器判成"圆外"直接透明，等于白鼓了。这个值要
-         *  略大于 1+幅度总和，留点安全余量；改了上面几个 AMP 的话记得这个也要跟着调大。 */
+         *  略大于 1+幅度总和，留点安全余量；改了上面几个 AMP 的话记得这个也要跟着调大。
+         *  第 30 批：五组总量 0.056，最大半径倍数 1.056 < 1.18，安全，不用动。 */
         const val TUNE_SHAPE_MARGIN = 1.18f
 
         /** 第 9 批新增：内部折射环的强度——很淡的一圈，别调太大，抢了高光的戏就不像了。
@@ -686,15 +728,25 @@ class OriloDropletView @JvmOverloads constructor(
         /** 涟漪随距离衰减（1/像素）：300px 处剩 e^(-1.2)≈0.30，500px 处剩 0.14，
          *  跟 v93 同一个值。 */
         const val TUNE_RIPPLE_DECAY = 0.004f
-        /** 涟漪波包的周期（秒）：每 15 秒从左下源点发一波（用户令）。包络 =
+        /** 涟漪波包的周期（秒）：每 15 秒一轮（用户令）。包络 =
          *  smoothstep(0, 0.5, cycle) * exp(-cycle / 3.0)，cycle = iTime 对 15
          *  取模——0.5 秒内胀起来、3 秒时间常数衰减，到 15 秒时剩 e^(-5)≈0.007，
-         *  下一波开始时包络是 0，不会"砰"一下跳出来。 */
+         *  下一波开始时包络是 0，不会"砰"一下跳出来。
+         *  第 30 批：3 个源点各错开 5 秒（周期/3）轮流起波，等于每 5 秒有一波
+         *  从不同点出发；单点周期还是 15 秒。 */
         const val TUNE_RIPPLE_PERIOD = 15.0f
         /** 大高光跟着颤动游走的幅度（相对半径）：0.05r，在用户手机上约 ±10px
          *  （参考实测高光在 ±11px 内游走）。游走由颤动速度（4.2/2.9/5.6）驱动，
-         *  跟水滴颤动同步、不是另外一套时钟。 */
-        const val TUNE_HIGHLIGHT_WANDER_FRAC = 0.05f
+         *  跟水滴颤动同步、不是另外一套时钟。
+         *  第 30 批（Henry 视频 30fps 实测）：高光游走其实是 ±25px，约 ±0.11r，
+         *  0.05r 太小。提到 0.11r。 */
+        const val TUNE_HIGHLIGHT_WANDER_FRAC = 0.11f
+        /** 第 30 批新增：水滴中心漂移的幅度（相对半径）——Henry 视频 30fps 实测，
+         *  中心在 (538, 716) 附近 ±7px 不规则漂移（标准差，范围 ±28px），没有
+         *  固定周期。0.05r 在用户手机上约 ±12px，两组不成整数比的慢正弦叠加后
+         *  标准差约 0.027r ≈ 6–7px。中心漂移后，颤动 Path、着色器 lensCenter、
+         *  影子、高光都用同一个漂移后的 cx/cy，不会错位。 */
+        const val TUNE_CENTER_DRIFT_FRAC = 0.05f
 
         // AGSL：球面透镜——按法线把采样位置往外推，推完的页面坐标拿去算
         // OriloBackgroundView 那套三色渐变 + 两团光斑（公式细节见该文件companion，
@@ -893,18 +945,34 @@ class OriloDropletView @JvmOverloads constructor(
                 float causticDist = length(n2 - causticDir * uCausticCenterFrac);
                 float caustic = (1.0 - smoothstep(0.0, uCausticRadiusFrac, causticDist)) * uCausticStrength;
 
-                // 第 23 批：涟漪在水滴自己的表面上（不是背景上）——从左下源点（225°、
-                // rim 上）出发、沿着水滴表面往里扩（往右上走）、随距离衰减。波包：
-                // 每 15 秒发一波，0.5 秒内胀起来、3 秒时间常数衰减到零，平时没有。
-                // 源点在水滴本地坐标里（不用 MainActivity 传），波峰随时间向外跑
-                // （波峰速度 = uRippleSpeed / uRippleFreq），包络在周期边界是 0，
-                // 相位跳变看不见。
-                float2 rippleSrc = float2(-0.7071, 0.7071) * lensRadius;
-                float rippleDist = length(local - rippleSrc);
-                float rippleCycle = mod(iTime, uRipplePeriod);
-                float rippleEnv = smoothstep(0.0, 0.5, rippleCycle) * exp(-rippleCycle / 3.0);
-                float ripple = sin(rippleDist * uRippleFreq - uRippleSpeed * rippleCycle)
-                    * exp(-rippleDist * uRippleDecay) * uRippleStrength * rippleEnv;
+                // 第 23 批：涟漪在水滴自己的表面上（不是背景上）——从源点（rim 上）
+                // 出发、沿着水滴表面往里扩、随距离衰减。波包：每 15 秒发一波，0.5 秒
+                // 内胀起来、3 秒时间常数衰减到零，平时没有。源点在水滴本地坐标里
+                // （不用 MainActivity 传），波峰随时间向外跑（波峰速度 =
+                // uRippleSpeed / uRippleFreq），包络在周期边界是 0，相位跳变看不见。
+                // 第 30 批（用户令）：涟漪改多点——原来只有一个源点（左下 225°），
+                // 现在 3 个源点（225°左下、315°右下、135°左上），各错开 5 秒
+                // （周期/3）轮流起波；同一时刻最多一波是主峰，旧波已衰到 ~19%，
+                // 三波叠加不会冲到 3 倍。多个点、不同时刻的变化。
+                float ripple = 0.0;
+                float2 rippleSrc1 = float2(-0.7071, 0.7071) * lensRadius;
+                float rippleCycle1 = mod(iTime, uRipplePeriod);
+                float rippleEnv1 = smoothstep(0.0, 0.5, rippleCycle1) * exp(-rippleCycle1 / 3.0);
+                float rippleDist1 = length(local - rippleSrc1);
+                ripple += sin(rippleDist1 * uRippleFreq - uRippleSpeed * rippleCycle1)
+                    * exp(-rippleDist1 * uRippleDecay) * uRippleStrength * rippleEnv1;
+                float2 rippleSrc2 = float2(0.7071, 0.7071) * lensRadius;
+                float rippleCycle2 = mod(iTime + uRipplePeriod / 3.0, uRipplePeriod);
+                float rippleEnv2 = smoothstep(0.0, 0.5, rippleCycle2) * exp(-rippleCycle2 / 3.0);
+                float rippleDist2 = length(local - rippleSrc2);
+                ripple += sin(rippleDist2 * uRippleFreq - uRippleSpeed * rippleCycle2)
+                    * exp(-rippleDist2 * uRippleDecay) * uRippleStrength * rippleEnv2;
+                float2 rippleSrc3 = float2(-0.7071, -0.7071) * lensRadius;
+                float rippleCycle3 = mod(iTime + uRipplePeriod * 2.0 / 3.0, uRipplePeriod);
+                float rippleEnv3 = smoothstep(0.0, 0.5, rippleCycle3) * exp(-rippleCycle3 / 3.0);
+                float rippleDist3 = length(local - rippleSrc3);
+                ripple += sin(rippleDist3 * uRippleFreq - uRippleSpeed * rippleCycle3)
+                    * exp(-rippleDist3 * uRippleDecay) * uRippleStrength * rippleEnv3;
 
                 // 聚光和涟漪都是"光"（加色项），直接加到颜色上、不走 alpha——水滴
                 // 内部 alpha 只有 0.01，走 alpha 会被吃掉看不见。alpha 通道还是
@@ -918,8 +986,15 @@ class OriloDropletView @JvmOverloads constructor(
         super.onDraw(canvas)
         // 布局给 220dp 的框，水滴本身画 0.78 倍、圆心略靠上，给右下方的软影留地方。
         val r = min(width, height) / 2f * 0.78f
-        val cx = width / 2f
-        val cy = height * 0.45f
+        // 第 30 批（Henry 视频 30fps 实测）：水滴中心不钉死——在框中心附近
+        // ±7px 不规则漂移。两组不成整数比的慢正弦叠加（约 7 秒和 12 秒），
+        // 幅度 0.05r，标准差约 0.027r。cx/cy 在这里一次漂移到位，后面颤动
+        // Path、着色器 lensCenter、影子、高光全用这一个 cx/cy，不会错位。
+        val tSec = SystemClock.uptimeMillis() / 1000.0
+        val driftX = (sin(tSec * 0.90) * 0.7 + sin(tSec * 0.52 + 1.7) * 0.3).toFloat() * r * TUNE_CENTER_DRIFT_FRAC
+        val driftY = (cos(tSec * 0.73 + 0.9) * 0.7 + cos(tSec * 1.10 + 2.4) * 0.3).toFloat() * r * TUNE_CENTER_DRIFT_FRAC
+        val cx = width / 2f + driftX
+        val cy = height * 0.45f + driftY
         if (r <= 0f) return
 
         // 影子：右下方一团软影（两条路径共用）。第 10 批按原版实测重调：影子中心最暗、
@@ -962,7 +1037,7 @@ class OriloDropletView @JvmOverloads constructor(
         // 第 9 批：本体改成画"颤动 Path"而不是正圆——冻结时刻（待机）用 setAwake()
         // 里记下的时间，没冻结（干活）就用这一帧的挂钟时间，相位连续、没有接缝
         // 第 19 批：颤动相位一直用挂钟时间走，不再冻结。
-        val tSec = SystemClock.uptimeMillis() / 1000.0
+        // 第 30 批：tSec 已在 onDraw 开头算过（中心漂移要用），这里不再重复算。
         val path = buildWobblePath(cx, cy, r, tSec)
 
         if (useShader) drawBodyWithShader(canvas, path, cx, cy, r) else drawBodyLegacy(canvas, path, cx, cy, r)
@@ -1077,7 +1152,11 @@ class OriloDropletView @JvmOverloads constructor(
         val wanderX = (sin(TUNE_WOBBLE_SPEED_1 * tSec) * 0.7 + sin(TUNE_WOBBLE_SPEED_2 * tSec + 1.3) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
         val wanderY = (cos(TUNE_WOBBLE_SPEED_3 * tSec + 0.7) * 0.7 + cos(TUNE_WOBBLE_SPEED_1 * tSec + 2.1) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
         canvas.save()
-        canvas.translate(cx + r * 0.43f + wanderX, cy - r * 0.46f + wanderY)
+        // 第 30 批（Henry 视频 30fps 实测）：高光核心在 0.80r 处（距圆心），
+        // 我们 0.63r 太靠里。位置往外推到 (0.41, -0.57)，距圆心 0.70r、方向
+        // 约 54°（右上）；外缘 0.70+0.25=0.95r，还在水滴里面，不会成贴片。
+        // 再往外推到 0.80r 的话外缘 1.05r 就伸出水滴了，别推过头。
+        canvas.translate(cx + r * 0.41f + wanderX, cy - r * 0.57f + wanderY)
         canvas.rotate(-40f)
         canvas.scale(1f, 0.55f)
         highlightPaint.shader = RadialGradient(

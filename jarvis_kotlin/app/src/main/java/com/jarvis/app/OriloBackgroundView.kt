@@ -10,15 +10,12 @@ import android.graphics.RadialGradient
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.random.Random
 
 /**
  * Orilo 主界面第 2 批（2026-11-15 用户反馈"动态玻璃差距不小"后的优化）：
@@ -31,8 +28,8 @@ import kotlin.random.Random
  * 扭完的坐标再去算三色渐变 + 两团光斑的颜色。API 33 以下（minSdk 24 兜底）保留
  * 第 1 批纯 Canvas 实现，不升级（旧设备没有 AGSL 管线）。
  *
- * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 色相 120 秒一圈：青蓝↔紫，
- *  光晕呼吸 13 秒一圈；第 12 批改道，不经过品红/红）
+ * 颜色公式（渐变三色 hueColor() / 光斑位置 ax,ay,bx,by / 色相连续缓慢漂移：青蓝↔紫，
+ *  第 30 批改，2–5°/秒，不再跳变；光晕呼吸 13 秒一圈；第 12 批改道，不经过品红/红）
  * 完全不变，只把相位来源从"动画器自身 elapsed 进度"改成"挂钟绝对时间取模"——这样
  * OriloDropletView 不管什么时候挂到窗口上，用同一份公式在同一个挂钟时刻必然算出
  * 完全相同的渐变色/光斑位置，两个 View 不用互相持有引用也不用传 Bitmap，水滴那边
@@ -124,15 +121,10 @@ class OriloBackgroundView @JvmOverloads constructor(
     private var flowAnimator: ValueAnimator? = null
 
     // ---------- 第 19 批：色相跳变的定时器 ----------
-    // 每 20–60 秒（随机）跳一次色相，跳是瞬间的（直接改 hueShiftJump 的值，
-    // 下一帧就换色，没有过渡）。Handler 挂主线程，detach 时停掉。
-    private val hueJumpHandler = Handler(Looper.getMainLooper())
-    private val hueJumpRunnable = object : Runnable {
-        override fun run() {
-            jumpHue()
-            hueJumpHandler.postDelayed(this, 20000L + Random.nextInt(40000))
-        }
-    }
+    // 第 30 批已删：Henry 视频 30fps 实测没有跳变，色相是连续缓慢漂移；
+    // 跳变定时器（hueJumpHandler/hueJumpRunnable）和 jumpHue() 全删，
+    // 色相改成 phaseAt() 里按挂钟时间连续算。这里留空是防以后有人照着
+    // 旧笔记把跳变加回来。
 
     init {
         if (useShader) {
@@ -144,13 +136,10 @@ class OriloBackgroundView @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         updateFlowAnim()
-        hueJumpHandler.removeCallbacks(hueJumpRunnable)
-        hueJumpHandler.postDelayed(hueJumpRunnable, 20000L + Random.nextInt(40000))
     }
 
     override fun onDetachedFromWindow() {
         stopFlowAnim()
-        hueJumpHandler.removeCallbacks(hueJumpRunnable)
         super.onDetachedFromWindow()
     }
 
@@ -184,8 +173,8 @@ class OriloBackgroundView @JvmOverloads constructor(
         flowAnimator = null
     }
 
-    /** 相位完全按挂钟绝对时间算（不依赖动画器自身 elapsed）：色相 120 秒一圈（青蓝↔紫），
-     *  光晕呼吸和光斑位置 13 秒一圈。
+    /** 相位完全按挂钟绝对时间算（不依赖动画器自身 elapsed）：色相连续缓慢漂移
+     *  （第 30 批：青蓝↔紫，2–5°/秒，不再跳变），光晕呼吸和光斑位置 13 秒一圈。
      *  公式提到了 companion 里的 phaseAt()，OriloDropletView 直接调用同一个函数，
      *  不是各写一份——保证两边任何时刻算出的光斑位置/偏色量在代码层面就是同一个来源，
      *  不存在"两份公式抄错一处就对不上"的风险。 */
@@ -194,7 +183,8 @@ class OriloBackgroundView @JvmOverloads constructor(
         ax = p.ax; ay = p.ay; bx = p.bx; by = p.by; hueShift = p.hueShift; satScale = p.satScale; bloom = p.bloom
     }
 
-    /** 底色随时间慢慢偏色（青蓝 ↔ 紫，色相 120 秒一圈，第 12 批改道，不经过红；饱和度按 13 秒走，走到淡的那头经过乳白相），照视频里整页色调流动的样子。 */
+    /** 底色随时间慢慢偏色（青蓝 ↔ 紫，连续缓慢漂移，第 12 批改道，不经过红；
+     *  第 30 批：饱和度跟色相耦合，变蓝时浓、变紫时淡），照视频里整页色调流动的样子。 */
     private fun hueColor(h: Float, s: Float, v: Float): Int =
         Color.HSVToColor(floatArrayOf((h + hueShift) % 360f, (s * satScale).coerceIn(0f, 1f), v))
 
@@ -289,16 +279,12 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  不固定的时间（20–60 秒随机）色相一瞬间跳到一个新值。跳变的色相
          *  存在这里（伴生对象），背景和水滴都从 phaseAt() 读同一份，保证
          *  两边跳的是一样的颜色。范围还是 0..50（底色 232→282、光斑
-         *  200→250，全程青蓝到紫，最高 293°，不经过品红/红）。 */
-        @Volatile
-        var hueShiftJump = 0f
-        /** 挑一个新色相跳过去：跟现在至少差 15°（跳得能看出来），方向随机，
-         *  0..50 之间循环。直接赋值就是一瞬间，没有过渡动画。 */
-        fun jumpHue() {
-            val dir = if (Random.nextBoolean()) 1f else -1f
-            val jump = 15f + Random.nextFloat() * 20f
-            hueShiftJump = (hueShiftJump + dir * jump + 50f) % 50f
-        }
+         *  200→250，全程青蓝到紫，最高 293°，不经过品红/红）。
+         *  第 30 批（Henry 视频 30fps 实测，用户令"全部改完"）：跳变模型是错的——
+         *  994 帧量出来根本没有跳变，色相是连续缓慢漂移（2–5°/秒，20–25 秒
+         *  走完蓝↔紫一圈）。跳变定时器和 jumpHue() 全删，色相改成 phaseAt()
+         *  里按挂钟时间连续算（两组不成整数比的正弦叠加，不重复、没有固定周期）。
+         *  hueShiftJump 和 jumpHue() 已删，别再找。 */
 
         // ====== 调参区：想自己试效果就改这几个数，不用懂 AGSL、不用改下面的着色器代码 ======
         // 改完重新编译装机就能看到效果；这几个数两个 View（背景 + 水滴）共用同一份，
@@ -351,15 +337,21 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
             val t = (uptimeMs % FLOW_PERIOD_MS) / FLOW_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
+            // 第 30 批（Henry 视频 30fps 实测）：色相连续缓慢漂移，不再跳变。
+            // 两组不成整数比的正弦叠加（31 秒和 47 秒），漂移不重复、没有固定
+            // 周期；hueShift 0..50，最快漂移约 4.4°/秒（实测 2–5°/秒）。
+            // 饱和度跟色相耦合：变蓝（hueShift 小）时饱和度高，变紫（hueShift 大）
+            // 时饱和度低——实测蓝 0.68–0.70、紫 0.45；satScale 1.0→0.65。
+            val tSec = uptimeMs / 1000.0
+            val hueShift = (25.0 + 15.0 * sin(2.0 * Math.PI * tSec / 31.0) + 10.0 * sin(2.0 * Math.PI * tSec / 47.0)).toFloat()
+            val satScale = (1.0f - 0.35f * (hueShift / 50f)).coerceIn(0.65f, 1.0f)
             return FlowPhase(
                 ax = 0.30f + 0.18f * sin(t * 0.9f),
                 ay = 0.26f + 0.14f * cos(t * 0.7f),
                 bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f),
                 by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f),
-                // 第 19 批：色相不再按时间慢慢转——直接读跳变值（hueShiftJump），
-                // 平时不动，跳的那一帧直接换色。饱和度还按 13 秒走，走到淡的那头经过乳白相。
-                hueShift = hueShiftJump,
-                satScale = 0.35f + 0.65f * (0.5f + 0.5f * cos(t)),
+                hueShift = hueShift,
+                satScale = satScale,
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
                 // 这样"光晕涨缩"跟"光晕挪位置"不会每圈都卡在同一个点上重复。
                 bloom = 0.5f + 0.5f * sin(t * 0.85f - (Math.PI / 2).toFloat()),
