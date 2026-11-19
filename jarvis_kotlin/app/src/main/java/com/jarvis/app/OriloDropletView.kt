@@ -7,7 +7,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
-import android.graphics.RectF
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
@@ -337,6 +336,13 @@ import kotlin.math.sin
  * ②笑脸 0.75→1.0、亮边 0.80→1.0。③影子中间停点 0x58→0x80（50%），核心
  * 0xC8 和停点（0f, 0.35f, 1f）不动。ALPHA_MAX 不动（第 21 批 0.35 试过、
  * 糊成实心白），只把边缘效果本身提亮。
+ * 2026-11-19 第 33 批（用户令：仔细看 Henry 视频逐帧分析）：视频 5 帧量下来，
+ * 表面是平滑渐变（左下亮→右上暗，没有平的地方加孤立白点），影子是一片自然
+ * 晕开的暗（最暗 39–52，横向 1.5r+、纵向 2r+，亮度横竖慢慢变，没有硬边）。
+ * ①影子去拱形：不用扁椭圆切了，直接画大而软的圆形渐变（中心水滴底下 1.3r、
+ * 半径 1.8r），褪到 0 才到边；水滴后画、盖住渐变上沿。②表面加平滑渐变：
+ * 聚光 0.15→0.30（左下亮起来，表面有明暗流动）、漫反射 0.01→0.06（极淡
+ * 的方向性明暗）。RectF 导入随椭圆一起删了。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -588,8 +594,11 @@ class OriloDropletView @JvmOverloads constructor(
          *  （DeepSeek 审）0.01→0.05：背景太平、折射扭不出花样，给内部直接加
          *  一点明暗——左上角稍亮、右下角稍暗，补一点体积感。第 23 批（用户令）
          *  0.05→0.01：水滴是清水玻璃，不自己带明暗——漫反射砍到近零，内部的
-         *  明暗由那束光决定（右上入口亮、左下聚光亮），不是人工 shading。 */
-        const val TUNE_DIFFUSE_STRENGTH = 0.01f
+         *  明暗由那束光决定（右上入口亮、左下聚光亮），不是人工 shading。
+         *  第 33 批（用户令：水滴表面要干净）：0.01→0.06——v100 表面太平、
+         *  没有体积感；漫反射补一点极淡的方向性明暗（左上稍亮、右下稍暗），
+         *  跟聚光一起让表面有平滑的明暗流动。还是很小，不会让水滴自己发光。 */
+        const val TUNE_DIFFUSE_STRENGTH = 0.06f
         /** 第 7 批新增：贴着最外缘的窄暗带强度——采样目标截图发现边缘有一圈比球体内部和
          *  背景都暗的细边（玻璃全反射那种"黑边"感），这是让边缘看着"是玻璃"而不是
          *  "一张半透明贴纸"的关键细节。第 13 批起只在顶部出现（topDarkMask），
@@ -724,8 +733,14 @@ class OriloDropletView @JvmOverloads constructor(
         // 走 alpha 会被吃掉看不见；它们在 main() 的 return 里直接加到颜色上。
         /** 里面左下聚光的峰值亮度（0..1）：参考视频实测左下里面比背景亮 +33/255
          *  （≈0.13），这里取 0.15、留一点余量让它在真机上读得出来。太亮像灯泡
-         *  就往 0.10 降，太淡看不见就往 0.20 升。 */
-        const val TUNE_CAUSTIC_STRENGTH = 0.15f
+         *  就往 0.10 降，太淡看不见就往 0.20 升。
+         *  第 33 批（用户令：水滴表面要干净、一眼就是一颗水滴浮在背景上）：
+         *  0.15→0.30——v100 表面是平的（170–182），只有一个孤立的白高光，
+         *  像块白斑贴在平玻璃上；参考图表面是平滑渐变（左下 216→右上 166）。
+         *  聚光是表面渐变的主力（光从右上进、左下聚），提亮它让表面有自然的
+         *  明暗流动，高光不再是孤立的白块。注意聚光在 return 里直接加色、
+         *  不走 alpha，不会被 0.22 的边缘透明度吃掉。 */
+        const val TUNE_CAUSTIC_STRENGTH = 0.30f
         /** 里面左下聚光中心离水滴圆心的距离（相对半径）：0.6r，225° 方向（左下）。
          *  着色器里按 n2 坐标算，中心在 (-0.7071, +0.7071) * 0.6。 */
         const val TUNE_CAUSTIC_CENTER_FRAC = 0.6f
@@ -1073,16 +1088,21 @@ class OriloDropletView @JvmOverloads constructor(
         // v100 影子核心够暗（44.7，参考 45.7），但整体太淡（均值 168.7，
         // 参考 140.3），影子不够宽、不够实。核心不动（0xC8），停点不动
         // （0f, 0.35f, 1f），只把中间抬到 50%，影子中间那圈实一点。 */
+        // 第 33 批（用户令：仔细看 Henry 视频逐帧分析）：视频里影子不是一个
+        // "形状"，就是一片自然晕开的暗——5 帧量下来，影子最暗 39–52，横向铺
+        // 到 1.5r 开外、纵向慢慢淡出 2r，亮度横竖都是慢慢变的，没有硬边、
+        // 没有拱形。咱们 v100 的影子是扁椭圆切出来的，硬边就是拱顶。
+        // 改成：不用椭圆切，直接画一个大而软的圆形渐变晕开（中心在水滴底下
+        // 1.3r、半径 1.8r），褪到 0 才到边，没有硬线；水滴后画、盖住渐变
+        // 上沿，影子从水滴底下自然晕出来。颜色和停点不动（核心 0xC8、
+        // 中间 0x80、停点 0f/0.35f/1f）。 */
         shadowPaint.shader = RadialGradient(
-            cx - r * 0.18f, cy + r * 1.08f, r * 1.0f,
+            cx - r * 0.18f, cy + r * 1.3f, r * 1.8f,
             intArrayOf(0xC8000000.toInt(), 0x80000000.toInt(), 0x00000000),
             floatArrayOf(0f, 0.35f, 1f),
             Shader.TileMode.CLAMP,
         )
-        canvas.drawOval(
-            RectF(cx - r * 1.2f, cy + r * 1.0f, cx + r * 1.0f, cy + r * 1.6f),
-            shadowPaint,
-        )
+        canvas.drawCircle(cx - r * 0.18f, cy + r * 1.3f, r * 1.8f, shadowPaint)
 
         // 第 9 批：本体改成画"颤动 Path"而不是正圆——冻结时刻（待机）用 setAwake()
         // 里记下的时间，没冻结（干活）就用这一帧的挂钟时间，相位连续、没有接缝
