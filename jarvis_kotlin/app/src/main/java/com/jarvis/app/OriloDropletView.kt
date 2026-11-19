@@ -343,6 +343,16 @@ import kotlin.math.sin
  * 半径 1.8r），褪到 0 才到边；水滴后画、盖住渐变上沿。②表面加平滑渐变：
  * 聚光 0.15→0.30（左下亮起来，表面有明暗流动）、漫反射 0.01→0.06（极淡
  * 的方向性明暗）。RectF 导入随椭圆一起删了。
+ * 2026-11-19 第 34 批（DeepSeek 审，用户令先修复再打包给 Claude 核对）：
+ * v101 真机 30fps 量下来影子是方块（暗区宽 603px 上下不变）、水滴还是空的。
+ * ①影子挪到背景层：1.8r 直径 308dp 比 220dp 小框大，被框切成矩形；背景是
+ * 全屏的，影子在那边画才有地方晕开（setShadowSpot，跟外面聚光同一套路）。
+ * 小框里的影子画法和 shadowPaint 全删了。②高光外推：(0.41,-0.57)→(0.47,
+ * -0.65)，距圆心 0.70r→0.80r，对上实测。③高光改软：白核停点 0.35f→0.15f，
+ * 亮核小了、光晕大了，像新月不像图钉。④游走解绑：不再绑颤动速度，改独立慢
+ * 相位（1.1/0.6、0.8/0.5 rad/s，周期 5.7–12.6 秒）。DeepSeek 错的三条没采纳：
+ * 着色器没截断（return 在 1041 行）、中心漂移在用（1055–1058 行）、影子
+ * 1.3r/1.8r 第 33 批已改；涟漪是你亲口定的，不删。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -359,7 +369,6 @@ class OriloDropletView @JvmOverloads constructor(
     private val screenLoc = IntArray(2)
 
     // ---------- 两条路径共用：右上大高光 / 左下小高光 / 亮边 ----------
-    private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val smallHighlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     // 第 25 批（用户令）：rimSoftPaint 删掉——它是画一个固定正圆的描边
@@ -1088,21 +1097,11 @@ class OriloDropletView @JvmOverloads constructor(
         // v100 影子核心够暗（44.7，参考 45.7），但整体太淡（均值 168.7，
         // 参考 140.3），影子不够宽、不够实。核心不动（0xC8），停点不动
         // （0f, 0.35f, 1f），只把中间抬到 50%，影子中间那圈实一点。 */
-        // 第 33 批（用户令：仔细看 Henry 视频逐帧分析）：视频里影子不是一个
-        // "形状"，就是一片自然晕开的暗——5 帧量下来，影子最暗 39–52，横向铺
-        // 到 1.5r 开外、纵向慢慢淡出 2r，亮度横竖都是慢慢变的，没有硬边、
-        // 没有拱形。咱们 v100 的影子是扁椭圆切出来的，硬边就是拱顶。
-        // 改成：不用椭圆切，直接画一个大而软的圆形渐变晕开（中心在水滴底下
-        // 1.3r、半径 1.8r），褪到 0 才到边，没有硬线；水滴后画、盖住渐变
-        // 上沿，影子从水滴底下自然晕出来。颜色和停点不动（核心 0xC8、
-        // 中间 0x80、停点 0f/0.35f/1f）。 */
-        shadowPaint.shader = RadialGradient(
-            cx - r * 0.18f, cy + r * 1.3f, r * 1.8f,
-            intArrayOf(0xC8000000.toInt(), 0x80000000.toInt(), 0x00000000),
-            floatArrayOf(0f, 0.35f, 1f),
-            Shader.TileMode.CLAMP,
-        )
-        canvas.drawCircle(cx - r * 0.18f, cy + r * 1.3f, r * 1.8f, shadowPaint)
+        // 第 34 批：影子挪到背景层（OriloBackgroundView）去了——影子半径 1.8r
+        // 直径 308dp，比这个 220dp 的小框还大，在这里画会被框的四边切成
+        // 矩形（v101 真机：暗区宽 603px、上下不变，就是方块）。背景是全屏
+        // 的，影子在那边画才有地方晕开。位置由 MainActivity.updateCausticSpot()
+        // 一起算好传过去（setShadowSpot）。这里不再画影子。 */
 
         // 第 9 批：本体改成画"颤动 Path"而不是正圆——冻结时刻（待机）用 setAwake()
         // 里记下的时间，没冻结（干活）就用这一帧的挂钟时间，相位连续、没有接缝
@@ -1222,20 +1221,27 @@ class OriloDropletView @JvmOverloads constructor(
         // (1, 0.4)→(1, 0.55)，渐变停点 [0, 0.05, 1]→[0, 0.35, 1]。现在高光
         // 是个针尖（5% 白核就没了）、像道划痕；参考图是个新月，有 35% 的白核
         // 再慢慢淡出。
-        val wanderX = (sin(TUNE_WOBBLE_SPEED_1 * tSec) * 0.7 + sin(TUNE_WOBBLE_SPEED_2 * tSec + 1.3) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
-        val wanderY = (cos(TUNE_WOBBLE_SPEED_3 * tSec + 0.7) * 0.7 + cos(TUNE_WOBBLE_SPEED_1 * tSec + 2.1) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
+        // 第 34 批（DeepSeek 审，逐条核对后采纳）：游走跟颤动解绑——颤动是水在晃、
+        // 游走是光源/视角在变，绑在一起高光像焊死在形变上、很机械。改成独立的
+        // 慢相位（1.1/0.6、0.8/0.5 rad/s，周期 5.7–12.6 秒），缓缓游走。
+        val wanderX = (sin(tSec * 1.1) * 0.7 + sin(tSec * 0.6 + 1.3) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
+        val wanderY = (cos(tSec * 0.8 + 0.7) * 0.7 + cos(tSec * 0.5 + 2.1) * 0.3).toFloat() * r * TUNE_HIGHLIGHT_WANDER_FRAC
         canvas.save()
         // 第 30 批（Henry 视频 30fps 实测）：高光核心在 0.80r 处（距圆心），
         // 我们 0.63r 太靠里。位置往外推到 (0.41, -0.57)，距圆心 0.70r、方向
         // 约 54°（右上）；外缘 0.70+0.25=0.95r，还在水滴里面，不会成贴片。
         // 再往外推到 0.80r 的话外缘 1.05r 就伸出水滴了，别推过头。
-        canvas.translate(cx + r * 0.41f + wanderX, cy - r * 0.57f + wanderY)
+        // 第 34 批（DeepSeek 审）：实测高光核心就是 0.80r，(0.47, -0.65)
+        // 合起来正好 0.802r。白核只占渐变前 15%（停点 0.15f），亮核在
+        // 0.71–0.89r 之间、还在水滴里面；外缘 1.05r 处已褪到透明，不会成贴片。
+        // 高光改软：白核停点 0.35f→0.15f，亮核小了、光晕大了，像新月不像图钉。
+        canvas.translate(cx + r * 0.47f + wanderX, cy - r * 0.65f + wanderY)
         canvas.rotate(-40f)
         canvas.scale(1f, 0.55f)
         highlightPaint.shader = RadialGradient(
             0f, 0f, r * 0.25f,
             intArrayOf(0xFFFFFFFF.toInt(), 0xFFFFFFFF.toInt(), 0x00FFFFFF),
-            floatArrayOf(0f, 0.35f, 1f),
+            floatArrayOf(0f, 0.15f, 1f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawCircle(0f, 0f, r * 0.25f, highlightPaint)

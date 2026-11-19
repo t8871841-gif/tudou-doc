@@ -74,6 +74,13 @@ import kotlin.math.sin
  * 光"：光透过水珠，照亮水珠外面左下一片区域——背景着色器里加一个柔和亮斑，
  * 位置在水滴左下再往外 0.5r（1.5r 处、225° 方向），由 MainActivity 按水滴
  * 实际落位算好、调 setCausticSpot() 传进来（位置 + 半径）。
+ *
+ * 2026-11-19 第 34 批：水滴的影子挪到这里画。以前影子在 220dp 的水滴小框里
+ * 画，半径 1.8r 直径 308dp 比框还大，被框切成矩形（v101 真机 30fps：暗区宽
+ * 603px 上下不变）。背景是全屏的，影子在着色器里画（uShadowSpot / uShadowRadius
+ * / uShadowStrength），中心在水滴底下 1.3r、半径 1.8r、强度 0.75，平滑褪到 0。
+ * 位置由 MainActivity.updateCausticSpot() 一起算好、调 setShadowSpot() 传进来，
+ * 跟外面聚光同一套路。
  */
 class OriloBackgroundView @JvmOverloads constructor(
     context: Context,
@@ -117,6 +124,18 @@ class OriloBackgroundView @JvmOverloads constructor(
         causticSpotX = x
         causticSpotY = y
         causticRadius = radiusPx
+    }
+
+    // 第 34 批：水滴的影子在哪、多大——水滴底下 1.3r 处、半径 1.8r，
+    // MainActivity 按水滴实际落位算好传进来。跟外面聚光同一套路。
+    private var shadowSpotX = 0f
+    private var shadowSpotY = 0f
+    private var shadowRadius = 1f
+
+    fun setShadowSpot(x: Float, y: Float, radiusPx: Float) {
+        shadowSpotX = x
+        shadowSpotY = y
+        shadowRadius = radiusPx
     }
 
     private var flowAnimator: ValueAnimator? = null
@@ -228,6 +247,10 @@ class OriloBackgroundView @JvmOverloads constructor(
         s.setFloatUniform("uCausticSpot", causticSpotX, causticSpotY)
         s.setFloatUniform("uCausticRadius", causticRadius)
         s.setFloatUniform("uCausticStrength", TUNE_CAUSTIC_STRENGTH)
+        // 第 34 批：水滴的影子——位置和半径由 MainActivity 传进来。
+        s.setFloatUniform("uShadowSpot", shadowSpotX, shadowSpotY)
+        s.setFloatUniform("uShadowRadius", shadowRadius)
+        s.setFloatUniform("uShadowStrength", TUNE_SHADOW_STRENGTH)
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 
@@ -334,6 +357,10 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  散开了，比里面聚光（0.15）淡、比涟漪（0.03）浓。太亮像灯泡就往 0.06
          *  降，太淡看不见就往 0.15 升。 */
         const val TUNE_CAUSTIC_STRENGTH = 0.10f
+        /** 第 34 批：水滴影子的强度（0..1）——中心最暗处压暗多少。背景约 170，
+         *  参考最暗 39–52，170 × (1-0.75) ≈ 42，对得上。太黑像墨块就往
+         *  0.6 降，太淡看不见就往 0.85 升。 */
+        const val TUNE_SHADOW_STRENGTH = 0.75f
 
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
@@ -411,6 +438,9 @@ class OriloBackgroundView @JvmOverloads constructor(
             uniform float2 uCausticSpot;
             uniform float  uCausticRadius;
             uniform float  uCausticStrength;
+            uniform float2 uShadowSpot;
+            uniform float  uShadowRadius;
+            uniform float  uShadowStrength;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -467,6 +497,16 @@ class OriloBackgroundView @JvmOverloads constructor(
                 float causticDist = length(fragCoord - uCausticSpot);
                 float caustic = (1.0 - smoothstep(0.0, uCausticRadius, causticDist)) * uCausticStrength;
                 colorOut += caustic;
+
+                // 第 34 批：水滴的影子——以前在 220dp 的水滴小框里画，半径 1.8r
+                // 直径 308dp 比框还大，被框切成矩形（v101 真机：暗区宽 603px、
+                // 上下不变）。挪到全屏背景层画，中心在水滴底下 1.3r、半径 1.8r，
+                // 平滑褪到 0，没有硬边。强度 0.75：背景 170 × (1-0.75) ≈ 42，
+                // 对上参考最暗 39–52。位置和半径由 MainActivity 按水滴实际落位
+                // 算好传进来（setShadowSpot），跟外面聚光同一套路。
+                float shadowDist = length(fragCoord - uShadowSpot);
+                float shadow = (1.0 - smoothstep(0.0, uShadowRadius, shadowDist)) * uShadowStrength;
+                colorOut *= (1.0 - shadow);
 
                 return half4(float4(colorOut, 1.0));
             }

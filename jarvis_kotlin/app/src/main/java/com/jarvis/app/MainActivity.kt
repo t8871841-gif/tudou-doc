@@ -517,6 +517,9 @@ class MainActivity : Activity() {
         // 左下 225°：x 减、y 加（y 朝下）。聚光中心在 1.5r 处（水滴左下 rim
         // 再往外 0.5r），半径 0.6r。
         oriloBackgroundView.setCausticSpot(cx - r * 1.5f * 0.7071f, cy + r * 1.5f * 0.7071f, r * 0.6f)
+        // 第 34 批：水滴的影子也挪到背景层——中心在水滴底下 1.3r、半径 1.8r。
+        // 影子中心 x 稍偏左（cx - 0.18r，跟原来小框里画的位置一致）。
+        oriloBackgroundView.setShadowSpot(cx - r * 0.18f, cy + r * 1.3f, r * 1.8f)
     }
 
     /** Orilo 对话区：按 ChatHistory 重建全部气泡（用户右、助手左，字号 15 不动）；
