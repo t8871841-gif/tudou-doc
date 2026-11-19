@@ -329,6 +329,14 @@ import kotlin.math.sin
  * 小幅（K=9、AMP=0.004、SPEED=20.0、约 0.31 秒一圈）补碎抖——4 组模拟的 5 秒
  * 反转数只有 10–19 次，实测 21–54 次。五组总量 0.056，最大半径倍数 1.056 <
  * TUNE_SHAPE_MARGIN 1.18，安全。
+ * 2026-11-19 第 32 批（用户令：差距主要集中在水珠边缘和阴影，v100 实测）：
+ * v100 四边是平的（164–183），没有边界感；影子核心够暗（44.7≈参考 45.7）
+ * 但整体太淡（均值 168.7，参考 140.3）。根因：边缘 alpha 只有 0.22，笑脸/
+ * 亮边被稀释到看不见。改法：①新暗边（uRimDarkStrength 0.40）——整圈最外缘
+ * （0.97–1.0r）都暗一点，顶部除外（已有暗带），底部的笑脸压完还剩亮弧。
+ * ②笑脸 0.75→1.0、亮边 0.80→1.0。③影子中间停点 0x58→0x80（50%），核心
+ * 0xC8 和停点（0f, 0.35f, 1f）不动。ALPHA_MAX 不动（第 21 批 0.35 试过、
+ * 糊成实心白），只把边缘效果本身提亮。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -550,8 +558,12 @@ class OriloDropletView @JvmOverloads constructor(
          *  第 28 批（用户令，按参考图 4454 加强反差）：0.50→0.75——v96 实测
          *  底部边缘只亮 184、背景 168–180，笑脸太弱、撑不起体积；参考图笑脸
          *  203。注意：ALPHA_MAX 只有 0.22，笑脸提太高可能亮得发白、变实线；
-         *  若真机看着太硬，把 OUTER_COS 往下调（0.60→0.50）让过渡更宽、褪得更慢；往上拉到 0.65 只会更硬（第 29 批 Claude 审查纠正）。 */
-        const val TUNE_SMILE_STRENGTH = 0.75f
+         *  若真机看着太硬，把 OUTER_COS 往下调（0.60→0.50）让过渡更宽、褪得更慢；往上拉到 0.65 只会更硬（第 29 批 Claude 审查纠正）。
+         *  第 32 批（用户令：差距在水珠边缘和阴影）：0.75→1.0——v100 实测底部
+         *  还是平的（174，跟中心一样），笑脸没出来；边缘 alpha 只有 0.22，
+         *  笑脸被稀释了。ALPHA_MAX 不动（第 21 批 0.35 试过、糊成实心白），
+         *  只把笑脸本身提亮。 */
+        const val TUNE_SMILE_STRENGTH = 1.0f
         /** 第 13 批新增：底部"笑脸"亮弧的半角，夹角余弦——cos(30°)≈0.87，数字越大
          *  （越接近 1）这段全亮的弧越窄；配合 `TUNE_SMILE_OUTER_COS` 控制往外的
          *  淡出范围，两个一起大致框出"4 点半到 7 点半"（约 60° 宽）这段弧。 */
@@ -600,7 +612,13 @@ class OriloDropletView @JvmOverloads constructor(
          *  亮边只在边缘（edge）起作用、顶部除外（topDarkMask 那里是暗带），把边缘
          *  亮回背景亮度（新参考图 4454 的边缘就是亮的细边、不是黑的）。0.80 是估计值，
          *  真机上太亮就降、太淡就升。 */
-        const val TUNE_RIM_STRENGTH = 0.80f
+        const val TUNE_RIM_STRENGTH = 1.0f
+        /** 第 32 批新增：暗边（黑边）强度——整圈最外缘（0.97–1.0r）都暗一点，
+         *  不是只在顶部。参考图 4454 四边在 1.0–1.1r 都暗到 111–156；v100 四边
+         *  是平的（164–183），没有边界感、像肥皂泡。暗边在亮边之后、只压最外缘
+         *  一圈，顶部除外（topDarkMask 那里已有暗带），底部的笑脸是加在它前面
+         *  的、压完还剩亮弧。0.40 是估计值，真机上太黑就降、太淡就升。 */
+        const val TUNE_RIM_DARK_STRENGTH = 0.40f
         /** 第 5 批新增：水滴跟着背景"光晕"一起发亮的强度——数值越大，光晕最强的那几秒
          *  水滴被照得越白越亮；调到 0 就是水滴亮度只跟折射出来的颜色有关，不跟光晕强度挂钩，
          *  退回第 4 批那种"颜色变但亮度不变"的效果。第 10 批从 0.35 砍到 0.15：它是内部
@@ -800,6 +818,7 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float  uTopDarkInnerCos;
             uniform float  uTopDarkOuterCos;
             uniform float  uRimStrength;
+            uniform float  uRimDarkStrength;
             uniform float  uShapeMargin;
             uniform float  uRingStrength;
             uniform float  uRingRadiusX;
@@ -950,6 +969,15 @@ class OriloDropletView @JvmOverloads constructor(
                 float rimBright = edge * (1.0 - topDarkMask) * uRimStrength;
                 colorOut += float3(1.0, 1.0, 1.0) * rimBright;
                 colorOut *= (1.0 - darkBand * uDarkBandStrength * topDarkMask);
+                // 第 32 批：暗边——整圈最外缘（0.97–1.0r）都暗一点（玻璃球的黑边），
+                // 不是只在顶部。参考图 4454 四边在 1.0–1.1r 都暗到 111–156；
+                // v100 四边是平的（164–183），没有边界感。暗边在亮边之后、只压
+                // 最外缘一圈，顶部除外（topDarkMask 那里已有暗带）；底部的笑脸
+                // 是加在它前面的、压完还剩亮弧。反向 smoothstep 未定义，写成
+                // 1.0 - smoothstep 的形式（跟 caustic 同款写法）。
+                float rimDark = smoothstep(lensRadius * 0.97, lensRadius, dist)
+                    * uRimDarkStrength * (1.0 - topDarkMask);
+                colorOut *= (1.0 - rimDark);
 
                 // 第 23 批：里面左下聚光——光从右上打进来、折进水里会聚到对面左下。
                 // 中心在 225°（左下）、0.6r 处，柔和亮斑、往外褪到 0。参考实测左下
@@ -1041,9 +1069,13 @@ class OriloDropletView @JvmOverloads constructor(
         // 主观问题，是这个数值本身不够。这次提到 0xC8（约 78%），中间停点同比例
         // 跟着提（0x14→0x58），没有直接冲到数学上的 81%——怕一步到位太突兀、
         // 真机看着像个黑洞，留一点余地，真机看完大概率还要再往上推一点。 */
+        // 第 32 批（用户令：差距在水珠边缘和阴影）：中间停点 0x58→0x80——
+        // v100 影子核心够暗（44.7，参考 45.7），但整体太淡（均值 168.7，
+        // 参考 140.3），影子不够宽、不够实。核心不动（0xC8），停点不动
+        // （0f, 0.35f, 1f），只把中间抬到 50%，影子中间那圈实一点。 */
         shadowPaint.shader = RadialGradient(
             cx - r * 0.18f, cy + r * 1.08f, r * 1.0f,
-            intArrayOf(0xC8000000.toInt(), 0x58000000, 0x00000000),
+            intArrayOf(0xC8000000.toInt(), 0x80000000.toInt(), 0x00000000),
             floatArrayOf(0f, 0.35f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -1117,6 +1149,7 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("uTopDarkInnerCos", TUNE_TOP_DARK_INNER_COS)
         s.setFloatUniform("uTopDarkOuterCos", TUNE_TOP_DARK_OUTER_COS)
         s.setFloatUniform("uRimStrength", TUNE_RIM_STRENGTH)
+        s.setFloatUniform("uRimDarkStrength", TUNE_RIM_DARK_STRENGTH)
         s.setFloatUniform("uShapeMargin", TUNE_SHAPE_MARGIN)
         s.setFloatUniform("uRingStrength", TUNE_RING_STRENGTH)
         s.setFloatUniform("uRingRadiusX", TUNE_RING_RADIUS_X)
