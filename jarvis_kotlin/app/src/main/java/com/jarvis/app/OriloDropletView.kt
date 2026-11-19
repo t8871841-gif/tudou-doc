@@ -314,7 +314,9 @@ import kotlin.math.sin
  * 所谓水滴形是某个时刻的形变；TUNE_SHAPE_TEARDROP 0.07→0.0，瞬时水滴形由 K=1
  * 左右晃产生（第 26 批的静态项是错的）。②涟漪改多点——原来只有一个源点（左下
  * 225°），现在 3 个源点（225°左下、315°右下、135°左上），各错开 5 秒轮流起波，
- * 每 5 秒有一波从不同点出发；单点周期还是 15 秒。③背景色相跳变改连续漂移——
+ * 每 5 秒有一波从不同点出发；单点周期还是 15 秒（第 30 批补：用户纠正 5 秒
+ * 太密，周期改 45 秒、错开 12 秒和 27 秒，三波间隔 18、15、12 秒，都在
+ * 10–20 秒里，时间不均匀）。③背景色相跳变改连续漂移——
  * 994 帧量出来根本没有跳变，色相是连续缓慢漂移（2–5°/秒，20–25 秒走完蓝↔紫
  * 一圈）；跳变定时器和 jumpHue() 全删（见 OriloBackgroundView），色相改成两组
  * 不成整数比的正弦叠加（31 秒和 47 秒），漂移不重复。④饱和度跟色相耦合——
@@ -728,13 +730,24 @@ class OriloDropletView @JvmOverloads constructor(
         /** 涟漪随距离衰减（1/像素）：300px 处剩 e^(-1.2)≈0.30，500px 处剩 0.14，
          *  跟 v93 同一个值。 */
         const val TUNE_RIPPLE_DECAY = 0.004f
-        /** 涟漪波包的周期（秒）：每 15 秒一轮（用户令）。包络 =
-         *  smoothstep(0, 0.5, cycle) * exp(-cycle / 3.0)，cycle = iTime 对 15
-         *  取模——0.5 秒内胀起来、3 秒时间常数衰减，到 15 秒时剩 e^(-5)≈0.007，
+        /** 涟漪波包的周期（秒）：一轮 45 秒（3 个源点各起一波）。包络 =
+         *  smoothstep(0, 0.5, cycle) * exp(-cycle / 3.0)，cycle = iTime 对 45
+         *  取模——0.5 秒内胀起来、3 秒时间常数衰减，到 45 秒时剩 e^(-15)≈0，
          *  下一波开始时包络是 0，不会"砰"一下跳出来。
          *  第 30 批：3 个源点各错开 5 秒（周期/3）轮流起波，等于每 5 秒有一波
-         *  从不同点出发；单点周期还是 15 秒。 */
-        const val TUNE_RIPPLE_PERIOD = 15.0f
+         *  从不同点出发；单点周期还是 15 秒。
+         *  第 30 批补（用户纠正：5 秒一波太密、不自然）：周期 15→45 秒，3 个
+         *  源点错开 12 秒和 27 秒（不再是均匀的周期/3），一轮里三波的间隔是
+         *  18 秒、15 秒、12 秒——都在 10–20 秒里，时间不均匀、看着随机。 */
+        const val TUNE_RIPPLE_PERIOD = 45.0f
+        /** 第 30 批补新增：涟漪源点 2（右下 315°）相对源点 1（左下 225°）的
+         *  错开时间（秒）——12 秒。一轮 45 秒里三波的起波时刻是 0 秒、18 秒、
+         *  33 秒，间隔 18、15、12 秒（都在 10–20 秒里，不均匀）。 */
+        const val TUNE_RIPPLE_OFFSET_2 = 12.0f
+        /** 第 30 批补新增：涟漪源点 3（左上 135°）相对源点 1 的错开时间（秒）
+         *  ——27 秒。注意着色器里是 mod(iTime + offset, period)，offset 27
+         *  对应起波时刻 45-27=18 秒（不是 27 秒）。 */
+        const val TUNE_RIPPLE_OFFSET_3 = 27.0f
         /** 大高光跟着颤动游走的幅度（相对半径）：0.05r，在用户手机上约 ±10px
          *  （参考实测高光在 ±11px 内游走）。游走由颤动速度（4.2/2.9/5.6）驱动，
          *  跟水滴颤动同步、不是另外一套时钟。
@@ -803,6 +816,8 @@ class OriloDropletView @JvmOverloads constructor(
             uniform float  uRippleSpeed;
             uniform float  uRippleDecay;
             uniform float  uRipplePeriod;
+            uniform float  uRippleOffset2;
+            uniform float  uRippleOffset3;
 
             float hash(float2 p) {
                 return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
@@ -951,9 +966,12 @@ class OriloDropletView @JvmOverloads constructor(
                 // （不用 MainActivity 传），波峰随时间向外跑（波峰速度 =
                 // uRippleSpeed / uRippleFreq），包络在周期边界是 0，相位跳变看不见。
                 // 第 30 批（用户令）：涟漪改多点——原来只有一个源点（左下 225°），
-                // 现在 3 个源点（225°左下、315°右下、135°左上），各错开 5 秒
-                // （周期/3）轮流起波；同一时刻最多一波是主峰，旧波已衰到 ~19%，
-                // 三波叠加不会冲到 3 倍。多个点、不同时刻的变化。
+                // 现在 3 个源点（225°左下、315°右下、135°左上），轮流起波；同一
+                // 时刻最多一波是主峰，旧波已衰到 ~2%（间隔 12 秒以上，exp(-12/3)
+                // ≈0.018），三波叠加不会冲到 3 倍。多个点、不同时刻的变化。
+                // 第 30 批补（用户纠正：5 秒一波太密、不自然）：周期 15→45 秒，
+                // 错开改成 12 秒和 27 秒（uRippleOffset2/3），一轮里三波的间隔是
+                // 18 秒、15 秒、12 秒——都在 10–20 秒里，时间不均匀、看着随机。
                 float ripple = 0.0;
                 float2 rippleSrc1 = float2(-0.7071, 0.7071) * lensRadius;
                 float rippleCycle1 = mod(iTime, uRipplePeriod);
@@ -962,13 +980,13 @@ class OriloDropletView @JvmOverloads constructor(
                 ripple += sin(rippleDist1 * uRippleFreq - uRippleSpeed * rippleCycle1)
                     * exp(-rippleDist1 * uRippleDecay) * uRippleStrength * rippleEnv1;
                 float2 rippleSrc2 = float2(0.7071, 0.7071) * lensRadius;
-                float rippleCycle2 = mod(iTime + uRipplePeriod / 3.0, uRipplePeriod);
+                float rippleCycle2 = mod(iTime + uRippleOffset2, uRipplePeriod);
                 float rippleEnv2 = smoothstep(0.0, 0.5, rippleCycle2) * exp(-rippleCycle2 / 3.0);
                 float rippleDist2 = length(local - rippleSrc2);
                 ripple += sin(rippleDist2 * uRippleFreq - uRippleSpeed * rippleCycle2)
                     * exp(-rippleDist2 * uRippleDecay) * uRippleStrength * rippleEnv2;
                 float2 rippleSrc3 = float2(-0.7071, -0.7071) * lensRadius;
-                float rippleCycle3 = mod(iTime + uRipplePeriod * 2.0 / 3.0, uRipplePeriod);
+                float rippleCycle3 = mod(iTime + uRippleOffset3, uRipplePeriod);
                 float rippleEnv3 = smoothstep(0.0, 0.5, rippleCycle3) * exp(-rippleCycle3 / 3.0);
                 float rippleDist3 = length(local - rippleSrc3);
                 ripple += sin(rippleDist3 * uRippleFreq - uRippleSpeed * rippleCycle3)
@@ -1117,6 +1135,8 @@ class OriloDropletView @JvmOverloads constructor(
         s.setFloatUniform("uRippleSpeed", TUNE_RIPPLE_SPEED)
         s.setFloatUniform("uRippleDecay", TUNE_RIPPLE_DECAY)
         s.setFloatUniform("uRipplePeriod", TUNE_RIPPLE_PERIOD)
+        s.setFloatUniform("uRippleOffset2", TUNE_RIPPLE_OFFSET_2)
+        s.setFloatUniform("uRippleOffset3", TUNE_RIPPLE_OFFSET_3)
         canvas.drawPath(path, paint)
     }
 
