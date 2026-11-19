@@ -967,7 +967,10 @@ class OriloDropletView @JvmOverloads constructor(
                     (n2.y - uRingCenter.y) / uRingRadiusY
                 );
                 float ringDist = abs(length(ringLocal) - 1.0);
-                float ringGlow = smoothstep(uRingWidth, 0.0, ringDist) * uRingStrength;
+                // 第 35 批（Claude 审查，发现反向 smoothstep——edge0=uRingWidth>edge1=0.0，
+                // 跟第 20 批那个坑同一类，未定义行为）：改成跟 caustic/darkBand 一样的
+                // 正确写法（edge0<edge1，外面套 1.0 减）。
+                float ringGlow = (1.0 - smoothstep(0.0, uRingWidth, ringDist)) * uRingStrength;
 
                 // 第 9 批新增：折射强度按"离中心多近"打折——中心只有 uTintCenterFactor
                 // 这么多折射强度（接近透明，几乎就是背景本身），边缘是完整强度，环境色
