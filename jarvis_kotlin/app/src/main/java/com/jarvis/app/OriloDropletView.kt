@@ -258,6 +258,17 @@ import kotlin.math.sin
  * 3. **影子椭圆顶挪到水滴底边**：从 cy+0.7r 挪到 cy+1.0r，不伸进水滴里面，
  *    影子只留在水滴下面（椭圆顶贴水滴底边、相切）。影子中心 cy+1.08r 不动、
  *    位置还是左下。
+ *
+ * 2026-11-19 第 25 批（用户发 jk-v95 截图、指出白圈 Bug）：水滴外面悬浮着一圈
+ * "实体光环"——真实物理世界里不可能有。罪魁祸首是 drawHighlightsAndRim 末尾
+ * 的 `canvas.drawCircle(cx, cy, r - 1f, rimSoftPaint)`：水滴本体边缘是动态
+ * 颤动的（wobblePath，半径 ±4.7% 波动），但这圈是绝对完美的正圆、半径死死
+ * 固定在 r-1f；水滴缩进去（波谷）时，白圈就原形毕露、悬浮在水滴外面。alpha 30
+ * 的半透明白描边在深色背景下像发光的塑料壳。原图没有这圈线，真玻璃的边缘靠
+ * 折射暗带和内部亮弧塑造。改法（方案一）：drawCircle 和 rimSoftPaint 变量
+ * 一起删掉，亮边由着色器里的 uRimStrength（菲涅尔，跟着颤动路径走）负责。
+ * 用户还顺带提了高光裁剪（clipPath 限制高光在水滴内部、别溢出边缘），这次
+ * 没做——先只删白圈，等用户点头再动高光。
  */
 class OriloDropletView @JvmOverloads constructor(
     context: Context,
@@ -277,18 +288,12 @@ class OriloDropletView @JvmOverloads constructor(
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val smallHighlightPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val rimSoftPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-        color = Color.WHITE
-        // 第 13 批：整圈白描边太抢戏（原图边缘不是整圈亮的），alpha 60→25。
-        // 第 17 批（DeepSeek 审）：25 在真机上大概率看不见、或像个塑料边缘，提到 50。
-        // 第 18 批 50→100：新参考图（4454）的边缘是一圈亮的细边，不是黑的；
-        // 暗带压下去之后，亮边要能读出来。
-        // 第 20 批（DeepSeek 审）100→30：100 的白线太生硬、像塑料边框；
-        // 真玻璃的边缘亮是折射出来的光，不该有一条实线边框。留 30 一点意思。
-        alpha = 30
-    }
+    // 第 25 批（用户令）：rimSoftPaint 删掉——它是画一个固定正圆的描边
+    // （drawCircle(cx, cy, r-1f)），半径死死固定在 r-1f，不跟水滴的颤动
+    // 路径（wobblePath，半径 ±4.7% 波动）走。水滴缩进去（波谷）时，这圈白边
+    // 就悬浮在水滴外面，像一圈"实体光环"（v95 实测底部 1.02–1.05r 亮 220–235、
+    // 背景才 193）。原图没有这圈线，真玻璃的边缘靠折射暗带和内部亮弧塑造。
+    // 亮边现在由着色器里的 uRimStrength（菲涅尔，跟着颤动路径走）负责。
 
     // ---------- 第 19 批（用户令）：Z 休息提示取消了，不再有待机/睡觉态——
     // 水滴永远是醒着的、呆萌萌的，不缩、不冻、不画 Z。setAwake 还留着
@@ -998,9 +1003,10 @@ class OriloDropletView @JvmOverloads constructor(
         )
         canvas.drawCircle(0f, 0f, r * 0.14f, smallHighlightPaint)
         canvas.restore()
-        // 亮边：整圈淡淡描边（第 13 批 alpha 60→25）。第 11 批删掉的下半圈硬线亮弧
-        // 别恢复——底部"笑脸"亮弧在着色器里（smileMask，柔光）；顶部亮边已去掉
-        // （原图顶部最暗）。
-        canvas.drawCircle(cx, cy, r - 1f, rimSoftPaint)
+        // 第 25 批（用户令）：亮边那圈 drawCircle 删掉——它是固定正圆（半径 r-1f），
+        // 不跟水滴的颤动路径走；水滴缩进去时白圈就悬浮在外面，像"实体光环"。
+        // 亮边由着色器里的 uRimStrength（菲涅尔，跟着颤动路径走）负责，不再画圈。
+        // 第 11 批删掉的下半圈硬线亮弧别恢复——底部"笑脸"亮弧在着色器里
+        // （smileMask，柔光）；顶部亮边已去掉（原图顶部最暗）。
     }
 }
