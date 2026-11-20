@@ -105,7 +105,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
             // 渐变跟下面真正的背景对不上）。这里不再输出背景，只输出影子/聚光，
             // 其余全透明，让下面真正的背景露出来。
-            if (dist > R * 1.18) {
+            // 第 40 批：分界从 1.18R 改成 R——1.18 是旧 AGSL 版的颤动余量
+            // （TUNE_SHAPE_MARGIN，水滴边缘颤动峰值会探出 R），GL 版没有颤动，
+            // 余量留着就成了一个圈：0.90R 处 edge 开始、1.18R 处渲染截止，
+            // 两道边界叠出来就是用户说的“两圈”。
+            if (dist > R) {
                 // 影子：半透明黑，盖在下面真正的背景上把它压暗。
                 vec2 sCenter = c + vec2(-R * 0.18, R * 1.3);
                 float sDist = length(fragPx - sCenter);
