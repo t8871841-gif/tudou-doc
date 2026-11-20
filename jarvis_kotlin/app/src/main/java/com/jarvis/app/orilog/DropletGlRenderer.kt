@@ -142,16 +142,23 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 // 之前是阴影 > 0.01 就直接返回，亮斑永远画不出来——散射的光
                 // 应该透过阴影照出来，亮斑长在阴影里面。现在两处一起算：
                 // 影子压暗、亮斑提亮，合成一个输出（白×亮斑 + 背景×(1−影子−亮斑)）。
-                // 影子中心也挪到光的方向：光在 54°（右上），影子顺着光往左下偏，
-                // 中心 (-0.59R, +0.81R)，方向 126°；之前是 (-0.18R, +1.0R)，
-                // 几乎正下方，往左偏得不够，差了约 26°。
-                vec2 sCenter = c + vec2(-R * 0.59, R * 0.81);
+                // 第 50 批：影子中心改直下方。第 48 批按“光 54°→影子 126°”
+                // 挪到 (-0.59R,+0.81R) 是错的——4454 参考图背景相对法量过，
+                // 影子质心 (-0.07R,+1.31R)，基本正下方；主界面视频两帧也是
+                // (+0.15~0.21R,+1.27~1.59R)，也是正下方。光主要是正面打过来
+                // （高光在右上是镜面反射角，影子投在背景上基本不偏），
+                // 所以影子就放正下方 1.3R。半径 1.4R、强度 0.70 不动。
+                vec2 sCenter = c + vec2(0.0, R * 1.3);
                 float sDist = length(fragPx - sCenter);
                 float shadow = (1.0 - smoothstep(0.0, R * 1.4, sDist)) * 0.70;
                 // 外面聚光：半透明白，提亮下面真正的背景。
-                vec2 ocCenter = c + vec2(-R * 1.5 * 0.7071, R * 1.5 * 0.7071);
+                // 第 50 批：位置 1.5R→1.0R（4454 量到最亮点 (-0.75R,+0.72R)，
+                // 离中心 1.04R；主界面视频 (-0.67R,+0.77R)，1.02R），
+                // 强度 0.10→0.70（0.10 在阴影里只能提亮约 9/255，根本看不见；
+                // 参考外面亮斑比背景亮 30–48，强度 0.70 手算约提亮 28–36）。
+                vec2 ocCenter = c + vec2(-R * 1.0 * 0.7071, R * 1.0 * 0.7071);
                 float ocDist = length(fragPx - ocCenter);
-                float oc = (1.0 - smoothstep(0.0, R * 0.6, ocDist)) * 0.10;
+                float oc = (1.0 - smoothstep(0.0, R * 0.6, ocDist)) * 0.70;
                 float a = clamp(shadow + oc, 0.0, 1.0);
                 if (a > 0.01) {
                     // 颜色 = 白×亮斑占比（亮斑 0 时纯黑、影子 0 时纯白），
@@ -166,7 +173,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float nz = sqrt(max(0.0, 1.0 - dot(n2, n2)));
             // 折射：沿法线弯折，采样真实背景纹理。n2 是在翻转后（Android）空间里算的，
             // 偏移量的 y 分量要翻回来（取负），再加到没翻转的 gl_FragCoord 上。
-            float bend = 120.0;
+            // 第 50 批：bend 120→180。用户说折射“还是淡的”——里面比背景暗、
+            // 渐变错位那层意思有，但背景透过水滴的错位太轻，看着像平玻璃。
+            // 加到 180，错位更明显；磨砂水滴，180 还不会变成透明弹珠的强倒像。
+            float bend = 180.0;
             vec2 refractUv = gl_FragCoord.xy / uRes + vec2(n2.x, -n2.y) * bend * (1.0 - nz) / uRes;
             vec3 refracted = texture(uBgTex, refractUv).rgb;
             // 边缘（按呼吸后的有效半径算）。第 45 批（DeepSeek 对比点 1、4）：
@@ -250,30 +260,35 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 49 批：笑脸亮度起伏。主界面 30fps 实测笑脸 155–227、均值 174，
             // 亮度是活的，跟着呼吸走——水滴胀缩时底部曲率和反射角变化，菲涅尔
             // 反射亮度跟着变。系数 0.20 × (1 ± 0.20)，峰值 158–238，对得上参考。
+            // 第 50 批：漫反射 0.06→0.12。里面太平、太暗（v105 中心 ~151，
+            // 参考 166–216 平滑渐变）——漫反射只给 0.06，里面拉不出渐变。
+            // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
             float smileCoeff = 0.20 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.12 + rimBright + highlight + smallHighlight + caustic * 0.5);
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随角度距离和时间衰减，
-            // 平时没有。角度用屏幕坐标（atan2，+y 朝下：0°=右，90°=下）。
-            // 三个源（用户给的角度是数学约定 0°=右、逆时针，换算到屏幕坐标）：
-            // 左下 225° → 屏幕 135°（2.356 rad），触发 t%45=0；
-            // 右下 315° → 屏幕 45°（0.785 rad），触发 t%45=18；
-            // 左上 135° → 屏幕 -135°（-2.356 rad），触发 t%45=33。
+            // 平时没有。三个源直接用用户给的数学约定角（0°=右、逆时针）：
+            // 左下 225°（-2.356 rad），触发 t%45=0；
+            // 右下 315°（-0.785 rad），触发 t%45=18；
+            // 左上 135°（2.356 rad），触发 t%45=33。
+            // 第 50 批修：之前错转成了屏幕角——surfAng = atan(n2.y, n2.x)，
+            // n2 是 Y 翻转后的空间（+y 朝上），所以 surfAng 本身就是数学约定角，
+            // 不用转屏幕角。错转等于上下镜像，三处源点全放反了。
             // 波沿表面走，振幅很小（0.05），只求一丝动感，别喧宾夺主。
             float ripple = 0.0;
             float surfAng = atan(n2.y, n2.x);
             {
-                float dAng = abs(mod(surfAng - 2.356 + 3.14159, 6.28318) - 3.14159);
+                float dAng = abs(mod(surfAng - (-2.356) + 3.14159, 6.28318) - 3.14159);
                 float dt = mod(uTime - 0.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
             {
-                float dAng = abs(mod(surfAng - 0.785 + 3.14159, 6.28318) - 3.14159);
+                float dAng = abs(mod(surfAng - (-0.785) + 3.14159, 6.28318) - 3.14159);
                 float dt = mod(uTime - 18.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
             {
-                float dAng = abs(mod(surfAng - (-2.356) + 3.14159, 6.28318) - 3.14159);
+                float dAng = abs(mod(surfAng - 2.356 + 3.14159, 6.28318) - 3.14159);
                 float dt = mod(uTime - 33.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
@@ -361,7 +376,12 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // 110dp×density×0.78，抄旧版抄来的，在用户手机上算出来 234px，
         // 参考 Henry 实测是 206px（屏宽 1080 的 19%）。改成屏宽的 19%，
         // 在这台手机上就是 206px，跟参考 1:1。不再用 dp 抄旧版。
-        val r = viewW * 0.19f
+        // 第 50 批：19% 必须按屏幕宽算，不能按 viewW 算。面板有 24dp 左右
+        // 内边距，dropWrap 宽只有 949px（屏宽 1080 − 48dp×2.73），
+        // viewW×0.19 只有 180px，比参考 206px 小了 25px。
+        // 用 displayMetrics.widthPixels（屏幕宽 1080）算，R=205px。
+        val screenW = context.resources.displayMetrics.widthPixels.toFloat()
+        val r = screenW * 0.19f
         val cx = viewW / 2f
         val cy = viewH * 0.45f
         setVec2(dropProgram, "uCenter", cx, cy)
