@@ -95,12 +95,26 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         uniform float uDriftX;
         uniform float uDriftY;
         out vec4 oColor;
+        // 颤动（第 41 批补上，之前 GL 版没有——水滴是个正圆、边缘静止）：
+        // 5 组不成整数比的频率叠加（K=1/3/5/7/9），参考视频实测主周期约 2.1 秒、
+        // 方向反转 5 秒内 21–54 次。振幅合计约 5.6%，跟实测 ±5% 对得上。
+        float wobbleFactor(float theta, float t) {
+            return 1.0
+                + 0.020 * sin(1.0 * theta + 3.0 * t)
+                + 0.015 * sin(3.0 * theta + 2.9 * t + 1.3)
+                + 0.012 * sin(5.0 * theta + 5.6 * t + 2.1)
+                + 0.005 * sin(7.0 * theta + 13.0 * t + 0.7)
+                + 0.004 * sin(9.0 * theta + 20.0 * t + 1.9);
+        }
         void main() {
             vec2 fragPx = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
             vec2 c = uCenter + vec2(uDriftX, uDriftY);
             vec2 local = fragPx - c;
             float dist = length(local);
             float R = uRadius;
+            // 颤动后的有效半径：边缘按角度现算，法线近似仍按圆算（振幅小，误差可接受）。
+            float theta = atan(local.y, local.x);
+            float R_eff = R * wobbleFactor(theta, uTime);
             // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
             // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
             // 渐变跟下面真正的背景对不上）。这里不再输出背景，只输出影子/聚光，
@@ -109,7 +123,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // （TUNE_SHAPE_MARGIN，水滴边缘颤动峰值会探出 R），GL 版没有颤动，
             // 余量留着就成了一个圈：0.90R 处 edge 开始、1.18R 处渲染截止，
             // 两道边界叠出来就是用户说的“两圈”。
-            if (dist > R) {
+            // 第 41 批：分界改成颤动后的有效半径 R_eff（水滴边缘在颤，边界跟着动）。
+            if (dist > R_eff) {
                 // 影子：半透明黑，盖在下面真正的背景上把它压暗。
                 vec2 sCenter = c + vec2(-R * 0.18, R * 1.3);
                 float sDist = length(fragPx - sCenter);
@@ -129,15 +144,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 oColor = vec4(0.0);
                 return;
             }
-            vec2 n2 = local / R;
+            vec2 n2 = local / R_eff;
             float nz = sqrt(max(0.0, 1.0 - dot(n2, n2)));
             // 折射：沿法线弯折，采样真实背景纹理。n2 是在翻转后（Android）空间里算的，
             // 偏移量的 y 分量要翻回来（取负），再加到没翻转的 gl_FragCoord 上。
             float bend = 120.0;
             vec2 refractUv = gl_FragCoord.xy / uRes + vec2(n2.x, -n2.y) * bend * (1.0 - nz) / uRes;
             vec3 refracted = texture(uBgTex, refractUv).rgb;
-            // 边缘
-            float edge = smoothstep(R * 0.90, R, dist);
+            // 边缘（按颤动后的有效半径算）
+            float edge = smoothstep(R_eff * 0.90, R_eff, dist);
             // 顶部暗带（~40° 宽）
             float cosTop = -n2.y;
             float topDarkMask = smoothstep(0.94, 0.98, cosTop);
@@ -147,8 +162,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float smileMask = smoothstep(0.60, 0.85, cosBottom);
             float smileBright = edge * smileMask;
             // 暗带环
-            float darkBand = smoothstep(R * 0.90, R * 0.975, dist)
-                * (1.0 - smoothstep(R * 0.975, R, dist));
+            float darkBand = smoothstep(R_eff * 0.90, R_eff * 0.975, dist)
+                * (1.0 - smoothstep(R_eff * 0.975, R_eff, dist));
             // 漫反射（左下亮、右上暗的平滑渐变）
             vec3 normal = vec3(n2, nz);
             vec3 lightDir = normalize(vec3(-0.45, -0.65, 0.6));
@@ -166,7 +181,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 亮边（菲涅尔）：降到 0.5，别跟笑脸/高光抢（之前 1.0 整圈顶满）。
             float rimBright = edge * (1.0 - topDarkMask) * 0.5;
             // 暗边
-            float rimDark = smoothstep(R * 0.97, R, dist) * 0.40 * (1.0 - topDarkMask);
+            float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.40 * (1.0 - topDarkMask);
+            // 小高光：左下（-0.45r/+0.42r），半径 0.14r，峰值 0.70（旧版第二个高光，
+            // 第 41 批补上；位置跟聚光（225°/0.6R）很近，两处亮斑叠在一起是参考图
+            // 左下那片亮）。
+            vec2 shC = vec2(-0.45, 0.42);
+            vec2 shD = n2 - shC;
+            float smallHighlight = exp(-dot(shD, shD) / (0.14 * 0.14) * 1.5) * 0.70;
             // 聚光（左下 225°，0.6R 处）
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
@@ -185,7 +206,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             result *= (1.0 - darkBand * 0.35 * topDarkMask);
             result *= (1.0 - rimDark);
             // 亮特征直接加（不乘 alpha）。
-            result += vec3(1.0) * (smileBright * 0.35 + diffuse * 0.06 + rimBright + highlight + caustic * 0.5);
+            result += vec3(1.0) * (smileBright * 0.35 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
             oColor = vec4(result, 1.0);
         }
     """.trimIndent()
