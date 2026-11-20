@@ -450,7 +450,8 @@ class MainActivity : Activity() {
         oriloDroplet = com.jarvis.app.orilog.DropletGlView(this)
         dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER))
         // 第 23 批：外面左下聚光 = 水滴左下再往外 0.5r——水滴落位后算一次，传给背景 View。
-        oriloDroplet?.post { updateCausticSpot() }
+        // 第 37 批：删掉——GL View 不透明，把背景 View 的聚光/影子全盖住了（Claude 第 36 批
+        // 审查指出）；外面聚光和影子已挪进 GL 水滴着色器里画。
         panel.addView(dropWrap)
         // 下半：对话区——可滚动的对话记录，每条消息单独一个玻璃气泡（跟经典气泡同一套），
         // 不再是整块玻璃板（2026-11-16 用户要求跟经典一样）。
@@ -489,42 +490,9 @@ class MainActivity : Activity() {
             if (hudPanelOpen) hudPanelOpen = false
             refreshOriloChat()
             // 第 23 批：切到 Orilo 档时也重算一次外面聚光位置（面板刚显示、落位可能变了）。
-            oriloDroplet?.post { updateCausticSpot() }
+            // 第 37 批：删掉——外面聚光/影子已在 GL 水滴着色器里，背景 View 那份被 GL 盖住。
         }
         refreshSettingsGear()
-    }
-
-    /** 第 23 批：外面左下聚光 = 水滴左下再往外 0.5r（1.5r 处、225° 方向），半径
-     *  0.6r——按水滴 View 的实际落位算，换算到背景 View 自身坐标（两个 View 都在
-     *  同一个根布局里，用屏幕坐标相减），传给背景 View 的着色器（uCausticSpot /
-     *  uCausticRadius）。水滴 onDraw 里圆心是 (w/2, h*0.45)、半径是
-     *  min(w,h)/2*0.78，这里照同一套公式算，位置才对得上。没落位（宽高为 0）
-     *  就再 post 一次，等下一帧布局完。第 22 批的涟漪源点（updateRippleOrigin）
-     *  已删——涟漪是沿着水珠自己的表面，挪到水滴着色器里了，不用 MainActivity 传。 */
-    private fun updateCausticSpot() {
-        val drop = oriloDroplet ?: return
-        if (!::oriloBackgroundView.isInitialized) return
-        val w = drop.width.toFloat()
-        val h = drop.height.toFloat()
-        if (w <= 0f || h <= 0f) {
-            drop.post { updateCausticSpot() }
-            return
-        }
-        val loc = IntArray(2)
-        drop.getLocationOnScreen(loc)
-        val bgLoc = IntArray(2)
-        oriloBackgroundView.getLocationOnScreen(bgLoc)
-        // 第 36 批：GL 水滴固定 220dp 直径，半径按 110dp 算，不跟 View 大小走
-        // （View 已占满 dropWrap，w/h 是整片上半屏）。
-        val r = 110f * resources.displayMetrics.density * 0.78f
-        val cx = loc[0] - bgLoc[0] + w / 2f
-        val cy = loc[1] - bgLoc[1] + h * 0.45f
-        // 左下 225°：x 减、y 加（y 朝下）。聚光中心在 1.5r 处（水滴左下 rim
-        // 再往外 0.5r），半径 0.6r。
-        oriloBackgroundView.setCausticSpot(cx - r * 1.5f * 0.7071f, cy + r * 1.5f * 0.7071f, r * 0.6f)
-        // 第 34 批：水滴的影子也挪到背景层——中心在水滴底下 1.3r、半径 1.8r。
-        // 影子中心 x 稍偏左（cx - 0.18r，跟原来小框里画的位置一致）。
-        oriloBackgroundView.setShadowSpot(cx - r * 0.18f, cy + r * 1.3f, r * 1.8f)
     }
 
     /** Orilo 对话区：按 ChatHistory 重建全部气泡（用户右、助手左，字号 15 不动）；
@@ -4154,6 +4122,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // 第 36 批：GLSurfaceView 必须跟 Activity 生命周期走，否则切后台渲染线程不停。
+        oriloDroplet?.onResume()
         // 可见性规则 6c：分屏/小窗时 Jarvis 不独占前台，另一半是其他 App 的页面，球要出现；
         // 全屏时才算自家前台、藏球。
         OrbController.setAppForeground(!isInMultiWindowMode)
@@ -4222,6 +4192,9 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        // 第 36 批：GLSurfaceView 必须跟 Activity 生命周期走，否则切后台渲染线程不停
+        // （费电，某些机型切回前台会崩或黑屏）。Claude 第 36 批审查指出。
+        oriloDroplet?.onPause()
         isResumed = false
         stopHudPeriodicRefresh()
         if (::hudWebView.isInitialized) {

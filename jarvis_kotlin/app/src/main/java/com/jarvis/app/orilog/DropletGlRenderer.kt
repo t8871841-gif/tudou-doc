@@ -101,22 +101,32 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 local = fragPx - c;
             float dist = length(local);
             float R = uRadius;
-            // 水滴外：直接输出背景
+            // 水滴外：直接输出背景（纹理采样永远用没翻转的 gl_FragCoord.xy——
+            // 背景纹理写入时用的是 GL 原始坐标（y 向上），用翻转后的 fragPx 采样
+            // 等于又多翻一次，上下镜像颠倒。Claude 第 36 批审查指出，实锤。）
             if (dist > R * 1.18) {
-                oColor = texture(uBgTex, fragPx / uRes);
+                vec3 bgOut = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
                 // 影子：水滴下方 1.3R 处、半径 1.8R 的软影（在背景上乘暗）
                 vec2 sCenter = c + vec2(-R * 0.18, R * 1.3);
                 float sDist = length(fragPx - sCenter);
                 float shadow = (1.0 - smoothstep(0.0, R * 1.8, sDist)) * 0.75;
-                oColor.rgb *= (1.0 - shadow);
+                bgOut *= (1.0 - shadow);
+                // 外面聚光：水滴左下 1.5R 处、半径 0.6R 的亮斑（光透过水珠照亮一片区域；
+                // 原来在背景 View 里画（第 23 批），GL View 不透明把它盖住了，挪到这里）。
+                vec2 ocCenter = c + vec2(-R * 1.5 * 0.7071, R * 1.5 * 0.7071);
+                float ocDist = length(fragPx - ocCenter);
+                float oc = (1.0 - smoothstep(0.0, R * 0.6, ocDist)) * 0.10;
+                bgOut += vec3(1.0) * oc;
+                oColor = vec4(bgOut, 1.0);
                 return;
             }
             vec2 n2 = local / R;
             float nz = sqrt(max(0.0, 1.0 - dot(n2, n2)));
-            // 折射：沿法线弯折，采样真实背景纹理
+            // 折射：沿法线弯折，采样真实背景纹理。n2 是在翻转后（Android）空间里算的，
+            // 偏移量的 y 分量要翻回来（取负），再加到没翻转的 gl_FragCoord 上。
             float bend = 120.0;
-            vec2 refractPx = fragPx + n2 * bend * (1.0 - nz);
-            vec3 refracted = texture(uBgTex, refractPx / uRes).rgb;
+            vec2 refractUv = gl_FragCoord.xy / uRes + vec2(n2.x, -n2.y) * bend * (1.0 - nz) / uRes;
+            vec3 refracted = texture(uBgTex, refractUv).rgb;
             // 边缘
             float edge = smoothstep(R * 0.90, R, dist);
             // 顶部暗带（~40° 宽）
@@ -134,8 +144,18 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec3 normal = vec3(n2, nz);
             vec3 lightDir = normalize(vec3(-0.45, -0.65, 0.6));
             float diffuse = clamp(dot(normal, lightDir), 0.0, 1.0);
-            // 亮边（菲涅尔）
-            float rimBright = edge * (1.0 - topDarkMask) * 1.0;
+            // 大高光：右上，窄核心（旧 Canvas 高光的 GLSL 版：中心 0.47r/-0.65r，
+            // 半径 0.25r，椭圆 1×0.55，转 -40°。Claude 第 36 批审查指出旧代码里
+            // 压根没有这颗高光，整圈亮边顶到 220/255，笑脸显不出来。）
+            vec2 hlC = vec2(0.47, -0.65);
+            vec2 hlD = n2 - hlC;
+            float hlAng = -0.698;
+            float hlCa = cos(hlAng), hlSa = sin(hlAng);
+            vec2 hlR = vec2(hlD.x * hlCa - hlD.y * hlSa, hlD.x * hlSa + hlD.y * hlCa);
+            vec2 hlQ = vec2(hlR.x / 0.25, hlR.y / (0.25 * 0.55));
+            float highlight = exp(-dot(hlQ, hlQ) * 1.5);
+            // 亮边（菲涅尔）：降到 0.5，别跟笑脸/高光抢（之前 1.0 整圈顶满）。
+            float rimBright = edge * (1.0 - topDarkMask) * 0.5;
             // 暗边
             float rimDark = smoothstep(R * 0.97, R, dist) * 0.40 * (1.0 - topDarkMask);
             // 聚光（左下 225°，0.6R 处）
@@ -146,14 +166,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec3 colorOut = refracted * 0.98
                 + vec3(1.0) * smileBright * 1.0
                 + vec3(1.0) * diffuse * 0.06
-                + vec3(1.0) * rimBright;
+                + vec3(1.0) * rimBright
+                + vec3(1.0) * highlight;
             colorOut *= (1.0 - darkBand * 0.35 * topDarkMask);
             colorOut *= (1.0 - rimDark);
-            colorOut += vec3(1.0) * caustic;
             // alpha：中心 0.01、边缘 0.22（跟旧版一致，中心保持透明）
             float alpha = mix(0.01, 0.22, edge);
-            // 预乘合成到背景上
-            vec3 bg = texture(uBgTex, fragPx / uRes).rgb;
+            // 手动合成到背景上（最后输出 alpha=1.0 不透明像素，不走 Android 合成层，
+            // 没有预乘透明度歧义），聚光只加一次。
+            vec3 bg = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
             vec3 result = colorOut * alpha + bg * (1.0 - alpha) + vec3(1.0) * caustic * 0.5;
             oColor = vec4(result, 1.0);
         }
@@ -161,6 +182,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES30.glClearColor(0f, 0f, 0f, 1f)
+        // EGL 上下文重建时本方法会再跑一次，先删旧对象（Claude 第 36 批审查建议，防御性）。
+        if (bgProgram != 0) GLES30.glDeleteProgram(bgProgram)
+        if (dropProgram != 0) GLES30.glDeleteProgram(dropProgram)
+        if (fboId != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
+        if (bgTexId != 0) GLES30.glDeleteTextures(1, intArrayOf(bgTexId), 0)
         bgProgram = buildProgram(vertSrc, bgFragSrc)
         dropProgram = buildProgram(vertSrc, dropFragSrc)
         startMs = SystemClock.uptimeMillis()
@@ -190,6 +216,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // ---- 背景 pass：渲染到 FBO ----
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, bgTexId, 0)
+        // FBO 完整性检查（Claude 第 36 批审查建议：AGSL 那边吃过静默失败的亏）。
+        val fboStatus = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+        if (fboStatus != GLES30.GL_FRAMEBUFFER_COMPLETE) {
+            android.util.Log.e("DropletGl", "FBO incomplete: $fboStatus")
+        }
         GLES30.glViewport(0, 0, viewW, viewH)
         GLES30.glUseProgram(bgProgram)
         setVec2(bgProgram, "uRes", viewW.toFloat(), viewH.toFloat())
