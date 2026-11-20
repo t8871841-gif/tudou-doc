@@ -130,14 +130,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 给水滴边缘留一小段 alpha 渐变做抗锯齿，不然 R 处硬截止在真机上会看出锯齿。
             if (dist > R_eff * 1.02) {
                 // 影子：半透明黑，盖在下面真正的背景上把它压暗。
-                // 第 44 批（DeepSeek 对比）：之前是“最大败笔”——半径 1.8R、强度 0.75，
-                // 又大又黑，像块黑斑，没贴住水滴底，看着像悬浮。改成贴住水滴：
-                // 中心从 1.2R 挪到 1.0R（贴底）、半径 1.8R→1.4R（收紧）、
-                // 强度 0.75→0.50（别那么黑）。参考的影子就是紧凑地贴在球下、
-                // 越远越虚，把球“压”在背景上。
+                // 第 46 批（1:1 复制）：第 44 批把强度降到 0.50 是改过头了——
+                // 参考影子最暗处 39–52（背景 ~170），强度本来就是 0.70–0.77，
+                // 暗不是问题，大才是问题。强度改回 0.70（跟参考最暗值对得上），
+                // 半径保持 1.4R、中心保持 1.0R（紧凑、贴底，不是一大团黑斑）。
                 vec2 sCenter = c + vec2(-R * 0.18, R * 1.0);
                 float sDist = length(fragPx - sCenter);
-                float shadow = (1.0 - smoothstep(0.0, R * 1.4, sDist)) * 0.50;
+                float shadow = (1.0 - smoothstep(0.0, R * 1.4, sDist)) * 0.70;
                 if (shadow > 0.01) {
                     oColor = vec4(0.0, 0.0, 0.0, shadow);
                     return;
@@ -229,7 +228,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             result *= (1.0 - darkBand * 0.35 * topDarkMask);
             result *= (1.0 - rimDark);
             // 亮特征直接加（不乘 alpha）。
-            result += vec3(1.0) * (smileBright * 0.35 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            // 第 46 批（1:1 复制）：笑脸系数 0.35→0.25。实测笑脸处 239，
+            // 参考是 203，亮过头了。降下来，往 203 靠。
+            result += vec3(1.0) * (smileBright * 0.25 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
             // 边缘抗锯齿（第 42 批）：R_eff 以内不透明，R_eff→1.02*R_eff 淡出到透明。
             // 这一环里 n2 长度略大于 1、nz=0，折射偏移最大，但只有 2% 宽且在淡出，
             // 看不出错色。
