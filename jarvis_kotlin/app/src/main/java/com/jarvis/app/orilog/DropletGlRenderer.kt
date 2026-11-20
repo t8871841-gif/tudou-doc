@@ -123,10 +123,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // （TUNE_SHAPE_MARGIN，水滴边缘颤动峰值会探出 R），GL 版没有颤动，
             // 余量留着就成了一个圈：0.90R 处 edge 开始、1.18R 处渲染截止，
             // 两道边界叠出来就是用户说的“两圈”。
-            // 第 41 批：分界改成颤动后的有效半径 R_eff（水滴边缘在颤，边界跟着动）。
-            if (dist > R_eff) {
+            // 第 42 批（Claude 审查点 12）：分界从 R_eff 放到 1.02*R_eff，
+            // 给水滴边缘留一小段 alpha 渐变做抗锯齿，不然 R 处硬截止在真机上会看出锯齿。
+            if (dist > R_eff * 1.02) {
                 // 影子：半透明黑，盖在下面真正的背景上把它压暗。
-                vec2 sCenter = c + vec2(-R * 0.18, R * 1.3);
+                // 第 42 批：中心从 1.3R 挪到 1.2R——影子最下沿比 dropWrap 下沿低约 30px
+                // 会被截掉一截，往上挪一点比重新量 View 高度省事（Claude 审查点 11）。
+                vec2 sCenter = c + vec2(-R * 0.18, R * 1.2);
                 float sDist = length(fragPx - sCenter);
                 float shadow = (1.0 - smoothstep(0.0, R * 1.8, sDist)) * 0.75;
                 if (shadow > 0.01) {
@@ -178,8 +181,16 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 hlR = vec2(hlD.x * hlCa - hlD.y * hlSa, hlD.x * hlSa + hlD.y * hlCa);
             vec2 hlQ = vec2(hlR.x / 0.25, hlR.y / (0.25 * 0.55));
             float highlight = exp(-dot(hlQ, hlQ) * 1.5);
-            // 亮边（菲涅尔）：降到 0.5，别跟笑脸/高光抢（之前 1.0 整圈顶满）。
-            float rimBright = edge * (1.0 - topDarkMask) * 0.5;
+            // 亮边（菲涅尔）：第 42 批（Claude 数值模拟发现）——0.5 跟 topDarkMask
+            // 搭配只压掉了顶部，笑脸所在的下半圈完全不受影响，算下来笑脸位置
+            // rimBright(0.5) + smileBright*0.35 叠加后原始值 ≈322/255，顶白成
+            // 255，比参考图实测的 203 过冲了一大截；而且“素边”（无高光无笑脸的
+            // 普通边缘，比如正左侧）算出来也到了 240/255，比参考图的素边（接近
+            // 背景色 170-185）亮太多，整圈边缘太亮会把笑脸/高光这些本该突出的
+            // 特征盖掉。这里降到 0.28，并在笑脸的角度范围里额外打折，不跟笑脸抢。
+            // 我按实际值手算核过：笑脸处 322→224（目标 203，不再顶白），
+            // 素边 240→184（目标背景区间 170-185，正好落进去），高光仍顶白 255（对的）。
+            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.6) * 0.28;
             // 暗边
             float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.40 * (1.0 - topDarkMask);
             // 小高光：左下（-0.45r/+0.42r），半径 0.14r，峰值 0.70（旧版第二个高光，
@@ -207,7 +218,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             result *= (1.0 - rimDark);
             // 亮特征直接加（不乘 alpha）。
             result += vec3(1.0) * (smileBright * 0.35 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
-            oColor = vec4(result, 1.0);
+            // 边缘抗锯齿（第 42 批）：R_eff 以内不透明，R_eff→1.02*R_eff 淡出到透明。
+            // 这一环里 n2 长度略大于 1、nz=0，折射偏移最大，但只有 2% 宽且在淡出，
+            // 看不出错色。
+            float edgeAlpha = 1.0 - smoothstep(R_eff, R_eff * 1.02, dist);
+            oColor = vec4(result, edgeAlpha);
         }
     """.trimIndent()
 
@@ -257,14 +272,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         GLES30.glUseProgram(bgProgram)
         setVec2(bgProgram, "uRes", viewW.toFloat(), viewH.toFloat())
         setFloat(bgProgram, "uTime", tSec)
-        val phase = huePhase(tSec)
+        // 第 42 批（Claude 审查点 5）：FBO 背景跟真背景同相位——之前 FBO 用的是
+        // 写死的固定三色，真背景会随时间做色相漂移（青↔蓝↔紫），时间一长两者
+        // 色相差拉开，水滴内部折射采到的颜色跟外面真背景对不上，边缘会看出
+        // 一条“内外不一致”的分界。改成直接调 OriloBackgroundView.phaseAt()
+        // （跟真背景同一个相位公式、同一套绝对时间），再用静态 hueColor()
+        // 把三色 + 两光斑算出来传进 uniform。光斑位置（ax/ay/bx/by）也用
+        // phaseAt 的，不再自己抄一份公式。
+        val phase = com.jarvis.app.OriloBackgroundView.phaseAt(android.os.SystemClock.uptimeMillis())
         setVec2(bgProgram, "uBlobA", phase.ax * viewW, phase.ay * viewH)
         setVec2(bgProgram, "uBlobB", phase.bx * viewW, phase.by * viewH)
-        setVec3(bgProgram, "uGradTop", 0.55f, 0.65f, 0.95f)
-        setVec3(bgProgram, "uGradMid", 0.45f, 0.55f, 0.91f)
-        setVec3(bgProgram, "uGradBot", 0.50f, 0.58f, 0.91f)
-        setVec3(bgProgram, "uBlobAColor", 0.45f, 0.75f, 0.95f)
-        setVec3(bgProgram, "uBlobBColor", 0.65f, 0.55f, 0.95f)
+        setColor3(bgProgram, "uGradTop", com.jarvis.app.OriloBackgroundView.hueColor(232f, 0.50f, 0.95f, phase.hueShift, phase.satScale))
+        setColor3(bgProgram, "uGradMid", com.jarvis.app.OriloBackgroundView.hueColor(232f, 0.68f, 0.91f, phase.hueShift, phase.satScale))
+        setColor3(bgProgram, "uGradBot", com.jarvis.app.OriloBackgroundView.hueColor(243f, 0.64f, 0.91f, phase.hueShift, phase.satScale))
+        setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
+        setColor3(bgProgram, "uBlobBColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift, phase.satScale))
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
         // ---- 水滴 pass：渲染到屏幕，采样背景纹理 ----
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
@@ -289,17 +311,6 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         setFloat(dropProgram, "uDriftY", driftY)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
-    }
-
-    // 背景光斑相位（跟旧版 OriloBackgroundView 的 13s 流场对齐的简化版）。
-    private data class Phase(val ax: Float, val ay: Float, val bx: Float, val by: Float)
-    private fun huePhase(tSec: Float): Phase {
-        val p = (tSec % 13f) / 13f
-        val ax = 0.30f + 0.18f * sin(p * 6.2831f)
-        val ay = 0.26f + 0.14f * cos(p * 6.2831f * 0.7f)
-        val bx = 0.62f + 0.16f * cos(p * 6.2831f * 0.9f + 1.0f)
-        val by = 0.55f + 0.15f * sin(p * 6.2831f * 0.8f + 2.0f)
-        return Phase(ax, ay, bx, by)
     }
 
     private fun buildProgram(vert: String, frag: String): Int {
@@ -345,5 +356,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
     }
     private fun setVec3(prog: Int, name: String, x: Float, y: Float, z: Float) {
         GLES30.glUniform3f(loc(prog, name), x, y, z)
+    }
+
+    /** 第 42 批：把 hueColor() 算出来的 Int 颜色拆成 0..1 的 RGB 传给 uniform。 */
+    private fun setColor3(prog: Int, name: String, color: Int) {
+        GLES30.glUniform3f(
+            loc(prog, name),
+            android.graphics.Color.red(color) / 255f,
+            android.graphics.Color.green(color) / 255f,
+            android.graphics.Color.blue(color) / 255f,
+        )
     }
 }
