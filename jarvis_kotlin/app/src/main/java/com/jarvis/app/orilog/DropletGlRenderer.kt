@@ -192,7 +192,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 大高光：右上，窄核心（旧 Canvas 高光的 GLSL 版：中心 0.47r/-0.65r，
             // 半径 0.25r，椭圆 1×0.55，转 -40°。Claude 第 36 批审查指出旧代码里
             // 压根没有这颗高光，整圈亮边顶到 220/255，笑脸显不出来。）
-            vec2 hlC = vec2(0.47, -0.65);
+            // 第 49 批：高光独立游走。参考里高光自己还在 ±25px（0.12R）范围里
+            // 游走，不只是跟着水滴中心漂——表面微小起伏改变局部法线，反射点
+            // 就跟着动。用值噪声（跟颤动同一套函数，不同种子、更慢的速度，
+            // 相关时间约 4 秒），缓慢漂移、不抖动。
+            vec2 hlWander = vec2(0.12 * vnoise(uTime * 0.25 + 11.0),
+                0.12 * vnoise(uTime * 0.22 + 23.0));
+            vec2 hlC = vec2(0.47, -0.65) + hlWander;
             vec2 hlD = n2 - hlC;
             float hlAng = -0.698;
             float hlCa = cos(hlAng), hlSa = sin(hlAng);
@@ -241,7 +247,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 47 批（1:1 复制）：笑脸系数 0.25→0.20。v105 真机量过，
             // 笑脸在底部边缘（y≈685，x=420–500），峰值 248，顶白了，
             // 参考是 203。降下来，往 203 靠。
-            result += vec3(1.0) * (smileBright * 0.20 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            // 第 49 批：笑脸亮度起伏。主界面 30fps 实测笑脸 155–227、均值 174，
+            // 亮度是活的，跟着呼吸走——水滴胀缩时底部曲率和反射角变化，菲涅尔
+            // 反射亮度跟着变。系数 0.20 × (1 ± 0.20)，峰值 158–238，对得上参考。
+            float smileCoeff = 0.20 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随角度距离和时间衰减，
             // 平时没有。角度用屏幕坐标（atan2，+y 朝下：0°=右，90°=下）。
