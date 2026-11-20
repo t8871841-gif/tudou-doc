@@ -160,8 +160,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float bend = 120.0;
             vec2 refractUv = gl_FragCoord.xy / uRes + vec2(n2.x, -n2.y) * bend * (1.0 - nz) / uRes;
             vec3 refracted = texture(uBgTex, refractUv).rgb;
-            // 边缘（按颤动后的有效半径算）
-            float edge = smoothstep(R_eff * 0.90, R_eff, dist);
+            // 边缘（按呼吸后的有效半径算）。第 45 批（DeepSeek 对比点 1、4）：
+            // 亮边带从 0.90R–R 收窄到 0.94R–R——之前那圈白边太粗、太实，
+            // 像霓虹描边。参考的亮边是细细的一线，贴着轮廓。
+            float edge = smoothstep(R_eff * 0.94, R_eff, dist);
             // 顶部暗带（~40° 宽）
             float cosTop = -n2.y;
             float topDarkMask = smoothstep(0.94, 0.98, cosTop);
@@ -170,8 +172,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float cosBottom = dot(normalize(n2), bottomDir);
             float smileMask = smoothstep(0.60, 0.85, cosBottom);
             float smileBright = edge * smileMask;
-            // 暗带环
-            float darkBand = smoothstep(R_eff * 0.90, R_eff * 0.975, dist)
+            // 暗带环。第 45 批：跟着亮边带一起收窄（0.94R–0.975R），别让暗带
+            // 盖住太多里面。
+            float darkBand = smoothstep(R_eff * 0.94, R_eff * 0.975, dist)
                 * (1.0 - smoothstep(R_eff * 0.975, R_eff, dist));
             // 漫反射（左下亮、右上暗的平滑渐变）
             vec3 normal = vec3(n2, nz);
@@ -190,14 +193,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 更柔和，别像 2D 软件里直接画上去的死白块。峰值仍是 1.0，
             // 中心照样顶白 255（参考的高光中心也是纯白），只是边缘化开。
             float highlight = exp(-dot(hlQ, hlQ) * 1.0);
-            // 亮边（菲涅尔）：第 44 批（DeepSeek 对比）——之前整圈亮度一样，
-            // 像霓虹灯描边、很 2D。参考的亮边是跟着光走的：朝光那面（右上）亮、
-            // 背光那面（左下）暗，有 3D 倒角感。乘上光照因子：n2 朝光方向时为 1，
-            // 背光时降到 0.55。光方向取大高光的方向（0.47, -0.65）。
+            // 亮边（菲涅尔）：第 45 批（DeepSeek 对比点 1、4）——系数 0.28→0.18。
+            // 参考的素边接近背景色（170-185），我们之前亮到 203，整圈白边
+            // 太实、像塑料球描边。降下来，让亮边细、淡，只在朝光面显出来
+            // （lightFace 已经在跟着光走了）。
             float lightFace = 0.55 + 0.45 * max(0.0, dot(normalize(n2), normalize(vec2(0.47, -0.65))));
-            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.6) * 0.28 * lightFace;
-            // 暗边
-            float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.40 * (1.0 - topDarkMask);
+            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.6) * 0.18 * lightFace;
+            // 暗边。第 45 批：0.40→0.25，别把边缘压得太黑，参考的边缘是
+            // 通透的、不是一圈黑。
+            float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.25 * (1.0 - topDarkMask);
             // 小高光：左下（-0.45r/+0.42r），半径 0.14r，峰值 0.70（旧版第二个高光，
             // 第 41 批补上；位置跟聚光（225°/0.6R）很近，两处亮斑叠在一起是参考图
             // 左下那片亮）。
@@ -215,7 +219,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 这是 v103 真机（2026-11-20 09:52 截图量测）找到的根因：
             // 中心 176 全平、右上高光没出现（315° 方向 170 平）、只有聚光
             // （直接加在结果上那项）亮到了 222。
-            float alpha = mix(0.01, 0.22, edge);
+            // 第 45 批（DeepSeek 对比点 1）：里面不透明、像塑料球——alpha 上限
+            // 0.22→0.15，让里面更透、更接近背景。参考的里面几乎就是背景色，
+            // 只有一层很淡的折射。中心 alpha 仍是 0.01（几乎全透）。
+            float alpha = mix(0.01, 0.15, edge);
             vec3 bg = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
             vec3 result = refracted * 0.98 * alpha + bg * (1.0 - alpha);
             // 暗特征先乘（暗带、暗边只压暗水滴表面）。
