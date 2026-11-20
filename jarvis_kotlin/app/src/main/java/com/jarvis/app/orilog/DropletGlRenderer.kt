@@ -162,20 +162,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
             float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.30;
-            // 合成：折射打底（只留 2% 色调，主体是背景本身），再加各光学项
-            vec3 colorOut = refracted * 0.98
-                + vec3(1.0) * smileBright * 1.0
-                + vec3(1.0) * diffuse * 0.06
-                + vec3(1.0) * rimBright
-                + vec3(1.0) * highlight;
-            colorOut *= (1.0 - darkBand * 0.35 * topDarkMask);
-            colorOut *= (1.0 - rimDark);
-            // alpha：中心 0.01、边缘 0.22（跟旧版一致，中心保持透明）
+            // 合成：先把折射背景和原背景按 alpha 混合（中心透明、边缘 0.22，
+            // 跟旧版一致）；光学特征（高光、笑脸、亮边、聚光、漫反射）是加性光，
+            // 必须直接加在结果上——之前把它们放进 colorOut 再乘 alpha，
+            // alpha 只有 0.01–0.22，特征全被压没了，水滴才成了一块平板。
+            // 这是 v103 真机（2026-11-20 09:52 截图量测）找到的根因：
+            // 中心 176 全平、右上高光没出现（315° 方向 170 平）、只有聚光
+            // （直接加在结果上那项）亮到了 222。
             float alpha = mix(0.01, 0.22, edge);
-            // 手动合成到背景上（最后输出 alpha=1.0 不透明像素，不走 Android 合成层，
-            // 没有预乘透明度歧义），聚光只加一次。
             vec3 bg = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
-            vec3 result = colorOut * alpha + bg * (1.0 - alpha) + vec3(1.0) * caustic * 0.5;
+            vec3 result = refracted * 0.98 * alpha + bg * (1.0 - alpha);
+            // 暗特征先乘（暗带、暗边只压暗水滴表面）。
+            result *= (1.0 - darkBand * 0.35 * topDarkMask);
+            result *= (1.0 - rimDark);
+            // 亮特征直接加（不乘 alpha）。
+            result += vec3(1.0) * (smileBright * 0.35 + diffuse * 0.06 + rimBright + highlight + caustic * 0.5);
             oColor = vec4(result, 1.0);
         }
     """.trimIndent()
