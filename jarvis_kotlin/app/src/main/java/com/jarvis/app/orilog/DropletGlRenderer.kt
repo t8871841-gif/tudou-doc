@@ -130,11 +130,14 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 给水滴边缘留一小段 alpha 渐变做抗锯齿，不然 R 处硬截止在真机上会看出锯齿。
             if (dist > R_eff * 1.02) {
                 // 影子：半透明黑，盖在下面真正的背景上把它压暗。
-                // 第 42 批：中心从 1.3R 挪到 1.2R——影子最下沿比 dropWrap 下沿低约 30px
-                // 会被截掉一截，往上挪一点比重新量 View 高度省事（Claude 审查点 11）。
-                vec2 sCenter = c + vec2(-R * 0.18, R * 1.2);
+                // 第 44 批（DeepSeek 对比）：之前是“最大败笔”——半径 1.8R、强度 0.75，
+                // 又大又黑，像块黑斑，没贴住水滴底，看着像悬浮。改成贴住水滴：
+                // 中心从 1.2R 挪到 1.0R（贴底）、半径 1.8R→1.4R（收紧）、
+                // 强度 0.75→0.50（别那么黑）。参考的影子就是紧凑地贴在球下、
+                // 越远越虚，把球“压”在背景上。
+                vec2 sCenter = c + vec2(-R * 0.18, R * 1.0);
                 float sDist = length(fragPx - sCenter);
-                float shadow = (1.0 - smoothstep(0.0, R * 1.8, sDist)) * 0.75;
+                float shadow = (1.0 - smoothstep(0.0, R * 1.4, sDist)) * 0.50;
                 if (shadow > 0.01) {
                     oColor = vec4(0.0, 0.0, 0.0, shadow);
                     return;
@@ -183,17 +186,16 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float hlCa = cos(hlAng), hlSa = sin(hlAng);
             vec2 hlR = vec2(hlD.x * hlCa - hlD.y * hlSa, hlD.x * hlSa + hlD.y * hlCa);
             vec2 hlQ = vec2(hlR.x / 0.25, hlR.y / (0.25 * 0.55));
-            float highlight = exp(-dot(hlQ, hlQ) * 1.5);
-            // 亮边（菲涅尔）：第 42 批（Claude 数值模拟发现）——0.5 跟 topDarkMask
-            // 搭配只压掉了顶部，笑脸所在的下半圈完全不受影响，算下来笑脸位置
-            // rimBright(0.5) + smileBright*0.35 叠加后原始值 ≈322/255，顶白成
-            // 255，比参考图实测的 203 过冲了一大截；而且“素边”（无高光无笑脸的
-            // 普通边缘，比如正左侧）算出来也到了 240/255，比参考图的素边（接近
-            // 背景色 170-185）亮太多，整圈边缘太亮会把笑脸/高光这些本该突出的
-            // 特征盖掉。这里降到 0.28，并在笑脸的角度范围里额外打折，不跟笑脸抢。
-            // 我按实际值手算核过：笑脸处 322→224（目标 203，不再顶白），
-            // 素边 240→184（目标背景区间 170-185，正好落进去），高光仍顶白 255（对的）。
-            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.6) * 0.28;
+            // 第 44 批（DeepSeek 对比）：高光指数从 1.5 放到 1.0，边缘过渡
+            // 更柔和，别像 2D 软件里直接画上去的死白块。峰值仍是 1.0，
+            // 中心照样顶白 255（参考的高光中心也是纯白），只是边缘化开。
+            float highlight = exp(-dot(hlQ, hlQ) * 1.0);
+            // 亮边（菲涅尔）：第 44 批（DeepSeek 对比）——之前整圈亮度一样，
+            // 像霓虹灯描边、很 2D。参考的亮边是跟着光走的：朝光那面（右上）亮、
+            // 背光那面（左下）暗，有 3D 倒角感。乘上光照因子：n2 朝光方向时为 1，
+            // 背光时降到 0.55。光方向取大高光的方向（0.47, -0.65）。
+            float lightFace = 0.55 + 0.45 * max(0.0, dot(normalize(n2), normalize(vec2(0.47, -0.65))));
+            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.6) * 0.28 * lightFace;
             // 暗边
             float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.40 * (1.0 - topDarkMask);
             // 小高光：左下（-0.45r/+0.42r），半径 0.14r，峰值 0.70（旧版第二个高光，
