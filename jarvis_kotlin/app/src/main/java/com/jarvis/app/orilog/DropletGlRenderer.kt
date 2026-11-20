@@ -101,23 +101,28 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 local = fragPx - c;
             float dist = length(local);
             float R = uRadius;
-            // 水滴外：直接输出背景（纹理采样永远用没翻转的 gl_FragCoord.xy——
-            // 背景纹理写入时用的是 GL 原始坐标（y 向上），用翻转后的 fragPx 采样
-            // 等于又多翻一次，上下镜像颠倒。Claude 第 36 批审查指出，实锤。）
+            // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
+            // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
+            // 渐变跟下面真正的背景对不上）。这里不再输出背景，只输出影子/聚光，
+            // 其余全透明，让下面真正的背景露出来。
             if (dist > R * 1.18) {
-                vec3 bgOut = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
-                // 影子：水滴下方 1.3R 处、半径 1.8R 的软影（在背景上乘暗）
+                // 影子：半透明黑，盖在下面真正的背景上把它压暗。
                 vec2 sCenter = c + vec2(-R * 0.18, R * 1.3);
                 float sDist = length(fragPx - sCenter);
                 float shadow = (1.0 - smoothstep(0.0, R * 1.8, sDist)) * 0.75;
-                bgOut *= (1.0 - shadow);
-                // 外面聚光：水滴左下 1.5R 处、半径 0.6R 的亮斑（光透过水珠照亮一片区域；
-                // 原来在背景 View 里画（第 23 批），GL View 不透明把它盖住了，挪到这里）。
+                if (shadow > 0.01) {
+                    oColor = vec4(0.0, 0.0, 0.0, shadow);
+                    return;
+                }
+                // 外面聚光：半透明白，提亮下面真正的背景。
                 vec2 ocCenter = c + vec2(-R * 1.5 * 0.7071, R * 1.5 * 0.7071);
                 float ocDist = length(fragPx - ocCenter);
                 float oc = (1.0 - smoothstep(0.0, R * 0.6, ocDist)) * 0.10;
-                bgOut += vec3(1.0) * oc;
-                oColor = vec4(bgOut, 1.0);
+                if (oc > 0.01) {
+                    oColor = vec4(1.0, 1.0, 1.0, oc);
+                    return;
+                }
+                oColor = vec4(0.0);
                 return;
             }
             vec2 n2 = local / R;
@@ -182,7 +187,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
     """.trimIndent()
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES30.glClearColor(0f, 0f, 0f, 1f)
+        // 第 39 批：透明 Surface，清成全透明（水滴外由着色器输出 alpha=0）。
+        GLES30.glClearColor(0f, 0f, 0f, 0f)
         // EGL 上下文重建时本方法会再跑一次，先删旧对象（Claude 第 36 批审查建议，防御性）。
         if (bgProgram != 0) GLES30.glDeleteProgram(bgProgram)
         if (dropProgram != 0) GLES30.glDeleteProgram(dropProgram)

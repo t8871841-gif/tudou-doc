@@ -1,6 +1,7 @@
 package com.jarvis.app.orilog
 
 import android.content.Context
+import android.graphics.PixelFormat
 import android.opengl.GLSurfaceView
 import android.util.AttributeSet
 
@@ -17,6 +18,11 @@ import android.util.AttributeSet
  * - 场景参数每帧 CPU 算好、经 uniform 传进去。
  *
  * WebGL 不用（用户明确）。
+ *
+ * 第 39 批：改成透明 Surface（EGL 带 alpha + TRANSLUCENT + ZOrderOnTop），
+ * 水滴外全透明，让下面真正的背景（OriloBackgroundView）露出来——
+ * 之前 GL 自己画背景，渐变跟下面对不上，水滴周围被截成一个正方形。
+ * FBO 背景只留给水滴内部折射采样用，不再显示。
  */
 class DropletGlView @JvmOverloads constructor(
     context: Context,
@@ -26,6 +32,10 @@ class DropletGlView @JvmOverloads constructor(
     private val renderer = DropletGlRenderer(context)
 
     init {
+        // 透明 Surface：EGL 要带 alpha 通道，holder 设成半透明，GL 层置顶。
+        setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+        holder.setFormat(PixelFormat.TRANSLUCENT)
+        setZOrderOnTop(true)
         setEGLContextClientVersion(3)
         setRenderer(renderer)
         renderMode = RENDERMODE_CONTINUOUSLY
