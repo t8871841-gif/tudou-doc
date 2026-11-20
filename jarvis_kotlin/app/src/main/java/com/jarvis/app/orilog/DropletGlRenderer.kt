@@ -95,16 +95,20 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         uniform float uDriftX;
         uniform float uDriftY;
         out vec4 oColor;
-        // 颤动（第 41 批补上，之前 GL 版没有——水滴是个正圆、边缘静止）：
-        // 5 组不成整数比的频率叠加（K=1/3/5/7/9），参考视频实测主周期约 2.1 秒、
-        // 方向反转 5 秒内 21–54 次。振幅合计约 5.6%，跟实测 ±5% 对得上。
-        float wobbleFactor(float theta, float t) {
+        // 颤动（第 43 批重写，第 41 批的角向颤动是错的——用户 2026-11-20 15:09 指出
+        // “每帧都是奇形怪状”：角向颤动让每一帧的轮廓都是坑坑洼洼的不规则形，
+        // 但参考图是正圆，Henry 30fps 实测圆拟合残差只有 1.07px（半径 206px 的
+        // 0.5%）。参考的 ±5% 颤动是半径随时间均匀呼吸（整圆一起胀缩），不是
+        // 边缘按角度变形。改成只随时间变的均匀呼吸：形状永远是正圆，半径
+        // 在时间上抖。频率和振幅跟原来同一套（主周期 2.1 秒、振幅合计 5.6%），
+        // 只是不再乘角度。
+        float breatheFactor(float t) {
             return 1.0
-                + 0.020 * sin(1.0 * theta + 3.0 * t)
-                + 0.015 * sin(3.0 * theta + 2.9 * t + 1.3)
-                + 0.012 * sin(5.0 * theta + 5.6 * t + 2.1)
-                + 0.005 * sin(7.0 * theta + 13.0 * t + 0.7)
-                + 0.004 * sin(9.0 * theta + 20.0 * t + 1.9);
+                + 0.020 * sin(3.0 * t)
+                + 0.015 * sin(2.9 * t + 1.3)
+                + 0.012 * sin(5.6 * t + 2.1)
+                + 0.005 * sin(13.0 * t + 0.7)
+                + 0.004 * sin(20.0 * t + 1.9);
         }
         void main() {
             vec2 fragPx = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
@@ -112,9 +116,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 local = fragPx - c;
             float dist = length(local);
             float R = uRadius;
-            // 颤动后的有效半径：边缘按角度现算，法线近似仍按圆算（振幅小，误差可接受）。
-            float theta = atan(local.y, local.x);
-            float R_eff = R * wobbleFactor(theta, uTime);
+            // 均匀呼吸后的有效半径：只随时间变，形状永远是正圆。
+            float R_eff = R * breatheFactor(uTime);
             // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
             // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
             // 渐变跟下面真正的背景对不上）。这里不再输出背景，只输出影子/聚光，
