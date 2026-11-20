@@ -102,13 +102,16 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // 边缘按角度变形。改成只随时间变的均匀呼吸：形状永远是正圆，半径
         // 在时间上抖。频率和振幅跟原来同一套（主周期 2.1 秒、振幅合计 5.6%），
         // 只是不再乘角度。
+        // 第 47 批（1:1 复制）：振幅翻倍。v104 视频量过，颤动标准差只有
+        // 1.4px，参考是 9.3px（半径 4.5%）。五组正弦叠加的标准差约是
+        // 振幅平方和开方的一半，翻倍后标准差约 4.0%，贴近参考的 4.5%。
         float breatheFactor(float t) {
             return 1.0
-                + 0.020 * sin(3.0 * t)
-                + 0.015 * sin(2.9 * t + 1.3)
-                + 0.012 * sin(5.6 * t + 2.1)
-                + 0.005 * sin(13.0 * t + 0.7)
-                + 0.004 * sin(20.0 * t + 1.9);
+                + 0.040 * sin(3.0 * t)
+                + 0.030 * sin(2.9 * t + 1.3)
+                + 0.024 * sin(5.6 * t + 2.1)
+                + 0.010 * sin(13.0 * t + 0.7)
+                + 0.008 * sin(20.0 * t + 1.9);
         }
         void main() {
             vec2 fragPx = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
@@ -228,9 +231,36 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             result *= (1.0 - darkBand * 0.35 * topDarkMask);
             result *= (1.0 - rimDark);
             // 亮特征直接加（不乘 alpha）。
-            // 第 46 批（1:1 复制）：笑脸系数 0.35→0.25。实测笑脸处 239，
-            // 参考是 203，亮过头了。降下来，往 203 靠。
-            result += vec3(1.0) * (smileBright * 0.25 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            // 第 47 批（1:1 复制）：笑脸系数 0.25→0.20。v105 真机量过，
+            // 笑脸在底部边缘（y≈685，x=420–500），峰值 248，顶白了，
+            // 参考是 203。降下来，往 203 靠。
+            result += vec3(1.0) * (smileBright * 0.20 + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
+            // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随角度距离和时间衰减，
+            // 平时没有。角度用屏幕坐标（atan2，+y 朝下：0°=右，90°=下）。
+            // 三个源（用户给的角度是数学约定 0°=右、逆时针，换算到屏幕坐标）：
+            // 左下 225° → 屏幕 135°（2.356 rad），触发 t%45=0；
+            // 右下 315° → 屏幕 45°（0.785 rad），触发 t%45=18；
+            // 左上 135° → 屏幕 -135°（-2.356 rad），触发 t%45=33。
+            // 波沿表面走，振幅很小（0.05），只求一丝动感，别喧宾夺主。
+            float ripple = 0.0;
+            float surfAng = atan(n2.y, n2.x);
+            {
+                float dAng = abs(mod(surfAng - 2.356 + 3.14159, 6.28318) - 3.14159);
+                float dt = mod(uTime - 0.0, 45.0);
+                ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
+            }
+            {
+                float dAng = abs(mod(surfAng - 0.785 + 3.14159, 6.28318) - 3.14159);
+                float dt = mod(uTime - 18.0, 45.0);
+                ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
+            }
+            {
+                float dAng = abs(mod(surfAng - (-2.356) + 3.14159, 6.28318) - 3.14159);
+                float dt = mod(uTime - 33.0, 45.0);
+                ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
+            }
+            result += vec3(1.0) * ripple * 0.05;
             // 边缘抗锯齿（第 42 批）：R_eff 以内不透明，R_eff→1.02*R_eff 淡出到透明。
             // 这一环里 n2 长度略大于 1、nz=0，折射偏移最大，但只有 2% 宽且在淡出，
             // 看不出错色。
@@ -310,10 +340,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTexId)
         setInt(dropProgram, "uBgTex", 0)
-        // 水滴固定 220dp 直径（跟旧版一致），不跟 View 大小走——View 是整片上半屏，
-        // 给影子留地方，水滴本身还是 220dp。
-        val density = context.resources.displayMetrics.density
-        val r = 110f * density * 0.78f
+        // 第 47 批（1:1 复制，用户令）：水滴半径改成参考值。之前是
+        // 110dp×density×0.78，抄旧版抄来的，在用户手机上算出来 234px，
+        // 参考 Henry 实测是 206px（屏宽 1080 的 19%）。改成屏宽的 19%，
+        // 在这台手机上就是 206px，跟参考 1:1。不再用 dp 抄旧版。
+        val r = viewW * 0.19f
         val cx = viewW / 2f
         val cy = viewH * 0.45f
         setVec2(dropProgram, "uCenter", cx, cy)
