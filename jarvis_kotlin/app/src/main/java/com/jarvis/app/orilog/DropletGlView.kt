@@ -1,0 +1,38 @@
+package com.jarvis.app.orilog
+
+import android.content.Context
+import android.opengl.GLSurfaceView
+import android.util.AttributeSet
+
+/**
+ * Orilo 路线重做的水滴 View（第 36 批起）。
+ *
+ * 跟旧的 OriloDropletView（Android View + AGSL RuntimeShader）完全分开，
+ * 放在 orilog/ 文件夹里，不混在一起。
+ *
+ * 架构（照 Orilo 原版路线，不是抄它的代码）：
+ * - 原生 OpenGL ES，GLSurfaceView + 自定义 GLSL。
+ * - 全屏大三角（无 VBO），整颗水滴在片元着色器里逐像素算。
+ * - 背景先渲染到 FBO 纹理，水滴着色器采样真实背景纹理做折射。
+ * - 场景参数每帧 CPU 算好、经 uniform 传进去。
+ *
+ * WebGL 不用（用户明确）。
+ */
+class DropletGlView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+) : GLSurfaceView(context, attrs) {
+
+    private val renderer = DropletGlRenderer(context)
+
+    init {
+        setEGLContextClientVersion(3)
+        setRenderer(renderer)
+        renderMode = RENDERMODE_CONTINUOUSLY
+    }
+
+    /** 设置水滴中心漂移幅度（0.05 = 5% 半径），跟旧版 TUNE_CENTER_DRIFT_FRAC 对应。 */
+    fun setDriftFrac(frac: Float) {
+        renderer.driftFrac = frac
+    }
+}

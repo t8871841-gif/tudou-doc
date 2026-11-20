@@ -144,7 +144,7 @@ class MainActivity : Activity() {
     // renderHistoryBubbles 重建经典气泡时为 true：addBubble 的 Orilo 同步跳过它，
     // 对话区由 refreshOriloChat 全量重建（问候语那句 record=true，不能只靠 record 区分）。
     private var rebuildingBubbles = false
-    private var oriloDroplet: OriloDropletView? = null
+    private var oriloDroplet: com.jarvis.app.orilog.DropletGlView? = null
     // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
     // 插在对话背景照片层之上、设置页与内容列之下；Orilo 档才显示。
     private lateinit var oriloBackgroundView: OriloBackgroundView
@@ -444,8 +444,11 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
         // 水滴颜色不跟状态（固定玻璃色）；大小跟待机走（setAwake：待机缩、干活胀）。
-        oriloDroplet = OriloDropletView(this)
-        dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER))
+        // 第 36 批：AGSL 路线停掉，改走 OpenGL 路线（orilog/ 文件夹，DropletGlView）。
+        // GL View 占满整个 dropWrap（上半屏），给影子留地方；水滴本身还是 220dp，
+        // 半径在 DropletGlRenderer 里按 110dp 算。
+        oriloDroplet = com.jarvis.app.orilog.DropletGlView(this)
+        dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER))
         // 第 23 批：外面左下聚光 = 水滴左下再往外 0.5r——水滴落位后算一次，传给背景 View。
         oriloDroplet?.post { updateCausticSpot() }
         panel.addView(dropWrap)
@@ -511,7 +514,9 @@ class MainActivity : Activity() {
         drop.getLocationOnScreen(loc)
         val bgLoc = IntArray(2)
         oriloBackgroundView.getLocationOnScreen(bgLoc)
-        val r = kotlin.math.min(w, h) / 2f * 0.78f
+        // 第 36 批：GL 水滴固定 220dp 直径，半径按 110dp 算，不跟 View 大小走
+        // （View 已占满 dropWrap，w/h 是整片上半屏）。
+        val r = 110f * resources.displayMetrics.density * 0.78f
         val cx = loc[0] - bgLoc[0] + w / 2f
         val cy = loc[1] - bgLoc[1] + h * 0.45f
         // 左下 225°：x 减、y 加（y 朝下）。聚光中心在 1.5r 处（水滴左下 rim
