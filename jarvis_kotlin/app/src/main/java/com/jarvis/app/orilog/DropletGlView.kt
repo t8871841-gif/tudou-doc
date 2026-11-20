@@ -35,4 +35,10 @@ class DropletGlView @JvmOverloads constructor(
     fun setDriftFrac(frac: Float) {
         renderer.driftFrac = frac
     }
+
+    /** 空方法，跟旧 OriloDropletView 一样：水滴不再有待机/睡觉态——永远满尺寸、
+     *  永远颤动、不画 Z。留着这个方法是让 MainActivity 的调用不用改。 */
+    fun setAwake(@Suppress("UNUSED_PARAMETER") awake: Boolean) {
+        // 故意什么都不做。
+    }
 }
