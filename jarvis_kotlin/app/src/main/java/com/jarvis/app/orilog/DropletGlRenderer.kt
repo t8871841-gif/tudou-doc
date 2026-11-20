@@ -100,18 +100,24 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // 但参考图是正圆，Henry 30fps 实测圆拟合残差只有 1.07px（半径 206px 的
         // 0.5%）。参考的 ±5% 颤动是半径随时间均匀呼吸（整圆一起胀缩），不是
         // 边缘按角度变形。改成只随时间变的均匀呼吸：形状永远是正圆，半径
-        // 在时间上抖。频率和振幅跟原来同一套（主周期 2.1 秒、振幅合计 5.6%），
-        // 只是不再乘角度。
-        // 第 47 批（1:1 复制）：振幅翻倍。v104 视频量过，颤动标准差只有
-        // 1.4px，参考是 9.3px（半径 4.5%）。五组正弦叠加的标准差约是
-        // 振幅平方和开方的一半，翻倍后标准差约 4.0%，贴近参考的 4.5%。
+        // 在时间上抖。
+        // 第 48 批（物理想透彻了再改）：颤动换成值噪声，不再是固定正弦。
+        // 水滴颤动是表面张力在拉、空气和震动在推、黏性在耗——推一下耗一下，
+        // 永远不重复。Henry 实测：没有干净周期，相关时间 1–2 秒，标准差
+        // 9.3px（半径 4.5%）。固定正弦频谱是死的，迟早重复，看着就机械。
+        // 值噪声（hash + 平滑插值）两层叠加，相关时间约 2 秒和 0.8 秒，
+        // 振幅调到标准差约 4.1%，贴近参考的 4.5%，且不重复。
+        float hash1(float n) { return fract(sin(n) * 43758.5453123); }
+        float vnoise(float t) {
+            float i = floor(t);
+            float f = fract(t);
+            float u = f * f * (3.0 - 2.0 * f);
+            return mix(hash1(i), hash1(i + 1.0), u) * 2.0 - 1.0;
+        }
         float breatheFactor(float t) {
             return 1.0
-                + 0.040 * sin(3.0 * t)
-                + 0.030 * sin(2.9 * t + 1.3)
-                + 0.024 * sin(5.6 * t + 2.1)
-                + 0.010 * sin(13.0 * t + 0.7)
-                + 0.008 * sin(20.0 * t + 1.9);
+                + 0.065 * vnoise(t * 0.5)
+                + 0.030 * vnoise(t * 1.3 + 7.0);
         }
         void main() {
             vec2 fragPx = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
@@ -132,24 +138,25 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 42 批（Claude 审查点 12）：分界从 R_eff 放到 1.02*R_eff，
             // 给水滴边缘留一小段 alpha 渐变做抗锯齿，不然 R 处硬截止在真机上会看出锯齿。
             if (dist > R_eff * 1.02) {
-                // 影子：半透明黑，盖在下面真正的背景上把它压暗。
-                // 第 46 批（1:1 复制）：第 44 批把强度降到 0.50 是改过头了——
-                // 参考影子最暗处 39–52（背景 ~170），强度本来就是 0.70–0.77，
-                // 暗不是问题，大才是问题。强度改回 0.70（跟参考最暗值对得上），
-                // 半径保持 1.4R、中心保持 1.0R（紧凑、贴底，不是一大团黑斑）。
-                vec2 sCenter = c + vec2(-R * 0.18, R * 1.0);
+                // 第 48 批（物理想透彻了再改）：影子和亮斑叠加，不再“影子优先返回”。
+                // 之前是阴影 > 0.01 就直接返回，亮斑永远画不出来——散射的光
+                // 应该透过阴影照出来，亮斑长在阴影里面。现在两处一起算：
+                // 影子压暗、亮斑提亮，合成一个输出（白×亮斑 + 背景×(1−影子−亮斑)）。
+                // 影子中心也挪到光的方向：光在 54°（右上），影子顺着光往左下偏，
+                // 中心 (-0.59R, +0.81R)，方向 126°；之前是 (-0.18R, +1.0R)，
+                // 几乎正下方，往左偏得不够，差了约 26°。
+                vec2 sCenter = c + vec2(-R * 0.59, R * 0.81);
                 float sDist = length(fragPx - sCenter);
                 float shadow = (1.0 - smoothstep(0.0, R * 1.4, sDist)) * 0.70;
-                if (shadow > 0.01) {
-                    oColor = vec4(0.0, 0.0, 0.0, shadow);
-                    return;
-                }
                 // 外面聚光：半透明白，提亮下面真正的背景。
                 vec2 ocCenter = c + vec2(-R * 1.5 * 0.7071, R * 1.5 * 0.7071);
                 float ocDist = length(fragPx - ocCenter);
                 float oc = (1.0 - smoothstep(0.0, R * 0.6, ocDist)) * 0.10;
-                if (oc > 0.01) {
-                    oColor = vec4(1.0, 1.0, 1.0, oc);
+                float a = clamp(shadow + oc, 0.0, 1.0);
+                if (a > 0.01) {
+                    // 颜色 = 白×亮斑占比（亮斑 0 时纯黑、影子 0 时纯白），
+                    // alpha = 两者之和。SurfaceFlinger 再跟真背景合成。
+                    oColor = vec4(vec3(oc / a), a);
                     return;
                 }
                 oColor = vec4(0.0);
