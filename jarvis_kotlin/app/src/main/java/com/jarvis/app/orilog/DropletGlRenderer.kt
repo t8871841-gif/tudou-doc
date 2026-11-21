@@ -223,7 +223,12 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 太实、像塑料球描边。降下来，让亮边细、淡，只在朝光面显出来
             // （lightFace 已经在跟着光走了）。
             float lightFace = 0.55 + 0.45 * max(0.0, dot(normalize(n2), normalize(vec2(0.47, -0.65))));
-            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.6) * 0.18 * lightFace;
+            // 第 51 批：笑脸方向的亮边再压下去。Claude 重算指出笑脸峰值
+            // 系统性亮约 60 点，根子是 rimBright 在笑脸方向贡献太多，
+            // 光调笑脸系数压不下来（底子不跟着系数变）。把笑脸方向的
+            // 亮边压制从 0.6 提到 0.85（笑脸中心处亮边只剩 15%，原来 40%），
+            // 配合笑脸系数减半，峰值约 194–205，落进目标区间。
+            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.85) * 0.18 * lightFace;
             // 暗边。第 45 批：0.40→0.25，别把边缘压得太黑，参考的边缘是
             // 通透的、不是一圈黑。
             float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.25 * (1.0 - topDarkMask);
@@ -259,36 +264,45 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 参考是 203。降下来，往 203 靠。
             // 第 49 批：笑脸亮度起伏。主界面 30fps 实测笑脸 155–227、均值 174，
             // 亮度是活的，跟着呼吸走——水滴胀缩时底部曲率和反射角变化，菲涅尔
-            // 反射亮度跟着变。系数 0.20 × (1 ± 0.20)，峰值 158–238，对得上参考。
+            // 反射亮度跟着变。
+            // 第 51 批：系数 0.20→0.10。Claude 按实际公式重算：第 49 批的
+            // “158–238”是线性缩放，错的——笑脸是加在背景+亮边+漫反射的底子上，
+            // 不是从 0 开始正比。实际是系数 0.16→220、0.20→231、0.24→241，
+            // 比目标（155–227）系统性亮约 60 点。光调系数压不下来，
+            // 因为底子（背景 170 + 亮边）不跟着系数变。系数减半到 0.10，
+            // 再配合亮边在笑脸方向多压一点（见 rimBright），峰值约 194–205，
+            // 落进目标区间（4454 目标 203）。
             // 第 50 批：漫反射 0.06→0.12。里面太平、太暗（v105 中心 ~151，
             // 参考 166–216 平滑渐变）——漫反射只给 0.06，里面拉不出渐变。
             // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
-            float smileCoeff = 0.20 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            float smileCoeff = 0.10 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
             result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.12 + rimBright + highlight + smallHighlight + caustic * 0.5);
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随角度距离和时间衰减，
-            // 平时没有。三个源直接用用户给的数学约定角（0°=右、逆时针）：
-            // 左下 225°（-2.356 rad），触发 t%45=0；
-            // 右下 315°（-0.785 rad），触发 t%45=18；
-            // 左上 135°（2.356 rad），触发 t%45=33。
-            // 第 50 批修：之前错转成了屏幕角——surfAng = atan(n2.y, n2.x)，
-            // n2 是 Y 翻转后的空间（+y 朝上），所以 surfAng 本身就是数学约定角，
-            // 不用转屏幕角。错转等于上下镜像，三处源点全放反了。
+            // 平时没有。三个源用屏幕坐标角（surfAng = atan(n2.y, n2.x)，
+            // n2.y 为正 = 屏幕向下，所以 0°=右、90°=下）：
+            // 左下 225°（数学）→ 屏幕 135°（2.356 rad），触发 t%45=0；
+            // 右下 315°（数学）→ 屏幕 45°（0.785 rad），触发 t%45=18；
+            // 左上 135°（数学）→ 屏幕 225°（-2.356 rad），触发 t%45=33。
+            // 第 51 批：纠正第 50 批的错误“修正”。第 50 批以为 surfAng 是
+            // 数学角，把三处全取反了，其实是错的——Claude 机算验证：
+            // n2.y 为正就是屏幕向下，surfAng 是屏幕角，第 47 批的原值
+            // （2.356/0.785/-2.356）本来就是对的。认错，改回去。
             // 波沿表面走，振幅很小（0.05），只求一丝动感，别喧宾夺主。
             float ripple = 0.0;
             float surfAng = atan(n2.y, n2.x);
             {
-                float dAng = abs(mod(surfAng - (-2.356) + 3.14159, 6.28318) - 3.14159);
+                float dAng = abs(mod(surfAng - 2.356 + 3.14159, 6.28318) - 3.14159);
                 float dt = mod(uTime - 0.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
             {
-                float dAng = abs(mod(surfAng - (-0.785) + 3.14159, 6.28318) - 3.14159);
+                float dAng = abs(mod(surfAng - 0.785 + 3.14159, 6.28318) - 3.14159);
                 float dt = mod(uTime - 18.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
             {
-                float dAng = abs(mod(surfAng - 2.356 + 3.14159, 6.28318) - 3.14159);
+                float dAng = abs(mod(surfAng - (-2.356) + 3.14159, 6.28318) - 3.14159);
                 float dt = mod(uTime - 33.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
