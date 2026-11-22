@@ -291,10 +291,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 盖住太多里面。
             float darkBand = smoothstep(R_eff * 0.94, R_eff * 0.975, dist)
                 * (1.0 - smoothstep(R_eff * 0.975, R_eff, dist));
-            // 漫反射（左下亮、右上暗的平滑渐变）
-            vec3 normal = vec3(n2, nz);
-            vec3 lightDir = normalize(vec3(-0.45, -0.65, 0.6));
-            float diffuse = clamp(dot(normal, lightDir), 0.0, 1.0);
+            // 第 78 批：漫反射计算整段删掉（上面已从合成里拿掉，留着是死代码）。
             // 大高光：右上，窄核心（旧 Canvas 高光的 GLSL 版：中心 0.47r/-0.65r，
             // 半径 0.25r，椭圆 1×0.55，转 -40°。Claude 第 36 批审查指出旧代码里
             // 压根没有这颗高光，整圈亮边顶到 220/255，笑脸显不出来。）
@@ -347,7 +344,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 加上去的白线，靠折射、月牙、亮点、笑脸界定。rimBright 系数
             // 0.18→0.05：朝光面只剩 0.05（细、淡），背光面 0.005（看不见），
             // 边缘由折射和其它特征界定，不再有一圈白线。
-            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.85) * 0.05 * lightFace;
+            // 第 78 批（用户物理课）：白边整条删。rimBright 0.05 也是错的——
+            // 水滴边缘没有一圈白线，亮只亮在有光的地方（高光、亮点、笑脸、
+            // 聚光），边缘由折射 + 暗环（rimDark，全内反射）界定。归零。
+            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.85) * 0.0 * lightFace;
             // 暗边。第 45 批：0.40→0.25，别把边缘压得太黑，参考的边缘是
             // 通透的、不是一圈黑。
             float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.25 * (1.0 - topDarkMask);
@@ -369,7 +369,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // (+0.65, +0.12)，同半径、同峰值。
             vec2 shRC = vec2(0.65, 0.12);
             vec2 shRD = n2 - shRC;
-            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.55;
+            // 第 78 批：右亮点 0.55→0.20。jk-v115 右亮点 237，参考 147——
+            // 参考的右亮点极淡，几乎看不见，我的太亮抢眼，压回去。
+            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.20;
             // 顶部细月牙：第 68 批。参考 4454 顶部有一道细月牙——一道细细的
             // 亮弧，贴着水滴上缘内侧弯着，从左上到右上。不是大高光（那是右上
             // 实心白块），是独立的细弧。实现：顶部方向（0,-1）的点积定角度
@@ -401,7 +403,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 topDir = vec2(0.0, -1.0);
             float topDot = dot(normalize(n2), topDir);
             float cresR = length(n2);
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.15;
+            // 第 78 批：月牙 0.15→0.25。jk-v115 月牙 122（比背景暗，看不见），
+            // 参考 156（亮的细弧）。底色变了，按新底色重算，提亮到显出来。
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.25;
             // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
             // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
             // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限
@@ -449,10 +453,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 这是 v103 真机（2026-11-20 09:52 截图量测）找到的根因：
             // 中心 176 全平、右上高光没出现（315° 方向 170 平）、只有聚光
             // （直接加在结果上那项）亮到了 222。
-            // 第 45 批（DeepSeek 对比点 1）：里面不透明、像塑料球——alpha 上限
-            // 0.22→0.15，让里面更透、更接近背景。参考的里面几乎就是背景色，
-            // 只有一层很淡的折射。中心 alpha 仍是 0.01（几乎全透）。
-            float alpha = mix(0.01, 0.15, edge);
+            // 第 78 批（用户物理课）：水滴无色透明，颜色全是背景透过来的。
+            // alpha 0.01–0.15 等于只让 1%–15% 的折射背景透进来，剩下全是
+            // 直接背景，水滴几乎没起透镜作用，才像贴上去的紫色圆片。
+            // 提上去：里面基本全是折射进来的背景（透镜），时刻跟背景走。
+            float alpha = mix(0.85, 1.0, edge);
             vec3 bg = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
             vec3 result = refracted * 0.98 * alpha + bg * (1.0 - alpha);
             // 暗特征先乘（暗带、暗边只压暗水滴表面）。
@@ -475,7 +480,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 50 批：漫反射 0.06→0.12。里面太平、太暗（v105 中心 ~151，
             // 参考 166–216 平滑渐变）——漫反射只给 0.06，里面拉不出渐变。
             // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
-            float smileCoeff = 0.12 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            // 第 78 批：笑脸 0.12→0.20。jk-v115 笑脸 131（比背景暗，看不见），
+            // 参考 181（底部宽而柔的光弧）。底色变了，按新底色重算，提亮。
+            float smileCoeff = 0.20 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
             // 第 67 批：球和背景太分明——用户指出水滴像个独立的球，跟背景
             // 是分开的。参考 4454 里水滴是透明的：背景透过水滴，带着渐变
             // 和折射，里面比背景略暗，水滴融在背景里。我的里面太均匀、太亮，
@@ -483,7 +490,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 的背景渐变洗平了。降到 0.06：里面不再均匀发亮，背景渐变透出来，
             // 水滴跟背景融在一起。折射 bend 180 不动（用户之前说折射淡才加到
             // 180 的）。
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.015 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + secondary + bridge + caustic * 0.5);
+            // 第 78 批（用户物理课）：漫反射 diffuse 删掉。diffuse 是实心球的
+            // 明暗（朝光面亮、背光面暗），水滴没有这个——水滴只有折射、镜面
+            // 高光、聚光。留着它，里面就永远像个塑料球。只留加白光的镜面项。
+            result += vec3(1.0) * (smileBright * smileCoeff + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + secondary + bridge + caustic * 0.5);
             result += vec3(1.0, 0.7, 1.0) * fringe;
             result += vec3(0.35, 0.28, 0.55) * bounce;
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
