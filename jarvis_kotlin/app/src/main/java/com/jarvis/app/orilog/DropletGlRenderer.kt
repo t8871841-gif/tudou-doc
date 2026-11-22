@@ -98,8 +98,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // 颤动（第 43 批重写，第 41 批的角向颤动是错的——用户 2026-11-20 15:09 指出
         // “每帧都是奇形怪状”：角向颤动让每一帧的轮廓都是坑坑洼洼的不规则形，
         // 但参考图是正圆，Henry 30fps 实测圆拟合残差只有 1.07px（半径 206px 的
-        // 0.5%）。参考的 ±5% 颤动是半径随时间均匀呼吸（整圆一起胀缩），不是
-        // 边缘按角度变形。改成只随时间变的均匀呼吸：形状永远是正圆，半径
+        // 0.5%）。第 43 批改成只随时间变的均匀呼吸：形状永远是正圆，半径
         // 在时间上抖。
         // 第 48 批（物理想透彻了再改）：颤动换成值噪声，不再是固定正弦。
         // 水滴颤动是表面张力在拉、空气和震动在推、黏性在耗——推一下耗一下，
@@ -107,6 +106,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // 9.3px（半径 4.5%）。固定正弦频谱是死的，迟早重复，看着就机械。
         // 值噪声（hash + 平滑插值）两层叠加，相关时间约 2 秒和 0.8 秒，
         // 振幅调到标准差约 4.1%，贴近参考的 4.5%，且不重复。
+        // 第 53 批（纠正“整体呼吸”）：2026-11-22 用户问“人家是呼吸效果吗？”、
+        // “水滴形变”，我重算了 Henry 994 帧逐方向半径——“均匀呼吸”不成立：
+        // 对向半径负相关（0°↔180° -0.33、135°↔315° -0.59），各方向半径跟
+        // 平均半径的回归 R² 不到 0.1。参考不是纯呼吸，是半径抖动 + 方向性
+        // 形变混在一起：一轴拉长、垂直轴收缩（体积守恒的椭球模态 l=2）。
+        // 但方向性分量很小——圆拟合残差中位数只有 0.69px、90% 分位 1.8px，
+        // 所以振幅只取 1.5%（约 3px），形状看着还是圆，统计上才有对向负相关。
+        // 振幅大了就回到 v104 的坑洼轮廓。拉伸轴用值噪声缓慢游走
+        // （相关时间约 20 秒），不固定、不周期。
         float hash1(float n) { return fract(sin(n) * 43758.5453123); }
         float vnoise(float t) {
             float i = floor(t);
@@ -125,8 +133,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 local = fragPx - c;
             float dist = length(local);
             float R = uRadius;
-            // 均匀呼吸后的有效半径：只随时间变，形状永远是正圆。
-            float R_eff = R * breatheFactor(uTime);
+            // 均匀呼吸 × 椭球方向性（第 53 批）：半径随时间抖（值噪声，呼吸那
+            // 一半）+ 随角度调制（cos2θ，l=2 椭球模态，一轴拉长、一轴收缩）。
+            // theta 是屏幕角（0°=右、90°=下），跟 ellipAngle 同一坐标系。
+            // 振幅 0.015（1.5%，R=205px 时约 3px）——参考圆拟合残差中位数
+            // 0.69px，振幅大了轮廓就坑洼（v104 的教训）。
+            float theta = atan(local.y, local.x);
+            float ellipAngle = 6.28318 * (vnoise(uTime * 0.05 + 13.0) * 0.5 + 0.5);
+            float ellip = 1.0 + 0.015 * cos(2.0 * (theta - ellipAngle));
+            float R_eff = R * breatheFactor(uTime) * ellip;
             // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
             // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
             // 渐变跟下面真正的背景对不上）。这里不再输出背景，只输出影子/聚光，
@@ -161,9 +176,14 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 float oc = (1.0 - smoothstep(0.0, R * 0.6, ocDist)) * 0.70;
                 float a = clamp(shadow + oc, 0.0, 1.0);
                 if (a > 0.01) {
-                    // 颜色 = 白×亮斑占比（亮斑 0 时纯黑、影子 0 时纯白），
-                    // alpha = 两者之和。SurfaceFlinger 再跟真背景合成。
-                    oColor = vec4(vec3(oc / a), a);
+                    // 第 53 批：预乘 alpha 写法。jk-v106 真机证实：外面聚光爆成
+                    // 纯白 255（比当地背景高 111，参考只高 30–48）——Android
+                    // 的 SurfaceFlinger 用预乘 alpha 合成透明 GLSurfaceView，
+                    // 直 alpha 写法 vec3(oc/a) 在 a 中等处被放大、截断到纯白。
+                    // 预乘写法 vec3(oc)：输出的 RGB 就是已乘过 alpha 的颜色，
+                    // 合成 = oc + 背景×(1−a)，亮斑强度回到参考水平。
+                    // 影子不受影响（黑在两种模式下一样），所以 v106 影子是对的。
+                    oColor = vec4(vec3(oc), a);
                     return;
                 }
                 oColor = vec4(0.0);
