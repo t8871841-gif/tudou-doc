@@ -274,7 +274,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float hlAng = -0.698;
             float hlCa = cos(hlAng), hlSa = sin(hlAng);
             vec2 hlR = vec2(hlD.x * hlCa - hlD.y * hlSa, hlD.x * hlSa + hlD.y * hlCa);
-            vec2 hlQ = vec2(hlR.x / 0.25, hlR.y / (0.25 * 0.55));
+            // 第 73 批：高光太胖——用户令按光的原理全量核对。4454 高光 L≥240 区域
+            // 实测：长轴标准差 0.114R、短轴 0.042R（比 7.24），长轴指向屏幕
+            // 40°（右下）；换算成高斯 sigma 是长 0.33R、短 0.12R（比 2.75）。
+            // 我的高光是 0.25R × 0.1375R（比 1.82），太圆、太胖，像个白点不像
+            // 一道斜拉的光斑。改成 0.33 × 0.12。位置 (0.47,-0.65) 与参考中心
+            // (0.50,-0.66) 已对上，不动；转角 -40° 也不动。
+            vec2 hlQ = vec2(hlR.x / 0.33, hlR.y / 0.12);
             // 第 44 批（DeepSeek 对比）：高光指数从 1.5 放到 1.0，边缘过渡
             // 更柔和，别像 2D 软件里直接画上去的死白块。峰值仍是 1.0，
             // 中心照样顶白 255（参考的高光中心也是纯白），只是边缘化开。
