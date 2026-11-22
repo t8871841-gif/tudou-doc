@@ -129,11 +129,12 @@ class DropletGlView @JvmOverloads constructor(
                 val configs = arrayOfNulls<EGLConfig>(1)
                 val numConfigs = IntArray(1)
                 // ES3（着色器是 #version 300 es）+ RGBA8888 + 16 位深度。
-                // 注意：EGL14 里常量叫 EGL_OPENGL_ES3_BIT，没有 _KHR 后缀
-                // （_KHR 只在 EGLExt 里）；eglInitialize 是五参版
-                // (display, major, majorOffset, minor, minorOffset)。
+                // 注意：eglInitialize 是五参版 (display, major, majorOffset,
+                // minor, minorOffset)，null 不能落在 Int 位置上；EGL14 的
+                // 常量只到 ES2（EGL 1.4），ES3 的位（0x0040）只在
+                // EGLExt.EGL_OPENGL_ES3_BIT_KHR 里——已对照官方文档核实。
                 val attribs = intArrayOf(
-                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES3_BIT,
+                    EGL14.EGL_RENDERABLE_TYPE, android.opengl.EGLExt.EGL_OPENGL_ES3_BIT_KHR,
                     EGL14.EGL_RED_SIZE, 8,
                     EGL14.EGL_GREEN_SIZE, 8,
                     EGL14.EGL_BLUE_SIZE, 8,
