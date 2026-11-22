@@ -73,25 +73,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-jk-
 
-      - name: Download sherpa-onnx AAR + offline ASR models
+      # 瘦身：模型不再随 APK 打包。四个 ASR 模型文件改由 App 首次运行时从
+      # GitHub Release（asr-models-v1）下载到 filesDir/asr/（仅 WiFi，
+      # 按字节数校验后写 marker，见 OfflineAsr.prepareModelDir）。这里只下
+      # 编译要用的 sherpa-onnx AAR，APK 体积从约 273MB 降到约 95MB。
+      - name: Download sherpa-onnx AAR
         run: |
-          mkdir -p app/libs app/src/main/assets/asr /tmp/asr-model
+          mkdir -p app/libs
           curl -sL -o app/libs/sherpa-onnx-1.12.23.aar \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.23/sherpa-onnx-1.12.23.aar
-          curl -sL -o /tmp/asr-model.tar.bz2 \
-            https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2
-          tar -xjf /tmp/asr-model.tar.bz2 -C /tmp/asr-model
-          find /tmp/asr-model -name 'encoder-epoch-99-avg-1.int8.onnx' -exec cp {} app/src/main/assets/asr/ \;
-          find /tmp/asr-model -name 'decoder-epoch-99-avg-1.onnx' -exec cp {} app/src/main/assets/asr/ \;
-          find /tmp/asr-model -name 'joiner-epoch-99-avg-1.int8.onnx' -exec cp {} app/src/main/assets/asr/ \;
-          find /tmp/asr-model -name 'tokens.txt' -exec cp {} app/src/main/assets/asr/ \;
-          ls -la app/libs/ app/src/main/assets/asr/
+          ls -la app/libs/
           test -f app/libs/sherpa-onnx-1.12.23.aar
-          test -f app/src/main/assets/asr/encoder-epoch-99-avg-1.int8.onnx
-          test -f app/src/main/assets/asr/decoder-epoch-99-avg-1.onnx
-          test -f app/src/main/assets/asr/joiner-epoch-99-avg-1.int8.onnx
-          test -f app/src/main/assets/asr/tokens.txt
-          rm -rf /tmp/asr-model /tmp/asr-model.tar.bz2
 
       - name: Build debug APK
         run: |

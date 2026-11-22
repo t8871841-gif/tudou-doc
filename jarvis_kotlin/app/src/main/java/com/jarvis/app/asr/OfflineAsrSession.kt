@@ -126,7 +126,19 @@ object OfflineAsrSession {
         }
     }
 
-    fun isAvailable(ctx: Context): Boolean = OfflineAsr.assetsPresent(ctx)
+    /**
+     * 模型能用就返回 true。"ready"（已就位 / APK 里有全套可现拷）和
+     * "missing"（在 WiFi 下但还没下）都算可用——"missing" 时首次使用
+     * 会由 prepareModelDir 自动下载；只有 "no-wifi"（未下载且非 WiFi）
+     * 才算不可用。注意：这里不触发下载本身，下载在
+     * OfflineAsr.start()->sharedRecognizer()->prepareModelDir 里做。
+     */
+    fun isAvailable(ctx: Context): Boolean {
+        return when (OfflineAsr.modelStatus(ctx)) {
+            "ready", "missing" -> true
+            else -> false
+        }
+    }
 
     fun listenOnce(
         ctx: Context,
@@ -144,7 +156,7 @@ object OfflineAsrSession {
             return
         }
         if (!isAvailable(appCtx)) {
-            onError("离线识别模型文件缺失（assets/asr 下没放齐 4 个模型文件）")
+            onError("离线识别模型未下载，需连接 WiFi 下载一次（约 190MB）")
             return
         }
 
@@ -158,15 +170,18 @@ object OfflineAsrSession {
         gotAnyFinalOrError = false
 
         // C2：模型加载加超时——20 秒还没 onReady 就报“识别加载超时”，而不是静默无反应。
+        // 瘦身补：模型缺失时首次加载要先下载约 190MB，20 秒不够，超时放宽到 5 分钟，
+        // 否则新装机第一次说话必报超时（下载在后台继续，第二次才好，体验差）。
+        val loadTimeoutMs = if (OfflineAsr.modelStatus(appCtx) == "missing") 300_000L else MODEL_LOAD_TIMEOUT_MS
         val loadTimeout = Runnable {
             if (mySeq != seq || gotAnyFinalOrError || engineReady) return@Runnable
-            Log.w(TAG, "model load timed out after ${MODEL_LOAD_TIMEOUT_MS}ms")
+            Log.w(TAG, "model load timed out after ${loadTimeoutMs}ms")
             gotAnyFinalOrError = true
             main.post { if (mySeq == seq) onError("识别加载超时") }
             teardownTurn(currentEngine)
         }
         loadTimeoutRunnable = loadTimeout
-        main.postDelayed(loadTimeout, MODEL_LOAD_TIMEOUT_MS)
+        main.postDelayed(loadTimeout, loadTimeoutMs)
 
         // H3：收音前先向系统申请音频焦点；来电丢焦点时直接 stop()。
         val focusHandle = acquireFocus(appCtx, mySeq)

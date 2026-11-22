@@ -58,6 +58,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
+import com.jarvis.app.asr.OfflineAsr
 import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudPalette
@@ -4366,7 +4367,14 @@ class MainActivity : Activity() {
             appendLine("悬浮球：${if (OrbController.isEnabled()) "已开启" else "已关闭"}")
             val keyOk = JarvisPrefs.getCustomKey(this@MainActivity).isNotBlank()
             appendLine("API Key：${if (keyOk) "已配置" else "未配置（对话会报错）"}")
-            appendLine("离线语音识别(sherpa-onnx)：${if (OfflineAsrSession.isAvailable(this@MainActivity)) "模型文件已就位" else "缺模型文件(assets/asr 下没放齐 4 个文件)，听写/唤醒词都用不了"}")
+            val asrStatus = OfflineAsr.modelStatus(this@MainActivity)
+            val asrText = when (asrStatus) {
+                "ready" -> "模型已就位"
+                "downloading" -> "模型下载中…"
+                "no-wifi" -> "模型未下载，需连 WiFi 下载一次（约 190MB），听写/唤醒词暂不可用"
+                else -> "模型未下载，首次使用时自动下载（仅 WiFi，约 190MB）"
+            }
+            appendLine("离线语音识别(sherpa-onnx)：$asrText")
             appendLine("语音合成：Edge TTS（云扬），需联网，无需 Key")
             if (a11y) append("无障碍详情：${JarvisAccessibilityService.status()}")
         }
