@@ -358,7 +358,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float topDot = dot(normalize(n2), topDir);
             float cresR = length(n2);
             float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.035, 2.0)) * 0.08;
-            // 聚光（左下 225°，0.6R 处）
+            // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
+            // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
+            // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限
+            // （156–161）亮约 20–25；光路对角线比垂直对角线亮 +5–+7。光从右上
+            // 进来、穿过水滴、会聚到左下，沿途散射让这条线微微发亮，越靠近
+            // 聚光点越亮。我的漫反射（光从左上）不产生这条线，聚光只是个点，
+            // 缺的就是这条光路。实现：到高光→聚光线段的距离高斯带，宽 0.35R，
+            // 亮度沿线渐强（0.3→1.0），峰值 0.06（约 +15），柔和、不抢戏。
+            vec2 beamA = vec2(0.47, -0.65);
+            vec2 beamB = vec2(-0.42, 0.42);
+            vec2 beamD = beamB - beamA;
+            float beamT = clamp(dot(n2 - beamA, beamD) / dot(beamD, beamD), 0.0, 1.0);
+            vec2 beamClosest = beamA + beamT * beamD;
+            float beamDist = length(n2 - beamClosest);
+            float beam = exp(-pow(beamDist / 0.35, 2.0)) * (0.3 + 0.7 * beamT) * 0.06;
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
             float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.12;
@@ -403,7 +417,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 的背景渐变洗平了。降到 0.06：里面不再均匀发亮，背景渐变透出来，
             // 水滴跟背景融在一起。折射 bend 180 不动（用户之前说折射淡才加到
             // 180 的）。
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + caustic * 0.5);
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + caustic * 0.5);
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随距离和时间衰减，
             // 平时没有。三个源点在边缘，屏幕角：
