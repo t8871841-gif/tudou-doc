@@ -351,7 +351,14 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 参考 166–216 平滑渐变）——漫反射只给 0.06，里面拉不出渐变。
             // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
             float smileCoeff = 0.10 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.12 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            // 第 67 批：球和背景太分明——用户指出水滴像个独立的球，跟背景
+            // 是分开的。参考 4454 里水滴是透明的：背景透过水滴，带着渐变
+            // 和折射，里面比背景略暗，水滴融在背景里。我的里面太均匀、太亮，
+            // 像个实心蓝球——根子是漫反射 diffuse 0.12 全幅提亮，把折射进来
+            // 的背景渐变洗平了。降到 0.06：里面不再均匀发亮，背景渐变透出来，
+            // 水滴跟背景融在一起。折射 bend 180 不动（用户之前说折射淡才加到
+            // 180 的）。
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随距离和时间衰减，
             // 平时没有。三个源点在边缘，屏幕角：
