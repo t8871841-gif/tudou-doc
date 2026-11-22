@@ -329,8 +329,12 @@ class OriloBackgroundView @JvmOverloads constructor(
         /** 光斑 A 的影响半径，相对页面宽度的比例：越大这团光斑铺得越开。 */
         const val TUNE_BLOB_A_RADIUS_FRAC = 0.55f
         /** 光斑 A 的颜色（HSV）：第 10 批从品红紫 312 改成青色 200——品红加漂移会走到
-         *  红（312+60=12），真机反馈“这种红不要，太艳丽”；青色加漂移只在蓝青之间走。 */
-        const val TUNE_BLOB_A_HUE = 200f
+         *  红（312+60=12），真机反馈“这种红不要，太艳丽”；青色加漂移只在蓝青之间走。
+         *  第 77 批（用户令按 95% 贴近 4454 参考改）：4454 参考左上是粉紫（暖紫），
+         *  不是青——真机截图左上那片薄荷绿/青就是这团光斑。改回暖紫 285°：
+         *  285+漂移（-45..+50）最高 335°，仍在紫粉区，不到红（360°/0°），
+         *  不会重蹈第 10 批“太艳丽”的问题。 */
+        const val TUNE_BLOB_A_HUE = 285f
         const val TUNE_BLOB_A_SAT = 0.55f
         const val TUNE_BLOB_A_VAL = 0.98f
         /** 光斑 B（右下附近）混合强度：0..1，同上是混合比例。 */
@@ -338,8 +342,9 @@ class OriloBackgroundView @JvmOverloads constructor(
         /** 光斑 B 的影响半径，相对页面宽度的比例。 */
         const val TUNE_BLOB_B_RADIUS_FRAC = 0.6f
         /** 光斑 B 的颜色（HSV）：第 10 批从靛蓝紫 255 改成蓝色 220，跟光斑 A 的青色
-         *  在同一段蓝青里，不再往紫粉那边偏。 */
-        const val TUNE_BLOB_B_HUE = 220f
+         *  在同一段蓝青里，不再往紫粉那边偏。
+         *  第 77 批：4454 参考右下是靛蓝/冷蓝，比 220° 更深更冷。改成 245°。 */
+        const val TUNE_BLOB_B_HUE = 245f
         const val TUNE_BLOB_B_SAT = 0.62f
         const val TUNE_BLOB_B_VAL = 0.85f
 
@@ -496,7 +501,12 @@ class OriloBackgroundView @JvmOverloads constructor(
                 float valBot = mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0));
                 float val = mix(valTop, valBot, step(0.55, t));
                 float hueN = noise(wuv * 1.6 + float2(iTime * 0.010, iTime * 0.008));
-                float hue = mix(190.0, 267.0, hueN);
+                // 第 77 批（用户令按 95% 贴近 4454 参考改）：4454 参考是紫为主，
+                // 左上暖紫、右下靛蓝，没有薄荷绿/青。色相场 190°↔267° 太偏青，
+                // 真机左上那片薄荷绿就是 190° 的青。改成 210°↔285°：低端仍是
+                // 蓝（210°，不是绿），高端到暖紫（285°），整体往紫移，青不
+                // 再抢眼。乳白场不动。
+                float hue = mix(210.0, 285.0, hueN);
                 float milkN = noise(wuv * 1.1 + float2(iTime * 0.006, iTime * 0.005) + 7.3);
                 float milkAmt = smoothstep(0.6, 0.9, milkN);
                 sat = mix(sat, 0.08, milkAmt * 0.85);

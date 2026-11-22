@@ -90,7 +90,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                             mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
             float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.010, uAbsTime * 0.008));
-            float hue = mix(190.0, 267.0, hueN);
+            // 第 77 批：跟 OriloBackgroundView 同步——色相场 190°↔267° 改成
+            // 210°↔285°（贴近 4454 参考的紫色调，去薄荷绿）。FBO 背景必须
+            // 跟真背景用同一套数，不然水滴里面透出来的颜色跟外面接不上。
+            float hue = mix(210.0, 285.0, hueN);
             float milkN = noise(wuv * 1.1 + vec2(uAbsTime * 0.006, uAbsTime * 0.005) + 7.3);
             float milkAmt = smoothstep(0.6, 0.9, milkN);
             sat = mix(sat, 0.08, milkAmt * 0.85);
