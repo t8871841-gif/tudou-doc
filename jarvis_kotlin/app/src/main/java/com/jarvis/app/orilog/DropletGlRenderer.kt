@@ -296,7 +296,14 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 光调笑脸系数压不下来（底子不跟着系数变）。把笑脸方向的
             // 亮边压制从 0.6 提到 0.85（笑脸中心处亮边只剩 15%，原来 40%），
             // 配合笑脸系数减半，峰值约 194–205，落进目标区间。
-            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.85) * 0.18 * lightFace;
+            // 第 70 批：白边还在——用户看 jk-v113 截图说“还有白边”。第 66 批只把
+            // lightFace 下限 0.55→0.10，背光面是暗了，但朝光面（顶部、左上）
+            // 仍有 0.18 的亮边：实测 4942 顶部 r=0.98R 亮度 182–200，参考
+            // 4454 同位置只有 129–150。亮边本身就是问题——参考的边缘没有
+            // 加上去的白线，靠折射、月牙、亮点、笑脸界定。rimBright 系数
+            // 0.18→0.05：朝光面只剩 0.05（细、淡），背光面 0.005（看不见），
+            // 边缘由折射和其它特征界定，不再有一圈白线。
+            float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.85) * 0.05 * lightFace;
             // 暗边。第 45 批：0.40→0.25，别把边缘压得太黑，参考的边缘是
             // 通透的、不是一圈黑。
             float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.25 * (1.0 - topDarkMask);
@@ -343,7 +350,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 聚光（左下 225°，0.6R 处）
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
-            float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.20;
+            float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.12;
             // 合成：先把折射背景和原背景按 alpha 混合（中心透明、边缘 0.22，
             // 跟旧版一致）；光学特征（高光、笑脸、亮边、聚光、漫反射）是加性光，
             // 必须直接加在结果上——之前把它们放进 colorOut 再乘 alpha，
