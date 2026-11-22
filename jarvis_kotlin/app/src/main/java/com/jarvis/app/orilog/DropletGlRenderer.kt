@@ -71,8 +71,12 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         }
         void main() {
             vec2 uv = gl_FragCoord.xy / uRes;
-            float w = noise(uv * 2.8 + vec2(uTime * 0.03, 0.0)) - 0.5;
-            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uTime * 0.02)) * 0.25 - 0.125);
+            // 第 62 批：warp 改用 uAbsTime——FBO 的 warp 之前用相对时间 uTime，
+            // AGSL 真背景的 warp 用绝对时间 iTime，两者相位对不上，FBO 采到的
+            // 色相场位置跟真背景错开，水滴内部颜色跟外面背景变化不同步。
+            // 改成绝对时间后 FBO 跟真背景同相位，内外颜色一起变。
+            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.03, 0.0)) - 0.5;
+            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.02)) * 0.25 - 0.125);
             // 第 55 批（补）：底色改成 HSV 直接算（跟 AGSL 同一套）。色相由
             // 噪声场直接定（青 190°↔蓝 232°↔紫 267°），饱和的青、蓝、紫同框
             // 互相流；饱和度/明度仍按纵向渐变；乳白场独立（另一路 noise），
@@ -355,24 +359,28 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 波沿表面走，振幅很小（0.05），只求一丝动感，别喧宾夺主。
             // 第 60 批：用户反馈真机上涟漪看不到、效果很微弱——0.05 确实太淡，
             // 振幅提到 0.15（3 倍），让它看得见但仍不喧宾夺主。
+            // 第 62 批：用户再反馈 jk-v110 上还是看不到，以前 AGSL 构架能看到。
+            // 问题不只是振幅：45 秒一圈、每波只在头几秒，5 秒录像很可能错过。
+            // 改成 15 秒一圈（触发 0/6/11 秒，间隔不变）、振幅提到 0.30，
+            // 打开后几秒内必有一波，亮到看得见。
             float ripple = 0.0;
             float surfAng = atan(n2.y, n2.x);
             {
                 float dAng = abs(mod(surfAng - 2.356 + 3.14159, 6.28318) - 3.14159);
-                float dt = mod(uTime - 0.0, 45.0);
+                float dt = mod(uTime - 0.0, 15.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
             {
                 float dAng = abs(mod(surfAng - 0.785 + 3.14159, 6.28318) - 3.14159);
-                float dt = mod(uTime - 18.0, 45.0);
+                float dt = mod(uTime - 6.0, 15.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
             {
                 float dAng = abs(mod(surfAng - (-2.356) + 3.14159, 6.28318) - 3.14159);
-                float dt = mod(uTime - 33.0, 45.0);
+                float dt = mod(uTime - 11.0, 15.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
-            result += vec3(1.0) * ripple * 0.15;
+            result += vec3(1.0) * ripple * 0.30;
             // 边缘抗锯齿（第 42 批）：R_eff 以内不透明，R_eff→1.02*R_eff 淡出到透明。
             // 这一环里 n2 长度略大于 1、nz=0，折射偏移最大，但只有 2% 宽且在淡出，
             // 看不出错色。
