@@ -272,7 +272,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 50 批：bend 120→180。用户说折射“还是淡的”——里面比背景暗、
             // 渐变错位那层意思有，但背景透过水滴的错位太轻，看着像平玻璃。
             // 加到 180，错位更明显；磨砂水滴，180 还不会变成透明弹珠的强倒像。
-            float bend = 180.0;
+            // 第 79 批：bend 180→120。180 在边缘处 UV 偏移太大（边缘 1.0-nz
+            // 接近 1，偏移能到 140px），采到远处的颜色，一圈忽明忽暗，
+            // 圆周处理过猛。120 是第 50 批之前的值；现在 alpha 已提到
+            // 0.85–1.0，折射显出来了，120 够用，采得近、颜色跟得上局部背景。
+            float bend = 120.0;
             vec2 refractUv = gl_FragCoord.xy / uRes + vec2(n2.x, -n2.y) * bend * (1.0 - nz) / uRes;
             vec3 refracted = texture(uBgTex, refractUv).rgb;
             // 边缘（按呼吸后的有效半径算）。第 45 批（DeepSeek 对比点 1、4）：
@@ -312,14 +316,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 我的高光是 0.25R × 0.1375R（比 1.82），太圆、太胖，像个白点不像
             // 一道斜拉的光斑。改成 0.33 × 0.12。位置 (0.47,-0.65) 与参考中心
             // (0.50,-0.66) 已对上，不动；转角 -40° 也不动。
-            vec2 hlQ = vec2(hlR.x / 0.45, hlR.y / 0.08);
+            // 第 79 批：高光长轴 0.45→0.33（参考值）。0.45 太长，沿长轴方向
+            // 高光中心离边缘只有 0.20R，边缘处还有峰值 82%，漫出水滴。
+            // 参考的长轴 sigma 就是 0.33R。
+            vec2 hlQ = vec2(hlR.x / 0.33, hlR.y / 0.08);
             // 第 44 批（DeepSeek 对比）：高光指数从 1.5 放到 1.0，边缘过渡
             // 更柔和，别像 2D 软件里直接画上去的死白块。峰值仍是 1.0，
             // 中心照样顶白 255（参考的高光中心也是纯白），只是边缘化开。
             // 第 75 批：jk-v114 真机量到高光是 60×60px 的圆斑，不是长条——
             // 峰值 1.0 饱和区太大，把长条撑成了圆。峰值 1.0→0.85，拉长
             // 0.33×0.12→0.45×0.08，让斜拉的光斑形状显出来。
-            float highlight = exp(-dot(hlQ, hlQ) * 1.0) * 0.85;
+            // 第 79 批：高光收边。镜面反射只能发生在水滴表面上，没有表面就
+            // 没有光——高光绝不能探出圆周。0.85R 内全亮，到 0.98R 收到零，
+            // 游走到哪都漫不出去。
+            float hlEdgeMask = 1.0 - smoothstep(0.85, 0.98, length(n2));
+            float highlight = exp(-dot(hlQ, hlQ) * 1.0) * 0.85 * hlEdgeMask;
             // 亮边（菲涅尔）：第 45 批（DeepSeek 对比点 1、4）——系数 0.28→0.18。
             // 参考的素边接近背景色（170-185），我们之前亮到 203，整圈白边
             // 太实、像塑料球描边。降下来，让亮边细、淡，只在朝光面显出来
@@ -350,7 +361,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float rimBright = edge * (1.0 - topDarkMask) * (1.0 - smileMask * 0.85) * 0.0 * lightFace;
             // 暗边。第 45 批：0.40→0.25，别把边缘压得太黑，参考的边缘是
             // 通透的、不是一圈黑。
-            float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.25 * (1.0 - topDarkMask);
+            // 第 79 批：rimDark 0.25→0.15。圆周处理过猛——暗环太重，边缘一圈
+            // 忽明忽暗。参考的边缘很平静（111–175），暗环只是全内反射的细线。
+            float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.15 * (1.0 - topDarkMask);
             // 小高光：第 52 批移位。旧值（-0.45r/+0.42r）是第 41 批从旧版
             // 抄来的，从没实测过。2026-11-21 另一位审稿人把 210 帧全量完，
             // 指出小高光比代码写得更靠左、更不靠下（-0.6/0.25），但自己
