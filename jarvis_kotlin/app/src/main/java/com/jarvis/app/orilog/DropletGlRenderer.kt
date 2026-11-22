@@ -179,9 +179,17 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 改回来：轴频率 3.0→0.3（约 3 秒，慢慢换方向）；快抖改由振幅承担——
             // 椭球振幅 0.03×(1+0.6×vnoise(3.0t))，椭圆度快速脉动（约 0.33 秒），
             // 沿同一方向一伸一缩，逐帧半径变化约 1px，跟参考一致，不抽搐。
+            // 第 75 批（电影原理）：用户指出“细微的变化连在一起播放就是动态，
+            // 电影同样道理”“每一帧肯定都是静态图片”。30fps 逐帧差分实测：
+            // 相邻帧平均像素差 2–6，起伏周期约 0.3 秒，高光在 ±15px 里跳着晃。
+            // 参考的颤动是像素级、快而乱的闪，静帧上看不出椭圆；我的 3% 椭圆
+            // 在真机上看得见一个椭圆在转，太几何、太犟硬。改：振幅 0.03→0.01
+            // （1%，静帧上看不出椭圆，约 2px）；再叠一层极小的高频角向抖动
+            // （0.005×vnoise(8t+3θ)），打破完美椭圆的干净感，让表面有细碎的活气。
             float ellipAngle = 6.28318 * (vnoise(uTime * 0.3 + 13.0) * 0.5 + 0.5);
-            float ellipAmp = 0.03 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
-            float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle));
+            float ellipAmp = 0.01 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
+            float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle))
+                + 0.005 * vnoise(uTime * 8.0 + theta * 3.0);
             // 蛋形（第 74 批）：水滴不是绝对正圆。受表面张力/透视影响，视觉上
             // 极微的“上宽下窄”，底部接触面略扁。静态形态微调：egg = 1 +
             // 0.015×(-sin(theta))，顶部 +1.5%、底部 -1.5%，平滑、无断点。
@@ -220,7 +228,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 float contactAng = abs(atan(fragPx.y - c.y, fragPx.x - c.x) - 1.5708);
                 contactAng = min(contactAng, 6.28318 - contactAng);
                 float contactR = length(fragPx - c) / R;
-                float contact = exp(-pow(contactAng / 0.52, 2.0)) * exp(-pow((contactR - 1.0) / 0.05, 2.0)) * 0.5;
+                float contact = exp(-pow(contactAng / 0.52, 2.0)) * exp(-pow((contactR - 1.0) / 0.05, 2.0)) * 0.35;
                 shadow = clamp(shadow + contact, 0.0, 1.0);
                 // 外面聚光：半透明白，提亮下面真正的背景。
                 // 第 50 批：位置 1.5R→1.0R（4454 量到最亮点 (-0.75R,+0.72R)，
@@ -282,8 +290,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 游走，不只是跟着水滴中心漂——表面微小起伏改变局部法线，反射点
             // 就跟着动。用值噪声（跟颤动同一套函数，不同种子、更慢的速度，
             // 相关时间约 4 秒），缓慢漂移、不抖动。
-            vec2 hlWander = vec2(0.12 * vnoise(uTime * 0.25 + 11.0),
-                0.12 * vnoise(uTime * 0.22 + 23.0));
+            vec2 hlWander = vec2(0.07 * vnoise(uTime * 2.0 + 11.0),
+                0.07 * vnoise(uTime * 1.7 + 23.0));
             vec2 hlC = vec2(0.47, -0.65) + hlWander;
             vec2 hlD = n2 - hlC;
             float hlAng = -0.698;
@@ -295,11 +303,14 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 我的高光是 0.25R × 0.1375R（比 1.82），太圆、太胖，像个白点不像
             // 一道斜拉的光斑。改成 0.33 × 0.12。位置 (0.47,-0.65) 与参考中心
             // (0.50,-0.66) 已对上，不动；转角 -40° 也不动。
-            vec2 hlQ = vec2(hlR.x / 0.33, hlR.y / 0.12);
+            vec2 hlQ = vec2(hlR.x / 0.45, hlR.y / 0.08);
             // 第 44 批（DeepSeek 对比）：高光指数从 1.5 放到 1.0，边缘过渡
             // 更柔和，别像 2D 软件里直接画上去的死白块。峰值仍是 1.0，
             // 中心照样顶白 255（参考的高光中心也是纯白），只是边缘化开。
-            float highlight = exp(-dot(hlQ, hlQ) * 1.0);
+            // 第 75 批：jk-v114 真机量到高光是 60×60px 的圆斑，不是长条——
+            // 峰值 1.0 饱和区太大，把长条撑成了圆。峰值 1.0→0.85，拉长
+            // 0.33×0.12→0.45×0.08，让斜拉的光斑形状显出来。
+            float highlight = exp(-dot(hlQ, hlQ) * 1.0) * 0.85;
             // 亮边（菲涅尔）：第 45 批（DeepSeek 对比点 1、4）——系数 0.28→0.18。
             // 参考的素边接近背景色（170-185），我们之前亮到 203，整圈白边
             // 太实、像塑料球描边。降下来，让亮边细、淡，只在朝光面显出来
@@ -378,7 +389,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 topDir = vec2(0.0, -1.0);
             float topDot = dot(normalize(n2), topDir);
             float cresR = length(n2);
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.08;
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.15;
             // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
             // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
             // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限
@@ -452,7 +463,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 50 批：漫反射 0.06→0.12。里面太平、太暗（v105 中心 ~151，
             // 参考 166–216 平滑渐变）——漫反射只给 0.06，里面拉不出渐变。
             // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
-            float smileCoeff = 0.07 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            float smileCoeff = 0.12 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
             // 第 67 批：球和背景太分明——用户指出水滴像个独立的球，跟背景
             // 是分开的。参考 4454 里水滴是透明的：背景透过水滴，带着渐变
             // 和折射，里面比背景略暗，水滴融在背景里。我的里面太均匀、太亮，
@@ -460,7 +471,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 的背景渐变洗平了。降到 0.06：里面不再均匀发亮，背景渐变透出来，
             // 水滴跟背景融在一起。折射 bend 180 不动（用户之前说折射淡才加到
             // 180 的）。
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.03 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + secondary + bridge + caustic * 0.5);
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.015 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + secondary + bridge + caustic * 0.5);
             result += vec3(1.0, 0.7, 1.0) * fringe;
             result += vec3(0.35, 0.28, 0.55) * bounce;
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
