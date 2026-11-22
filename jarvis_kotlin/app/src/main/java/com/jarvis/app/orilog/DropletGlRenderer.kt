@@ -6,8 +6,6 @@ import android.opengl.GLSurfaceView
 import android.os.SystemClock
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
-import kotlin.math.cos
-import kotlin.math.sin
 
 /**
  * Orilo 路线的水滴渲染器（第 36 批起）。
@@ -133,14 +131,19 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 local = fragPx - c;
             float dist = length(local);
             float R = uRadius;
-            // 均匀呼吸 × 椭球方向性（第 53 批）：半径随时间抖（值噪声，呼吸那
-            // 一半）+ 随角度调制（cos2θ，l=2 椭球模态，一轴拉长、一轴收缩）。
-            // theta 是屏幕角（0°=右、90°=下），跟 ellipAngle 同一坐标系。
-            // 振幅 0.015（1.5%，R=205px 时约 3px）——参考圆拟合残差中位数
-            // 0.69px，振幅大了轮廓就坑洼（v104 的教训）。
+            // 均匀呼吸 × 椭球方向性（第 53 批加，第 54 批加强）：半径随时间抖
+            // （值噪声，呼吸那一半）+ 随角度调制（cos2θ，l=2 椭球模态，
+            // 一轴拉长、一轴收缩）。theta 是屏幕角（0°=右、90°=下），
+            // 跟 ellipAngle 同一坐标系。
+            // 第 54 批：振幅 0.015→0.03（3%，R=205px 时约 6px，长短轴差
+            // 约 12px）——1.5% 在真机上看不出来，用户说“还是呼吸效果”。
+            // 轴游走频率 0.05→0.3（相关时间约 20 秒→约 3 秒）——20 秒
+            // 在 4 秒视频里轴基本不动，方向性形变看不出来；3 秒一圈，
+            // 几秒内就能看到拉伸方向在转。l=2 是平滑椭圆不是坑洼，
+            // 振幅翻倍不会回到 v104 那种坑洼轮廓。
             float theta = atan(local.y, local.x);
-            float ellipAngle = 6.28318 * (vnoise(uTime * 0.05 + 13.0) * 0.5 + 0.5);
-            float ellip = 1.0 + 0.015 * cos(2.0 * (theta - ellipAngle));
+            float ellipAngle = 6.28318 * (vnoise(uTime * 0.3 + 13.0) * 0.5 + 0.5);
+            float ellip = 1.0 + 0.03 * cos(2.0 * (theta - ellipAngle));
             float R_eff = R * breatheFactor(uTime) * ellip;
             // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
             // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
@@ -427,8 +430,12 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         val cy = viewH * 0.45f
         setVec2(dropProgram, "uCenter", cx, cy)
         setFloat(dropProgram, "uRadius", r)
-        val driftX = (sin(tSec * 0.90) * 0.7 + sin(tSec * 0.52 + 1.7) * 0.3).toFloat() * r * driftFrac
-        val driftY = (cos(tSec * 0.73 + 0.9) * 0.7 + cos(tSec * 1.10 + 2.4) * 0.3).toFloat() * r * driftFrac
+        // 第 54 批：中心漂移从正弦改成值噪声。之前的 sin/cos 是周期函数，
+        // 中心按固定轨迹平滑地转圈，看着机械。改成值噪声（跟呼吸同一套
+        // 思路，不同种子、相关时间约 2 秒和 0.8 秒），中心不规则地漂，
+        // 不重复、不周期。vnoise/hash1 在下面，跟 GLSL 里同一套公式。
+        val driftX = (vnoise(tSec * 0.5f) * 0.7f + vnoise(tSec * 1.3f + 7f) * 0.3f) * r * driftFrac
+        val driftY = (vnoise(tSec * 0.45f + 11f) * 0.7f + vnoise(tSec * 1.1f + 23f) * 0.3f) * r * driftFrac
         setFloat(dropProgram, "uDriftX", driftX)
         setFloat(dropProgram, "uDriftY", driftY)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
@@ -478,6 +485,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
     }
     private fun setVec3(prog: Int, name: String, x: Float, y: Float, z: Float) {
         GLES30.glUniform3f(loc(prog, name), x, y, z)
+    }
+
+    /** 第 54 批：值噪声（跟 GLSL 里同一套公式），中心漂移用。不规则、不周期。 */
+    private fun hash1(n: Float): Float {
+        val x = kotlin.math.sin(n.toDouble()) * 43758.5453123
+        return (x - kotlin.math.floor(x)).toFloat()
+    }
+
+    private fun vnoise(t: Float): Float {
+        val i = kotlin.math.floor(t.toDouble()).toFloat()
+        val f = t - i
+        val u = f * f * (3f - 2f * f)
+        val a = hash1(i)
+        val b = hash1(i + 1f)
+        return (a * (1f - u) + b * u) * 2f - 1f
     }
 
     /** 第 42 批：把 hueColor() 算出来的 Int 颜色拆成 0..1 的 RGB 传给 uniform。 */
