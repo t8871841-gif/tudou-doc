@@ -318,19 +318,32 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // (+0.65, +0.12)，同半径、同峰值。
             vec2 shRC = vec2(0.65, 0.12);
             vec2 shRD = n2 - shRC;
-            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.70;
+            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.50;
             // 顶部细月牙：第 68 批。参考 4454 顶部有一道细月牙——一道细细的
             // 亮弧，贴着水滴上缘内侧弯着，从左上到右上。不是大高光（那是右上
             // 实心白块），是独立的细弧。实现：顶部方向（0,-1）的点积定角度
             // 范围（顶部 ±41° 内），半径 0.90R 处高斯细带，薄、亮、两端渐隐。
+            // 第 69 批：全量核对 4454 vs 4940，漏项一次补齐（用户令“再检查检查别的”）。
+            // 实测五处亮度不匹配：
+            // 1）月牙太亮：参考月牙只比背景亮 +20（187 vs 168），我的峰值 0.60
+            //    会顶到 +153。降到 0.08（+20），跟参考一致。
+            // 2）右亮点太亮：参考右点 226、左点 255，右边本来就暗一档。我的
+            //    右点跟左点同峰值 0.70 会顶到 255。降到 0.50。
+            // 3）笑脸太亮：参考 203，我的 222（+19）。smileCoeff 0.10→0.07。
+            // 4）顶部暗带太亮：参考均值 128，我的 175（+47）。暗带系数
+            //    0.35→0.53（乘子 0.65→0.47，175×0.73≈128）。
+            // 5）外聚光太亮：参考 +61，我的 +94（+33）。聚光 0.30→0.20，
+            //    叠加笑脸减弱（-19）合计 -32，回到 +62≈+61。
+            // 大高光（255/294°/0.85R vs 255/300°/0.75R）、左亮点（255）、
+            // 影子（50 vs 44）、尺寸（208 vs 205）均已对上，不动。
             vec2 topDir = vec2(0.0, -1.0);
             float topDot = dot(normalize(n2), topDir);
             float cresR = length(n2);
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.90) / 0.035, 2.0)) * 0.60;
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.90) / 0.035, 2.0)) * 0.08;
             // 聚光（左下 225°，0.6R 处）
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
-            float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.30;
+            float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.20;
             // 合成：先把折射背景和原背景按 alpha 混合（中心透明、边缘 0.22，
             // 跟旧版一致）；光学特征（高光、笑脸、亮边、聚光、漫反射）是加性光，
             // 必须直接加在结果上——之前把它们放进 colorOut 再乘 alpha，
@@ -345,7 +358,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec3 bg = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
             vec3 result = refracted * 0.98 * alpha + bg * (1.0 - alpha);
             // 暗特征先乘（暗带、暗边只压暗水滴表面）。
-            result *= (1.0 - darkBand * 0.35 * topDarkMask);
+            result *= (1.0 - darkBand * 0.53 * topDarkMask);
             result *= (1.0 - rimDark);
             // 亮特征直接加（不乘 alpha）。
             // 第 47 批（1:1 复制）：笑脸系数 0.25→0.20。v105 真机量过，
@@ -364,7 +377,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 第 50 批：漫反射 0.06→0.12。里面太平、太暗（v105 中心 ~151，
             // 参考 166–216 平滑渐变）——漫反射只给 0.06，里面拉不出渐变。
             // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
-            float smileCoeff = 0.10 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            float smileCoeff = 0.07 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
             // 第 67 批：球和背景太分明——用户指出水滴像个独立的球，跟背景
             // 是分开的。参考 4454 里水滴是透明的：背景透过水滴，带着渐变
             // 和折射，里面比背景略暗，水滴融在背景里。我的里面太均匀、太亮，
