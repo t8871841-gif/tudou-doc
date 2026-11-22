@@ -123,12 +123,17 @@ class DropletGlView @JvmOverloads constructor(
             var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
             try {
                 eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-                EGL14.eglInitialize(eglDisplay, null, null, null, 0)
+                val eglMajor = IntArray(1)
+                val eglMinor = IntArray(1)
+                EGL14.eglInitialize(eglDisplay, eglMajor, 0, eglMinor, 0)
                 val configs = arrayOfNulls<EGLConfig>(1)
                 val numConfigs = IntArray(1)
                 // ES3（着色器是 #version 300 es）+ RGBA8888 + 16 位深度。
+                // 注意：EGL14 里常量叫 EGL_OPENGL_ES3_BIT，没有 _KHR 后缀
+                // （_KHR 只在 EGLExt 里）；eglInitialize 是五参版
+                // (display, major, majorOffset, minor, minorOffset)。
                 val attribs = intArrayOf(
-                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES3_BIT_KHR,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES3_BIT,
                     EGL14.EGL_RED_SIZE, 8,
                     EGL14.EGL_GREEN_SIZE, 8,
                     EGL14.EGL_BLUE_SIZE, 8,
