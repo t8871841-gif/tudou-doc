@@ -139,10 +139,19 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float u = f * f * (3.0 - 2.0 * f);
             return mix(hash1(i), hash1(i + 1.0), u) * 2.0 - 1.0;
         }
+        // 第 56 批：均匀呼吸大幅压小——jk-v108 真机两张截图（4918/4919）
+        // 量出来半径 224px vs 196px（设备），差 28px（~14%），就是呼吸
+        // 在作怪：4918 正好撞上呼吸峰顶（1.095×205=224），4919 在中低位。
+        // 呼吸是全方向一起缩放，看着就是气球一胀一缩，用户说“像气球”。
+        // 参考 Henry 的半径抖动是方向性的（对向负相关），不是均匀呼吸，
+        // 均匀那部分必须压到看不出来。0.065/0.030（±9.5%）→0.020/0.010
+        // （±3.0%，R=205 时约 ±6px），尺寸基本稳定在 199–211px；
+        // 方向性形变交给椭球（3%，长短轴差约 12px）和中心漂移去表现，
+        // 形变是“形状在变”不是“大小在变”，这才是灵动。
         float breatheFactor(float t) {
             return 1.0
-                + 0.065 * vnoise(t * 0.5)
-                + 0.030 * vnoise(t * 1.3 + 7.0);
+                + 0.020 * vnoise(t * 0.5)
+                + 0.010 * vnoise(t * 1.3 + 7.0);
         }
         void main() {
             vec2 fragPx = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
