@@ -4123,7 +4123,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // 第 36 批：GLSurfaceView 必须跟 Activity 生命周期走，否则切后台渲染线程不停。
+        // 第 36 批：GL 渲染线程必须跟 Activity 生命周期走，否则切后台渲染线程不停。
         oriloDroplet?.onResume()
         // 可见性规则 6c：分屏/小窗时 Jarvis 不独占前台，另一半是其他 App 的页面，球要出现；
         // 全屏时才算自家前台、藏球。
@@ -4193,7 +4193,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        // 第 36 批：GLSurfaceView 必须跟 Activity 生命周期走，否则切后台渲染线程不停
+        // 第 36 批：GL 渲染线程必须跟 Activity 生命周期走，否则切后台渲染线程不停
         // （费电，某些机型切回前台会崩或黑屏）。Claude 第 36 批审查指出。
         oriloDroplet?.onPause()
         isResumed = false

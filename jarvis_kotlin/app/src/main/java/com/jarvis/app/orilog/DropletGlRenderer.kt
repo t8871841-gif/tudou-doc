@@ -2,10 +2,7 @@ package com.jarvis.app.orilog
 
 import android.content.Context
 import android.opengl.GLES30
-import android.opengl.GLSurfaceView
 import android.os.SystemClock
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
 
 /**
  * Orilo 路线的水滴渲染器（第 36 批起）。
@@ -28,8 +25,16 @@ import javax.microedition.khronos.opengles.GL10
  * 时间、光斑、噪声精度稍有出入，颜色就对不上。现在 GLSurfaceView 自己全屏画
  * 背景（贴 FBO 纹理），OriloBackgroundView 不再上屏。水滴采样和眼睛看到的是
  * 同一份纹理，同步是结构保证的，不靠参数对齐。
+ *
+ * 第 81 批：GLSurfaceView → TextureView。jk-v117 真机：气泡/按钮的液态玻璃
+ * 全黑——LiquidGlassView 靠把身后层级光栅化成位图再折射，GLSurfaceView 的像素
+ * 在独立 Surface 上，光栅化时是黑洞，玻璃采到黑色。TextureView 的内容画在
+ * View 层级里，光栅化能看到，玻璃恢复正常。单套渲染不变（同一份 FBO 纹理），
+ * 同步仍是结构保证。EGL/渲染线程由 DropletGlView 管，渲染器只保留
+ * onSurfaceCreated/onSurfaceChanged/onDrawFrame 三个方法，不再实现
+ * GLSurfaceView.Renderer。
  */
-class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
+class DropletGlRenderer(private val context: Context) {
 
     /** 中心漂移幅度（半径分数），默认 0.05。 */
     @Volatile
@@ -247,9 +252,15 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 // 所以影子就放正下方。第 76 批：中心 1.3R→1.5R，减少跟水滴
                 // 下缘的重叠（Claude 对比：60°–100° 异常暗是影子叠在边缘上）。
                 // 半径 1.1R、强度 0.55 不动。
-                vec2 sCenter = c + vec2(0.0, R * 1.5);
-                float sDist = length(fragPx - sCenter);
-                float shadow = (1.0 - smoothstep(0.0, R * 1.1, sDist)) * 0.55;
+                // 第 81 批：圆盘改成椭圆高斯——中心贴着接触线 (0, 1.05R)，横向
+                // sigma 0.75R、纵向 sigma 0.35R，峰值 0.55。圆盘盘内几乎一样暗：
+                // jk-v117 真机量到正下方 1.05R:54、1.2R:64、1.35R:57、1.5R:54，
+                // 一团平的暗斑，1.5R 处还有第二个暗核；参考 4454 是 44→73→92，
+                // 贴着接触线最暗、向外单调变亮。高斯以接触线为峰向外衰减，
+                // 形状一次对上参考。接触阴影（下面那行）不动，仍是最暗那条线。
+                vec2 sOff = fragPx - c;
+                float shadow = 0.55 * exp(-pow(sOff.x / (R * 0.75), 2.0)
+                    - pow((sOff.y - R * 1.05) / (R * 0.35), 2.0));
                 // 接触阴影：第 74 批。水滴与平面接触的那条线（约 1.0R、底部）
                 // 有一道极暗、极窄的接触阴影（最暗 <50），向外迅速变宽、变浅、
                 // 羽化。这是环境光遮蔽（AO），不是单纯挡光，极大增强“水滴附着
@@ -308,18 +319,23 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 亮边带从 0.90R–R 收窄到 0.94R–R——之前那圈白边太粗、太实，
             // 像霓虹描边。参考的亮边是细细的一线，贴着轮廓。
             float edge = smoothstep(R_eff * 0.94, R_eff, dist);
-            // 顶部暗带（~40° 宽）
-            float cosTop = -n2.y;
+            // 顶部暗带（~40° 宽）。第 81 批（补）：cosTop 原来是 -n2.y（没归一化），
+            // 在顶部射线上等于 r/R——暗带只在 r>0.94R 才出现，成了一道细环。
+            // 4454 的顶部暗区从 0.85R 就开始了。改成方向余弦（只跟角度有关），
+            // 径向范围由 darkBand 的缓坡管。
+            float cosTop = -n2.y / max(length(n2), 0.001);
             float topDarkMask = smoothstep(0.94, 0.98, cosTop);
             // 底部笑脸
             vec2 bottomDir = normalize(vec2(-0.42, 0.91));
             float cosBottom = dot(normalize(n2), bottomDir);
             float smileMask = smoothstep(0.60, 0.85, cosBottom);
             float smileBright = edge * smileMask;
-            // 暗带环。第 45 批：跟着亮边带一起收窄（0.94R–0.975R），别让暗带
-            // 盖住太多里面。
-            float darkBand = smoothstep(R_eff * 0.94, R_eff * 0.975, dist)
-                * (1.0 - smoothstep(R_eff * 0.975, R_eff, dist));
+            // 顶部暗带。第 45 批曾把它收窄成 0.94R–0.975R 的细环、强度 0.53——
+            // 错了：jk-v117 真机量到顶部边缘 54，比里面暗一半，成了一处黑斑。
+            // 第 81 批（补）：再看 4454——Orilo 顶部没有黑斑也没有黑线，顶部是
+            // 从 0.85R（144）到边缘外 1.03R（113）平滑变暗，约 20%，摊在 0.2R
+            // 的宽度上。改成宽缓坡：从 0.70R 起渐暗，到边缘 0.20。
+            float darkBand = smoothstep(R_eff * 0.70, R_eff, dist);
             // 第 78 批：漫反射计算整段删掉（上面已从合成里拿掉，留着是死代码）。
             // 大高光：右上，窄核心（旧 Canvas 高光的 GLSL 版：中心 0.47r/-0.65r，
             // 半径 0.25r，椭圆 1×0.55，转 -40°。Claude 第 36 批审查指出旧代码里
@@ -388,7 +404,11 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 通透的、不是一圈黑。
             // 第 79 批：rimDark 0.25→0.15。圆周处理过猛——暗环太重，边缘一圈
             // 忽明忽暗。参考的边缘很平静（111–175），暗环只是全内反射的细线。
-            float rimDark = smoothstep(R_eff * 0.97, R_eff, dist) * 0.15 * (1.0 - topDarkMask);
+            // 第 81 批：rimDark 0.15→0.12 本想稍压，但再看 4454 才明白问题不在
+            // 深浅、在宽窄——参考的边缘暗下去约 25 点，但摊在 0.2R（约 40px）
+            // 上，是平滑过渡；我的 0.97R–R 只有 2–3px 宽，再淡也是一条黑线。
+            // 改成宽缓坡（0.85R–R）+ 0.06：留一点全内反射的暗边，但看不出线。
+            float rimDark = smoothstep(R_eff * 0.85, R_eff, dist) * 0.06 * (1.0 - topDarkMask);
             // 小高光：第 52 批移位。旧值（-0.45r/+0.42r）是第 41 批从旧版
             // 抄来的，从没实测过。2026-11-21 另一位审稿人把 210 帧全量完，
             // 指出小高光比代码写得更靠左、更不靠下（-0.6/0.25），但自己
@@ -443,7 +463,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float cresR = length(n2);
             // 第 78 批：月牙 0.15→0.25。jk-v115 月牙 122（比背景暗，看不见），
             // 参考 156（亮的细弧）。底色变了，按新底色重算，提亮到显出来。
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.25;
+            // 第 81 批：月牙 0.25→0.28。jk-v117 真机量到顶部 0.70R 处 142–149，
+            // 参考 156，还差一档，小提。
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.28;
             // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
             // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
             // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限
@@ -499,7 +521,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec3 bg = texture(uBgTex, gl_FragCoord.xy / uRes).rgb;
             vec3 result = refracted * 0.98 * alpha + bg * (1.0 - alpha);
             // 暗特征先乘（暗带、暗边只压暗水滴表面）。
-            result *= (1.0 - darkBand * 0.53 * topDarkMask);
+            result *= (1.0 - darkBand * 0.20 * topDarkMask);
             result *= (1.0 - rimDark);
             // 亮特征直接加（不乘 alpha）。
             // 第 47 批（1:1 复制）：笑脸系数 0.25→0.20。v105 真机量过，
@@ -520,7 +542,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 翻倍，朝光面亮、背光面暗，里面有了明暗，折射那层“淡”也跟着好起来。
             // 第 78 批：笑脸 0.12→0.20。jk-v115 笑脸 131（比背景暗，看不见），
             // 参考 181（底部宽而柔的光弧）。底色变了，按新底色重算，提亮。
-            float smileCoeff = 0.20 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            // 第 81 批：笑脸 0.20→0.24。jk-v117 真机量到笑脸峰值 152（115°）
+            // ～179（135°，含光桥叠加），参考 181–203，还差一档。方向不动
+            // （115°；135° 的亮是光桥/光路叠的，不是笑脸偏了）。
+            float smileCoeff = 0.24 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
             // 第 67 批：球和背景太分明——用户指出水滴像个独立的球，跟背景
             // 是分开的。参考 4454 里水滴是透明的：背景透过水滴，带着渐变
             // 和折射，里面比背景略暗，水滴融在背景里。我的里面太均匀、太亮，
@@ -578,7 +603,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         }
     """.trimIndent()
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+    fun onSurfaceCreated() {
         // 第 39 批：透明 Surface，清成全透明（水滴外由着色器输出 alpha=0）。
         GLES30.glClearColor(0f, 0f, 0f, 0f)
         // EGL 上下文重建时本方法会再跑一次，先删旧对象（Claude 第 36 批审查建议，防御性）。
@@ -599,7 +624,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         bgTexId = tex[0]
     }
 
-    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+    fun onSurfaceChanged(width: Int, height: Int) {
         viewW = width
         viewH = height
         GLES30.glViewport(0, 0, width, height)
@@ -612,7 +637,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
     }
 
-    override fun onDrawFrame(gl: GL10?) {
+    fun onDrawFrame() {
         val tSec = (SystemClock.uptimeMillis() - startMs) / 1000f
         // ---- 背景 pass：渲染到 FBO ----
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
