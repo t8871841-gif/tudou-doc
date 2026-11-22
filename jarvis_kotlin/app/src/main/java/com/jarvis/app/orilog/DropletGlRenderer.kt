@@ -12,13 +12,22 @@ import javax.microedition.khronos.opengles.GL10
  *
  * 架构（照 Orilo 原版路线，自己写的 GLSL，不抄它的代码）：
  * 1. 背景 pass：把程序化背景（渐变 + 光斑 + 流场）渲染到 FBO 纹理。
- * 2. 水滴 pass：全屏大三角，片元着色器里逐像素算水滴光学——
+ * 2. 贴图 pass（第 80 批）：把 FBO 纹理全屏贴到屏幕上——屏幕上看到的背景
+ *    就是这份 FBO 纹理，不再是另一套 AGSL 渲染。只此一份背景，水滴采样它、
+ *    眼睛看它，颜色不可能不同步。
+ * 3. 水滴 pass：全屏大三角，片元着色器里逐像素算水滴光学——
  *    采样背景纹理做折射（真实背景采样，不是重算假背景），
  *    再加高光、笑脸、暗带、亮边、聚光、影子。
- * 3. 场景参数（中心漂移、颤动相位）每帧 CPU 算好、经 uniform 传。
+ * 4. 场景参数（中心漂移、颤动相位）每帧 CPU 算好、经 uniform 传。
  *
  * 跟旧 AGSL 版的关键差别：背景是真实渲染出来的纹理，水滴折射采的是它，
  * 不是在片元里重算一个平滑函数——折射在平滑渐变上看不见的问题从根上解决。
+ *
+ * 第 80 批（用户令，方案一，要惊艳效果）：单套渲染。之前是两套背景各渲各的——
+ * 屏幕上的背景是 OriloBackgroundView（AGSL），水滴里透的是 FBO（GLSL），
+ * 时间、光斑、噪声精度稍有出入，颜色就对不上。现在 GLSurfaceView 自己全屏画
+ * 背景（贴 FBO 纹理），OriloBackgroundView 不再上屏。水滴采样和眼睛看到的是
+ * 同一份纹理，同步是结构保证的，不靠参数对齐。
  */
 class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
 
@@ -28,6 +37,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
 
     private var bgProgram = 0
     private var dropProgram = 0
+    private var blitProgram = 0
     private var fboId = 0
     private var bgTexId = 0
     private var viewW = 0
@@ -104,6 +114,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.40), 0.0, 1.0));
             base = mix(base, uBlobBColor, fb * 0.45);
             oColor = vec4(base, 1.0);
+        }
+    """.trimIndent()
+
+    // ---- 贴图片元着色器（第 80 批）：把 FBO 背景纹理原样贴满屏幕 ----
+    // 屏幕上看到的背景就是这份纹理，水滴采的也是它——同一份，同步是结构保证的。
+    // 注意 GL 纹理坐标原点在左下、gl_FragCoord 原点也在左下，直接除以分辨率即可，
+    // 不用翻转（FBO 渲染时 gl_FragCoord 也是左下原点，两边一致）。
+    private val blitFragSrc = """
+        #version 300 es
+        precision highp float;
+        uniform vec2 uRes;
+        uniform sampler2D uTex;
+        out vec4 oColor;
+        void main() {
+            oColor = vec4(texture(uTex, gl_FragCoord.xy / uRes).rgb, 1.0);
         }
     """.trimIndent()
 
@@ -559,10 +584,12 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         // EGL 上下文重建时本方法会再跑一次，先删旧对象（Claude 第 36 批审查建议，防御性）。
         if (bgProgram != 0) GLES30.glDeleteProgram(bgProgram)
         if (dropProgram != 0) GLES30.glDeleteProgram(dropProgram)
+        if (blitProgram != 0) GLES30.glDeleteProgram(blitProgram)
         if (fboId != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
         if (bgTexId != 0) GLES30.glDeleteTextures(1, intArrayOf(bgTexId), 0)
         bgProgram = buildProgram(vertSrc, bgFragSrc)
         dropProgram = buildProgram(vertSrc, dropFragSrc)
+        blitProgram = buildProgram(vertSrc, blitFragSrc)
         startMs = SystemClock.uptimeMillis()
         val fbo = IntArray(1)
         GLES30.glGenFramebuffers(1, fbo, 0)
@@ -618,9 +645,23 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
         setColor3(bgProgram, "uBlobBColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift, phase.satScale))
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
-        // ---- 水滴 pass：渲染到屏幕，采样背景纹理 ----
+        // ---- 贴图 pass（第 80 批）：把 FBO 背景纹理全屏贴到屏幕上 ----
+        // 屏幕上看到的背景就是这份纹理，水滴采的也是它——同一份，同步是结构保证的。
+        // 不透明贴图，关混合。
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, viewW, viewH)
+        GLES30.glDisable(GLES30.GL_BLEND)
+        GLES30.glUseProgram(blitProgram)
+        setVec2(blitProgram, "uRes", viewW.toFloat(), viewH.toFloat())
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTexId)
+        setInt(blitProgram, "uTex", 0)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        // ---- 水滴 pass：渲染到屏幕，采样背景纹理 ----
+        // 水滴边缘要抗锯齿淡出，开混合（SRC_ALPHA/ONE_MINUS_SRC_ALPHA），
+        // 边缘 alpha 淡出处透出下面刚贴好的背景。
+        GLES30.glEnable(GLES30.GL_BLEND)
+        GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
         GLES30.glUseProgram(dropProgram)
         setVec2(dropProgram, "uRes", viewW.toFloat(), viewH.toFloat())
         setFloat(dropProgram, "uTime", tSec)
@@ -638,7 +679,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         val screenW = context.resources.displayMetrics.widthPixels.toFloat()
         val r = screenW * 0.19f
         val cx = viewW / 2f
-        val cy = viewH * 0.45f
+        // 第 80 批：View 现在是全屏（之前只占上半屏 dropWrap），水滴中心 Y
+        // 从 0.45 改成 0.225——原来是上半屏高度的 45%，上半屏是整屏一半，
+        // 所以是整屏的 22.5%，屏上位置不变。
+        val cy = viewH * 0.225f
         setVec2(dropProgram, "uCenter", cx, cy)
         setFloat(dropProgram, "uRadius", r)
         // 第 54 批：中心漂移从正弦改成值噪声。之前的 sin/cos 是周期函数，

@@ -146,9 +146,10 @@ class MainActivity : Activity() {
     // 对话区由 refreshOriloChat 全量重建（问候语那句 record=true，不能只靠 record 区分）。
     private var rebuildingBubbles = false
     private var oriloDroplet: com.jarvis.app.orilog.DropletGlView? = null
-    // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
-    // 插在对话背景照片层之上、设置页与内容列之下；Orilo 档才显示。
-    private lateinit var oriloBackgroundView: OriloBackgroundView
+    // 第 80 批：OriloBackgroundView（AGSL）不再上屏。背景和水滴合成一套 GL 渲染——
+    // DropletGlView 全屏，自己贴 FBO 背景纹理、水滴采同一份纹理，颜色同步是结构保证的。
+    // OriloBackgroundView.kt 文件留着：phaseAt()/hueColor()/TUNE_* 是静态工具，
+    // DropletGlRenderer 还在用它们算光斑位置和颜色。
     // 竖屏第 1 批：根布局（横屏时 WebView 回这里全屏）与舞台（竖屏时 WebView 进这里，上 2/3）。
     private lateinit var rootLayout: FrameLayout
     private lateinit var stageLayout: FrameLayout
@@ -341,13 +342,15 @@ class MainActivity : Activity() {
         }.also { root.addView(it, 1) }
         refreshDialogueBackground()
 
-        // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底——根布局上的全屏层，
-        // 插 index 2：对话背景照片层（index 1）之上、设置页与内容列之下；Orilo 档才显示，
-        // 经典档藏起，盖住照片层（Orilo 整页就是流动底，不露对话照片）。
-        oriloBackgroundView = OriloBackgroundView(this).apply {
+        // 第 80 批（用户令，方案一）：整页流动底改由 DropletGlView 全屏画——
+        // 根布局上的全屏层，插 index 2：对话背景照片层（index 1）之上、设置页与内容列之下；
+        // Orilo 档才显示，经典档藏起，盖住照片层（Orilo 整页就是流动底，不露对话照片）。
+        // GL 自己贴 FBO 背景纹理，水滴采同一份纹理，颜色同步是结构保证的。
+        // OriloBackgroundView（AGSL）不再上屏。
+        oriloDroplet = com.jarvis.app.orilog.DropletGlView(this).apply {
             visibility = View.GONE
         }
-        root.addView(oriloBackgroundView, 2, FrameLayout.LayoutParams(
+        root.addView(oriloDroplet, 2, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         // HUD WebView 常驻（只建一次），竖屏藏起来停渲染，横屏全屏显示；再按当前方向摆一次。
@@ -432,7 +435,7 @@ class MainActivity : Activity() {
     // ---------- Orilo 主界面第 6 批：水滴主视觉面板 ----------
     // 结构：上半一颗动态水滴（居中）+ 下半对话区（滚动、每条消息一个玻璃气泡、字号 15 不动）；
     // 标题已删（2026-11-15 用户要求）。输入/麦克风/设置走下面共用的 buildBottomPanel，不另建。
-    // 整页流动底是根布局上的 OriloBackgroundView（applyMainStyle 里开关），本面板背景透明。
+    // 整页流动底是根布局上的 DropletGlView 全屏层（第 80 批，applyMainStyle 里开关），本面板背景透明。
     // Orilo 档下舞台/对话/原生面板三者藏起，只留它。
     private fun buildOriloPanel(): LinearLayout {
         val panel = LinearLayout(this).apply {
@@ -444,12 +447,10 @@ class MainActivity : Activity() {
         val dropWrap = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        // 水滴颜色不跟状态（固定玻璃色）；大小跟待机走（setAwake：待机缩、干活胀）。
-        // 第 36 批：AGSL 路线停掉，改走 OpenGL 路线（orilog/ 文件夹，DropletGlView）。
-        // GL View 占满整个 dropWrap（上半屏），给影子留地方；水滴本身还是 220dp，
-        // 半径在 DropletGlRenderer 里按 110dp 算。
-        oriloDroplet = com.jarvis.app.orilog.DropletGlView(this)
-        dropWrap.addView(oriloDroplet, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+        // 第 80 批：DropletGlView 不再放进 dropWrap——它已是根布局上的全屏层
+        // （上面建的，index 2），自己全屏画背景 + 水滴。dropWrap 只留作占位，
+        // 撑起上半屏空间，让对话区待在下半屏。水滴屏上位置不变（Renderer 里
+        // cy 按整屏 22.5% 算，即原来上半屏 45% 的位置）。
         // 第 23 批：外面左下聚光 = 水滴左下再往外 0.5r——水滴落位后算一次，传给背景 View。
         // 第 37 批：删掉——GL View 不透明，把背景 View 的聚光/影子全盖住了（Claude 第 36 批
         // 审查指出）；外面聚光和影子已挪进 GL 水滴着色器里画。
@@ -479,12 +480,11 @@ class MainActivity : Activity() {
         chatScroll.visibility = if (orilo || hudPanelOpen) View.GONE else View.VISIBLE
         panelScroll.visibility = if (!orilo && hudPanelOpen) View.VISIBLE else View.GONE
         oriloPanel.visibility = if (orilo) View.VISIBLE else View.GONE
-        // Orilo 第 1 批（2026-11-15 补的要求）：整页流动液态玻璃底是根布局上的全屏层；
-        // Orilo 档下显示它，并把 homePanel 背景置空、让流动底透满整页（含底部麦克风行）。
-        // 经典档藏起它，homePanel 背景不动（对话背景图那路在 refreshDialogueBackground 里管）。
-        if (::oriloBackgroundView.isInitialized) {
-            oriloBackgroundView.visibility = if (orilo) View.VISIBLE else View.GONE
-        }
+        // 第 80 批：整页流动底现在是根布局上的 DropletGlView 全屏层（GL 自己画背景
+        // + 水滴）；Orilo 档下显示它，并把 homePanel 背景置空、让流动底透满整页
+        // （含底部麦克风行）。经典档藏起它，homePanel 背景不动（对话背景图那路
+        // 在 refreshDialogueBackground 里管）。
+        oriloDroplet?.visibility = if (orilo) View.VISIBLE else View.GONE
         if (orilo) homePanel.background = null
         if (!orilo) cancelOriloTyping() // 经典档下对话区藏着，打字机不用跑。
         if (orilo) {

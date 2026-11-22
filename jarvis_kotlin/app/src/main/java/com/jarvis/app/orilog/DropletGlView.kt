@@ -23,6 +23,11 @@ import android.util.AttributeSet
  * 水滴外全透明，让下面真正的背景（OriloBackgroundView）露出来——
  * 之前 GL 自己画背景，渐变跟下面对不上，水滴周围被截成一个正方形。
  * FBO 背景只留给水滴内部折射采样用，不再显示。
+ *
+ * 第 80 批（用户令，方案一，要惊艳效果）：改回不透明 Surface。GL 自己全屏画
+ * 背景（贴 FBO 纹理），OriloBackgroundView 不再上屏——屏幕上的背景和水滴采的
+ * 背景是同一份纹理，颜色同步是结构保证的。第 39 批那个“正方形截断”不会再
+ * 出现，因为这次背景是全屏贴的，不是只画在水滴 View 的小框里。
  */
 class DropletGlView @JvmOverloads constructor(
     context: Context,
@@ -32,10 +37,10 @@ class DropletGlView @JvmOverloads constructor(
     private val renderer = DropletGlRenderer(context)
 
     init {
-        // 透明 Surface：EGL 要带 alpha 通道，holder 设成半透明，GL 层置顶。
-        setEGLConfigChooser(8, 8, 8, 8, 16, 0)
-        holder.setFormat(PixelFormat.TRANSLUCENT)
-        setZOrderOnTop(true)
+        // 第 80 批：不透明 Surface——GL 自己全屏画背景（贴 FBO 纹理），不再透
+        // 下面那层 AGSL 背景。EGL 不带 alpha 通道，holder 不透明，不置顶。
+        setEGLConfigChooser(8, 8, 8, 0, 16, 0)
+        holder.setFormat(PixelFormat.OPAQUE)
         setEGLContextClientVersion(3)
         setRenderer(renderer)
         renderMode = RENDERMODE_CONTINUOUSLY
