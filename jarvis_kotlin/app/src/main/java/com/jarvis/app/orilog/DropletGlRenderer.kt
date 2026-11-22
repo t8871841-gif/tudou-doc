@@ -248,7 +248,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float cosTop = -n2.y;
             float topDarkMask = smoothstep(0.94, 0.98, cosTop);
             // 底部笑脸
-            vec2 bottomDir = normalize(vec2(0.12, 0.99));
+            vec2 bottomDir = normalize(vec2(-0.42, 0.91));
             float cosBottom = dot(normalize(n2), bottomDir);
             float smileMask = smoothstep(0.60, 0.85, cosBottom);
             float smileBright = edge * smileMask;
@@ -343,10 +343,21 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             //    叠加笑脸减弱（-19）合计 -32，回到 +62≈+61。
             // 大高光（255/294°/0.85R vs 255/300°/0.75R）、左亮点（255）、
             // 影子（50 vs 44）、尺寸（208 vs 205）均已对上，不动。
+            // 第 71 批：放大看光线细节（用户令）。4454 三倍放大实测两处错位：
+            // 1）月牙位置错了：参考的细月牙不在 0.90R（贴边），在顶部约 0.65R、
+            //    向两侧弯到 0.85R——是一道贴着上半部内侧的弧，不是贴边的圈。
+            //    我的 0.90R 高斯带贴在边上，看着像又一圈亮边。改到 0.70R。
+            // 2）笑脸方向偏了：参考笑脸峰值在左下 125°（映的是左下聚光面），
+            //    我的 bottomDir (0.12,0.99)=83° 正下方。改到 (-0.42,0.91)=115°，
+            //    笑脸中心移到左下，跟参考对上。
+            // 其余放大确认无误：大高光 255（294–322°/0.76–0.91R，中心 (0.51,-0.65)，
+            // 我的是 (0.47,-0.65)）、左亮点 241 偏粉白、右亮点偏蓝紫（都是背景色
+            // 透出来的，不用改色）、边缘是平滑过渡+外侧暗环、没有亮线（70 批
+            // 亮边 0.05 已是上限）。
             vec2 topDir = vec2(0.0, -1.0);
             float topDot = dot(normalize(n2), topDir);
             float cresR = length(n2);
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.90) / 0.035, 2.0)) * 0.08;
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.035, 2.0)) * 0.08;
             // 聚光（左下 225°，0.6R 处）
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
