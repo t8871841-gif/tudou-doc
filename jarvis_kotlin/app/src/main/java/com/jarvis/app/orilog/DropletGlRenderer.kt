@@ -313,6 +313,20 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 shC = vec2(-0.65, 0.12);
             vec2 shD = n2 - shC;
             float smallHighlight = exp(-dot(shD, shD) / (0.14 * 0.14) * 1.5) * 0.70;
+            // 右侧小亮点：第 68 批。参考 4454 左右边缘各有一个小亮点，
+            // 左边的已有（-0.65, +0.12），右边的缺了。补一个镜像点
+            // (+0.65, +0.12)，同半径、同峰值。
+            vec2 shRC = vec2(0.65, 0.12);
+            vec2 shRD = n2 - shRC;
+            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.70;
+            // 顶部细月牙：第 68 批。参考 4454 顶部有一道细月牙——一道细细的
+            // 亮弧，贴着水滴上缘内侧弯着，从左上到右上。不是大高光（那是右上
+            // 实心白块），是独立的细弧。实现：顶部方向（0,-1）的点积定角度
+            // 范围（顶部 ±41° 内），半径 0.90R 处高斯细带，薄、亮、两端渐隐。
+            vec2 topDir = vec2(0.0, -1.0);
+            float topDot = dot(normalize(n2), topDir);
+            float cresR = length(n2);
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.90) / 0.035, 2.0)) * 0.60;
             // 聚光（左下 225°，0.6R 处）
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
@@ -358,7 +372,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 的背景渐变洗平了。降到 0.06：里面不再均匀发亮，背景渐变透出来，
             // 水滴跟背景融在一起。折射 bend 180 不动（用户之前说折射淡才加到
             // 180 的）。
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + caustic * 0.5);
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + caustic * 0.5);
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随距离和时间衰减，
             // 平时没有。三个源点在边缘，屏幕角：
