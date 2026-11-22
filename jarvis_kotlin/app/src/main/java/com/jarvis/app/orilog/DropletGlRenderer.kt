@@ -50,11 +50,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         precision highp float;
         uniform vec2 uRes;
         uniform float uTime;
+        uniform float uAbsTime;
         uniform vec2 uBlobA;
         uniform vec2 uBlobB;
-        uniform vec3 uGradTop;
-        uniform vec3 uGradMid;
-        uniform vec3 uGradBot;
         uniform vec3 uBlobAColor;
         uniform vec3 uBlobBColor;
         out vec4 oColor;
@@ -65,14 +63,35 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
                        mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
         }
+        // 第 55 批（补）：hsv2rgb（跟 OriloBackgroundView AGSL 同一套）。
+        vec3 hsv2rgb(vec3 c) {
+            vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+            vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+        }
         void main() {
             vec2 uv = gl_FragCoord.xy / uRes;
             float w = noise(uv * 2.8 + vec2(uTime * 0.03, 0.0)) - 0.5;
             vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uTime * 0.02)) * 0.25 - 0.125);
+            // 第 55 批（补）：底色改成 HSV 直接算（跟 AGSL 同一套）。色相由
+            // 噪声场直接定（青 190°↔蓝 232°↔紫 267°），饱和的青、蓝、紫同框
+            // 互相流；饱和度/明度仍按纵向渐变；乳白场独立（另一路 noise），
+            // 饱和度压到 0.08、明度抬到 0.97，褪成乳白。青斑和乳白斑位置不同、
+            // 各自流动，青↔乳白互相渗。uGradTop/Mid/Bot 不再用。
             float t = clamp(dot(wuv, vec2(0.25, 1.0)) / 1.0625, 0.0, 1.0);
-            vec3 base = mix(mix(uGradTop, uGradMid, clamp(t / 0.55, 0.0, 1.0)),
-                            mix(uGradMid, uGradBot, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
+            float sat = mix(mix(0.50, 0.68, clamp(t / 0.55, 0.0, 1.0)),
+                            mix(0.68, 0.64, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
+            float val = mix(mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0)),
+                            mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
+                            step(0.55, t));
+            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.010, uAbsTime * 0.008));
+            float hue = mix(190.0, 267.0, hueN);
+            float milkN = noise(wuv * 1.1 + vec2(uAbsTime * 0.006, uAbsTime * 0.005) + 7.3);
+            float milkAmt = smoothstep(0.6, 0.9, milkN);
+            sat = mix(sat, 0.08, milkAmt * 0.85);
+            val = mix(val, 0.97, milkAmt * 0.5);
+            vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
             float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.40), 0.0, 1.0));
@@ -391,6 +410,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         GLES30.glUseProgram(bgProgram)
         setVec2(bgProgram, "uRes", viewW.toFloat(), viewH.toFloat())
         setFloat(bgProgram, "uTime", tSec)
+        // 第 55 批：空间色相场用绝对时间（跟 AGSL 的 iTime 同一个挂钟），
+        // 保证 FBO 跟真背景同相位。uTime 是相对 startMs 的（水滴颤动用），
+        // 不能拿来算背景色相场，否则 FBO 跟真背景的紫蓝边界对不上。
+        setFloat(bgProgram, "uAbsTime", android.os.SystemClock.uptimeMillis() / 1000f)
         // 第 42 批（Claude 审查点 5）：FBO 背景跟真背景同相位——之前 FBO 用的是
         // 写死的固定三色，真背景会随时间做色相漂移（青↔蓝↔紫），时间一长两者
         // 色相差拉开，水滴内部折射采到的颜色跟外面真背景对不上，边缘会看出
@@ -401,9 +424,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
         val phase = com.jarvis.app.OriloBackgroundView.phaseAt(android.os.SystemClock.uptimeMillis())
         setVec2(bgProgram, "uBlobA", phase.ax * viewW, phase.ay * viewH)
         setVec2(bgProgram, "uBlobB", phase.bx * viewW, phase.by * viewH)
-        setColor3(bgProgram, "uGradTop", com.jarvis.app.OriloBackgroundView.hueColor(232f, 0.50f, 0.95f, phase.hueShift, phase.satScale))
-        setColor3(bgProgram, "uGradMid", com.jarvis.app.OriloBackgroundView.hueColor(232f, 0.68f, 0.91f, phase.hueShift, phase.satScale))
-        setColor3(bgProgram, "uGradBot", com.jarvis.app.OriloBackgroundView.hueColor(243f, 0.64f, 0.91f, phase.hueShift, phase.satScale))
+        // 第 55 批（补）：底色色相改由着色器内噪声场直接定（hsv2rgb），
+        // uGradTop/Mid/Bot 不再用，这里不再传。光斑颜色仍由 CPU 算。
         setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
         setColor3(bgProgram, "uBlobBColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift, phase.satScale))
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)

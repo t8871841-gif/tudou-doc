@@ -220,14 +220,11 @@ class OriloBackgroundView @JvmOverloads constructor(
     private fun drawWithShader(canvas: Canvas, w: Float, h: Float) {
         val s = runtimeShader ?: return
         val paint = shaderPaint ?: return
-        val top = hueColor(232f, 0.50f, 0.95f)
-        val mid = hueColor(232f, 0.68f, 0.91f)
-        val bot = hueColor(243f, 0.64f, 0.91f)
         s.setFloatUniform("iResolution", w, h)
         s.setFloatUniform("iTime", SystemClock.uptimeMillis() / 1000f)
-        s.setFloatUniform("gradTop", Color.red(top) / 255f, Color.green(top) / 255f, Color.blue(top) / 255f)
-        s.setFloatUniform("gradMid", Color.red(mid) / 255f, Color.green(mid) / 255f, Color.blue(mid) / 255f)
-        s.setFloatUniform("gradBot", Color.red(bot) / 255f, Color.green(bot) / 255f, Color.blue(bot) / 255f)
+        // 第 55 批（补）：底色色相改由着色器内噪声场直接定（hsv2rgb），
+        // gradTop/Mid/Bot 不再用（色相不再由 CPU 的 hueColor 定），
+        // 这里不再传。光斑颜色仍由 CPU 的 hueColor 算（全局漂移）。
         s.setFloatUniform("blobA", ax * w, ay * h)
         s.setFloatUniform("blobB", bx * w, by * h)
         val blobAColor = hueColor(TUNE_BLOB_A_HUE, TUNE_BLOB_A_SAT, TUNE_BLOB_A_VAL)
@@ -420,9 +417,6 @@ class OriloBackgroundView @JvmOverloads constructor(
         const val AGSL_SOURCE = """
             uniform float2 iResolution;
             uniform float  iTime;
-            uniform float3 gradTop;
-            uniform float3 gradMid;
-            uniform float3 gradBot;
             uniform float2 blobA;
             uniform float2 blobB;
             uniform float3 blobAColor;
@@ -465,6 +459,16 @@ class OriloBackgroundView @JvmOverloads constructor(
                 }
                 return v;
             }
+            // 第 55 批（补）：hsv2rgb——青要作为饱和色出现，不能只靠 YIQ 旋转。
+            // 之前那版是 ±25° 旋转：蓝（232°）上下只到 207°–257°，到不了青
+            // （190°），青只在乳白斑里以淡青出现，从没有饱和的青。
+            // 改成色相由噪声场直接定：hue = mix(190, 267, hueN)，青↔蓝↔紫
+            // 全程在场，饱和的青、蓝、紫同框、互相流。标准紧凑实现。
+            float3 hsv2rgb(float3 c) {
+                float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+                float3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+                return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+            }
 
             half4 main(float2 fragCoord) {
                 float2 uv = fragCoord / iResolution;
@@ -474,14 +478,30 @@ class OriloBackgroundView @JvmOverloads constructor(
                 );
                 float2 wuv = uv + (warp - 0.5) * uWarpStrength;
 
+                // 第 55 批（补）：底色改成 HSV 直接算。之前是纵向 RGB 渐变
+                // （gradTop/Mid/Bot，CPU 上 hueColor 全局移色相）+ YIQ 旋转
+                // ±25°，青到不了（蓝 232° 上下只到 207°–257°），青只在乳白
+                // 斑里淡青出现。改成：色相由噪声场直接定（青 190°↔蓝 232°↔
+                // 紫 267° 全程在场，饱和的青、蓝、紫同框互相流），饱和度/明度
+                // 仍按纵向渐变（上 0.50/0.95、中 0.68/0.91、下 0.64/0.91），
+                // 乳白场独立（另一路 noise）：noise 高的地方饱和度压到 0.08、
+                // 明度抬到 0.97，褪成乳白。乳白斑和青斑位置不同、各自流动，
+                // 青↔乳白互相渗。gradTop/Mid/Bot 不再用（色相不再由 CPU 定）。
                 float2 dir = float2(0.25, 1.0);
                 float t = clamp(dot(wuv, dir) / dot(dir, dir), 0.0, 1.0);
-                float wgt = step(0.55, t);
-                float3 base = mix(
-                    mix(gradTop, gradMid, clamp(t / 0.55, 0.0, 1.0)),
-                    mix(gradMid, gradBot, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
-                    wgt
-                );
+                float satTop = mix(0.50, 0.68, clamp(t / 0.55, 0.0, 1.0));
+                float satBot = mix(0.68, 0.64, clamp((t - 0.55) / 0.45, 0.0, 1.0));
+                float sat = mix(satTop, satBot, step(0.55, t));
+                float valTop = mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0));
+                float valBot = mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0));
+                float val = mix(valTop, valBot, step(0.55, t));
+                float hueN = noise(wuv * 1.6 + float2(iTime * 0.010, iTime * 0.008));
+                float hue = mix(190.0, 267.0, hueN);
+                float milkN = noise(wuv * 1.1 + float2(iTime * 0.006, iTime * 0.005) + 7.3);
+                float milkAmt = smoothstep(0.6, 0.9, milkN);
+                sat = mix(sat, 0.08, milkAmt * 0.85);
+                val = mix(val, 0.97, milkAmt * 0.5);
+                float3 base = hsv2rgb(float3(hue / 360.0, sat, val));
 
                 float2 pxA = wuv * iResolution - blobA;
                 float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(pxA) / (iResolution.x * uBlobARadiusFrac), 0.0, 1.0));
