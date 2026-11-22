@@ -167,7 +167,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 几秒内就能看到拉伸方向在转。l=2 是平滑椭圆不是坑洼，
             // 振幅翻倍不会回到 v104 那种坑洼轮廓。
             float theta = atan(local.y, local.x);
-            float ellipAngle = 6.28318 * (vnoise(uTime * 0.3 + 13.0) * 0.5 + 0.5);
+            // 第 59 批：椭球轴游走改快——用户指出我 60fps 的观察（半径抖动相关
+            // 时间约 0.1–0.2 秒，又快又不规则）没有 1:1 复制。第 58 批拿掉
+            // 呼吸是对的（体积守恒），但椭球轴还在用 0.3 频率（相关时间约 3 秒）
+            // 慢悠悠地转，快抖动丢了。轴频率 0.3→3.0（相关时间约 0.33 秒），
+            // 长轴快速不规则地换方向，固定方向上的半径跟着快抖，跟参考一致；
+            // 椭球本身仍是体积守恒（面积一阶不变），振幅 3% 不动。
+            float ellipAngle = 6.28318 * (vnoise(uTime * 3.0 + 13.0) * 0.5 + 0.5);
             float ellip = 1.0 + 0.03 * cos(2.0 * (theta - ellipAngle));
             float R_eff = R * breatheFactor(uTime) * ellip;
             // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
