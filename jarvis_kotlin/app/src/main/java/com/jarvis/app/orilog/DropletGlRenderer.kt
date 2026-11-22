@@ -350,6 +350,8 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // n2.y 为正就是屏幕向下，surfAng 是屏幕角，第 47 批的原值
             // （2.356/0.785/-2.356）本来就是对的。认错，改回去。
             // 波沿表面走，振幅很小（0.05），只求一丝动感，别喧宾夺主。
+            // 第 60 批：用户反馈真机上涟漪看不到、效果很微弱——0.05 确实太淡，
+            // 振幅提到 0.15（3 倍），让它看得见但仍不喧宾夺主。
             float ripple = 0.0;
             float surfAng = atan(n2.y, n2.x);
             {
@@ -367,7 +369,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 float dt = mod(uTime - 33.0, 45.0);
                 ripple += sin(dAng * 6.0 - dt * 2.5) * exp(-dAng * 1.2) * exp(-dt * 0.7);
             }
-            result += vec3(1.0) * ripple * 0.05;
+            result += vec3(1.0) * ripple * 0.15;
             // 边缘抗锯齿（第 42 批）：R_eff 以内不透明，R_eff→1.02*R_eff 淡出到透明。
             // 这一环里 n2 长度略大于 1、nz=0，折射偏移最大，但只有 2% 宽且在淡出，
             // 看不出错色。
