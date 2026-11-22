@@ -182,7 +182,12 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             float ellipAngle = 6.28318 * (vnoise(uTime * 0.3 + 13.0) * 0.5 + 0.5);
             float ellipAmp = 0.03 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
             float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle));
-            float R_eff = R * breatheFactor(uTime) * ellip;
+            // 蛋形（第 74 批）：水滴不是绝对正圆。受表面张力/透视影响，视觉上
+            // 极微的“上宽下窄”，底部接触面略扁。静态形态微调：egg = 1 +
+            // 0.015×(-sin(theta))，顶部 +1.5%、底部 -1.5%，平滑、无断点。
+            // 不是颤动（颤动是椭球 3% 随时间变），是底形本身就带一点蛋形。
+            float egg = 1.0 + 0.015 * (-sin(theta));
+            float R_eff = R * breatheFactor(uTime) * ellip * egg;
             // 水滴外：影子 / 外面聚光 / 全透明。GL View 现在是透明的（第 39 批，
             // 用户指出水滴周围被截成正方形、跟背景格格不入——之前 GL 自己画背景，
             // 渐变跟下面真正的背景对不上）。这里不再输出背景，只输出影子/聚光，
@@ -206,7 +211,17 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 // 所以影子就放正下方 1.3R。半径 1.4R、强度 0.70 不动。
                 vec2 sCenter = c + vec2(0.0, R * 1.3);
                 float sDist = length(fragPx - sCenter);
-                float shadow = (1.0 - smoothstep(0.0, R * 1.4, sDist)) * 0.70;
+                float shadow = (1.0 - smoothstep(0.0, R * 1.1, sDist)) * 0.55;
+                // 接触阴影：第 74 批。水滴与平面接触的那条线（约 1.0R、底部）
+                // 有一道极暗、极窄的接触阴影（最暗 <50），向外迅速变宽、变浅、
+                // 羽化。这是环境光遮蔽（AO），不是单纯挡光，极大增强“水滴附着
+                // 在平面上”的真实感。实现：底部 90° 附近、r=1.0R 处的窄高斯暗带，
+                // 峰值 0.5，径向宽 0.05R、角向宽 30°，叠加到影子上。
+                float contactAng = abs(atan(fragPx.y - c.y, fragPx.x - c.x) - 1.5708);
+                contactAng = min(contactAng, 6.28318 - contactAng);
+                float contactR = length(fragPx - c) / R;
+                float contact = exp(-pow(contactAng / 0.52, 2.0)) * exp(-pow((contactR - 1.0) / 0.05, 2.0)) * 0.5;
+                shadow = clamp(shadow + contact, 0.0, 1.0);
                 // 外面聚光：半透明白，提亮下面真正的背景。
                 // 第 50 批：位置 1.5R→1.0R（4454 量到最亮点 (-0.75R,+0.72R)，
                 // 离中心 1.04R；主界面视频 (-0.67R,+0.77R)，1.02R），
@@ -325,13 +340,13 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 所以从（-0.45, +0.42）移到（-0.65, +0.12）。半径 0.14、峰值 0.70 不变。
             vec2 shC = vec2(-0.65, 0.12);
             vec2 shD = n2 - shC;
-            float smallHighlight = exp(-dot(shD, shD) / (0.14 * 0.14) * 1.5) * 0.70;
+            float smallHighlight = exp(-dot(shD, shD) / (0.14 * 0.14) * 1.5) * 0.60;
             // 右侧小亮点：第 68 批。参考 4454 左右边缘各有一个小亮点，
             // 左边的已有（-0.65, +0.12），右边的缺了。补一个镜像点
             // (+0.65, +0.12)，同半径、同峰值。
             vec2 shRC = vec2(0.65, 0.12);
             vec2 shRD = n2 - shRC;
-            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.50;
+            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.45;
             // 顶部细月牙：第 68 批。参考 4454 顶部有一道细月牙——一道细细的
             // 亮弧，贴着水滴上缘内侧弯着，从左上到右上。不是大高光（那是右上
             // 实心白块），是独立的细弧。实现：顶部方向（0,-1）的点积定角度
@@ -363,7 +378,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 topDir = vec2(0.0, -1.0);
             float topDot = dot(normalize(n2), topDir);
             float cresR = length(n2);
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.035, 2.0)) * 0.08;
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.08;
             // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
             // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
             // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限
@@ -382,6 +397,28 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             vec2 causticDir = vec2(-0.7071, 0.7071);
             float causticDist = length(n2 - causticDir * 0.6);
             float caustic = (1.0 - smoothstep(0.0, 0.55, causticDist)) * 0.12;
+            // 第 74 批（用户列的细节清单，一次补齐）：
+            // a）次级高光：顶部细月牙与内表面反射之间（约 1–2 点钟方向），
+            //    还有一条极微弱、弥散的反射带，与细月牙共同构成顶部内表面
+            //    的复杂反射。实现：(0.45,-0.45) 处宽高斯（0.25R），峰值 0.04。
+            vec2 secC = vec2(0.45, -0.45);
+            float secondary = exp(-dot(n2 - secC, n2 - secC) / (0.25 * 0.25)) * 0.04;
+            // b）色散：9 点钟左亮点边缘有极微弱的粉/紫色包边（不同波长折射率
+            //    不同）。实现：左亮点外一圈稍大的粉晕 (1.0,0.7,1.0)，峰值 0.03。
+            float fringe = exp(-dot(shD, shD) / (0.20 * 0.20) * 1.5) * 0.03;
+            // c）焦散光桥：内聚光（0.6R）与外聚光（1.04R）之间有一条视觉相连
+            //    的光桥。光穿透水滴底部最薄处，在边缘强烈折射压缩，左下边缘
+            //    （1.0R 附近）透出背景被扭曲后的高浓度紫蓝。实现：135° 方向的
+            //    窄高斯带（角宽 0.14 rad），径向以 1.0R 为峰、宽 0.25R，峰值 0.08。
+            float bridgeAng = abs(atan(n2.y, n2.x) - 2.356);
+            bridgeAng = min(bridgeAng, 6.28318 - bridgeAng);
+            float bridgeR = length(n2);
+            float bridge = exp(-pow(bridgeAng / 0.14, 2.0)) * exp(-pow((bridgeR - 1.0) / 0.25, 2.0)) * 0.08;
+            // d）反弹光：左下聚光照亮下方平面，平面把紫光微弱反射回水滴右下
+            //    边缘，右下边缘不是死黑，带一层极薄的暗紫灰色轮廓。实现：45°
+            //    方向、0.97R 处的窄高斯，暗紫灰 (0.35,0.28,0.55)，峰值 0.04。
+            vec2 bounceC = vec2(0.68, 0.68);
+            float bounce = exp(-dot(n2 - bounceC, n2 - bounceC) / (0.10 * 0.10)) * 0.04;
             // 合成：先把折射背景和原背景按 alpha 混合（中心透明、边缘 0.22，
             // 跟旧版一致）；光学特征（高光、笑脸、亮边、聚光、漫反射）是加性光，
             // 必须直接加在结果上——之前把它们放进 colorOut 再乘 alpha，
@@ -423,7 +460,9 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // 的背景渐变洗平了。降到 0.06：里面不再均匀发亮，背景渐变透出来，
             // 水滴跟背景融在一起。折射 bend 180 不动（用户之前说折射淡才加到
             // 180 的）。
-            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.06 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + caustic * 0.5);
+            result += vec3(1.0) * (smileBright * smileCoeff + diffuse * 0.03 + rimBright + highlight + smallHighlight + smallHighlightR + crescent + beam + secondary + bridge + caustic * 0.5);
+            result += vec3(1.0, 0.7, 1.0) * fringe;
+            result += vec3(0.35, 0.28, 0.55) * bounce;
             // 涟漪：第 47 批（1:1 复制，用户令）。三点轮流起波，每 45 秒一圈，
             // 间隔 18/15/12 秒。波从源点沿水滴表面扩散，随距离和时间衰减，
             // 平时没有。三个源点在边缘，屏幕角：
