@@ -1,8 +1,6 @@
 package com.jarvis.app.asr
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.util.Log
 import com.k2fsa.sherpa.onnx.EndpointConfig
 import com.k2fsa.sherpa.onnx.EndpointRule
@@ -306,9 +304,8 @@ class OfflineAsr(
                 }
             }
             if (toDownload.isNotEmpty()) {
-                if (!isWifiConnected(context)) {
-                    throw IllegalStateException("离线识别模型未下载，需连接 WiFi 下载一次（约 190MB）")
-                }
+                // 第 64 批：用户令“不要仅wifi”——下载不限网络，WiFi/移动数据都能下。
+                // 原先的 WiFi 限制（非 WiFi 抛错）已拿掉。
                 downloading = true
                 try {
                     for (name in toDownload) downloadModelFile(name, File(dir, name))
@@ -327,14 +324,6 @@ class OfflineAsr(
             }
             marker.writeText("ok")
             return dir
-        }
-
-        /** 当前是不是 WiFi（下载模型只允许 WiFi，不走移动数据）。 */
-        private fun isWifiConnected(context: Context): Boolean {
-            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                ?: return false
-            val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
-            return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
         }
 
         /**
@@ -377,15 +366,16 @@ class OfflineAsr(
         /**
          * 设置页用：模型状态。
          * "ready" 已就位可用（filesDir 有 marker，或 APK 的 assets 里有全套可现拷）；
-         * "downloading" 正在下载；"no-wifi" 未下载且当前非 WiFi；
-         * "missing" 未下载（在 WiFi 下首次使用语音时会自动下载）。
+         * "downloading" 正在下载；
+         * "missing" 未下载（首次使用语音时会自动下载，约 190MB）。
+         * 第 64 批：用户令“不要仅wifi”，"no-wifi" 状态已删，下载不限网络。
          */
         fun modelStatus(context: Context): String {
             val dir = File(context.filesDir, "asr")
             if (File(dir, MODEL_MARKER).exists()) return "ready"
             if (downloading) return "downloading"
             if (assetsPresent(context)) return "ready"
-            return if (isWifiConnected(context)) "missing" else "no-wifi"
+            return "missing"
         }
 
         /** 自检页用：assets 里是不是已经放齐了四个模型文件（不保证内容完整/版本对，只查存在性）。 */

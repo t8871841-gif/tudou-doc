@@ -4371,8 +4371,7 @@ class MainActivity : Activity() {
             val asrText = when (asrStatus) {
                 "ready" -> "模型已就位"
                 "downloading" -> "模型下载中…"
-                "no-wifi" -> "模型未下载，需连 WiFi 下载一次（约 190MB），听写/唤醒词暂不可用"
-                else -> "模型未下载，首次使用时自动下载（仅 WiFi，约 190MB）"
+                else -> "模型未下载，首次使用时自动下载（约 190MB）"
             }
             appendLine("离线语音识别(sherpa-onnx)：$asrText")
             appendLine("语音合成：Edge TTS（云扬），需联网，无需 Key")

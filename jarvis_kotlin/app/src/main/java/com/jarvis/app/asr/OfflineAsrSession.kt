@@ -128,9 +128,9 @@ object OfflineAsrSession {
 
     /**
      * 模型能用就返回 true。"ready"（已就位 / APK 里有全套可现拷）和
-     * "missing"（在 WiFi 下但还没下）都算可用——"missing" 时首次使用
-     * 会由 prepareModelDir 自动下载；只有 "no-wifi"（未下载且非 WiFi）
-     * 才算不可用。注意：这里不触发下载本身，下载在
+     * "missing"（还没下）都算可用——"missing" 时首次使用
+     * 会由 prepareModelDir 自动下载（第 64 批：用户令“不要仅wifi”，
+     * 下载不限网络）。注意：这里不触发下载本身，下载在
      * OfflineAsr.start()->sharedRecognizer()->prepareModelDir 里做。
      */
     fun isAvailable(ctx: Context): Boolean {
@@ -156,7 +156,7 @@ object OfflineAsrSession {
             return
         }
         if (!isAvailable(appCtx)) {
-            onError("离线识别模型未下载，需连接 WiFi 下载一次（约 190MB）")
+            onError("离线识别模型未就绪")
             return
         }
 
