@@ -216,8 +216,10 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 // 影子质心 (-0.07R,+1.31R)，基本正下方；主界面视频两帧也是
                 // (+0.15~0.21R,+1.27~1.59R)，也是正下方。光主要是正面打过来
                 // （高光在右上是镜面反射角，影子投在背景上基本不偏），
-                // 所以影子就放正下方 1.3R。半径 1.4R、强度 0.70 不动。
-                vec2 sCenter = c + vec2(0.0, R * 1.3);
+                // 所以影子就放正下方。第 76 批：中心 1.3R→1.5R，减少跟水滴
+                // 下缘的重叠（Claude 对比：60°–100° 异常暗是影子叠在边缘上）。
+                // 半径 1.1R、强度 0.55 不动。
+                vec2 sCenter = c + vec2(0.0, R * 1.5);
                 float sDist = length(fragPx - sCenter);
                 float shadow = (1.0 - smoothstep(0.0, R * 1.1, sDist)) * 0.55;
                 // 接触阴影：第 74 批。水滴与平面接触的那条线（约 1.0R、底部）
@@ -225,10 +227,17 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
                 // 羽化。这是环境光遮蔽（AO），不是单纯挡光，极大增强“水滴附着
                 // 在平面上”的真实感。实现：底部 90° 附近、r=1.0R 处的窄高斯暗带，
                 // 峰值 0.5，径向宽 0.05R、角向宽 30°，叠加到影子上。
+                // 第 76 批（Claude 对比 4953 vs 4454）：影子形状不对——球体边缘到
+                // 影子是硬切（167→44 只隔 10px），切完影子在 0.76R–1.43R 几乎
+                // 是平的（81–97），不是“中心暗、向外平滑变淡”。根子是接触阴影
+                // 太窄太狠（径向宽 0.05R、峰值 0.35），在边缘切出一道黑线。
+                // 改：径向宽 0.05R→0.10R，峰值 0.35→0.25，让接触阴影变宽变软，
+                // 跟漫射影子平滑衔接。漫射影子中心也从 1.3R 下移到 1.5R，
+                // 减少跟水滴下缘的重叠（同批修 60°–100° 异常暗区）。
                 float contactAng = abs(atan(fragPx.y - c.y, fragPx.x - c.x) - 1.5708);
                 contactAng = min(contactAng, 6.28318 - contactAng);
                 float contactR = length(fragPx - c) / R;
-                float contact = exp(-pow(contactAng / 0.52, 2.0)) * exp(-pow((contactR - 1.0) / 0.05, 2.0)) * 0.35;
+                float contact = exp(-pow(contactAng / 0.52, 2.0)) * exp(-pow((contactR - 1.0) / 0.10, 2.0)) * 0.25;
                 shadow = clamp(shadow + contact, 0.0, 1.0);
                 // 外面聚光：半透明白，提亮下面真正的背景。
                 // 第 50 批：位置 1.5R→1.0R（4454 量到最亮点 (-0.75R,+0.72R)，
@@ -357,7 +366,7 @@ class DropletGlRenderer(private val context: Context) : GLSurfaceView.Renderer {
             // (+0.65, +0.12)，同半径、同峰值。
             vec2 shRC = vec2(0.65, 0.12);
             vec2 shRD = n2 - shRC;
-            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.45;
+            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.55;
             // 顶部细月牙：第 68 批。参考 4454 顶部有一道细月牙——一道细细的
             // 亮弧，贴着水滴上缘内侧弯着，从左上到右上。不是大高光（那是右上
             // 实心白块），是独立的细弧。实现：顶部方向（0,-1）的点积定角度
