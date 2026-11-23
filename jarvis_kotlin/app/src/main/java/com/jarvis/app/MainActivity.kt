@@ -51,6 +51,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.RelativeLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
@@ -441,7 +442,8 @@ class MainActivity : Activity() {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(dp(24), dp(16), dp(24), dp(8))
+            // 第 85 批（用户令：对话框离手机边太远）：面板左右边距 24→8dp。
+            setPadding(dp(8), dp(16), dp(8), dp(8))
         }
         // 上半：水滴占一半空间，居中 220dp。
         val dropWrap = FrameLayout(this).apply {
@@ -459,7 +461,8 @@ class MainActivity : Activity() {
         // 不再是整块玻璃板（2026-11-16 用户要求跟经典一样）。
         oriloChatList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
+            // 第 85 批：左右内边距 12→0dp（只留上下 12dp 呼吸），字贴边。
+            setPadding(0, dp(12), 0, dp(12))
         }
         oriloChatScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
@@ -530,15 +533,17 @@ class MainActivity : Activity() {
         }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
+            // 第 85 批：内容左右内边距 16→8dp；字左缘 = 面板 8 + 列表 0 + 内容 8 = 16dp。
+            setPadding(dp(8), dp(12), dp(8), dp(12))
             addView(body)
         }
-        // 气泡在 oriloChatList 里的位置与尺寸：两边共用，与经典气泡一字不差。
+        // 气泡在 oriloChatList 里的位置与尺寸：第 85 批起与经典气泡分开——
+        // 对侧边距 48→16dp，消息宽度放满（用户令：对话框离手机边太远）。
         val bubbleLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = if (mine) Gravity.END else Gravity.START
             topMargin = dp(6); bottomMargin = dp(6)
-            marginStart = if (mine) dp(48) else 0
-            marginEnd = if (mine) 0 else dp(48)
+            marginStart = if (mine) dp(16) else 0
+            marginEnd = if (mine) 0 else dp(16)
         }
         // 第 82 批（用户令：对话框去掉液态玻璃，不要气泡底，直接就是背景）：
         // 两支的 LiquidGlassView 包裹整段删掉，content 就是气泡本身——没有玻璃、
@@ -2602,7 +2607,8 @@ class MainActivity : Activity() {
     // 第 82 批（用户：底部状态栏的液态玻璃颜色太深，要浅一点）：CLEAR 材质自带
     // 固定压暗层，圆钮又坐在背景最暗的底部，整圈发黑。加白 20% 染色提亮——
     // 只提亮度，不改色相。
-    private fun glassWrapButton(btn: ImageButton, radiusDp: Float): LiquidGlassView {
+    // 第 85 批：参数放宽到 View——麦克风钮是普通 View，也要包玻璃壳。
+    private fun glassWrapButton(btn: View, radiusDp: Float): LiquidGlassView {
         val r = dp(radiusDp.toInt()).toFloat()
         return LiquidGlassView(this).apply {
             setCornerRadii(r, r, r, r)
@@ -2681,16 +2687,14 @@ class MainActivity : Activity() {
         addView(inputRow)
 
         // 竖屏第 4 批：设置齿轮移到这里——麦克风行最右端（屏幕右下角），与顶栏齿轮同一个入口（toggleSettings）。
-        // 三个主按钮放进一个占满剩余宽度的居中容器，齿轮固定在行尾；输入行在上面一行，发送按钮不在同一行，
-        // 互不重叠；齿轮在底部面板里，不盖聊天记录。
-        val micRow = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val micCenter = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        // 第 85 批：三个主按钮不再用占满剩余宽度的居中容器——麦克风框居中、静音/手写相对它左右对称，
+        // 齿轮固定在行尾；输入行在上面一行，发送按钮不在同一行，互不重叠；齿轮在底部面板里，不盖聊天记录。
+        // 第 85 批（用户令：底部重排、麦克风缩小+加玻璃、设置仍在底栏）：
+        // 麦克风以整行正中为锚，静音/手写左右对称，设置扳手仍在行尾。旧的
+        // LinearLayout + 权重居中会让整组中心偏离屏中心（扳手占了行尾宽度），
+        // 改 RelativeLayout：麦克风框 centerInParent，左右两钮相对它定位。
+        val micRow = RelativeLayout(this@MainActivity).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
         muteButton = ImageButton(this@MainActivity).apply {
             setImageResource(if (JarvisPrefs.isMuted(this@MainActivity)) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
@@ -2716,15 +2720,23 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
         muteCol.addView(glassWrapButton(muteButton, 20f), LinearLayout.LayoutParams(dp(44), dp(40)))
-        micCenter.addView(muteCol)
+        // 第 85 批：muteCol 不在这里加——它的相对位置要参照 micFxWrap 的 id，
+        // 在 micFxWrap 建好后（下面）再加进 micRow。
 
-        // 麦克风动效：64dp 圆钮本身不动，外面套一个 96dp 的框（动效圈有地方伸展），
+        // 麦克风动效：56dp 圆钮，外面套一个 84dp 的框（动效圈有地方伸展），
         // 脉冲环/旋转弧/均衡条都居中叠在框里，平时 GONE，只在对应状态才显示。
+        // 第 85 批：框 96→84dp（麦克风 64→56dp，动效圈跟着缩）；框以整行正中为锚，
+        // id 供左右两钮相对定位。
         micFxWrap = FrameLayout(this@MainActivity).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(96), dp(96)).apply { marginStart = dp(20); marginEnd = dp(20) }
+            id = View.generateViewId()
+            layoutParams = RelativeLayout.LayoutParams(dp(84), dp(84)).apply {
+                addRule(RelativeLayout.CENTER_IN_PARENT)
+            }
         }
+        // 第 85 批：麦克风 64→56dp（比 44dp 的钮只大一点）；底色改半透明渐变，
+        // 玻璃壳在外面给（下面包 glassWrapButton），透出背景的折射。
         micButton = View(this@MainActivity).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF00F0FF.toInt(), 0xFF7000FF.toInt())).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0x9900F0FF.toInt(), 0x997000FF.toInt())).apply {
                 shape = GradientDrawable.OVAL
             }
             setOnClickListener {
@@ -2737,19 +2749,22 @@ class MainActivity : Activity() {
                 }
             }
         }
-        micFxWrap.addView(micButton, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        // 第 85 批：麦克风包进液态玻璃壳（跟静音/手写/设置同一套 CLEAR 材质、
+        // 白 20% 染色、折射 80/斜面 32/色散 0.05），圆角 28dp = 圆形。
+        val micGlass = glassWrapButton(micButton, 28f)
+        micFxWrap.addView(micGlass, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
         micPulseRing1 = View(this@MainActivity).apply {
             background = makeMicRingDrawable()
             visibility = View.GONE
         }
-        micFxWrap.addView(micPulseRing1, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        micFxWrap.addView(micPulseRing1, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
         micPulseRing2 = View(this@MainActivity).apply {
             background = makeMicRingDrawable()
             visibility = View.GONE
         }
-        micFxWrap.addView(micPulseRing2, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        micFxWrap.addView(micPulseRing2, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
         micArcView = makeMicArcView().apply { visibility = View.GONE }
-        micFxWrap.addView(micArcView, FrameLayout.LayoutParams(dp(80), dp(80), Gravity.CENTER))
+        micFxWrap.addView(micArcView, FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER))
         micEqRow = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -2771,7 +2786,13 @@ class MainActivity : Activity() {
         }
         micEqBars = bars
         micFxWrap.addView(micEqRow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
-        micCenter.addView(micFxWrap)
+        micRow.addView(micFxWrap)
+        // 第 85 批：静音在麦克风左边，隔 24dp。
+        micRow.addView(muteCol, RelativeLayout.LayoutParams(dp(44), dp(40)).apply {
+            addRule(RelativeLayout.LEFT_OF, micFxWrap.id)
+            addRule(RelativeLayout.CENTER_VERTICAL)
+            marginEnd = dp(24)
+        })
         // 动效的 Animator 只建一次，状态切换时只 start/cancel。
         // 脉冲环（聆听）：一个 ValueAnimator 驱动两圈涟漪，第二圈错开半个周期。
         micPulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -2811,8 +2832,12 @@ class MainActivity : Activity() {
                 if (showInput) hideInputRow() else showInputRow()
             }
         }
-        micCenter.addView(glassWrapButton(keyboardToggle, 22f), LinearLayout.LayoutParams(dp(44), dp(44)))
-        micRow.addView(micCenter)
+        // 第 85 批：手写在麦克风右边，与静音对称，隔 24dp。
+        micRow.addView(glassWrapButton(keyboardToggle, 22f), RelativeLayout.LayoutParams(dp(44), dp(44)).apply {
+            addRule(RelativeLayout.RIGHT_OF, micFxWrap.id)
+            addRule(RelativeLayout.CENTER_VERTICAL)
+            marginStart = dp(24)
+        })
 
         settingsGearButton = ImageButton(this@MainActivity).apply {
             setImageResource(android.R.drawable.ic_menu_manage)
@@ -2826,7 +2851,11 @@ class MainActivity : Activity() {
             contentDescription = "设置"
         }
         settingsGearWrap = glassWrapButton(settingsGearButton, 24f)
-        micRow.addView(settingsGearWrap, LinearLayout.LayoutParams(dp(48), dp(48)))
+        // 第 85 批：设置扳手仍在底栏行尾（用户令：不要放右上角），贴父布局右端。
+        micRow.addView(settingsGearWrap, RelativeLayout.LayoutParams(dp(48), dp(48)).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_END)
+            addRule(RelativeLayout.CENTER_VERTICAL)
+        })
         addView(micRow)
 
         // 竖屏第 1 批：下面的「点击麦克风开始语音交互」提示字已删。
