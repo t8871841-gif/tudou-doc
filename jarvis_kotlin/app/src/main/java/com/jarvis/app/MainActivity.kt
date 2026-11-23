@@ -2211,7 +2211,9 @@ class MainActivity : Activity() {
                 enablePressEffect = false
                 enableDynamicBackground = true
                 backdropSource = rootLayout
-                glassTint = HudPalette.withAlpha(color, 0.38f)
+                // 第 86 批（用户令：经典对话框玻璃不要压黑）：主色染色保留，但颜色
+                // 先往白里提 50% 再染（HudPalette.lerp），亮度抬起来，状态色相还在。
+                glassTint = HudPalette.withAlpha(HudPalette.lerp(color, Color.WHITE, 0.5f), 0.38f)
                 addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
                 layoutParams = bubbleLp
             }
@@ -2219,8 +2221,10 @@ class MainActivity : Activity() {
             LiquidGlassView(this).apply {
                 // 逐角圆角（顺序：左上、右上、右下、左下），与旧版气泡一字不差。
                 setCornerRadii(dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                // 材质 CLEAR：弱模糊 + 固定压暗层（白字在亮照片上仍可读），底染白 8%、
-                // 高光 1.2×——白只保留一点点（用户要求）。自适应染色不开（CLEAR 本来也不用）。
+                // 材质 CLEAR：弱模糊 + 固定压暗层（白字在亮照片上仍可读）。
+                // 第 86 批（用户令：经典对话框玻璃不要压黑）：注释里写的“底染白 8%”
+                // 代码里从来没有，助手气泡一直是裸 CLEAR、压暗层全吃。加白 20% 提亮
+                // （第 82 批底栏钮同款、真机验证过）。自适应染色不开（CLEAR 本来也不用）。
                 material = GlassMaterial.CLEAR
                 // 收敛的折射/色散数值（第一版估值，真机验收再调）：默认值折射 160px、
                 // 斜面 48px、色散 0.10 都偏强；气泡矮，adaptiveLensScale 还会再钳一档。
@@ -2235,6 +2239,8 @@ class MainActivity : Activity() {
                 // 采根布局才把照片/罩子/紫渐变/别的气泡都采进来（见 BackdropCapture）。
                 enableDynamicBackground = true
                 backdropSource = rootLayout
+                // 第 86 批：加白 20% 提亮（见上面注释）。
+                glassTint = HudPalette.withAlpha(Color.WHITE, 0.20f)
                 addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
                 layoutParams = bubbleLp
             }
@@ -2626,9 +2632,11 @@ class MainActivity : Activity() {
     }
 
     // 真液态玻璃第 3 批：设置行三类（目录行 / 开关行 / 分段按钮）的玻璃壳——把行内容
-    // 包进 LiquidGlassView。参数与第 1、2 批同一套（CLEAR 材质、白 8%、折射 80/
+    // 包进 LiquidGlassView。参数与第 1、2 批同一套（CLEAR 材质、折射 80/
     // 斜面 32/色散 0.05），行比气泡还矮，adaptiveLensScale 会再钳一档；设置页会
     // 滚动，动态背景开、背景来源定死根布局。库自带的按压效果不要开（见第 2 批）。
+    // 第 86 批（用户令：设置页玻璃不要压黑）：注释里写的“白 8%”代码里从来没有，
+    // 设置行一直是裸 CLEAR、压暗层全吃。加白 20% 提亮（第 82 批底栏钮同款）。
     private fun glassWrapRow(v: View, radiusDp: Float): LiquidGlassView {
         val r = dp(radiusDp.toInt()).toFloat()
         return LiquidGlassView(this).apply {
@@ -2641,6 +2649,7 @@ class MainActivity : Activity() {
             enablePressEffect = false
             enableDynamicBackground = true
             backdropSource = rootLayout
+            glassTint = HudPalette.withAlpha(Color.WHITE, 0.20f)
             addView(v, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         }
     }
