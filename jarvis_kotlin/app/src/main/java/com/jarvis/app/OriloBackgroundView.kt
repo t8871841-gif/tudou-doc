@@ -294,8 +294,6 @@ class OriloBackgroundView @JvmOverloads constructor(
     )
 
     companion object {
-        /** 第 5 批：按原版录屏实测的节奏改成约 13 秒一圈（原来是猜的 30 秒，慢了一倍多）。 */
-        const val FLOW_PERIOD_MS = 13000L
         /** 第 19 批（用户令）：色相不再按固定时间慢慢转圈——改成"跳变"：平时
          *  色相不动（只有光斑位置/呼吸/饱和度在 13 秒轴上慢慢变幻），隔一段
          *  不固定的时间（20–60 秒随机）色相一瞬间跳到一个新值。跳变的色相
@@ -370,7 +368,12 @@ class OriloBackgroundView @JvmOverloads constructor(
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
-            val t = (uptimeMs % FLOW_PERIOD_MS) / FLOW_PERIOD_MS.toFloat() * (Math.PI * 2).toFloat()
+            // 第 84 批（用户令：背景流动不自然）：光斑位置原来是 13 秒一圈的摆锤——
+            // t=(uptimeMs%13000)/13000*2π，sin/cos 里再乘 0.6–0.9，13 秒接头处
+            // sin(0.9*2π)≠sin(0)、cos(0.7*2π)≠cos(0)，A 光斑一帧横跳约 11%、
+            // 纵跳约 18%，而且来回摆、每 13 秒原样重复。改成绝对时间 + 互质周期
+            // （47/53/61/71/57 秒，跟 hueShift 的 53/79 秒同款），正弦对任意 t
+            // 都连续、没有接头，组合周期几乎不重复，光斑像流水一样慢慢漂。
             // 第 31 批（用户令：背景要蓝、紫、青、乳白轮着变，颜色转化随机）：
             // 色相范围拉到 -45..+50（第 30 批是 0..50，只到蓝紫），青（约 190°）
             // 和紫（约 282°）都能走到。两组不成整数比的正弦叠加（53 秒和 79 秒），
@@ -387,15 +390,15 @@ class OriloBackgroundView @JvmOverloads constructor(
             val baseSat = (1.0f - 0.30f * ((hueShift + 14f) / 28f)).coerceIn(0.70f, 1.0f)
             val satScale = baseSat
             return FlowPhase(
-                ax = 0.30f + 0.18f * sin(t * 0.9f),
-                ay = 0.26f + 0.14f * cos(t * 0.7f),
-                bx = 0.72f + 0.16f * cos(t * 0.6f + 1.3f),
-                by = 0.70f + 0.15f * sin(t * 0.8f + 2.1f),
+                ax = 0.30f + 0.18f * sin(2.0 * Math.PI * tSec / 47.0).toFloat(),
+                ay = 0.26f + 0.14f * cos(2.0 * Math.PI * tSec / 61.0).toFloat(),
+                bx = 0.72f + 0.16f * cos(2.0 * Math.PI * tSec / 53.0 + 1.3).toFloat(),
+                by = 0.70f + 0.15f * sin(2.0 * Math.PI * tSec / 71.0 + 2.1).toFloat(),
                 hueShift = hueShift,
                 satScale = satScale,
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
                 // 这样"光晕涨缩"跟"光晕挪位置"不会每圈都卡在同一个点上重复。
-                bloom = 0.5f + 0.5f * sin(t * 0.85f - (Math.PI / 2).toFloat()),
+                bloom = 0.5f + 0.5f * sin(2.0 * Math.PI * tSec / 57.0 - Math.PI / 2).toFloat(),
             )
         }
 

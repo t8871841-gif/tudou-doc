@@ -88,6 +88,7 @@ class DropletGlRenderer(private val context: Context) {
         uniform vec2 uBlobB;
         uniform vec3 uBlobAColor;
         uniform vec3 uBlobBColor;
+        uniform float uOrbMode;
         out vec4 oColor;
         float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float noise(vec2 p) {
@@ -109,8 +110,12 @@ class DropletGlRenderer(private val context: Context) {
             // 色相场位置跟真背景错开，水滴内部颜色跟外面背景变化不同步。
             // 改成绝对时间后 FBO 跟真背景同相位，内外颜色一起变。
             // 第 82 批：流动再快一点——warp 与色相场的时间系数 ×1.5。
-            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.045, 0.0)) - 0.5;
-            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.03)) * 0.25 - 0.125);
+            // 第 84 批（用户令：背景颜色变化不自然、不流畅）：Henry 视频 30fps
+            // 量出来，Orilo 色相在固定点上 2–5°/秒稳步单向走，我们只有 0.2–1°/秒。
+            // 时间系数再 ×4（累计 ×6）：warp 0.045→0.18、0.03→0.12，
+            // 色相场 0.015→0.06、0.012→0.048，目标 2–5°/秒。
+            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.18, 0.0)) - 0.5;
+            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.12)) * 0.25 - 0.125);
             // 第 55 批（补）：底色改成 HSV 直接算（跟 AGSL 同一套）。色相由
             // 噪声场直接定，饱和的青、蓝、紫同框互相流；饱和度/明度仍按纵向渐变。
             // 第 82 批（用户令：背景只保留图片上颜色）：4454_1_3jar.png 实测背景
@@ -125,13 +130,20 @@ class DropletGlRenderer(private val context: Context) {
             float val = mix(mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0)),
                             mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
-            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.015, uAbsTime * 0.012));
+            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.06, uAbsTime * 0.048));
             float hue = mix(230.0, 267.0, hueN);
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
             float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.40), 0.0, 1.0));
             base = mix(base, uBlobBColor, fb * 0.45);
+            // 第 84 批（用户令：悬浮球紫色不好看，要淡紫+淡蓝互相流）：
+            // 球在别的 App 上面，看不见底下真实背景，折射采到的还是 App 自己
+            // 那套深紫背景（饱和 50–68%），球像颗实心紫球。悬浮球模式把折射源
+            // 往白里褪 55%：色相不动（230° 蓝↔267° 紫还在），饱和压到约 25–30%、
+            // 明度抬到约 96–98%，球里就是淡紫淡蓝互相流动。主界面不动
+            // （uOrbMode=0 时原样，水滴跟背景配得上）。
+            if (uOrbMode > 0.5) { base = mix(base, vec3(1.0), 0.55); }
             oColor = vec4(base, 1.0);
         }
     """.trimIndent()
@@ -234,7 +246,11 @@ class DropletGlRenderer(private val context: Context) {
             // （1%，静帧上看不出椭圆，约 2px）；再叠一层极小的高频角向抖动
             // （0.005×vnoise(8t+3θ)），打破完美椭圆的干净感，让表面有细碎的活气。
             float ellipAngle = 6.28318 * (vnoise(uTime * 0.3 + 13.0) * 0.5 + 0.5);
-            float ellipAmp = 0.01 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
+            // 第 84 批：用户说抖动幅度没有 Orilo 大——30fps 量横向半径，Orilo
+            // 206–214px（std 2.35px）、我们卡在 193–194px。振幅 0.01→0.02
+            // （约 2%，Orilo 约 1.1–2.3%），轴仍慢的不规则走（61 批修法不动），
+            // 不回 3% 那种看得见的转。
+            float ellipAmp = 0.02 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
             float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle))
                 + 0.005 * vnoise(uTime * 8.0 + theta * 3.0);
             // 蛋形（第 74 批）：水滴不是绝对正圆。受表面张力/透视影响，视觉上
@@ -358,8 +374,10 @@ class DropletGlRenderer(private val context: Context) {
             // 游走，不只是跟着水滴中心漂——表面微小起伏改变局部法线，反射点
             // 就跟着动。用值噪声（跟颤动同一套函数，不同种子、更慢的速度，
             // 相关时间约 4 秒），缓慢漂移、不抖动。
-            vec2 hlWander = vec2(0.07 * vnoise(uTime * 2.0 + 11.0),
-                0.07 * vnoise(uTime * 1.7 + 23.0));
+            // 第 84 批：用户说抖动幅度没有 Orilo 大——高光游走实测 Orilo ±25px，
+            // 我们只有 ±14px。0.07→0.12，回到 49 批注释里写的参考值。
+            vec2 hlWander = vec2(0.12 * vnoise(uTime * 2.0 + 11.0),
+                0.12 * vnoise(uTime * 1.7 + 23.0));
             vec2 hlC = vec2(0.47, -0.65) + hlWander;
             vec2 hlD = n2 - hlC;
             float hlAng = -0.698;
@@ -673,6 +691,8 @@ class DropletGlRenderer(private val context: Context) {
         // 保证 FBO 跟真背景同相位。uTime 是相对 startMs 的（水滴颤动用），
         // 不能拿来算背景色相场，否则 FBO 跟真背景的紫蓝边界对不上。
         setFloat(bgProgram, "uAbsTime", android.os.SystemClock.uptimeMillis() / 1000f)
+        // 第 84 批：悬浮球模式把折射源褪淡（淡紫淡蓝），主界面原样。
+        setFloat(bgProgram, "uOrbMode", if (orbMode) 1f else 0f)
         // 第 42 批（Claude 审查点 5）：FBO 背景跟真背景同相位——之前 FBO 用的是
         // 写死的固定三色，真背景会随时间做色相漂移（青↔蓝↔紫），时间一长两者
         // 色相差拉开，水滴内部折射采到的颜色跟外面真背景对不上，边缘会看出
