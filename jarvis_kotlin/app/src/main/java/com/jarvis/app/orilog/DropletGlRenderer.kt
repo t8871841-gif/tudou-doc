@@ -90,13 +90,16 @@ class DropletGlRenderer(private val context: Context) {
             // AGSL 真背景的 warp 用绝对时间 iTime，两者相位对不上，FBO 采到的
             // 色相场位置跟真背景错开，水滴内部颜色跟外面背景变化不同步。
             // 改成绝对时间后 FBO 跟真背景同相位，内外颜色一起变。
-            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.03, 0.0)) - 0.5;
-            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.02)) * 0.25 - 0.125);
+            // 第 82 批：流动再快一点——warp 与色相场的时间系数 ×1.5。
+            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.045, 0.0)) - 0.5;
+            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.03)) * 0.25 - 0.125);
             // 第 55 批（补）：底色改成 HSV 直接算（跟 AGSL 同一套）。色相由
-            // 噪声场直接定（青 190°↔蓝 232°↔紫 267°），饱和的青、蓝、紫同框
-            // 互相流；饱和度/明度仍按纵向渐变；乳白场独立（另一路 noise），
-            // 饱和度压到 0.08、明度抬到 0.97，褪成乳白。青斑和乳白斑位置不同、
-            // 各自流动，青↔乳白互相渗。uGradTop/Mid/Bot 不再用。
+            // 噪声场直接定，饱和的青、蓝、紫同框互相流；饱和度/明度仍按纵向渐变。
+            // 第 82 批（用户令：背景只保留图片上颜色）：4454_1_3jar.png 实测背景
+            // 只有 230°–267°（左上 261°、右下 230°），色相场 210°↔285° 两头
+            // 都超了，收进 230°↔267°；乳白场（另一路 noise 把饱和度压到 0.08、
+            // 明度抬到 0.97）整段删掉——图里没有乳白色，乳白斑是画蛇添足。
+            // uGradTop/Mid/Bot 不再用。
             float t = clamp(dot(wuv, vec2(0.25, 1.0)) / 1.0625, 0.0, 1.0);
             float sat = mix(mix(0.50, 0.68, clamp(t / 0.55, 0.0, 1.0)),
                             mix(0.68, 0.64, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
@@ -104,15 +107,8 @@ class DropletGlRenderer(private val context: Context) {
             float val = mix(mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0)),
                             mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
-            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.010, uAbsTime * 0.008));
-            // 第 77 批：跟 OriloBackgroundView 同步——色相场 190°↔267° 改成
-            // 210°↔285°（贴近 4454 参考的紫色调，去薄荷绿）。FBO 背景必须
-            // 跟真背景用同一套数，不然水滴里面透出来的颜色跟外面接不上。
-            float hue = mix(210.0, 285.0, hueN);
-            float milkN = noise(wuv * 1.1 + vec2(uAbsTime * 0.006, uAbsTime * 0.005) + 7.3);
-            float milkAmt = smoothstep(0.6, 0.9, milkN);
-            sat = mix(sat, 0.08, milkAmt * 0.85);
-            val = mix(val, 0.97, milkAmt * 0.5);
+            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.015, uAbsTime * 0.012));
+            float hue = mix(230.0, 267.0, hueN);
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
@@ -569,32 +565,36 @@ class DropletGlRenderer(private val context: Context) {
             // 为正 = 屏幕向下），第 47 批的原值（2.356/0.785/-2.356）是对的。
             // 第 60 批：振幅 0.05→0.15（真机上看不到）。第 62 批：15 秒一圈、
             // 振幅 0.30（45 秒一圈 5 秒录像容易错过）。
+            // 第 82 批（用户：涟漪不像水波，太宽、太深）：波长 2π/6≈1.05R，
+            // 整颗水滴只有两圈宽环，像同心圆靶子；振幅 0.30 是 30% 亮度起伏，
+            // 太抢。改窄改浅——空间频率 6→14（波长约 0.45R，约四圈半细环），
+            // 时间系数跟着按比例提（2.5→6.0，波前扩散速度不变），振幅 0.30→0.12。
             // 第 65 批：用户指出涟漪做成了中心放射线——错了。旧写法用 dAng
             // （到源点的角度差）当距离，相位只跟角度有关、跟半径无关，
             // 同一角度上所有半径亮度一样，就成了从中心发散的射线。
             // 涟漪是三个点受力产生的点源波：波前是以源点为圆心的圆，
             // 向外扩。改成到源点的实际表面距离 d = length(n2 - src)，
-            // 相位 sin(d*6 - dt*2.5)，波前是绕源点的圆环，越扩越淡。
+            // 相位 sin(d*14 - dt*6)，波前是绕源点的圆环，越扩越淡。
             float ripple = 0.0;
             {
                 vec2 src = vec2(cos(2.356), sin(2.356));
                 float d = length(n2 - src);
                 float dt = mod(uTime - 0.0, 15.0);
-                ripple += sin(d * 6.0 - dt * 2.5) * exp(-d * 1.2) * exp(-dt * 0.7);
+                ripple += sin(d * 14.0 - dt * 6.0) * exp(-d * 1.2) * exp(-dt * 0.7);
             }
             {
                 vec2 src = vec2(cos(0.785), sin(0.785));
                 float d = length(n2 - src);
                 float dt = mod(uTime - 6.0, 15.0);
-                ripple += sin(d * 6.0 - dt * 2.5) * exp(-d * 1.2) * exp(-dt * 0.7);
+                ripple += sin(d * 14.0 - dt * 6.0) * exp(-d * 1.2) * exp(-dt * 0.7);
             }
             {
                 vec2 src = vec2(cos(-2.356), sin(-2.356));
                 float d = length(n2 - src);
                 float dt = mod(uTime - 11.0, 15.0);
-                ripple += sin(d * 6.0 - dt * 2.5) * exp(-d * 1.2) * exp(-dt * 0.7);
+                ripple += sin(d * 14.0 - dt * 6.0) * exp(-d * 1.2) * exp(-dt * 0.7);
             }
-            result += vec3(1.0) * ripple * 0.30;
+            result += vec3(1.0) * ripple * 0.12;
             // 边缘抗锯齿（第 42 批）：R_eff 以内不透明，R_eff→1.02*R_eff 淡出到透明。
             // 这一环里 n2 长度略大于 1、nz=0，折射偏移最大，但只有 2% 宽且在淡出，
             // 看不出错色。

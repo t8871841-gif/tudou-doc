@@ -333,8 +333,11 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  第 77 批（用户令按 95% 贴近 4454 参考改）：4454 参考左上是粉紫（暖紫），
          *  不是青——真机截图左上那片薄荷绿/青就是这团光斑。改回暖紫 285°：
          *  285+漂移（-45..+50）最高 335°，仍在紫粉区，不到红（360°/0°），
-         *  不会重蹈第 10 批“太艳丽”的问题。 */
-        const val TUNE_BLOB_A_HUE = 285f
+         *  不会重蹈第 10 批“太艳丽”的问题。
+         *  第 82 批（用户令：背景只保留图片上颜色）：图里左上是 261°，285°
+         *  超出图里颜色了。改成 255°——加上收窄后的漂移（±14°）是 241°–269°，
+         *  仍在图里 230°–267° 这一家子紫里。 */
+        const val TUNE_BLOB_A_HUE = 255f
         const val TUNE_BLOB_A_SAT = 0.55f
         const val TUNE_BLOB_A_VAL = 0.98f
         /** 光斑 B（右下附近）混合强度：0..1，同上是混合比例。 */
@@ -374,20 +377,15 @@ class OriloBackgroundView @JvmOverloads constructor(
             // 漂移不重复、没有固定周期；最快漂移约 4.9°/秒（实测 2–5°/秒）。
             // 饱和度跟色相耦合：变蓝/青（hueShift 小）时饱和度高，变紫（hueShift 大）
             // 时饱和度低。hueShift -45→1.0、+50→0.70。
-            // 乳白相：偶尔（约每 2–3 分钟一次、持续十来秒）饱和度压到很低，背景褪成
-            // 乳白。用一个长周期正弦（173 秒）+ 高阈值 smoothstep，平时为 0、峰值
-            // 附近才起作用；三个周期（53/79/173）不成整数比，颜色转化没有固定周期。
-            // 阈值 0.96（不是 0.88）：正弦峰顶很宽，阈值低了乳白相会拖到 27 秒，
-            // 太长；0.96 时明显褪白约 15 秒，是一段"相位"、不是常态。
-            // 注意：光斑 A 底色 200° 在色相最青时到 155°（偏绿），是同一套 hueShift
-            // 一起移的副作用；主渐变（232°）到 187° 是青，整体还是青蓝调。
+            // 第 82 批（用户令：背景只保留图片上颜色）：漂移 -45..+50 会把光斑
+            // 颜色带出图里 230°–267° 的范围（285°+50°=335° 是品红），乳白相
+            // （约每 2–3 分钟一次、持续十来秒把背景褪成乳白）更是图里没有的颜色。
+            // 漂移收窄到 ±14°，乳白相整段去掉（satScale 只剩 baseSat）。
+            // 两组正弦周期（53/79 秒）不动，漂移仍不重复；最快漂移约 1.5°/秒。
             val tSec = uptimeMs / 1000.0
-            val hueShift = (2.5 + 27.5 * sin(2.0 * Math.PI * tSec / 53.0) + 20.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
-            val baseSat = (1.0f - 0.30f * ((hueShift + 45f) / 95f)).coerceIn(0.70f, 1.0f)
-            val milkyRaw = (0.5f + 0.5f * sin(2.0 * Math.PI * tSec / 173.0)).toFloat()
-            val milkyT = ((milkyRaw - 0.96f) / (1.0f - 0.96f)).coerceIn(0f, 1f)
-            val milky = milkyT * milkyT * (3f - 2f * milkyT)
-            val satScale = (baseSat * (1.0f - 0.8f * milky)).coerceIn(0.14f, 1.0f)
+            val hueShift = (8.0 * sin(2.0 * Math.PI * tSec / 53.0) + 6.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
+            val baseSat = (1.0f - 0.30f * ((hueShift + 14f) / 28f)).coerceIn(0.70f, 1.0f)
+            val satScale = baseSat
             return FlowPhase(
                 ax = 0.30f + 0.18f * sin(t * 0.9f),
                 ay = 0.26f + 0.14f * cos(t * 0.7f),

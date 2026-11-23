@@ -515,14 +515,14 @@ class MainActivity : Activity() {
         scrollOriloChatToBottom()
     }
 
-    /** 对话区里的一条消息：跟经典气泡同一套玻璃（圆角/折射/色散/动态背景；用户行带色、
-     *  助手行透明），只是没有“谁·几点”那行头；正文黑体黑字 15sp，不截断，整段显示。
+    /** 对话区里的一条消息：没有“谁·几点”那行头；正文黑体黑字 16sp，不截断，整段显示。
+     *  第 82 批（用户令）：对话框去掉液态玻璃，不要气泡底，直接就是背景——
+     *  正文直接印在背景上。字一直是黑色（无论背景怎么变），字号 15→16sp。
      *  返回（气泡，正文）——打字机要往正文里逐字打。 */
     private fun oriloChatBubble(text: String, mine: Boolean): Pair<View, TextView> {
-        val color = HudPalette.colorFor(JarvisAgent.currentState())
         val body = TextView(this).apply {
             this.text = text
-            textSize = 15f
+            textSize = 16f
             setTextColor(Color.BLACK)
             typeface = Typeface.DEFAULT_BOLD
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -540,37 +540,12 @@ class MainActivity : Activity() {
             marginStart = if (mine) dp(48) else 0
             marginEnd = if (mine) 0 else dp(48)
         }
-        val bubble: View = if (mine) {
-            LiquidGlassView(this).apply {
-                setCornerRadii(dp(18).toFloat(), dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                material = GlassMaterial.CLEAR
-                refractionHeight = 80f
-                bevelWidth = 32f
-                dispersionStrength = 0.05f
-                enableSensorHighlight = true
-                enablePressEffect = false
-                enableDynamicBackground = true
-                backdropSource = rootLayout
-                glassTint = HudPalette.withAlpha(color, 0.38f)
-                addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
-                layoutParams = bubbleLp
-            }
-        } else {
-            LiquidGlassView(this).apply {
-                setCornerRadii(dp(4).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat())
-                material = GlassMaterial.CLEAR
-                refractionHeight = 80f
-                bevelWidth = 32f
-                dispersionStrength = 0.05f
-                enableSensorHighlight = true
-                enablePressEffect = false
-                enableDynamicBackground = true
-                backdropSource = rootLayout
-                addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
-                layoutParams = bubbleLp
-            }
-        }
-        return bubble to body
+        // 第 82 批（用户令：对话框去掉液态玻璃，不要气泡底，直接就是背景）：
+        // 两支的 LiquidGlassView 包裹整段删掉，content 就是气泡本身——没有玻璃、
+        // 没有底色，正文直接印在背景上。位置与边距（bubbleLp）不动；content 自带
+        // 的 16/12dp 内边距保留，给字留呼吸空间。经典档的 addBubble 不动。
+        content.layoutParams = bubbleLp
+        return content to body
     }
 
     private fun scrollOriloChatToBottom() {
@@ -2624,6 +2599,9 @@ class MainActivity : Activity() {
     // 库自带的按压效果不要开：ImageButton 吃掉了触摸，玻璃自己的 onTouchEvent
     // 拿不到 ACTION_DOWN（库没有 onInterceptTouchEvent）；按压反馈仍走
     // attachPressScale（贴在图标上，0.97x/80ms，与旧版同一套），图标缩、玻璃不动。
+    // 第 82 批（用户：底部状态栏的液态玻璃颜色太深，要浅一点）：CLEAR 材质自带
+    // 固定压暗层，圆钮又坐在背景最暗的底部，整圈发黑。加白 20% 染色提亮——
+    // 只提亮度，不改色相。
     private fun glassWrapButton(btn: ImageButton, radiusDp: Float): LiquidGlassView {
         val r = dp(radiusDp.toInt()).toFloat()
         return LiquidGlassView(this).apply {
@@ -2636,6 +2614,7 @@ class MainActivity : Activity() {
             enablePressEffect = false
             enableDynamicBackground = true
             backdropSource = rootLayout
+            glassTint = HudPalette.withAlpha(Color.WHITE, 0.20f)
             addView(btn, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
     }
