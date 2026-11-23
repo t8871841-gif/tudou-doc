@@ -74,6 +74,17 @@ class DropletGlView @JvmOverloads constructor(
         renderer.driftFrac = frac
     }
 
+    /** 第 83 批（用户令：悬浮球也换成水滴，主水滴的 2/3）：悬浮球模式。
+     *  渲染器改透明底、不贴背景、半径 ×2/3、中心 Y 0.40；本 View 改非不透明，
+     *  水滴外透出下面别的 App。必须在加到窗口之前调——SurfaceTexture 建好后
+     *  isOpaque 再改无效。 */
+    fun setOrbMode() {
+        renderer.orbMode = true
+        renderer.radiusScale = 2f / 3f
+        renderer.centerYFrac = 0.40f
+        isOpaque = false
+    }
+
     /** 空方法，跟旧 OriloDropletView 一样：水滴不再有待机/睡觉态——永远满尺寸、
      *  永远颤动、不画 Z。留着这个方法是让 MainActivity 的调用不用改。 */
     fun setAwake(@Suppress("UNUSED_PARAMETER") awake: Boolean) {

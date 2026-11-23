@@ -7,17 +7,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import android.graphics.PixelFormat
-import android.graphics.RadialGradient
-import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -25,19 +20,21 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.TextView
-import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.orilog.DropletGlView
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.min
 
 /**
  * 悬浮球：用无障碍服务的 TYPE_ACCESSIBILITY_OVERLAY 窗口画在所有 App 之上，不需要“悬浮窗”权限。
  *  - 只在 Jarvis 不在前台时显示（前台时界面本身就在）；
  *  - 点一下：常驻服务在跑 → 通知 Dart 开始听；否则拉起 Jarvis 再听（后台没有前台服务时系统不让用麦克风）；
  *  - 长按：打开 Jarvis；拖动：随手摆位，松手吸附左右边缘并记住位置；
- *  - 球的颜色跟随状态（待命/聆听/思考/播报），回答文字在球旁弹出小气泡。
+ *  - 球本身就是 Orilo 水滴（第 83 批，用户令：跟主界面同一颗水滴，主水滴的 2/3，
+ *    高光/亮点/月牙/笑脸/影子/折射/颤动全保留）；水滴不随状态变色，状态改由球旁
+ *    气泡的文字/表情表达（待机不挂气泡，只剩水滴）。
  * 全部 UI 操作在主线程。
  */
 object OrbController {
@@ -50,7 +47,10 @@ object OrbController {
     // 贴边收起后还留多少比例的球体露在外面（剩下这一截用来给用户看见"球还在"、
     // 也用来当下一次点击的热区）。真正的贴边隐藏只留一小截（15%），不是原来露 38%
     // 那种半个球还在外面。
-    private const val COLLAPSED_VISIBLE_FRACTION = 0.15f
+    // 第 83 批（悬浮球换水滴）：窗口 376px 里水滴只占中间 273px，两边各 51px
+    // 是透明边距。15% 只剩 56px 窗口，水滴只露 6px 边缘，几乎看不见、摸不着。
+    // 放到 20%（露 75px 窗口），水滴露约 25px，跟旧玻璃球露的那截差不多。
+    private const val COLLAPSED_VISIBLE_FRACTION = 0.20f
     private const val COLLAPSED_ALPHA = 0.55f
     private const val COLLAPSE_IDLE_MS = 1600L
     private const val COLLAPSE_ANIM_MS = 220L
@@ -203,7 +203,39 @@ object OrbController {
                 orb?.shakeError()
                 buzz(orb, HapticFeedbackConstants.REJECT)
             }
+            // 第 83 批（用户令：水滴不动，状态用旁边气泡文字或者表情表达）：
+            // 水滴本身不再变色，状态改挂球旁气泡；待机不挂气泡，只剩水滴。
+            showStateBubble(displayState())
         }
+    }
+
+    // 第 83 批：当前气泡是不是状态气泡（区别于任务/回答消息气泡）。
+    // 状态气泡常驻到下一次状态变化；待机时只清状态气泡，不动消息气泡；
+    // 消息气泡一来就顶掉状态气泡，下次状态变化再重新挂。
+    private var bubbleIsState = false
+    private var stateBubbleText: String? = null
+
+    /** 状态 → 球旁气泡（文字 + 表情）；待机返回 null = 不挂气泡。 */
+    private fun stateBubbleTextFor(ds: String): String? = when (ds) {
+        "listening" -> "🎤 在听…"
+        "thinking" -> "🤔 思考中…"
+        "speaking" -> "💬 说话中…"
+        STATE_WORKING -> "⚙️ 干活中…"
+        STATE_ERROR -> "❌ 出错了"
+        "stopped" -> "🛑 已停止"
+        else -> null
+    }
+
+    private fun showStateBubble(ds: String) {
+        val text = stateBubbleTextFor(ds)
+        if (text == null) {
+            // 待机：只清状态气泡；正在显示的消息气泡（句子/任务进度）不动。
+            if (bubbleIsState) removeBubble()
+            return
+        }
+        // 同一状态重复报不闪——气泡已经是这句就不用重建。
+        if (bubbleIsState && stateBubbleText == text && bubble != null) return
+        doShowBubble(text, sticky = true)
     }
 
     fun isEnabled(): Boolean = enabled
@@ -629,8 +661,13 @@ object OrbController {
         val s = svc ?: return
         val w = wm ?: return
         val d = s.resources.displayMetrics
-        // 真机反馈：jk-v11 时 56dp 太小，jk-v12 放大到 168dp 又太大，用户改定 120dp
-        val size = (100 * d.density).toInt()
+        // 第 83 批（用户令：悬浮球也换成水滴，主水滴的 2/3）：窗口按水滴定。
+        // 主水滴半径 = 屏宽 × 0.19（约 205px），悬浮球半径 ×2/3（约 137px）；
+        // 窗口要装下水滴（2R）+ 正下方影子（影子底约中心 +1.5R，滴底再往下
+        // 约 0.5R）+ 两头小边距，取 2.75R。1080 宽的屏上窗口约 376px。
+        // （旧 100dp 是 jk-v12 定下来的玻璃球尺寸，换水滴后作废。）
+        val orbR = d.widthPixels * 0.19f * (2f / 3f)
+        val size = (orbR * 2.75f).toInt().coerceAtLeast(1)
         // M39：夹紧用的半个球（pad）与半沉底沿（perchY，Andee clampCompact 同款）。
         val pad = size / 2
         val perchY = bottomEdge() - size / 2
@@ -739,7 +776,6 @@ object OrbController {
                 launchApp(null)
             }
         })
-        v.amplitude = { OfflineAsrSession.currentLevel() }
         v.setState(displayState())
         try {
             w.addView(v, lp)
@@ -747,6 +783,10 @@ object OrbController {
             orbLp = lp
             // C13：任务期只沉底沿不隐藏、截图期才 GONE，都由 applyVisibility() 统一落。
             applyVisibility()
+            // 第 83 批：球重现时把当前状态气泡也挂上（水滴本身不显示状态，
+            // 只靠 setState 里的 showStateBubble 的话，球重现后要等下一次
+            // 状态变化才有气泡）。
+            showStateBubble(displayState())
             // 第二梯队批八：这次显示时如果上次保存的位置本来就贴边，空闲一段时间后也该收起，
             // 不用非得等用户这次又拖一下才开始计时。
             scheduleCollapseIfDocked()
@@ -820,12 +860,16 @@ object OrbController {
         try { s.startActivity(i) } catch (_: Exception) {}
     }
 
-    private fun doShowBubble(text: String) {
+    /** sticky = 状态气泡：常驻到下一次状态变化，不启动自动销毁计时。
+     *  普通消息气泡（sticky=false）照旧：3.5 秒 + 字数 × 60ms 后自动销毁。 */
+    private fun doShowBubble(text: String, sticky: Boolean = false) {
         val s = svc ?: return
         val w = wm ?: return
         val olp = orbLp ?: return
         if (orb == null || text.isBlank()) return
         removeBubble()
+        bubbleIsState = sticky
+        stateBubbleText = if (sticky) text else null
         val d = s.resources.displayMetrics
         // M36：球旁气泡截断放宽到 Andee 的 4000 字上限（ChatHistory.MAX_TEXT，约三屏中文），
         // 不再是 120 字。
@@ -864,6 +908,12 @@ object OrbController {
             // M53：隐藏期间不启动销毁计时——气泡现在是 GONE 的，计时照常跑会在
             // 恢复显示前就把气泡销毁、用户永远看不到。恢复显示时 applyVisibility()
             // 按 bubbleHideDelayMs 重新计时。（任务期 C13 不再隐藏气泡，不走这条。）
+            // 第 83 批：状态气泡（sticky）常驻，不启动计时——它是现在的状态指示，
+            // 下一次状态变化或消息气泡来时才换掉；恢复显示时也不补计时。
+            if (sticky) {
+                bubbleHidePending = false
+                return
+            }
             val delayMs = (3500L + text.length * 60L).coerceAtMost(12000L)
             if (captureHidden) {
                 bubbleHidePending = true
@@ -903,6 +953,8 @@ object OrbController {
     private fun removeBubble() {
         main.removeCallbacks(hideBubbleRunnable)
         bubbleHidePending = false
+        bubbleIsState = false
+        stateBubbleText = null
         bubble?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
         bubble = null
     }
@@ -921,15 +973,16 @@ object OrbController {
     }
 
     /**
-     * 球本体（第三批水滴改版）：一颗圆形玻璃水珠，无尖顶、无贝塞尔水滴形。
-     *  共用画法：软阴影椭圆 + 径向渐变球体（中心亮、边缘深）+ 左上高光 + 底部亮边；
-     *  颜色是主信号：六种状态各一个主色，切换时 700ms 插值平滑过渡（不跳变）；
-     *  动画为辅：待机慢呼吸、聆听涟漪环、思考单弧快转、回复随幅度缩放+声波环、
-     *  出错红+抖动、工作中深紫+整圈光环慢转。旧的 6 层几何画法（光晕、sweep 弧环、
-     *  虚线环、脉冲波纹、核心光球、环绕小卫星）已删。
+     * 球本体（第 83 批，用户令：悬浮球也换成水滴）：
+     * 不再是 Canvas 画的玻璃球——里面就是一颗 Orilo 水滴（DropletGlView，
+     * 跟主界面同一套渲染器，主水滴的 2/3），水滴外全透明，浮在别的 App
+     * 上面只透出水滴自己 + 它投在下面 App 上的影子。
+     * 本类只剩容器 + 触摸：拖动（6dp 阈值）、点按、长按 500ms、按压缩放、
+     * 出错抖动。六态颜色、呼吸、转弧、涟漪环、声波环、光环全部删掉——
+     * 水滴不随状态变色，状态只走旁边气泡（OrbController.setState）。
      * M39/Andee BubbleUi 同款：拖动阈值 6dp、长按 500ms。
      */
-    private class OrbView(ctx: Context, private val host: Host) : View(ctx) {
+    private class OrbView(ctx: Context, private val host: Host) : FrameLayout(ctx) {
         interface Host {
             fun dragStart()
             fun dragBy(dx: Float, dy: Float)
@@ -938,93 +991,18 @@ object OrbController {
             fun longPress()
         }
 
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val dp = ctx.resources.displayMetrics.density
         // M39：拖动阈值 6dp（Andee BubbleUi 同款，不再是系统 touch slop × 2.5 约 20dp）。
         private val slop = 6f * dp
-        private var st = "idle"
-        private var rot = 0f
-        private var anim: ValueAnimator? = null
-        private var breathAnim: ValueAnimator? = null
         private var downX = 0f
         private var downY = 0f
         private var moved = false
         private var longFired = false
-        private var pressed = false
-        private var lastTickMs = 0L
-        private var animStartMs = SystemClock.uptimeMillis()
-        /** 音量 0..1：OrbController 接 OfflineAsrSession.currentLevel（聆听时有效） */
-        var amplitude: () -> Float = { 0f }
-        /** 颜色过渡 600–800ms（取 700ms）：当前显示色 → 目标状态色，逐帧插值，不跳变。 */
-        private val COLOR_BLEND_MS = 700L
 
-        // 六种状态的主色（颜色是主信号，动画为辅）：
-        // 待机淡紫/薰衣草、聆听亮蓝、思考琥珀橙、回复青绿（与聆听的蓝区分开）、
-        // 出错红、工作中深紫（与待机的淡紫区分：更深更饱和）。
-        private val COLOR_IDLE = 0xFFBFA8F0.toInt()
-        private val COLOR_LISTENING = 0xFF2A8CFF.toInt()
-        private val COLOR_THINKING = 0xFFFF9F1C.toInt()
-        private val COLOR_SPEAKING = 0xFF00C896.toInt()
-        private val COLOR_ERROR = 0xFFEF5350.toInt()
-        private val COLOR_WORKING = 0xFF6A2FE0.toInt()
-        /** 当前正在显示的主色（插值过程中的中间值）；初始即待机淡紫。 */
-        private var curColor = COLOR_IDLE
-        private var colorAnim: ValueAnimator? = null
+        private val glView = DropletGlView(ctx).apply { setOrbMode() }
 
-        private fun alpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
-
-        /** 状态 → 主色；"stopped"（急停 1.8 秒）与 error 同走红色。 */
-        private fun colorFor(s: String) = when (s) {
-            "listening" -> COLOR_LISTENING
-            "thinking" -> COLOR_THINKING
-            "speaking" -> COLOR_SPEAKING
-            STATE_WORKING -> COLOR_WORKING
-            STATE_ERROR, "stopped" -> COLOR_ERROR
-            else -> COLOR_IDLE
-        }
-
-        /** 向白混 f（0..1）：球体渐变的亮端。 */
-        private fun lighten(c: Int, f: Float): Int {
-            val r = (Color.red(c) + (255 - Color.red(c)) * f).toInt().coerceIn(0, 255)
-            val g = (Color.green(c) + (255 - Color.green(c)) * f).toInt().coerceIn(0, 255)
-            val b = (Color.blue(c) + (255 - Color.blue(c)) * f).toInt().coerceIn(0, 255)
-            return Color.argb(255, r, g, b)
-        }
-
-        /** 向黑混 f（0..1）：球体渐变的深端。 */
-        private fun darken(c: Int, f: Float): Int {
-            val r = (Color.red(c) * (1f - f)).toInt().coerceIn(0, 255)
-            val g = (Color.green(c) * (1f - f)).toInt().coerceIn(0, 255)
-            val b = (Color.blue(c) * (1f - f)).toInt().coerceIn(0, 255)
-            return Color.argb(255, r, g, b)
-        }
-
-        private fun lerpColor(a: Int, b: Int, f: Float): Int {
-            val r = (Color.red(a) + (Color.red(b) - Color.red(a)) * f).toInt().coerceIn(0, 255)
-            val g = (Color.green(a) + (Color.green(b) - Color.green(a)) * f).toInt().coerceIn(0, 255)
-            val bl = (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * f).toInt().coerceIn(0, 255)
-            return Color.argb(255, r, g, bl)
-        }
-
-        /** 从当前显示色向目标色插值过渡 700ms；状态连变时从当前中间色重新起步，不跳变。 */
-        private fun startColorBlend(target: Int) {
-            if (target == curColor) return
-            colorAnim?.cancel()
-            val from = curColor
-            colorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = COLOR_BLEND_MS
-                addUpdateListener {
-                    curColor = lerpColor(from, target, it.animatedValue as Float)
-                    invalidate()
-                }
-                addListener(object : android.animation.AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: android.animation.Animator) {
-                        curColor = target
-                        invalidate()
-                    }
-                })
-                start()
-            }
+        init {
+            addView(glView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         }
 
         private val longRunnable = Runnable {
@@ -1034,16 +1012,6 @@ object OrbController {
                 HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING
             )
             host.longPress()
-        }
-
-        /** 状态定转速（第三批水滴改版后按新动画语义复核）：只有思考（单弧快转 90°/秒）
-         * 与工作中（整圈光环慢转 70°/秒）转弧；待机只呼吸、聆听只涟漪、回复只随幅度
-         * 缩放，三者都不转弧；停止/出错 0。第一批的待机 30°/秒与说话/聆听 55°/秒
-         * 随旧画法（旋转 sweep 环）一并作废。 */
-        private fun speedFor(s: String) = when (s) {
-            "thinking" -> 90f
-            STATE_WORKING -> 70f
-            else -> 0f
         }
 
         private var shakeAnim: ValueAnimator? = null
@@ -1066,224 +1034,26 @@ object OrbController {
             }
         }
 
-        fun setState(s: String) {
-            if (s != st) {
-                st = s
-                // 颜色是主信号：当前显示色向新状态主色插值 700ms 平滑过渡，不跳变。
-                startColorBlend(colorFor(s))
-            }
-            // 旋转动画常驻（只思考/工作中转弧，其余状态 speedFor 为 0）；只按状态换速度，不跳变。
-            if (anim == null) {
-                lastTickMs = SystemClock.uptimeMillis()
-                anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 1000
-                    repeatCount = ValueAnimator.INFINITE
-                    addUpdateListener {
-                        val now = SystemClock.uptimeMillis()
-                        val dt = ((now - lastTickMs).coerceAtLeast(0L)) / 1000f
-                        lastTickMs = now
-                        rot = (rot + speedFor(st) * dt) % 360f
-                        invalidate()
-                    }
-                    start()
-                }
-            }
-            if (s == "idle") {
-                // 待机呼吸：整球缩放 1.0↔1.04，2.5 秒一周期；只动缩放，不动透明度（沿用原机制）。
-                if (breathAnim == null) {
-                    breathAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 2500
-                        repeatCount = ValueAnimator.INFINITE
-                        addUpdateListener {
-                            val v = it.animatedValue as Float
-                            val k = 1f + 0.04f * (0.5f - 0.5f * kotlin.math.cos(v * 2f * Math.PI.toFloat()))
-                            scaleX = k
-                            scaleY = k
-                        }
-                        start()
-                    }
-                }
-            } else {
-                breathAnim?.cancel()
-                breathAnim = null
-                scaleX = 1f
-                scaleY = 1f
-            }
-            invalidate()
+        /** 只记个名义，不改水滴——水滴不随状态变色、不转弧、不呼吸。
+         *  状态只走旁边气泡（OrbController.setState 里的 showStateBubble）。 */
+        fun setState(@Suppress("UNUSED_PARAMETER") s: String) {
+            // 故意什么都不做。
         }
 
         override fun onDetachedFromWindow() {
-            anim?.cancel()
-            anim = null
-            breathAnim?.cancel()
-            breathAnim = null
-            colorAnim?.cancel()
-            colorAnim = null
             shakeAnim?.cancel()
             shakeAnim = null
+            // 球撤掉就停渲染线程（surface 销毁时也会停，这里是双保险；
+            // 球只在 App 切后台时出现，主界面在前台时主水滴在跑，两边不同时跑）。
+            glView.onPause()
             super.onDetachedFromWindow()
         }
 
-        override fun onDraw(c: Canvas) {
-            val cx = width / 2f
-            val cy = height / 2f
-            if (cx <= 0f) return
-            val half = min(cx, cy)
-            val r = half * 0.80f
-            val elapsed = (SystemClock.uptimeMillis() - animStartMs) / 1000f
-            // 幅度来源：
-            //  - 聆听：真包络。amplitude() 接 OfflineAsrSession.currentLevel()，是采集线程
-            //    每 100ms 块算的真 RMS（maxRms / 4000，0..1），开麦时实时更新、轮次结束清零。
-            //  - 回复：没有真包络。Edge TTS 把解出的 PCM 直写 AudioTrack，全仓没有任何
-            //    RMS / Visualizer / 电平回调，拿不到播报振幅；按任务要求退回固定节奏
-            //    （2 秒一周期正弦 0.20..0.70），不要静止。真包络要等 EdgeTts 侧在
-            //    onPcm 回调里算 RMS 并暴露出来，属另一批活，本批不动 TTS。
-            val mic = amplitude().coerceIn(0f, 1f)
-            val amp = if (st == "speaking") 0.45f + 0.25f * kotlin.math.sin(elapsed * Math.PI.toFloat()) else mic
-            val main = curColor
-
-            if (pressed) {
-                c.save()
-                c.scale(0.92f, 0.92f, cx, cy)
-            }
-            // 动画层画在球体之下（不盖高光与亮边），按当前状态分发到六个画法。
-            when (st) {
-                "listening" -> drawListeningRipples(c, cx, cy, r, elapsed, main)
-                "thinking" -> drawThinkingArc(c, cx, cy, r, main)
-                "speaking" -> drawSpeakingRings(c, cx, cy, r, elapsed, amp, main)
-                STATE_WORKING -> drawWorkingHalo(c, cx, cy, r, main)
-                // idle：只靠呼吸缩放（setState 里的 breathAnim），无附加层；
-                // error / stopped：红色主色 + shakeError 抖动，无附加层。
-            }
-            // 共用圆形玻璃水珠：回复态随幅度胀缩（说得响胀大、轻缩小），其余状态等大。
-            val ballR = r * (1f + if (st == "speaking") 0.10f * amp else 0f)
-            drawGlassBall(c, cx, cy, ballR, main)
-            if (pressed) c.restore()
-        }
-
-        /** 共用画法：圆形玻璃水珠——软阴影 + 径向渐变球体 + 左上高光 + 底部亮边。 */
-        private fun drawGlassBall(c: Canvas, cx: Float, cy: Float, r: Float, main: Int) {
-            // 软阴影：球体下方一枚横向压扁的模糊椭圆（径向渐变黑→透明），不用 setShadowLayer
-            //（硬件加速画布下对形状无效，渐变椭圆在各机型上表现一致）。
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.FILL
-            paint.shader = RadialGradient(
-                cx, cy + r * 0.55f, r * 1.05f,
-                intArrayOf(alpha(0xFF000000.toInt(), 70), alpha(0xFF000000.toInt(), 0)),
-                floatArrayOf(0f, 1f), Shader.TileMode.CLAMP
-            )
-            c.save()
-            c.scale(1f, 0.45f, cx, cy + r * 0.55f)
-            c.drawCircle(cx, cy + r * 0.55f, r * 1.05f, paint)
-            c.restore()
-            paint.shader = null
-            // 球体：径向渐变（中心亮、边缘深），营造球体通透感。
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.FILL
-            paint.shader = RadialGradient(
-                cx - r * 0.18f, cy - r * 0.22f, r * 1.15f,
-                intArrayOf(lighten(main, 0.55f), main, darken(main, 0.45f)),
-                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
-            )
-            c.drawCircle(cx, cy, r, paint)
-            paint.shader = null
-            // 左上高光：小白椭圆（-30° 斜置）。
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.FILL
-            paint.color = 0xFFFFFFFF.toInt()
-            paint.alpha = 210
-            c.save()
-            c.translate(cx - r * 0.38f, cy - r * 0.42f)
-            c.rotate(-30f)
-            c.drawOval(android.graphics.RectF(-r * 0.22f, -r * 0.10f, r * 0.22f, r * 0.10f), paint)
-            c.restore()
-            // 底部亮边：下沿一圈亮弧（35° 起 110°，即正下方一段）。
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 2f * dp
-            paint.strokeCap = Paint.Cap.ROUND
-            paint.color = 0xFFFFFFFF.toInt()
-            paint.alpha = 150
-            c.drawArc(
-                android.graphics.RectF(cx - r * 0.92f, cy - r * 0.92f, cx + r * 0.92f, cy + r * 0.92f),
-                35f, 110f, false, paint
-            )
-        }
-
-        /** 聆听：涟漪环从水珠向外扩散——3 圈错相、1.8 秒一周期、越扩越淡。 */
-        private fun drawListeningRipples(c: Canvas, cx: Float, cy: Float, r: Float, elapsed: Float, main: Int) {
-            for (i in 0 until 3) {
-                val t = ((elapsed / 1.8f) + i / 3f) % 1f
-                paint.reset(); paint.isAntiAlias = true
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 2f * dp
-                paint.color = main
-                paint.alpha = ((1f - t) * 160f).toInt().coerceIn(0, 255)
-                c.drawCircle(cx, cy, r * (1.05f + 0.45f * t), paint)
-            }
-        }
-
-        /** 思考：一条弧线绕水珠旋转（单弧快转，像加载圈）——120° 弧 + 前端亮点，90°/秒。 */
-        private fun drawThinkingArc(c: Canvas, cx: Float, cy: Float, r: Float, main: Int) {
-            val rr = r * 1.08f
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 3f * dp
-            paint.strokeCap = Paint.Cap.ROUND
-            paint.color = lighten(main, 0.20f)
-            paint.alpha = 230
-            c.save()
-            c.rotate(rot, cx, cy)
-            c.drawArc(
-                android.graphics.RectF(cx - rr, cy - rr, cx + rr, cy + rr),
-                -90f, 120f, false, paint
-            )
-            // 前端亮点：弧终点（旋转系里 -90° + 120° = 30° 方向）。
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.FILL
-            paint.color = 0xFFFFFFFF.toInt()
-            paint.alpha = 230
-            val a = Math.toRadians(30.0)
-            c.drawCircle((cx + rr * kotlin.math.cos(a)).toFloat(), (cy + rr * kotlin.math.sin(a)).toFloat(), 2.6f * dp, paint)
-            c.restore()
-        }
-
-        /** 回复：向外辐射声波环——2 圈错相、1.2 秒一周期，透明度与线宽随幅度起伏。 */
-        private fun drawSpeakingRings(c: Canvas, cx: Float, cy: Float, r: Float, elapsed: Float, amp: Float, main: Int) {
-            for (i in 0 until 2) {
-                val t = ((elapsed / 1.2f) + i / 2f) % 1f
-                paint.reset(); paint.isAntiAlias = true
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = (1.5f + 1.5f * amp) * dp
-                paint.color = main
-                paint.alpha = ((1f - t) * (90f + 120f * amp)).toInt().coerceIn(0, 255)
-                c.drawCircle(cx, cy, r * (1.05f + 0.35f * t), paint)
-            }
-        }
-
-        /** 工作中：缓慢旋转的光环——整圈细环打底 + 一段 70° 亮弧随 rot 慢转（70°/秒），
-         * 与思考的单弧快转区分开（思考无底环、弧 120°、90°/秒）。 */
-        private fun drawWorkingHalo(c: Canvas, cx: Float, cy: Float, r: Float, main: Int) {
-            val rr = r * 1.08f
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 2f * dp
-            paint.color = main
-            paint.alpha = 120
-            c.drawCircle(cx, cy, rr, paint)
-            paint.reset(); paint.isAntiAlias = true
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 3.5f * dp
-            paint.strokeCap = Paint.Cap.ROUND
-            paint.color = lighten(main, 0.35f)
-            paint.alpha = 230
-            c.save()
-            c.rotate(rot, cx, cy)
-            c.drawArc(
-                android.graphics.RectF(cx - rr, cy - rr, cx + rr, cy + rr),
-                -90f, 70f, false, paint
-            )
-            c.restore()
+        /** 按压反馈：整颗球缩到 0.92（旧版是在 Canvas 里对球体画缩放，效果一样）。 */
+        private fun setPressedVisual(p: Boolean) {
+            val k = if (p) 0.92f else 1f
+            scaleX = k
+            scaleY = k
         }
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -1293,8 +1063,7 @@ object OrbController {
                     downY = e.rawY
                     moved = false
                     longFired = false
-                    pressed = true
-                    invalidate()
+                    setPressedVisual(true)
                     host.dragStart()
                     // M39：长按 500ms（Andee BubbleUi 同款，不再是 600ms）。
                     postDelayed(longRunnable, 500)
@@ -1312,15 +1081,13 @@ object OrbController {
                 }
                 MotionEvent.ACTION_UP -> {
                     removeCallbacks(longRunnable)
-                    pressed = false
-                    invalidate()
+                    setPressedVisual(false)
                     if (moved) host.dragEnd() else if (!longFired) host.tap()
                     return true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     removeCallbacks(longRunnable)
-                    pressed = false
-                    invalidate()
+                    setPressedVisual(false)
                     if (moved) host.dragEnd()
                     return true
                 }

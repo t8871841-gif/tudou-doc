@@ -40,6 +40,24 @@ class DropletGlRenderer(private val context: Context) {
     @Volatile
     var driftFrac: Float = 0.05f
 
+    // ---- 悬浮球模式（第 83 批，用户令：悬浮球也换成水滴，主水滴的 2/3）----
+    // 主界面是整屏不透明：贴图 pass 把 FBO 背景全屏贴出来，水滴采同一份纹理。
+    // 悬浮球浮在别的 App 上面，窗口是半透明的：水滴外必须全透明（只透出水滴
+    // 自己 + 它投在下面 App 上的影子），不能贴背景。FBO 背景照常渲染——
+    // 只留给水滴内部折射采样用，不再显示。着色器本身全按 R 的相对量算
+    // （高光、亮点、月牙、笑脸、影子、涟漪、折射 bend 都是 R 的倍数或
+    // UV 归一化量），小尺寸下特征 1:1 缩放，不用改参数。
+    /** true = 悬浮球模式：不贴背景、帧缓冲先清透明、水滴 pass 用预乘混合。 */
+    @Volatile
+    var orbMode: Boolean = false
+    /** 半径系数：主界面 1.0（屏宽 19%），悬浮球 2/3。 */
+    @Volatile
+    var radiusScale: Float = 1f
+    /** 水滴中心 Y 占 viewH 的比例：主界面 0.225；悬浮球 0.40——窗口要装下
+     *  水滴 + 正下方影子（影子底约中心 +1.5R），中心不能放太低。 */
+    @Volatile
+    var centerYFrac: Float = 0.225f
+
     private var bgProgram = 0
     private var dropProgram = 0
     private var blitProgram = 0
@@ -673,20 +691,37 @@ class DropletGlRenderer(private val context: Context) {
         // ---- 贴图 pass（第 80 批）：把 FBO 背景纹理全屏贴到屏幕上 ----
         // 屏幕上看到的背景就是这份纹理，水滴采的也是它——同一份，同步是结构保证的。
         // 不透明贴图，关混合。
+        // 悬浮球模式跳过这步：下面是别的 App，水滴外要全透明；帧缓冲先清透明——
+        // 没有贴图盖住全屏，水滴 pass 的混合（SRC_ALPHA）写不掉上一帧的影子残影。
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, viewW, viewH)
-        GLES30.glDisable(GLES30.GL_BLEND)
-        GLES30.glUseProgram(blitProgram)
-        setVec2(blitProgram, "uRes", viewW.toFloat(), viewH.toFloat())
-        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTexId)
-        setInt(blitProgram, "uTex", 0)
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        if (orbMode) {
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        } else {
+            GLES30.glDisable(GLES30.GL_BLEND)
+            GLES30.glUseProgram(blitProgram)
+            setVec2(blitProgram, "uRes", viewW.toFloat(), viewH.toFloat())
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTexId)
+            setInt(blitProgram, "uTex", 0)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        }
         // ---- 水滴 pass：渲染到屏幕，采样背景纹理 ----
         // 水滴边缘要抗锯齿淡出，开混合（SRC_ALPHA/ONE_MINUS_SRC_ALPHA），
         // 边缘 alpha 淡出处透出下面刚贴好的背景。
+        // 悬浮球模式用预乘混合（ONE/ONE_MINUS_SRC_ALPHA）：水滴外那支输出
+        // 是预乘写法 vec4(vec3(oc), a)（第 53 批：影子是黑、亮斑是白，
+        // RGB 已乘过 alpha）。SRC_ALPHA 会再乘一次 alpha，影子 alpha 通道
+        // 变成 a²——0.55 的影子只压暗 30%，比参考的 55% 淡一半。预乘混合
+        // 直接输出 oc，SurfaceFlinger 再按 (1−a) 透出下面 App，影子强度
+        // 跟主界面一致。水滴内那支输出 vec4(result, edgeAlpha)，result
+        // 本身已是最终颜色，ONE 混合不改它，边缘淡出照样平滑。
         GLES30.glEnable(GLES30.GL_BLEND)
-        GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+        if (orbMode) {
+            GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+        } else {
+            GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+        }
         GLES30.glUseProgram(dropProgram)
         setVec2(dropProgram, "uRes", viewW.toFloat(), viewH.toFloat())
         setFloat(dropProgram, "uTime", tSec)
@@ -702,12 +737,14 @@ class DropletGlRenderer(private val context: Context) {
         // viewW×0.19 只有 180px，比参考 206px 小了 25px。
         // 用 displayMetrics.widthPixels（屏幕宽 1080）算，R=205px。
         val screenW = context.resources.displayMetrics.widthPixels.toFloat()
-        val r = screenW * 0.19f
+        // 悬浮球模式：半径 ×2/3（第 83 批，用户令：主水滴的 2/3）。
+        val r = screenW * 0.19f * radiusScale
         val cx = viewW / 2f
         // 第 80 批：View 现在是全屏（之前只占上半屏 dropWrap），水滴中心 Y
         // 从 0.45 改成 0.225——原来是上半屏高度的 45%，上半屏是整屏一半，
         // 所以是整屏的 22.5%，屏上位置不变。
-        val cy = viewH * 0.225f
+        // 悬浮球模式：centerYFrac = 0.40（窗口要装下水滴 + 正下方影子）。
+        val cy = viewH * centerYFrac
         setVec2(dropProgram, "uCenter", cx, cy)
         setFloat(dropProgram, "uRadius", r)
         // 第 54 批：中心漂移从正弦改成值噪声。之前的 sin/cos 是周期函数，
