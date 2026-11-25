@@ -290,6 +290,7 @@ class OriloBackgroundView @JvmOverloads constructor(
      *  背景经过乳白相，不是一直浓到发艳）。 */
     data class FlowPhase(
         val ax: Float, val ay: Float, val bx: Float, val by: Float,
+        val ax2: Float, val bx2: Float,
         val hueShift: Float, val bloom: Float, val satScale: Float,
     )
 
@@ -368,12 +369,16 @@ class OriloBackgroundView @JvmOverloads constructor(
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
         fun phaseAt(uptimeMs: Long): FlowPhase {
-            // 第 84 批（用户令：背景流动不自然）：光斑位置原来是 13 秒一圈的摆锤——
-            // t=(uptimeMs%13000)/13000*2π，sin/cos 里再乘 0.6–0.9，13 秒接头处
-            // sin(0.9*2π)≠sin(0)、cos(0.7*2π)≠cos(0)，A 光斑一帧横跳约 11%、
-            // 纵跳约 18%，而且来回摆、每 13 秒原样重复。改成绝对时间 + 互质周期
-            // （47/53/61/71/57 秒，跟 hueShift 的 53/79 秒同款），正弦对任意 t
-            // 都连续、没有接头，组合周期几乎不重复，光斑像流水一样慢慢漂。
+            // 第 87 批（用户令：主界面动态不流畅，参考云朵快速变化）：第 84 批
+            // 的互质周期正弦还是原地来回摆（47–71 秒一圈），位置在原地摆、色相
+            // 在原地闪，看着像呼吸不像流动。改成定向漂移：光斑像风吹的云，朝一
+            // 个方向横穿屏幕、从另一边再进来；纵向仍保留缓慢正弦起伏（61/71 秒），
+            // 轨迹带一点波浪。ax/bx 是锯齿波（fract）：A 15 秒、B 19 秒走完一个
+            // 周期（屏幕宽 + 两倍光斑半径），速度不同、方向相同，像不同高度的云
+            // 层被同一阵风吹。ax2/bx2 是滞后一个周期的副本（ax-1.9、bx-1.8，单位
+            // 是屏宽）：着色器里两份一起画，换头瞬间副本正好接上领头的位置，没
+            // 有跳变。1.9/1.8 的来历：着色器里光斑半径是 0.45/0.40 屏宽，中心从
+            // -0.45（完全出左屏）走到 1.45（完全出右屏）正好 1.9 个屏宽，B 同理 1.8。
             // 第 31 批（用户令：背景要蓝、紫、青、乳白轮着变，颜色转化随机）：
             // 色相范围拉到 -45..+50（第 30 批是 0..50，只到蓝紫），青（约 190°）
             // 和紫（约 282°）都能走到。两组不成整数比的正弦叠加（53 秒和 79 秒），
@@ -389,11 +394,17 @@ class OriloBackgroundView @JvmOverloads constructor(
             val hueShift = (8.0 * sin(2.0 * Math.PI * tSec / 53.0) + 6.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
             val baseSat = (1.0f - 0.30f * ((hueShift + 14f) / 28f)).coerceIn(0.70f, 1.0f)
             val satScale = baseSat
+            val axDrift = (tSec / 15.0 % 1.0).toFloat()
+            val bxDrift = (tSec / 19.0 % 1.0).toFloat()
+            val ax = -0.45f + 1.9f * axDrift
+            val bx = -0.40f + 1.8f * bxDrift
             return FlowPhase(
-                ax = 0.30f + 0.18f * sin(2.0 * Math.PI * tSec / 47.0).toFloat(),
+                ax = ax,
                 ay = 0.26f + 0.14f * cos(2.0 * Math.PI * tSec / 61.0).toFloat(),
-                bx = 0.72f + 0.16f * cos(2.0 * Math.PI * tSec / 53.0 + 1.3).toFloat(),
+                bx = bx,
                 by = 0.70f + 0.15f * sin(2.0 * Math.PI * tSec / 71.0 + 2.1).toFloat(),
+                ax2 = ax - 1.9f,
+                bx2 = bx - 1.8f,
                 hueShift = hueShift,
                 satScale = satScale,
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），

@@ -86,6 +86,8 @@ class DropletGlRenderer(private val context: Context) {
         uniform float uAbsTime;
         uniform vec2 uBlobA;
         uniform vec2 uBlobB;
+        uniform vec2 uBlobA2;
+        uniform vec2 uBlobB2;
         uniform vec3 uBlobAColor;
         uniform vec3 uBlobBColor;
         uniform float uOrbMode;
@@ -114,8 +116,13 @@ class DropletGlRenderer(private val context: Context) {
             // 量出来，Orilo 色相在固定点上 2–5°/秒稳步单向走，我们只有 0.2–1°/秒。
             // 时间系数再 ×4（累计 ×6）：warp 0.045→0.18、0.03→0.12，
             // 色相场 0.015→0.06、0.012→0.048，目标 2–5°/秒。
-            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.18, 0.0)) - 0.5;
-            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.12)) * 0.25 - 0.125);
+            // 第 87 批（用户令：主界面动态不流畅，参考云朵快速变化）：warp 与色相
+            // 场原来是斜着流（x、y 分量都有），跟光斑的摆动方向对不上，整页没有
+            // 一个统一的风向。改成跟光斑同一个方向（横向 +x，像风吹的云）、速度
+            // 再提一倍：warp x 0.18→0.22、y 0.12→0.04，色相场 0.06/0.048→
+            // 0.12/0.02。色相场横向扫过屏幕约 13 秒，跟光斑 15/19 秒一个来回合拍。
+            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.22, 0.0)) - 0.5;
+            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.04)) * 0.25 - 0.125);
             // 第 55 批（补）：底色改成 HSV 直接算（跟 AGSL 同一套）。色相由
             // 噪声场直接定，饱和的青、蓝、紫同框互相流；饱和度/明度仍按纵向渐变。
             // 第 82 批（用户令：背景只保留图片上颜色）：4454_1_3jar.png 实测背景
@@ -130,13 +137,19 @@ class DropletGlRenderer(private val context: Context) {
             float val = mix(mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0)),
                             mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
-            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.06, uAbsTime * 0.048));
+            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.12, uAbsTime * 0.02));
             float hue = mix(230.0, 267.0, hueN);
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
+            // 第 87 批：滞后一个周期的副本——光斑从右屏出去、从左屏进来时，
+            // 副本正好接上，没有跳变。平时副本在屏外，看不见。
+            float fa2 = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA2) / (uRes.x * 0.45), 0.0, 1.0));
+            base = mix(base, uBlobAColor, fa2 * 0.55);
             float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.40), 0.0, 1.0));
             base = mix(base, uBlobBColor, fb * 0.45);
+            float fb2 = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB2) / (uRes.x * 0.40), 0.0, 1.0));
+            base = mix(base, uBlobBColor, fb2 * 0.45);
             // 第 84 批（用户令：悬浮球紫色不好看，要淡紫+淡蓝互相流）：
             // 球在别的 App 上面，看不见底下真实背景，折射采到的还是 App 自己
             // 那套深紫背景（饱和 50–68%），球像颗实心紫球。悬浮球模式把折射源
@@ -251,7 +264,11 @@ class DropletGlRenderer(private val context: Context) {
             // 206–214px（std 2.35px）、我们卡在 193–194px。振幅 0.01→0.02
             // （约 2%，Orilo 约 1.1–2.3%），轴仍慢的不规则走（61 批修法不动），
             // 不回 3% 那种看得见的转。
-            float ellipAmp = 0.02 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
+            // 第 87 批（用户令：颤动幅度再大一点）：振幅 0.02→0.03。注意：3% 是
+            // 第 75 批砍下来的数——当时静帧上看得见椭圆在转、太几何。但现在多了
+            // 角向抖动（0.005×vnoise(8t+3θ)）和快脉动（1+0.6×vnoise(3t)）打碎
+            // 几何感，轴还是 61 批的慢走法；手机上看如果又显椭圆，就往 0.025 回调。
+            float ellipAmp = 0.03 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
             float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle))
                 + 0.005 * vnoise(uTime * 8.0 + theta * 3.0);
             // 蛋形（第 74 批）：水滴不是绝对正圆。受表面张力/透视影响，视觉上
@@ -704,6 +721,9 @@ class DropletGlRenderer(private val context: Context) {
         val phase = com.jarvis.app.OriloBackgroundView.phaseAt(android.os.SystemClock.uptimeMillis())
         setVec2(bgProgram, "uBlobA", phase.ax * viewW, phase.ay * viewH)
         setVec2(bgProgram, "uBlobB", phase.bx * viewW, phase.by * viewH)
+        // 第 87 批：滞后一个周期的光斑副本（ax2/bx2），换头时接上领头光斑。
+        setVec2(bgProgram, "uBlobA2", phase.ax2 * viewW, phase.ay * viewH)
+        setVec2(bgProgram, "uBlobB2", phase.bx2 * viewW, phase.by * viewH)
         // 第 55 批（补）：底色色相改由着色器内噪声场直接定（hsv2rgb），
         // uGradTop/Mid/Bot 不再用，这里不再传。光斑颜色仍由 CPU 算。
         setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
