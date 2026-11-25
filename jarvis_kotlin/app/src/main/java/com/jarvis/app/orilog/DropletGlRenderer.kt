@@ -121,8 +121,14 @@ class DropletGlRenderer(private val context: Context) {
             // 一个统一的风向。改成跟光斑同一个方向（横向 +x，像风吹的云）、速度
             // 再提一倍：warp x 0.18→0.22、y 0.12→0.04，色相场 0.06/0.048→
             // 0.12/0.02。色相场横向扫过屏幕约 13 秒，跟光斑 15/19 秒一个来回合拍。
-            float w = noise(uv * 2.8 + vec2(uAbsTime * 0.22, 0.0)) - 0.5;
-            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * 0.04)) * 0.25 - 0.125);
+            // 第 88 批（纠正 87 批的方向错误）：87 批只改了系数大小，没改符号——
+            // 噪声采样坐标上加时间，图案实际往反方向走。jk-v123 录像实测：顶部
+            // 亮斑 6 秒往左约 400px，速度正对扭曲场的 85px/秒；光斑往右、场往左，
+            // 两层反向剪切，就是"不流畅"的根子。时间系数全部取反（0.22→-0.22、
+            // 0.04→-0.04、色相场 0.12→-0.12、0.02→-0.02），图案改成往右流，
+            // 跟光斑同一个风向；速度大小不动。
+            float w = noise(uv * 2.8 + vec2(uAbsTime * -0.22, 0.0)) - 0.5;
+            vec2 wuv = uv + vec2(w * 0.25, noise(uv * 2.8 + vec2(0.0, uAbsTime * -0.04)) * 0.25 - 0.125);
             // 第 55 批（补）：底色改成 HSV 直接算（跟 AGSL 同一套）。色相由
             // 噪声场直接定，饱和的青、蓝、紫同框互相流；饱和度/明度仍按纵向渐变。
             // 第 82 批（用户令：背景只保留图片上颜色）：4454_1_3jar.png 实测背景
@@ -137,7 +143,7 @@ class DropletGlRenderer(private val context: Context) {
             float val = mix(mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0)),
                             mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
-            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * 0.12, uAbsTime * 0.02));
+            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * -0.12, uAbsTime * -0.02));
             float hue = mix(230.0, 267.0, hueN);
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
@@ -268,7 +274,12 @@ class DropletGlRenderer(private val context: Context) {
             // 第 75 批砍下来的数——当时静帧上看得见椭圆在转、太几何。但现在多了
             // 角向抖动（0.005×vnoise(8t+3θ)）和快脉动（1+0.6×vnoise(3t)）打碎
             // 几何感，轴还是 61 批的慢走法；手机上看如果又显椭圆，就往 0.025 回调。
-            float ellipAmp = 0.03 * (1.0 + 0.6 * vnoise(uTime * 3.0 + 5.0));
+            // 第 88 批（用户令：速度也要变快；jk-v123 录像实测）：幅度已超参考
+            // （Rx std 3.69px/1.9%，参考 2.35px/1.12%），边缘速度只有参考 75%
+            // （0.82 vs 1.09px/帧），起伏主要在 1.5–2.1 秒（轴在转），参考是
+            // 0.3 秒快闪。幅度与轴都不动，只把快脉动 3.0→4.5（0.33 秒→0.22 秒
+            // 一轮），边缘闪得更快。
+            float ellipAmp = 0.03 * (1.0 + 0.6 * vnoise(uTime * 4.5 + 5.0));
             float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle))
                 + 0.005 * vnoise(uTime * 8.0 + theta * 3.0);
             // 蛋形（第 74 批）：水滴不是绝对正圆。受表面张力/透视影响，视觉上
