@@ -9,7 +9,7 @@ import android.content.SharedPreferences
  */
 object JarvisPrefs {
     private const val FILE = "jarvis_settings"
-    // 模型开关：GLM（默认，内置智谱）/ 自定义（用户自己填的三项）/ DeepSeek（内置 deepseek-flash）。聊天、任务、看屏都跟着走。
+    // 模型开关：GLM（默认，内置智谱）/ 自定义（用户自己填的三项）/ DeepSeek（内置 deepseek-flash）/ NPU（端侧 Gemma 4 E2B，见 local/NpuModel）/ 自动。聊天、任务、看屏都跟着走。
     private const val KEY_MODEL_MODE = "model_mode"
     // Orilo 主界面第 1 批：主界面风格 classic（默认）/ orilo，设置「主界面」里切换，两种都保留。
     private const val KEY_MAIN_STYLE = "main_ui_style"
@@ -39,11 +39,12 @@ object JarvisPrefs {
     private fun p(ctx: Context): SharedPreferences =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    /** 模型开关：返回 "glm"、"custom"、"deepseek" 或 "auto"，默认 "glm"。旧的 task_brain 值自动迁移。
-     * "auto" 是自动选模型：聊天固定走 GLM，任务按文本路由（见 TaskRouter）。 */
+    /** 模型开关：返回 "glm"、"custom"、"deepseek"、"npu" 或 "auto"，默认 "glm"。旧的 task_brain 值自动迁移。
+     * "auto" 是自动选模型：聊天固定走 GLM，任务按文本路由（见 TaskRouter）。
+     * "npu" 是端侧 NPU 档：简单任务走 NPU，复杂多步/打电话仍走云端（见 TaskRouter.resolve）。 */
     fun getModelMode(ctx: Context): String {
         val saved = p(ctx).getString(KEY_MODEL_MODE, null)
-        if (saved == "glm" || saved == "custom" || saved == "deepseek" || saved == "auto") return saved
+        if (saved == "glm" || saved == "custom" || saved == "deepseek" || saved == "auto" || saved == "npu") return saved
         // 旧版迁移：task_brain 里 autoglm/agnes 都算 GLM，custom 保持自定义。
         val old = p(ctx).getString(KEY_TASK_BRAIN, "autoglm") ?: "autoglm"
         val mode = if (old == "custom") "custom" else "glm"
@@ -51,7 +52,7 @@ object JarvisPrefs {
         return mode
     }
     fun setModelMode(ctx: Context, v: String) {
-        val mode = if (v == "custom") "custom" else if (v == "deepseek") "deepseek" else if (v == "auto") "auto" else "glm"
+        val mode = if (v == "custom") "custom" else if (v == "deepseek") "deepseek" else if (v == "auto") "auto" else if (v == "npu") "npu" else "glm"
         p(ctx).edit().putString(KEY_MODEL_MODE, mode).apply()
     }
 

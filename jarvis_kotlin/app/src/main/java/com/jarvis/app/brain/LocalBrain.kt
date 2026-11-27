@@ -3,8 +3,13 @@ package com.jarvis.app.brain
 import android.util.Log
 import com.jarvis.app.AuditLog
 import com.jarvis.app.R
+import com.jarvis.app.net.BrainLlmClient
 import com.jarvis.app.net.DeepSeekLlmClient as LlmClient
+import com.jarvis.app.net.HttpBrainLlmClient
 import com.jarvis.app.net.LlmHttpException
+import com.jarvis.app.net.NPU_SYSTEM_PROMPT
+import com.jarvis.app.net.NpuLlmClient
+import com.jarvis.app.net.NpuTools
 import com.jarvis.app.net.ToolSchemas
 import com.jarvis.app.task.AppKnowledge
 import org.json.JSONArray
@@ -92,13 +97,25 @@ class LocalBrain(
     private val onSweepSpent: (Int) -> Unit = {},
 ) {
 
-    private val llm = LlmClient(
-        baseUrl = cfg.baseUrl,
-        apiKey = cfg.apiKey,
-        model = cfg.model,
-        thinking = cfg.thinking,
-        reasoningEffort = cfg.reasoningEffort,
-    )
+    /**
+     * NPU 档时换成本地 LiteRT-LM 后端（NpuLlmClient），其余走 HTTP
+     * （DeepSeekLlmClient 包一层 HttpBrainLlmClient）。接口是同一个
+     * BrainLlmClient，下面的循环一字不用改；静态能力（toolSpecs、
+     * ToolCall、Reply）仍在 LlmClient（DeepSeekLlmClient）上。
+     */
+    private val llm: BrainLlmClient = if (cfg.isNpu) {
+        NpuLlmClient(appContext)
+    } else {
+        HttpBrainLlmClient(
+            LlmClient(
+                baseUrl = cfg.baseUrl,
+                apiKey = cfg.apiKey,
+                model = cfg.model,
+                thinking = cfg.thinking,
+                reasoningEffort = cfg.reasoningEffort,
+            )
+        )
+    }
 
     /**
      * Apply a settings change that is only about how the backend is asked —
@@ -280,9 +297,10 @@ class LocalBrain(
     fun submit(userText: String, images: List<String> = emptyList()) {
         val text = userText.trim()
         if (text.isEmpty() && images.isEmpty()) return
-        if (cfg.apiKey.isEmpty()) {
+        if (cfg.apiKey.isEmpty() && !cfg.isNpu) {
             // Said out loud rather than logged: from the ball's point of view a
             // missing key is indistinguishable from a brain that never answers.
+            // NPU 档没有 Key，isNpu 时不拦（模型就绪检查在 NpuModel 那边）。
             onFinal(AppLocale.str(appContext, R.string.brain_no_key))
             return
         }
@@ -689,7 +707,13 @@ class LocalBrain(
 
         if (!internal && images.isNotEmpty()) attachUserPhotos(images)
 
-        val tools = LlmClient.toolSpecs(ToolSchemas.all(), registry.tools(), market.tools())
+        // NPU 档只给 7 个设备类工具（短描述）：29 个全量 schema 装不进
+        // 4096 上下文，NPU 档也只接简单任务；复杂任务路由层已拦去云端。
+        val tools = if (cfg.isNpu) {
+            NpuTools.specs()
+        } else {
+            LlmClient.toolSpecs(ToolSchemas.all(), registry.tools(), market.tools())
+        }
         var lastSignature = ""
         var repeats = 0
 
@@ -1113,10 +1137,15 @@ class LocalBrain(
      * 所以 persona 恒为空（withPersona 为空时不加 §12）；场景那半句还在，
      * 走 JarvisBrain.activeScene（目前恒为 null，接上是另外一件事）。
      */
-    private fun systemPrompt(): String = LocalPrompt.withPersona(
-        "",
-        JarvisBrain.activeScene(appContext),
-    )
+    private fun systemPrompt(): String = if (cfg.isNpu) {
+        // NPU 档用短版系统提示：4096 上下文装不下 LocalPrompt 那份长的。
+        NPU_SYSTEM_PROMPT
+    } else {
+        LocalPrompt.withPersona(
+            "",
+            JarvisBrain.activeScene(appContext),
+        )
+    }
 
     /**
      * The scene changed mid-conversation; make the model read as that one

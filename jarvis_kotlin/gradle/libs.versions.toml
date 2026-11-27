@@ -7,6 +7,8 @@ ksp = "1.9.22-1.0.17"
 room = "2.6.1"
 coroutines = "1.7.3"
 mediapipeGenai = "0.10.24"
+litertlm = "0.19.1"
+qnnRuntime = "2.52.0"
 webkit = "1.9.0"
 shizuku = "13.1.5"
 mlkitTextRecognition = "16.0.1"
@@ -21,6 +23,12 @@ room-compiler = { group = "androidx.room", name = "room-compiler", version.ref =
 room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 mediapipe-tasks-genai = { group = "com.google.mediapipe", name = "tasks-genai", version.ref = "mediapipeGenai" }
+# NPU 档（2026-11-27）：LiteRT-LM Kotlin API（Google Maven）+ 高通 QNN 运行时
+# （Maven Central）。litertlm 0.19.1 是 Fertroll10 的 SM8550 实测版；
+# qnn-runtime 2.52.0 是与它配对的 QAIRT 版——dispatch 与 runtime 必须同代，
+# 旧版会在 NPU 初始化时报 "Qnn System library version mismatched"。
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
+qnn-runtime = { group = "com.qualcomm.qti", name = "qnn-runtime", version.ref = "qnnRuntime" }
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 # OCR 补字层（Mika 同款，Bundled 版离线模型，不依赖 Play Services，国行机可用）

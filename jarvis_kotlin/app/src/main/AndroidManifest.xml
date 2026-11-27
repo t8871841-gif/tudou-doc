@@ -37,6 +37,8 @@
         android:label="Jarvis"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round">
+        <!-- NPU 档：Hexagon RPC 库，QNN HTP 后端要 dlopen 它；required=false，没它也能装。 -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"
