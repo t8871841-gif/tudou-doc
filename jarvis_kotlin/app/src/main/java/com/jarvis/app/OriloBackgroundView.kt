@@ -378,10 +378,13 @@ class OriloBackgroundView @JvmOverloads constructor(
             // 个方向横穿屏幕、从另一边再进来；纵向仍保留缓慢正弦起伏（61/71 秒），
             // 轨迹带一点波浪。ax/bx 是锯齿波（fract）：A 15 秒、B 19 秒走完一个
             // 周期（屏幕宽 + 两倍光斑半径），速度不同、方向相同，像不同高度的云
-            // 层被同一阵风吹。ax2/bx2 是滞后一个周期的副本（ax-1.9、bx-1.8，单位
-            // 是屏宽）：着色器里两份一起画，换头瞬间副本正好接上领头的位置，没
-            // 有跳变。1.9/1.8 的来历：着色器里光斑半径是 0.45/0.40 屏宽，中心从
-            // -0.45（完全出左屏）走到 1.45（完全出右屏）正好 1.9 个屏宽，B 同理 1.8。
+            // 层被同一阵风吹。ax2/bx2 是各错半个周期的副本（A 7.5 秒、B 9.5 秒）：
+            // 着色器里两份一起画，换头瞬间副本正好接上领头的位置，没有跳变。
+            // 第 95 批修正（2026-11-28 评审查实）：原来 ax2 = ax - 1.9 是错的——
+            // ax 已经取过 mod，减常数只是刚性平移，ax2 永远在 -2.35~-0.45、
+            // 光斑右缘刚贴左边界，画面上恒为 0，换头从来没人接棒。1.9/1.8 的来历：
+            // 着色器里光斑半径是 0.45/0.40 屏宽，中心从 -0.45（完全出左屏）走到
+            // 1.45（完全出右屏）正好 1.9 个屏宽，B 同理 1.8。
             // 第 31 批（用户令：背景要蓝、紫、青、乳白轮着变，颜色转化随机）：
             // 色相范围拉到 -45..+50（第 30 批是 0..50，只到蓝紫），青（约 190°）
             // 和紫（约 282°）都能走到。两组不成整数比的正弦叠加（53 秒和 79 秒），
@@ -399,15 +402,24 @@ class OriloBackgroundView @JvmOverloads constructor(
             val satScale = baseSat
             val axDrift = (tSec / 15.0 % 1.0).toFloat()
             val bxDrift = (tSec / 19.0 % 1.0).toFloat()
+            // 第 95 批：副本各有自己独立的锯齿波，错半个周期（A 7.5 秒、B 9.5 秒），
+            // 不是从已经 wrap 过的 ax/bx 减常数。Kotlin 的 % 对负数给负余数，
+            // tSec 小的时候 (tSec - 7.5) 是负的，手动 +1 转正。
+            val ax2DriftRaw = ((tSec - 7.5) / 15.0 % 1.0).toFloat()
+            val ax2Drift = if (ax2DriftRaw < 0) ax2DriftRaw + 1f else ax2DriftRaw
+            val bx2DriftRaw = ((tSec - 9.5) / 19.0 % 1.0).toFloat()
+            val bx2Drift = if (bx2DriftRaw < 0) bx2DriftRaw + 1f else bx2DriftRaw
             val ax = -0.45f + 1.9f * axDrift
             val bx = -0.40f + 1.8f * bxDrift
+            val ax2 = -0.45f + 1.9f * ax2Drift
+            val bx2 = -0.40f + 1.8f * bx2Drift
             return FlowPhase(
                 ax = ax,
                 ay = 0.26f + 0.14f * cos(2.0 * Math.PI * tSec / 61.0).toFloat(),
                 bx = bx,
                 by = 0.70f + 0.15f * sin(2.0 * Math.PI * tSec / 71.0 + 2.1).toFloat(),
-                ax2 = ax - 1.9f,
-                bx2 = bx - 1.8f,
+                ax2 = ax2,
+                bx2 = bx2,
                 hueShift = hueShift,
                 satScale = satScale,
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
