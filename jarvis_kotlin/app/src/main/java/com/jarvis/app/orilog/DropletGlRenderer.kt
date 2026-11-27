@@ -500,7 +500,10 @@ class DropletGlRenderer(private val context: Context) {
             // 第 89 批：rimDark 0.06→0.20。2026-11-27 单帧实测：我们 rim 只暗
             // -8~-17%，两处参考 -26~-44%——边缘太弱，水滴边界发虚。之前那条
             // 黑线是窄（2–3px）的问题，宽缓坡（0.85R–R）不动，只把深度还回来。
-            float rimDark = smoothstep(R_eff * 0.85, R_eff, dist) * 0.20 * (1.0 - topDarkMask);
+            // 第 91 批：rimDark 0.20→0.06 改回。jk-v125 真机 verdict：边缘成了一圈
+            // 黑边（实测暗 -23%，原来 -8%~-17%），用户说“黑边太宽了，原来的就行”。
+            // 深度还回去，宽缓坡不动。
+            float rimDark = smoothstep(R_eff * 0.85, R_eff, dist) * 0.06 * (1.0 - topDarkMask);
             // 小高光：第 52 批移位。旧值（-0.45r/+0.42r）是第 41 批从旧版
             // 抄来的，从没实测过。2026-11-21 另一位审稿人把 210 帧全量完，
             // 指出小高光比代码写得更靠左、更不靠下（-0.6/0.25），但自己
