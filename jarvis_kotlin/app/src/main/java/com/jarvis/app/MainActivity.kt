@@ -1718,16 +1718,54 @@ class MainActivity : Activity() {
             intArrayOf(0xB3000000.toInt(), 0x99000000.toInt())
         )
 
+    // 第 94 批（用户令：设置页字体黑色）：Orilo 自定义背景是否在用。
+    // refreshDialogueBackground() 的早退条件与字色切换共用这一处，别各写一份。
+    private fun isOriloCustomBgActive(): Boolean =
+        JarvisPrefs.isOriloStyle(this) && JarvisPrefs.isOriloBgCustom(this) &&
+            JarvisPrefs.getOriloCustomBgUri(this).isNotBlank()
+
+    // 第 94 批：设置页字色跟背景走。自定义背景透出来（浅色底）时，设置页里直接
+    // 贴在背景上的浅色字一律改黑（透明度保留，次字仍比主字淡）；切回深色底时从
+    // tag 里的原色恢复。只扫 settingsScroll 子树，不动主界面。
+    // 不动的：输入框（深底输入框，冰蓝字本来就配）、实色按钮（深紫底，白字本来就配）；
+    // 只改背景为空的 TextView 与玻璃壳里的分段按钮（背景已置空）。
+    // 首次扫到某行字时把原色存进 tag，之后每次都从原色换算——切回深色底原样恢复，
+    // 不会把原来就是深色的字翻成白。
+    private val TAG_SETTINGS_ORIG_COLOR = -0x10001
+
+    private fun refreshSettingsTextColor() {
+        if (!::settingsScroll.isInitialized) return
+        val toBlack = isOriloCustomBgActive()
+        fun map(orig: Int): Int {
+            if (!toBlack) return orig
+            val lum = 0.299 * Color.red(orig) + 0.587 * Color.green(orig) + 0.114 * Color.blue(orig)
+            return if (lum > 90) Color.argb(Color.alpha(orig), 0, 0, 0) else orig
+        }
+        fun walk(v: View) {
+            if (v is TextView && v !is EditText && !(v is Button && v.background != null)) {
+                if (v.getTag(TAG_SETTINGS_ORIG_COLOR) == null) {
+                    v.setTag(TAG_SETTINGS_ORIG_COLOR, v.currentTextColor)
+                }
+                v.setTextColor(map(v.getTag(TAG_SETTINGS_ORIG_COLOR) as Int))
+            }
+            if (v is ViewGroup) {
+                for (i in 0 until v.childCount) walk(v.getChildAt(i))
+            }
+        }
+        walk(settingsScroll)
+    }
+
     /** D 批·对话区背景图：选过用图库那张（按宽度等比缩小解码，大照片不占满内存），
      * 上面压一层暗色罩子保白字可读；没选过/授权丢了/解不出来就回深空渐变，
      * 不报错、不弹 toast。homePanel（对话区）与 settingsScroll（设置页）同时换，行为一致。 */
     private fun refreshDialogueBackground() {
         val iv = dialogueBgImageView ?: return
+        // 第 94 批：背景与字色同批切换——自定义透出来时字改黑，切回深色底时字恢复。
+        refreshSettingsTextColor()
         // 第 93 批（用户令：自定义背景不压黑，任何界面都不要暗罩子，包括设置页）：
         // Orilo 自定义静态图在用时，设置页背景置空——自定义图从全屏 GL 层透出来，
         // 不盖深空渐变、也不压对话暗罩子（上 70%→下 60% 黑）。对话背景图那路只在经典档生效。
-        if (JarvisPrefs.isOriloStyle(this) && JarvisPrefs.isOriloBgCustom(this) &&
-            JarvisPrefs.getOriloCustomBgUri(this).isNotBlank()) {
+        if (isOriloCustomBgActive()) {
             iv.visibility = View.GONE
             settingsScroll.background = null
             return
@@ -3174,7 +3212,8 @@ class MainActivity : Activity() {
             ) {
                 override fun getView(pos: Int, v: View?, parent: android.view.ViewGroup): View {
                     val tv = super.getView(pos, v, parent) as TextView
-                    tv.setTextColor(HudPalette.ICE)
+                    // 第 94 批：自定义背景透出来时选中行改黑字（下拉行仍是系统浅底，深字不动）。
+                    tv.setTextColor(if (isOriloCustomBgActive()) Color.BLACK else HudPalette.ICE)
                     return tv
                 }
                 override fun getDropDownView(pos: Int, v: View?, parent: android.view.ViewGroup): View {
@@ -3605,6 +3644,7 @@ class MainActivity : Activity() {
             memoryListContainer.addView(TextView(this).apply {
                 text = "记忆已关闭，不会写入也不会带上。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
             })
+            refreshSettingsTextColor() // 第 94 批：记忆开关切回来重填的行也按当前背景换字色。
             return
         }
         memoryListContainer.addView(TextView(this).apply {
@@ -3617,6 +3657,7 @@ class MainActivity : Activity() {
                 memoryListContainer.addView(TextView(this@MainActivity).apply {
                     text = "还没有记忆。对 Jarvis 说“记住：……”就能存一条。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
                 })
+                refreshSettingsTextColor() // 第 94 批：异步填进来的行也按当前背景换字色。
                 return@launch
             }
             val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
@@ -3647,6 +3688,7 @@ class MainActivity : Activity() {
                 }, false))
                 memoryListContainer.addView(row)
             }
+            refreshSettingsTextColor() // 第 94 批：异步填进来的记忆行也按当前背景换字色。
         }
     }
 
@@ -3773,6 +3815,7 @@ class MainActivity : Activity() {
             skillListContainer.addView(TextView(this).apply {
                 text = "技能已关闭，不会命中也不会重播。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
             })
+            refreshSettingsTextColor() // 第 94 批：技能开关切回来重填的行也按当前背景换字色。
             return
         }
         skillListContainer.addView(TextView(this).apply {
@@ -3785,6 +3828,7 @@ class MainActivity : Activity() {
                 skillListContainer.addView(TextView(this@MainActivity).apply {
                     text = "还没有技能。可以把最近操作存为技能，或在下面手动新建。"; textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
                 })
+                refreshSettingsTextColor() // 第 94 批：异步填进来的行也按当前背景换字色。
                 return@launch
             }
             for (item in list) {
@@ -3819,6 +3863,7 @@ class MainActivity : Activity() {
                 }, false))
                 skillListContainer.addView(row)
             }
+            refreshSettingsTextColor() // 第 94 批：异步填进来的技能行也按当前背景换字色。
         }
     }
 
