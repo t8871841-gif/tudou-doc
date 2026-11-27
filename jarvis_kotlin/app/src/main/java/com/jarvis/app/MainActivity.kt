@@ -112,6 +112,8 @@ class MainActivity : Activity() {
         const val REQ_PICK_DIALOGUE_BG = 5154
         // 附件（2026-11-14）：对话框加文件，系统文件选择器回调。
         const val REQ_PICK_ATTACH_FILE = 5155
+        // 第 90 批：动态水滴自定义背景，图库选图（ACTION_OPEN_DOCUMENT 回调）。
+        const val REQ_PICK_ORILO_BG = 5156
         // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
@@ -202,6 +204,8 @@ class MainActivity : Activity() {
     // onActivityResult 与设置按钮都能刷新。
     private var dialogueBgImageView: ImageView? = null
     private lateinit var dialogueBgStatusText: TextView
+    private lateinit var oriloBgStatusText: TextView
+    private lateinit var oriloBgCustomRows: LinearLayout
     // Shizuku 配对：状态行 + 配对按钮，字段化以便进页与点按钮后都能刷新。
     private lateinit var shizukuStatusText: TextView
     private lateinit var shizukuPairButton: Button
@@ -3421,9 +3425,12 @@ class MainActivity : Activity() {
             toast(if (i == 1) "已切到动态水滴风格" else "已切回贾维斯风格")
             recreate()
         })
-        // 下面三组（竖屏背景图 / 对话区背景图 / 竖屏舞台模式）只属于贾维斯档：
-        // 动态水滴档下没有舞台、不用选背景图，直接 return 藏起来（2026-11-16 用户要求）。
-        if (JarvisPrefs.isOriloStyle(this)) return
+        // 第 90 批：动态水滴档下不藏起来了，改成“水滴背景”区；下面三组
+        // （竖屏背景图 / 对话区背景图 / 竖屏舞台模式）只属于贾维斯档。
+        if (JarvisPrefs.isOriloStyle(this)) {
+            buildOriloBgSection(root)
+            return
+        }
         portraitBgStatusText = TextView(this).apply {
             textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
         }
@@ -3488,6 +3495,61 @@ class MainActivity : Activity() {
             setPortraitStageMode(true)
             toast("竖屏舞台已切到静态图")
         })
+    }
+
+    /** 第 90 批：动态水滴档下的“水滴背景”——默认动态 / 自定义静态图。 */
+    private fun buildOriloBgSection(root: LinearLayout) {
+        root.addView(segmentedRow("水滴背景", listOf("默认动态", "自定义"),
+            if (JarvisPrefs.isOriloBgCustom(this)) 1 else 0) { i ->
+            JarvisPrefs.setOriloBgMode(this, if (i == 1) JarvisPrefs.ORILO_BG_CUSTOM else JarvisPrefs.ORILO_BG_DEFAULT)
+            refreshOriloBgStatus()
+            refreshOriloBgCustomRows()
+            toast(if (i == 1) "已切到自定义背景" else "已切回默认动态")
+        })
+        oriloBgStatusText = TextView(this).apply {
+            textSize = 12f; setTextColor(0xB3FFFFFF.toInt()); setPadding(0, dp(8), 0, 0)
+        }
+        refreshOriloBgStatus()
+        root.addView(oriloBgStatusText)
+        oriloBgCustomRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        oriloBgCustomRows.addView(btn("从图库选一张背景图") {
+            try {
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "image/*"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(i, REQ_PICK_ORILO_BG)
+            } catch (e: Exception) {
+                toast("打不开图库：${e.message}")
+            }
+        })
+        oriloBgCustomRows.addView(btn("恢复默认动态") {
+            JarvisPrefs.setOriloBgMode(this, JarvisPrefs.ORILO_BG_DEFAULT)
+            refreshOriloBgStatus()
+            refreshOriloBgCustomRows()
+            // 分段行的选中态由 segmentedRow 自己在点按时改；这里改完设置要重建页面才对上。
+            recreate()
+        })
+        root.addView(oriloBgCustomRows)
+        refreshOriloBgCustomRows()
+    }
+
+    private fun refreshOriloBgStatus() {
+        if (!::oriloBgStatusText.isInitialized) return
+        oriloBgStatusText.text = if (!JarvisPrefs.isOriloBgCustom(this)) {
+            "水滴背景：默认动态（紫色流动背景）"
+        } else if (JarvisPrefs.getOriloCustomBgUri(this).isBlank()) {
+            "水滴背景：自定义（还没选图，先用默认动态顶着）"
+        } else {
+            "水滴背景：自定义（已选一张图，静态显示）"
+        }
+    }
+
+    private fun refreshOriloBgCustomRows() {
+        if (!::oriloBgCustomRows.isInitialized) return
+        oriloBgCustomRows.visibility = if (JarvisPrefs.isOriloBgCustom(this)) android.view.View.VISIBLE else android.view.View.GONE
     }
 
     /** 批三新增：「记忆」分区——总开关、列表（分域+时间）、逐条删除、一键清空。数据在 MemoryService（Room）。 */
@@ -3833,6 +3895,21 @@ class MainActivity : Activity() {
                 toast(if (ok) "录屏授权好了，截图兜底可用" else "录屏没启动起来：" + com.jarvis.app.screen.ScreenCapture.shared(this).lastError.ifEmpty { "再试一次" })
             } else {
                 toast("没给录屏授权，截图兜底先不用")
+            }
+            return
+        }
+        // 第 90 批：动态水滴自定义背景——图库选图回调，拿持久授权存起来，立即换背景。
+        if (requestCode == REQ_PICK_ORILO_BG) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: Exception) {
+                    // 拿不到持久授权也先用着：本次能显示，下次打开可能回默认动态。
+                }
+                JarvisPrefs.setOriloCustomBgUri(this, uri.toString())
+                refreshOriloBgStatus()
+                toast("水滴背景图已换")
             }
             return
         }

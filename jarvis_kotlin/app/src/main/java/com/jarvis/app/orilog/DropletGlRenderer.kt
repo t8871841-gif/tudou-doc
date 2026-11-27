@@ -63,6 +63,15 @@ class DropletGlRenderer(private val context: Context) {
     private var blitProgram = 0
     private var fboId = 0
     private var bgTexId = 0
+    // ---- 第 90 批：自定义静态背景（图库选图） ----
+    // 自定义模式下把选的图画进 FBO 代替程序化背景；纹理只在 URI 变了时重载，
+    // 解码失败记下来不再每帧重试。UV 矩形做居中裁剪 + V 翻转（Bitmap 行 0 是图顶）。
+    private var customBgTexId = 0
+    private var customBgUriLoaded = ""
+    private var customBgFailedUri = ""
+    private var customBgIw = 0
+    private var customBgIh = 0
+    private var customBgUvRect = floatArrayOf(0f, 0f, 1f, 1f)
     private var viewW = 0
     private var viewH = 0
     private var startMs = 0L
@@ -179,9 +188,13 @@ class DropletGlRenderer(private val context: Context) {
         precision highp float;
         uniform vec2 uRes;
         uniform sampler2D uTex;
+        // 第 90 批：UV 矩形——平时 (0,0,1,1) 原样贴；自定义背景用它做居中裁剪 + V 翻转。
+        uniform vec4 uUvRect;
         out vec4 oColor;
         void main() {
-            oColor = vec4(texture(uTex, gl_FragCoord.xy / uRes).rgb, 1.0);
+            vec2 uv = gl_FragCoord.xy / uRes;
+            uv = vec2(uUvRect.x + uv.x * uUvRect.z, uUvRect.y + uv.y * uUvRect.w);
+            oColor = vec4(texture(uTex, uv).rgb, 1.0);
         }
     """.trimIndent()
 
@@ -699,6 +712,10 @@ class DropletGlRenderer(private val context: Context) {
         if (blitProgram != 0) GLES30.glDeleteProgram(blitProgram)
         if (fboId != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
         if (bgTexId != 0) GLES30.glDeleteTextures(1, intArrayOf(bgTexId), 0)
+        // 第 90 批：自定义背景纹理也随上下文重建，URI 记下来下次重载。
+        if (customBgTexId != 0) GLES30.glDeleteTextures(1, intArrayOf(customBgTexId), 0)
+        customBgTexId = 0
+        customBgUriLoaded = ""
         bgProgram = buildProgram(vertSrc, bgFragSrc)
         dropProgram = buildProgram(vertSrc, dropFragSrc)
         blitProgram = buildProgram(vertSrc, blitFragSrc)
@@ -722,6 +739,8 @@ class DropletGlRenderer(private val context: Context) {
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        // 第 90 批：尺寸变了，自定义背景的居中裁剪矩形要按新尺寸重算。
+        if (customBgTexId != 0) computeCustomBgUvRect()
     }
 
     fun onDrawFrame() {
@@ -735,33 +754,46 @@ class DropletGlRenderer(private val context: Context) {
             android.util.Log.e("DropletGl", "FBO incomplete: $fboStatus")
         }
         GLES30.glViewport(0, 0, viewW, viewH)
-        GLES30.glUseProgram(bgProgram)
-        setVec2(bgProgram, "uRes", viewW.toFloat(), viewH.toFloat())
-        setFloat(bgProgram, "uTime", tSec)
-        // 第 55 批：空间色相场用绝对时间（跟 AGSL 的 iTime 同一个挂钟），
-        // 保证 FBO 跟真背景同相位。uTime 是相对 startMs 的（水滴颤动用），
-        // 不能拿来算背景色相场，否则 FBO 跟真背景的紫蓝边界对不上。
-        setFloat(bgProgram, "uAbsTime", android.os.SystemClock.uptimeMillis() / 1000f)
-        // 第 84 批：悬浮球模式把折射源褪淡（淡紫淡蓝），主界面原样。
-        setFloat(bgProgram, "uOrbMode", if (orbMode) 1f else 0f)
-        // 第 42 批（Claude 审查点 5）：FBO 背景跟真背景同相位——之前 FBO 用的是
-        // 写死的固定三色，真背景会随时间做色相漂移（青↔蓝↔紫），时间一长两者
-        // 色相差拉开，水滴内部折射采到的颜色跟外面真背景对不上，边缘会看出
-        // 一条“内外不一致”的分界。改成直接调 OriloBackgroundView.phaseAt()
-        // （跟真背景同一个相位公式、同一套绝对时间），再用静态 hueColor()
-        // 把三色 + 两光斑算出来传进 uniform。光斑位置（ax/ay/bx/by）也用
-        // phaseAt 的，不再自己抄一份公式。
-        val phase = com.jarvis.app.OriloBackgroundView.phaseAt(android.os.SystemClock.uptimeMillis())
-        setVec2(bgProgram, "uBlobA", phase.ax * viewW, phase.ay * viewH)
-        setVec2(bgProgram, "uBlobB", phase.bx * viewW, phase.by * viewH)
-        // 第 87 批：滞后一个周期的光斑副本（ax2/bx2），换头时接上领头光斑。
-        setVec2(bgProgram, "uBlobA2", phase.ax2 * viewW, phase.ay * viewH)
-        setVec2(bgProgram, "uBlobB2", phase.bx2 * viewW, phase.by * viewH)
-        // 第 55 批（补）：底色色相改由着色器内噪声场直接定（hsv2rgb），
-        // uGradTop/Mid/Bot 不再用，这里不再传。光斑颜色仍由 CPU 算。
-        setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
-        setColor3(bgProgram, "uBlobBColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift, phase.satScale))
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        // 第 90 批：自定义静态背景——选了图就把图画进 FBO 代替程序化背景；
+        // 没选图、加载失败或默认动态时走原来的程序化背景。后面贴图和水滴
+        // 折射都采这份 FBO 纹理，同步是结构保证的。
+        if (ensureCustomBg()) {
+            GLES30.glUseProgram(blitProgram)
+            setVec2(blitProgram, "uRes", viewW.toFloat(), viewH.toFloat())
+            setVec4(blitProgram, "uUvRect", customBgUvRect[0], customBgUvRect[1], customBgUvRect[2], customBgUvRect[3])
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, customBgTexId)
+            setInt(blitProgram, "uTex", 0)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        } else {
+            GLES30.glUseProgram(bgProgram)
+            setVec2(bgProgram, "uRes", viewW.toFloat(), viewH.toFloat())
+            setFloat(bgProgram, "uTime", tSec)
+            // 第 55 批：空间色相场用绝对时间（跟 AGSL 的 iTime 同一个挂钟），
+            // 保证 FBO 跟真背景同相位。uTime 是相对 startMs 的（水滴颤动用），
+            // 不能拿来算背景色相场，否则 FBO 跟真背景的紫蓝边界对不上。
+            setFloat(bgProgram, "uAbsTime", android.os.SystemClock.uptimeMillis() / 1000f)
+            // 第 84 批：悬浮球模式把折射源褪淡（淡紫淡蓝），主界面原样。
+            setFloat(bgProgram, "uOrbMode", if (orbMode) 1f else 0f)
+            // 第 42 批（Claude 审查点 5）：FBO 背景跟真背景同相位——之前 FBO 用的是
+            // 写死的固定三色，真背景会随时间做色相漂移（青↔蓝↔紫），时间一长两者
+            // 色相差拉开，水滴内部折射采到的颜色跟外面真背景对不上，边缘会看出
+            // 一条“内外不一致”的分界。改成直接调 OriloBackgroundView.phaseAt()
+            // （跟真背景同一个相位公式、同一套绝对时间），再用静态 hueColor()
+            // 把三色 + 两光斑算出来传进 uniform。光斑位置（ax/ay/bx/by）也用
+            // phaseAt 的，不再自己抄一份公式。
+            val phase = com.jarvis.app.OriloBackgroundView.phaseAt(android.os.SystemClock.uptimeMillis())
+            setVec2(bgProgram, "uBlobA", phase.ax * viewW, phase.ay * viewH)
+            setVec2(bgProgram, "uBlobB", phase.bx * viewW, phase.by * viewH)
+            // 第 87 批：滞后一个周期的光斑副本（ax2/bx2），换头时接上领头光斑。
+            setVec2(bgProgram, "uBlobA2", phase.ax2 * viewW, phase.ay * viewH)
+            setVec2(bgProgram, "uBlobB2", phase.bx2 * viewW, phase.by * viewH)
+            // 第 55 批（补）：底色色相改由着色器内噪声场直接定（hsv2rgb），
+            // uGradTop/Mid/Bot 不再用，这里不再传。光斑颜色仍由 CPU 算。
+            setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
+            setColor3(bgProgram, "uBlobBColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_B_VAL, phase.hueShift, phase.satScale))
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
+        }
         // ---- 贴图 pass（第 80 批）：把 FBO 背景纹理全屏贴到屏幕上 ----
         // 屏幕上看到的背景就是这份纹理，水滴采的也是它——同一份，同步是结构保证的。
         // 不透明贴图，关混合。
@@ -775,6 +807,8 @@ class DropletGlRenderer(private val context: Context) {
             GLES30.glDisable(GLES30.GL_BLEND)
             GLES30.glUseProgram(blitProgram)
             setVec2(blitProgram, "uRes", viewW.toFloat(), viewH.toFloat())
+            // 第 90 批：贴图 pass 的 UV 矩形永远是整张（自定义的裁剪只在画进 FBO 那步做）。
+            setVec4(blitProgram, "uUvRect", 0f, 0f, 1f, 1f)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTexId)
             setInt(blitProgram, "uTex", 0)
@@ -864,6 +898,79 @@ class DropletGlRenderer(private val context: Context) {
         return sh
     }
 
+    // ---- 第 90 批：自定义静态背景 ----
+    // 每帧先问一句：自定义模式 + 选了图 + 图能解出来，才用自定义；否则回程序化背景。
+    // 悬浮球不画背景（帧缓冲清透明），折射源沿用 FBO 里上次的，这里直接回 false。
+    private fun ensureCustomBg(): Boolean {
+        if (orbMode) return false
+        if (!com.jarvis.app.JarvisPrefs.isOriloBgCustom(context)) return false
+        val uriStr = com.jarvis.app.JarvisPrefs.getOriloCustomBgUri(context)
+        if (uriStr.isBlank() || uriStr == customBgFailedUri) return false
+        if (uriStr == customBgUriLoaded && customBgTexId != 0) return true
+        if (!loadCustomBgTexture(uriStr)) {
+            customBgFailedUri = uriStr
+            return false
+        }
+        return true
+    }
+
+    // 解码一次（最长边压到 2048 以内省显存），上传成纹理；居中裁剪在着色器里用 UV 矩形做。
+    private fun loadCustomBgTexture(uriStr: String): Boolean {
+        try {
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(android.net.Uri.parse(uriStr))?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2048) sample *= 2
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = context.contentResolver.openInputStream(android.net.Uri.parse(uriStr))?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, opts)
+            } ?: return false
+            if (customBgTexId == 0) {
+                val tex = IntArray(1)
+                GLES30.glGenTextures(1, tex, 0)
+                customBgTexId = tex[0]
+            }
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, customBgTexId)
+            android.opengl.GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bmp, 0)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+            customBgIw = bmp.width
+            customBgIh = bmp.height
+            bmp.recycle()
+            computeCustomBgUvRect()
+            customBgUriLoaded = uriStr
+            customBgFailedUri = ""
+            return true
+        } catch (e: Exception) {
+            android.util.Log.e("DropletGl", "custom bg load failed: $uriStr", e)
+            return false
+        }
+    }
+
+    // 居中裁剪 UV 矩形（u0, vTop, uScale, vScale)：图比屏宽裁左右，图比屏高裁上下；
+    // V 要翻转（Bitmap 行 0 是图顶，GL 纹理 v=0 是行 0），所以 vScale 是负的。
+    private fun computeCustomBgUvRect() {
+        if (customBgIw <= 0 || customBgIh <= 0 || viewW <= 0 || viewH <= 0) {
+            customBgUvRect = floatArrayOf(0f, 0f, 1f, 1f)
+            return
+        }
+        val ia = customBgIw.toFloat() / customBgIh.toFloat()
+        val sa = viewW.toFloat() / viewH.toFloat()
+        customBgUvRect = if (ia > sa) {
+            val us = sa / ia
+            floatArrayOf((1f - us) / 2f, 1f, us, -1f)
+        } else {
+            val vs = ia / sa
+            floatArrayOf(0f, 1f - (1f - vs) / 2f, 1f, -vs)
+        }
+    }
+
     private fun loc(prog: Int, name: String): Int = GLES30.glGetUniformLocation(prog, name)
     private fun setFloat(prog: Int, name: String, v: Float) {
         GLES30.glUniform1f(loc(prog, name), v)
@@ -876,6 +983,9 @@ class DropletGlRenderer(private val context: Context) {
     }
     private fun setVec3(prog: Int, name: String, x: Float, y: Float, z: Float) {
         GLES30.glUniform3f(loc(prog, name), x, y, z)
+    }
+    private fun setVec4(prog: Int, name: String, x: Float, y: Float, z: Float, w: Float) {
+        GLES30.glUniform4f(loc(prog, name), x, y, z, w)
     }
 
     /** 第 54 批：值噪声（跟 GLSL 里同一套公式），中心漂移用。不规则、不周期。 */

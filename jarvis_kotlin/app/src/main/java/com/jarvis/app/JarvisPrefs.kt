@@ -441,4 +441,24 @@ object JarvisPrefs {
     fun setPortraitUseStatic(ctx: Context, v: Boolean) {
         p(ctx).edit().putBoolean(KEY_PORTRAIT_USE_STATIC, v).apply()
     }
+
+    // ---------- 第 90 批：动态水滴背景（默认动态 / 自定义静态图） ----------
+    // 动态水滴档下的背景选择：默认 = 程序化紫色流动背景；自定义 = 图库选一张图
+    // 做静态背景（背景不动，水滴还在、折射这张图）。自定义没选图时先用默认动态顶着。
+    private const val KEY_ORILO_BG_MODE = "orilo_bg_mode"
+    const val ORILO_BG_DEFAULT = "default"
+    const val ORILO_BG_CUSTOM = "custom"
+
+    fun getOriloBgMode(ctx: Context): String = p(ctx).getString(KEY_ORILO_BG_MODE, ORILO_BG_DEFAULT) ?: ORILO_BG_DEFAULT
+    fun setOriloBgMode(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_ORILO_BG_MODE, if (v == ORILO_BG_CUSTOM) ORILO_BG_CUSTOM else ORILO_BG_DEFAULT).apply()
+    }
+    fun isOriloBgCustom(ctx: Context): Boolean = getOriloBgMode(ctx) == ORILO_BG_CUSTOM
+
+    private const val KEY_ORILO_CUSTOM_BG_URI = "orilo_custom_bg_uri"
+
+    fun getOriloCustomBgUri(ctx: Context): String = p(ctx).getString(KEY_ORILO_CUSTOM_BG_URI, "") ?: ""
+    fun setOriloCustomBgUri(ctx: Context, v: String) {
+        p(ctx).edit().putString(KEY_ORILO_CUSTOM_BG_URI, v).apply()
+    }
 }
