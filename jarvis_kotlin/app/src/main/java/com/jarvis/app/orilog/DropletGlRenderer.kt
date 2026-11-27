@@ -144,7 +144,9 @@ class DropletGlRenderer(private val context: Context) {
                             mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
             float hueN = noise(wuv * 1.6 + vec2(uAbsTime * -0.12, uAbsTime * -0.02));
-            float hue = mix(230.0, 267.0, hueN);
+            // 第 89 批（用户令：背景以紫为主、淡蓝缓缓变化）：色相场 230°–267°
+            // 改成 250°–267°——底色全是紫，230° 的蓝不再做底，只留在光斑 B 里。
+            float hue = mix(250.0, 267.0, hueN);
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
@@ -265,7 +267,15 @@ class DropletGlRenderer(private val context: Context) {
             // 在真机上看得见一个椭圆在转，太几何、太犟硬。改：振幅 0.03→0.01
             // （1%，静帧上看不出椭圆，约 2px）；再叠一层极小的高频角向抖动
             // （0.005×vnoise(8t+3θ)），打破完美椭圆的干净感，让表面有细碎的活气。
+            // 第 89 批（用户令：水滴要灵动；2026-11-27 按真中心赤道重测 jk-v123）：
+            // 慢带 3.58px 是 Orilo 0.60px 的 6 倍，快带 1.09px 与 Orilo 1.37px
+            // 相当——慢摇是主角、快闪是毛刺，所以看着犟硬。第 88 批只把毛刺
+            // 加速，没动主角，感觉不会变。拆成两股：慢股振幅 0.03→0.005
+            // （慢摇 3.58→0.60px，跟 Orilo 一个量级）；新加一股快椭圆，有符号
+            // 值噪声 2Hz 驱动、振幅 0.012，椭圆每半秒左右在横竖之间翻一次，
+            // 快闪变成主角。两股都是 l=2 模态，体积一阶守恒；角向抖动 0.005 不动。
             float ellipAngle = 6.28318 * (vnoise(uTime * 0.3 + 13.0) * 0.5 + 0.5);
+            float fastAngle = 6.28318 * (vnoise(uTime * 0.3 + 29.0) * 0.5 + 0.5);
             // 第 84 批：用户说抖动幅度没有 Orilo 大——30fps 量横向半径，Orilo
             // 206–214px（std 2.35px）、我们卡在 193–194px。振幅 0.01→0.02
             // （约 2%，Orilo 约 1.1–2.3%），轴仍慢的不规则走（61 批修法不动），
@@ -279,8 +289,10 @@ class DropletGlRenderer(private val context: Context) {
             // （0.82 vs 1.09px/帧），起伏主要在 1.5–2.1 秒（轴在转），参考是
             // 0.3 秒快闪。幅度与轴都不动，只把快脉动 3.0→4.5（0.33 秒→0.22 秒
             // 一轮），边缘闪得更快。
-            float ellipAmp = 0.03 * (1.0 + 0.6 * vnoise(uTime * 4.5 + 5.0));
+            float ellipAmp = 0.005 * (1.0 + 0.6 * vnoise(uTime * 4.5 + 5.0));
+            float fastAmp = 0.012 * (2.0 * vnoise(uTime * 2.0 + 9.0) - 1.0);
             float ellip = 1.0 + ellipAmp * cos(2.0 * (theta - ellipAngle))
+                + fastAmp * cos(2.0 * (theta - fastAngle))
                 + 0.005 * vnoise(uTime * 8.0 + theta * 3.0);
             // 蛋形（第 74 批）：水滴不是绝对正圆。受表面张力/透视影响，视觉上
             // 极微的“上宽下窄”，底部接触面略扁。静态形态微调：egg = 1 +
@@ -388,7 +400,10 @@ class DropletGlRenderer(private val context: Context) {
             vec2 bottomDir = normalize(vec2(-0.42, 0.91));
             float cosBottom = dot(normalize(n2), bottomDir);
             float smileMask = smoothstep(0.60, 0.85, cosBottom);
-            float smileBright = edge * smileMask;
+            // 第 89 批：笑脸原来是 edge（0.94R–R）的细环，真机上成了一条贴边
+            // 硬亮线；参考是峰值在 0.94R 的宽缓光带。改成径向高斯：峰值
+            // 0.92R、宽 0.05R，往里铺到 ~0.85R、往外收到边缘，柔、不成线。
+            float smileBright = exp(-pow((length(n2) - 0.92) / 0.05, 2.0)) * smileMask;
             // 顶部暗带。第 45 批曾把它收窄成 0.94R–0.975R 的细环、强度 0.53——
             // 错了：jk-v117 真机量到顶部边缘 54，比里面暗一半，成了一处黑斑。
             // 第 81 批（补）：再看 4454——Orilo 顶部没有黑斑也没有黑线，顶部是
@@ -469,7 +484,10 @@ class DropletGlRenderer(private val context: Context) {
             // 深浅、在宽窄——参考的边缘暗下去约 25 点，但摊在 0.2R（约 40px）
             // 上，是平滑过渡；我的 0.97R–R 只有 2–3px 宽，再淡也是一条黑线。
             // 改成宽缓坡（0.85R–R）+ 0.06：留一点全内反射的暗边，但看不出线。
-            float rimDark = smoothstep(R_eff * 0.85, R_eff, dist) * 0.06 * (1.0 - topDarkMask);
+            // 第 89 批：rimDark 0.06→0.20。2026-11-27 单帧实测：我们 rim 只暗
+            // -8~-17%，两处参考 -26~-44%——边缘太弱，水滴边界发虚。之前那条
+            // 黑线是窄（2–3px）的问题，宽缓坡（0.85R–R）不动，只把深度还回来。
+            float rimDark = smoothstep(R_eff * 0.85, R_eff, dist) * 0.20 * (1.0 - topDarkMask);
             // 小高光：第 52 批移位。旧值（-0.45r/+0.42r）是第 41 批从旧版
             // 抄来的，从没实测过。2026-11-21 另一位审稿人把 210 帧全量完，
             // 指出小高光比代码写得更靠左、更不靠下（-0.6/0.25），但自己
@@ -490,7 +508,9 @@ class DropletGlRenderer(private val context: Context) {
             vec2 shRD = n2 - shRC;
             // 第 78 批：右亮点 0.55→0.20。jk-v115 右亮点 237，参考 147——
             // 参考的右亮点极淡，几乎看不见，我的太亮抢眼，压回去。
-            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.20;
+            // 第 89 批：右亮点 0.20→0.0（删掉）。两处参考该位置都不亮——4454
+            // 偏暗、新视频与局部同亮；我们加白 +40 点，成了一个不该有的亮点。
+            float smallHighlightR = exp(-dot(shRD, shRD) / (0.14 * 0.14) * 1.5) * 0.0;
             // 顶部细月牙：第 68 批。参考 4454 顶部有一道细月牙——一道细细的
             // 亮弧，贴着水滴上缘内侧弯着，从左上到右上。不是大高光（那是右上
             // 实心白块），是独立的细弧。实现：顶部方向（0,-1）的点积定角度
@@ -526,7 +546,9 @@ class DropletGlRenderer(private val context: Context) {
             // 参考 156（亮的细弧）。底色变了，按新底色重算，提亮到显出来。
             // 第 81 批：月牙 0.25→0.28。jk-v117 真机量到顶部 0.70R 处 142–149，
             // 参考 156，还差一档，小提。
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.28;
+            // 第 89 批：月牙 0.28→0.20。2026-11-27 实测：我们 +40° 处 +89 点、
+            // 顶部 0° +6 点，参考 +9/-24——右瓣与高光尾巴叠亮了，顶部也偏亮。
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.20;
             // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
             // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
             // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限

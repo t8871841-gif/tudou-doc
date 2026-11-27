@@ -346,9 +346,12 @@ class OriloBackgroundView @JvmOverloads constructor(
         /** 光斑 B 的颜色（HSV）：第 10 批从靛蓝紫 255 改成蓝色 220，跟光斑 A 的青色
          *  在同一段蓝青里，不再往紫粉那边偏。
          *  第 77 批：4454 参考右下是靛蓝/冷蓝，比 220° 更深更冷。改成 245°。 */
-        const val TUNE_BLOB_B_HUE = 245f
-        const val TUNE_BLOB_B_SAT = 0.62f
-        const val TUNE_BLOB_B_VAL = 0.85f
+        /** 第 89 批（用户令：背景以紫为主、淡蓝缓缓变化）：光斑 B 改成淡蓝——
+         *  色相 245°→230°（真蓝），饱和度 0.62→0.45（淡），亮度 0.85→0.95
+         *  （亮）。它是全屏唯一的蓝色，漂移速度（19 秒一圈）不动，缓缓变化。 */
+        const val TUNE_BLOB_B_HUE = 230f
+        const val TUNE_BLOB_B_SAT = 0.45f
+        const val TUNE_BLOB_B_VAL = 0.95f
 
         // ====== 第 23 批：外面左下聚光（光透过水珠，照亮水珠外面左下一片）======
         // 第 22 批的涟漪常量（TUNE_RIPPLE_*）已删——涟漪是沿着水珠自己的表面、
