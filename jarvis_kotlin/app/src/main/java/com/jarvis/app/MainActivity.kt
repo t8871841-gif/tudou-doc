@@ -1748,7 +1748,7 @@ class MainActivity : Activity() {
                 }
                 v.setTextColor(map(v.getTag(TAG_SETTINGS_ORIG_COLOR) as Int))
             }
-            if (v is ViewGroup) {
+            if (v is android.view.ViewGroup) {
                 for (i in 0 until v.childCount) walk(v.getChildAt(i))
             }
         }
