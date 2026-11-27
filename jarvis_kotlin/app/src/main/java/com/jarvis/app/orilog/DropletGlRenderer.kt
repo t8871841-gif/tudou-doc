@@ -917,7 +917,8 @@ class DropletGlRenderer(private val context: Context) {
         return true
     }
 
-    // 解码一次（最长边压到 2048 以内省显存），上传成纹理；居中裁剪在着色器里用 UV 矩形做。
+    // 解码一次（最长边压到 3072 以内省显存；1080×2400 的手机壁纸满分辨率进纹理，
+    // 别压成一半再放大、发虚发闷），上传成纹理；居中裁剪在着色器里用 UV 矩形做。
     private fun loadCustomBgTexture(uriStr: String): Boolean {
         try {
             val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -926,7 +927,7 @@ class DropletGlRenderer(private val context: Context) {
             }
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
             var sample = 1
-            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2048) sample *= 2
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 3072) sample *= 2
             val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
             val bmp = context.contentResolver.openInputStream(android.net.Uri.parse(uriStr))?.use {
                 android.graphics.BitmapFactory.decodeStream(it, null, opts)

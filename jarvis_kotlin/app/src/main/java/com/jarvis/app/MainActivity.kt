@@ -502,6 +502,9 @@ class MainActivity : Activity() {
             // 第 37 批：删掉——外面聚光/影子已在 GL 水滴着色器里，背景 View 那份被 GL 盖住。
         }
         refreshSettingsGear()
+        // 第 93 批：风格切换时重算设置页背景——切进 Orilo 自定义时去暗底，
+        // 切回经典时按对话背景图那路恢复（深空渐变或对话暗罩子）。
+        refreshDialogueBackground()
     }
 
     /** Orilo 对话区：按 ChatHistory 重建全部气泡（用户右、助手左，字号 15 不动）；
@@ -1720,6 +1723,15 @@ class MainActivity : Activity() {
      * 不报错、不弹 toast。homePanel（对话区）与 settingsScroll（设置页）同时换，行为一致。 */
     private fun refreshDialogueBackground() {
         val iv = dialogueBgImageView ?: return
+        // 第 93 批（用户令：自定义背景不压黑，任何界面都不要暗罩子，包括设置页）：
+        // Orilo 自定义静态图在用时，设置页背景置空——自定义图从全屏 GL 层透出来，
+        // 不盖深空渐变、也不压对话暗罩子（上 70%→下 60% 黑）。对话背景图那路只在经典档生效。
+        if (JarvisPrefs.isOriloStyle(this) && JarvisPrefs.isOriloBgCustom(this) &&
+            JarvisPrefs.getOriloCustomBgUri(this).isNotBlank()) {
+            iv.visibility = View.GONE
+            settingsScroll.background = null
+            return
+        }
         val uriStr = JarvisPrefs.getDialogueBgUri(this)
         if (uriStr.isBlank()) {
             iv.visibility = View.GONE
@@ -3505,6 +3517,7 @@ class MainActivity : Activity() {
             JarvisPrefs.setOriloBgMode(this, if (i == 1) JarvisPrefs.ORILO_BG_CUSTOM else JarvisPrefs.ORILO_BG_DEFAULT)
             refreshOriloBgStatus()
             refreshOriloBgCustomRows()
+            refreshDialogueBackground() // 第 93 批：切模式立刻重算设置页背景（自定义→透出原图，不压黑）。
             toast(if (i == 1) "已切到自定义背景" else "已切回默认动态")
         })
         oriloBgStatusText = TextView(this).apply {
@@ -3910,6 +3923,7 @@ class MainActivity : Activity() {
                 }
                 JarvisPrefs.setOriloCustomBgUri(this, uri.toString())
                 refreshOriloBgStatus()
+                refreshDialogueBackground() // 第 93 批：选图后设置页立刻透出原图，不压黑。
                 toast("水滴背景图已换")
             }
             return
