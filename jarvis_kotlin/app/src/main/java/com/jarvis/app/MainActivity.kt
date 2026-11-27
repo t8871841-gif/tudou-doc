@@ -273,14 +273,15 @@ class MainActivity : Activity() {
         // 再建界面——buildChatPanel 与 renderHistoryBubbles 都从它读记录。
         ChatHistory.init(this)
 
-        // 批八：真全屏——隐藏系统状态栏（顶部下拉可临时唤出），此前主界面一直顶着状态栏不算全屏。
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        window.setFlags(
-            android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
-            android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN
-        )
+        // 第 92 批：全面屏 edge-to-edge——状态栏改透明，背景延到屏幕顶，图标浮在上面。
+        // 批八的沉浸式隐藏状态栏，截图时藏起来的那块渲成纯黑带（v117/v121/v125 三张
+        // 截图量出来一模一样，约 82px）；改成透明栏，黑带就没了。
+        // 图标颜色跟主界面风格走：动态水滴档背景浅、用深色图标；经典档背景深、用浅色图标。
+        // 底部不用管：手机默认全屏、手势条本来就没有（2026-11-27 用户确认）。
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = JarvisPrefs.isOriloStyle(this)
 
         val root = FrameLayout(this)
         rootLayout = root
