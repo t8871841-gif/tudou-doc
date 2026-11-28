@@ -153,17 +153,25 @@ class DropletGlRenderer(private val context: Context) {
             float val = mix(mix(0.99, 0.96, clamp(t / 0.55, 0.0, 1.0)),
                             mix(0.96, 0.94, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
-            float hueN = noise(wuv * 1.6 + vec2(uAbsTime * -0.12, uAbsTime * -0.02));
+            // 第 97 批（2026-11-28 用户令：蓝紫都是成片，迅速变化，没有规律）：
+            // 89 批把蓝从底色里拿掉了，底色只剩紫，蓝只剩光斑 B 一条细带——
+            // 这就是 96 批后真机“淡紫太多”的根子。蓝回到底色里：色相场
+            // 230°–267°，噪声出蓝出紫都是片；尺度 1.6→2.2（片更碎、更多），
+            // 漂移 -0.12→-0.30（约 147 px/s）再加正弦摆动，速度时快时慢、不走直线。
+            float hueN = noise(wuv * 2.2 + vec2(uAbsTime * -0.30 + 0.5 * sin(uAbsTime * 0.10), uAbsTime * -0.05 + 0.5 * sin(uAbsTime * 0.073 + 1.7)));
             // 第 89 批（用户令：背景以紫为主、淡蓝缓缓变化）：色相场 230°–267°
             // 改成 250°–267°——底色全是紫，230° 的蓝不再做底，只留在光斑 B 里。
-            float hue = mix(250.0, 267.0, hueN);
+            // 第 97 批改回 230°–267°（见上面）。
+            float hue = mix(230.0, 267.0, hueN);
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
-            float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
+            // 第 97 批：光斑放大成片——A 半径 0.45→0.55、B 0.40→0.60 屏宽
+            // （AGSL 那边的 TUNE 半径本来就是 0.55/0.6，GL 这边之前写小了）。
+            float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.55), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
             // 第 96 批：三角波没有跳变，fa2/fb2 换头副本删掉。光斑 B 强度 0.45→0.80：
             // 旧值混进紫底色后实际是 248° 偏紫的蓝（参考角上是干净的 229°），
             // 强度提到 0.80 后混出 233°/饱和 0.64，贴近参考蓝角 229°/0.66。
-            float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.40), 0.0, 1.0));
+            float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.60), 0.0, 1.0));
             base = mix(base, uBlobBColor, fb * 0.80);
             // 第 84 批（用户令：悬浮球紫色不好看，要淡紫+淡蓝互相流）：
             // 球在别的 App 上面，看不见底下真实背景，折射采到的还是 App 自己

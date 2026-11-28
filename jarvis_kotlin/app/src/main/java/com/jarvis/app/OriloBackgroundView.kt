@@ -370,13 +370,6 @@ class OriloBackgroundView @JvmOverloads constructor(
 
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
-        /** 三角波 0→1→0：fract 取小数部分，负数先 +1 转正（Kotlin % 对负数给负余数）。 */
-        private fun tri(x: Double): Float {
-            val f = x % 1.0
-            val ff = if (f < 0) f + 1.0 else f
-            return (if (ff < 0.5) ff * 2.0 else 2.0 - ff * 2.0).toFloat()
-        }
-
         fun phaseAt(uptimeMs: Long): FlowPhase {
             // 第 87 批（用户令：主界面动态不流畅，参考云朵快速变化）：第 84 批
             // 的互质周期正弦还是原地来回摆（47–71 秒一圈），位置在原地摆、色相
@@ -393,6 +386,7 @@ class OriloBackgroundView @JvmOverloads constructor(
             // 1.45（完全出右屏）正好 1.9 个屏宽，B 同理 1.8。
             // 第 96 批（2026-11-28 用户令：参考是来回变换）：上面说的锯齿波 +
             // 副本已改成三角波（往右扫到头再原路往左扫回来），见下面；副本删掉。
+            // 第 97 批：上面说的三角波也改了——固定周期还是有规律，见下面。
             // 第 31 批（用户令：背景要蓝、紫、青、乳白轮着变，颜色转化随机）：
             // 色相范围拉到 -45..+50（第 30 批是 0..50，只到蓝紫），青（约 190°）
             // 和紫（约 282°）都能走到。两组不成整数比的正弦叠加（53 秒和 79 秒），
@@ -413,14 +407,19 @@ class OriloBackgroundView @JvmOverloads constructor(
             val hueShift = (3.0 * sin(2.0 * Math.PI * tSec / 53.0) + 2.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
             val baseSat = (1.0f - 0.30f * ((hueShift + 5f) / 10f)).coerceIn(0.70f, 1.0f)
             val satScale = baseSat
-            // 第 96 批：三角波来回扫（见上面第 96 批注释）。ax2/bx2 副本删掉。
-            val ax = -0.45f + 1.9f * tri(tSec / 22.0)
-            val bx = -0.40f + 1.8f * tri(tSec / 26.0)
+            // 第 97 批（2026-11-28 用户令：蓝紫都是成片，迅速变化，没有规律）：
+            // 三角波是节拍器——固定周期、固定速度、固定路线，一眼看出规律。
+            // 改成两组不成整数比的正弦叠加（17/7 秒、13/5 秒）：位置来回走，
+            // 速度时快时慢、有时折返，60 秒里不重复。A 平均约 188 px/s、最快
+            // 约 460 px/s，B 平均约 257 px/s、最快约 620 px/s；纵向也改成
+            // 23/19 秒两组正弦，上下都走，不再只横着扫。
+            val ax = (0.5 + 0.55 * sin(2.0 * Math.PI * tSec / 17.0) + 0.25 * sin(2.0 * Math.PI * tSec / 7.0 + 1.3)).toFloat()
+            val bx = (0.5 + 0.55 * sin(2.0 * Math.PI * tSec / 13.0 + 2.0) + 0.25 * sin(2.0 * Math.PI * tSec / 5.0 + 0.5)).toFloat()
             return FlowPhase(
                 ax = ax,
-                ay = 0.26f + 0.14f * cos(2.0 * Math.PI * tSec / 61.0).toFloat(),
+                ay = (0.50 + 0.28 * sin(2.0 * Math.PI * tSec / 23.0 + 0.7) + 0.12 * sin(2.0 * Math.PI * tSec / 9.0 + 2.1)).toFloat(),
                 bx = bx,
-                by = 0.70f + 0.15f * sin(2.0 * Math.PI * tSec / 71.0 + 2.1).toFloat(),
+                by = (0.50 + 0.28 * sin(2.0 * Math.PI * tSec / 19.0 + 1.0) + 0.12 * sin(2.0 * Math.PI * tSec / 11.0 + 0.3)).toFloat(),
                 hueShift = hueShift,
                 satScale = satScale,
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），
