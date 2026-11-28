@@ -75,10 +75,10 @@ object BrainRunner {
         }
         val appCtx = ctx.applicationContext
         val cfg = JarvisBrain.forTask(appCtx, taskText)
-        if (cfg.apiKey.isBlank() && !cfg.isNpu) {
+        if (cfg.apiKey.isBlank()) {
             // 没 Key 时 LocalBrain.submit 也只会回这句、不启动 turn；这里先拦，
             // 不建大脑也不挂接管框，并返回 null 让阻塞调用方按“没跑起来”处理，
-            // 别把这句当成高德核实结果喂给改行程模型。NPU 档没有 Key，isNpu 时不拦。
+            // 别把这句当成高德核实结果喂给改行程模型。
             onFinal(AppLocale.str(appCtx, R.string.brain_no_key))
             return null
         }

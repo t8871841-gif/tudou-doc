@@ -64,7 +64,6 @@ import com.jarvis.app.asr.OfflineAsrSession
 import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
-import com.jarvis.app.local.NpuModel
 import com.jarvis.app.memory.MemoryService
 import com.jarvis.app.net.CustomClient
 import com.jarvis.app.skill.SkillService
@@ -115,8 +114,6 @@ class MainActivity : Activity() {
         const val REQ_PICK_ATTACH_FILE = 5155
         // 第 90 批：动态水滴自定义背景，图库选图（ACTION_OPEN_DOCUMENT 回调）。
         const val REQ_PICK_ORILO_BG = 5156
-        // NPU 档：导入 .litertlm 模型文件，系统文件选择器回调。
-        const val REQ_PICK_NPU_MODEL = 5157
         // 竖屏面板重做：手势只认对话框区（下 1/3）；上 2/3（HUD 动画）不再参与手势。
         const val SWIPE_ZONE_NONE = 0
         const val SWIPE_ZONE_DIALOG = 1
@@ -192,7 +189,6 @@ class MainActivity : Activity() {
     private lateinit var memoryListContainer: LinearLayout
     private lateinit var skillListContainer: LinearLayout
     private lateinit var localStatusView: TextView
-    private lateinit var npuStatusView: TextView
 
     // 设置二级页面：目录 + 分页宿主（真机反馈：不再十个分区一长条）
     private lateinit var settingsListPanel: LinearLayout
@@ -1198,13 +1194,6 @@ class MainActivity : Activity() {
                         o.put("base_url", JarvisPrefs.DEEPSEEK_BASE_URL)
                         o.put("model", JarvisPrefs.DEEPSEEK_MODEL)
                         o.put("has_key", JarvisPrefs.getDeepSeekKey(this@MainActivity).isNotBlank())
-                    }
-                    // NPU 档：本地模型，没有地址/Key；has_key 在这里借指“模型已就绪”。
-                    "npu" -> {
-                        o.put("provider", "npu")
-                        o.put("base_url", "")
-                        o.put("model", "gemma-4-E2B-it-sm8550")
-                        o.put("has_key", NpuModel.isReady(this@MainActivity))
                     }
                     else -> {
                         o.put("provider", "glm")
@@ -2534,27 +2523,6 @@ class MainActivity : Activity() {
                 askChatCustom("附件《${attachName}》的内容如下：\n$attachText\n\n问题：$q", mem, localTried = false)
                 return@launch
             }
-            // NPU 档（用户 2026-11-28 定：只用 NPU）：日常聊天与问答走 NPU 模型，
-            // 不走云端、不走旧 MediaPipe 本地模型。模型没就绪或答不出就直接说，
-            // 不静默回云端。附件/看屏在上面已分流（NPU 模型只吃文本），到不了这里。
-            if (JarvisPrefs.getModelMode(this@MainActivity) == "npu") {
-                if (!NpuModel.isReady(this@MainActivity)) {
-                    setChatInFlight(false)
-                    addBubble("NPU 模型还没就绪，先去设置 → NPU 模型导入或下载模型", mine = false)
-                    return@launch
-                }
-                val localMem = MemoryService.getInjectableMemories(this@MainActivity, q, topN = 2)
-                val npu = NpuModel.generate(this@MainActivity, q, localMem)
-                setChatInFlight(false)
-                if (!npu.isNullOrBlank()) {
-                    addBubble(npu, mine = false)
-                    speakReplyIfEnabled(npu)
-                    triggerMemoryExtraction(q, npu)
-                } else {
-                    addBubble("NPU 没答出来：${NpuModel.lastError ?: "加载或生成失败"}", mine = false)
-                }
-                return@launch
-            }
             // 批十调配 + 第二梯队批六再调配：智能调配开时 ChatRouter 综合内容/网络/电量/
             // 隐私信号判定，不只是"问答云端、闲聊本地"（与语音同路）
             val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
@@ -3061,7 +3029,6 @@ class MainActivity : Activity() {
             Triple("🧠", "记忆", { v -> buildMemorySection(v) }),
             Triple("🧩", "技能", { v -> buildSkillSection(v) }),
             Triple("🤖", "本地模型", { v -> buildLocalLlmSection(v) }),
-            Triple("⚡", "NPU 模型", { v -> buildNpuModelSection(v) }),
             Triple("📢", "主动播报", { v -> buildAnnounceSection(v) }),
             Triple("⏰", "晨报与出发提醒", { v -> buildBriefSection(v) }),
             Triple("📋", "操作审计", { v -> buildAuditSection(v) }),
@@ -3176,19 +3143,17 @@ class MainActivity : Activity() {
         root.addView(section)
 
         // 模型开关：GLM（默认，内置智谱）/ 自定义（下面三项自己填）/ DeepSeek（内置 deepseek-flash）
-        // / 自动（简单任务 GLM，跨应用多步骤 DeepSeek，见 TaskRouter；聊天固定走 GLM）
-        // / NPU（端侧 Gemma 4 E2B：简单任务 NPU，复杂多步/打电话仍走云端，见 TaskRouter.resolve）。
-        // 聊天、任务、看屏都跟着走（自动档下任务按路由走、聊天仍走 GLM；NPU 档下聊天仍走 GLM）。
-        root.addView(segmentedRow("模型", listOf("GLM", "自定义", "DeepSeek", "自动", "NPU"),
-            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; "deepseek" -> 2; "auto" -> 3; "npu" -> 4; else -> 0 }) { i ->
-            val next = when (i) { 1 -> "custom"; 2 -> "deepseek"; 3 -> "auto"; 4 -> "npu"; else -> "glm" }
+        // / 自动（简单任务 GLM，跨应用多步骤 DeepSeek，见 TaskRouter；聊天固定走 GLM）。
+        // 聊天、任务、看屏都跟着走（自动档下任务按路由走、聊天仍走 GLM）。
+        root.addView(segmentedRow("模型", listOf("GLM", "自定义", "DeepSeek", "自动"),
+            when (JarvisPrefs.getModelMode(this)) { "custom" -> 1; "deepseek" -> 2; "auto" -> 3; else -> 0 }) { i ->
+            val next = when (i) { 1 -> "custom"; 2 -> "deepseek"; 3 -> "auto"; else -> "glm" }
             JarvisPrefs.setModelMode(this, next)
             toast(
                 when (next) {
                     "custom" -> "改用自定义模型"
                     "deepseek" -> "改用 DeepSeek（deepseek-flash）"
                     "auto" -> "自动选模型（简单任务 GLM，跨应用多步骤 DeepSeek）"
-                    "npu" -> "改用 NPU 本地模型（Gemma 4 E2B，骁龙 8 Gen 2）"
                     else -> "改用 GLM（内置智谱）"
                 }
             )
@@ -3980,87 +3945,6 @@ class MainActivity : Activity() {
         localStatusView.text = LocalLlm.statusText(this)
     }
 
-    /** NPU 档新增：「NPU 模型」分区——导入/下载 .litertlm（SM8550）、试答、删除。运行时是 NpuModel（LiteRT-LM + QNN）。 */
-    private fun buildNpuModelSection(root: LinearLayout) {
-        root.addView(TextView(this).apply {
-            text = "NPU 模型（端侧 NPU，离线）"; textSize = 18f; setTextColor(Color.WHITE); setPadding(0, dp(24), 0, dp(8))
-        })
-        root.addView(TextView(this).apply {
-            text = "只接简单任务（查电量、开应用、调亮度/音量、定闹钟）；复杂多步、发消息、导航、打电话仍走云端。模型只认骁龙 8 Gen 2（SM8550）。"
-            textSize = 12f; setTextColor(0x8AFFFFFF.toInt())
-        })
-        npuStatusView = TextView(this).apply { textSize = 12f; setTextColor(0x8AFFFFFF.toInt()) }
-        root.addView(npuStatusView)
-        refreshNpuStatus()
-        root.addView(btn("导入模型文件（.litertlm）") {
-            try {
-                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                }
-                @Suppress("DEPRECATION")
-                startActivityForResult(i, REQ_PICK_NPU_MODEL)
-            } catch (e: Exception) {
-                toast("打不开文件选择器：${e.message}")
-            }
-        })
-        root.addView(btn("下载 / 校验模型（3.16GB）") {
-            if (NpuModel.isDownloading()) {
-                toast("正在下载，别重复点")
-                return@btn
-            }
-            toast("开始准备模型（下载 3.16GB 或校验已有文件），别关 App…")
-            uiScope.launch {
-                val ok = NpuModel.ensureReady(this@MainActivity) { done, total ->
-                    // 进度回调跑在后台线程，post 回主线程再碰 UI。
-                    val pct = if (total > 0) "（${(done * 100 / total).toInt()}%）" else ""
-                    val totalText = if (total > 0) (total / 1024 / 1024).toString() else "?"
-                    npuStatusView.post { npuStatusView.text = "模型下载中… ${done / 1024 / 1024} / $totalText MB$pct" }
-                }
-                toast(if (ok) "NPU 模型已就绪" else "模型没就绪（下载或校验失败，再试一次）")
-                refreshNpuStatus()
-            }
-        })
-        val testInput = EditText(this).apply {
-            hint = "试答一句（如：现在电量多少）"
-            setTextColor(Color.WHITE); setHintTextColor(0x66FFFFFF); textSize = 14f
-        }
-        root.addView(testInput)
-        root.addView(btn("用 NPU 模型试答") {
-            val q = testInput.text.toString().trim()
-            if (q.isEmpty()) {
-                toast("先写一句话")
-                return@btn
-            }
-            if (!NpuModel.isReady(this@MainActivity)) {
-                toast("模型还没就绪，先导入或下载")
-                return@btn
-            }
-            toast("NPU 生成中，稍等…")
-            uiScope.launch {
-                val out = NpuModel.ping(this@MainActivity, q)
-                if (out.isNullOrBlank()) {
-                    // 2026-11-28：原来只吐一句“加载或生成失败”，原因全看不见；
-                    // 现在把真实报错写进状态行，截屏就能看到是哪一步、报什么。
-                    npuStatusView.text = "试答失败：${NpuModel.lastError ?: "未知错误"}"
-                    toast("NPU 模型没答出来，原因写在上面状态行了")
-                } else {
-                    toast("NPU 答：${out.take(120)}")
-                }
-            }
-        })
-        root.addView(btn("删除已导入的模型") {
-            NpuModel.deleteModel(this@MainActivity)
-            refreshNpuStatus()
-            toast("模型已删除")
-        })
-    }
-
-    private fun refreshNpuStatus() {
-        if (!::npuStatusView.isInitialized) return
-        npuStatusView.text = NpuModel.statusText(this)
-    }
-
     @Deprecated("文件选择器回调")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -4128,19 +4012,6 @@ class MainActivity : Activity() {
             val uri = data?.data
             if (resultCode == RESULT_OK && uri != null) {
                 handleAttachUri(uri)
-            }
-            return
-        }
-        // NPU 档：导入 .litertlm 模型文件回调，拷进 filesDir/npu 并验 sha256。
-        if (requestCode == REQ_PICK_NPU_MODEL) {
-            val uri = data?.data
-            if (resultCode == RESULT_OK && uri != null) {
-                toast("模型导入中，文件大请稍等…")
-                uiScope.launch {
-                    val ok = NpuModel.importPicked(this@MainActivity, uri)
-                    toast(if (ok) "NPU 模型已导入并校验通过" else "导入失败（文件不对或校验没通过）")
-                    refreshNpuStatus()
-                }
             }
             return
         }

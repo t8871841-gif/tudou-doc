@@ -189,31 +189,17 @@ object TaskRouter {
     }
 
     /** 按开关 + 文本 + 断点定本次任务的模式：断点里有模式先沿用（续跑不换脑，
-     * 中间改了开关也不影响）；手动档原样返回；"auto" 才走路由；"npu" 走
-     * routeNpu（简单任务 NPU，复杂多步/打电话走云端）。 */
+     * 中间改了开关也不影响）；手动档原样返回；"auto" 才走路由。 */
     fun resolve(ctx: Context, taskText: String, resumeMode: String? = null): Route {
-        if (resumeMode == "glm" || resumeMode == "deepseek" || resumeMode == "custom" || resumeMode == "npu") {
+        if (resumeMode == "glm" || resumeMode == "deepseek" || resumeMode == "custom") {
             return Route(resumeMode, "断点续跑沿用")
         }
         return when (val global = JarvisPrefs.getModelMode(ctx)) {
             "deepseek" -> Route("deepseek", "手动 DeepSeek")
             "custom" -> Route("custom", "手动自定义")
-            "npu" -> routeNpu(taskText)
             "auto" -> route(taskText)
             else -> Route("glm", "手动 GLM")
         }
-    }
-
-    /**
-     * NPU 档的路由：简单任务走 NPU，复杂多步走云端（DeepSeek），打电话一律
-     * GLM（与 auto 档一致）。NPU 只有 4096 上下文，扛不住 29 个工具的全量
-     * schema 与长历史——复杂任务硬塞给 NPU 只会溢出，不是省钱。
-     */
-    private fun routeNpu(taskText: String): Route {
-        val t = taskText.trim()
-        if (CALL_PATTERN.containsMatchIn(t)) return Route("glm", "打电话")
-        val r = route(t)
-        return if (r.mode == "glm") Route("npu", r.reason) else r
     }
 
     private fun mentionedApps(text: String): List<String> {
