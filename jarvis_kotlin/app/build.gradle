@@ -70,6 +70,12 @@ android {
     }
     kotlinOptions {
         jvmTarget = '17'
+        // 第 95 批补丁（2026-11-28）：litertlm-android 0.19.1 本身就是 Kotlin 2.4 编的，
+        // 1.9 编译器读不了它的 metadata（jk-v127 第二建 kspDebugKotlin 失败）。
+        // 这个 flag 只跳过版本检查，不跳过二进制兼容校验；litertlm 对外 API 只是
+        // 数据类/函数/密封类，没有 2.x 新语法，1.9 编译器读得懂。升 Kotlin 工具链
+        // 是另外一件事，不在这里动。
+        freeCompilerArgs += "-Xskip-metadata-version-check"
     }
 }
 
