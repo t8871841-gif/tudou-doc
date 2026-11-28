@@ -2534,6 +2534,27 @@ class MainActivity : Activity() {
                 askChatCustom("附件《${attachName}》的内容如下：\n$attachText\n\n问题：$q", mem, localTried = false)
                 return@launch
             }
+            // NPU 档（用户 2026-11-28 定：只用 NPU）：日常聊天与问答走 NPU 模型，
+            // 不走云端、不走旧 MediaPipe 本地模型。模型没就绪或答不出就直接说，
+            // 不静默回云端。附件/看屏在上面已分流（NPU 模型只吃文本），到不了这里。
+            if (JarvisPrefs.getModelMode(this@MainActivity) == "npu") {
+                if (!NpuModel.isReady(this@MainActivity)) {
+                    setChatInFlight(false)
+                    addBubble("NPU 模型还没就绪，先去设置 → NPU 模型导入或下载模型", mine = false)
+                    return@launch
+                }
+                val localMem = MemoryService.getInjectableMemories(this@MainActivity, q, topN = 2)
+                val npu = NpuModel.generate(this@MainActivity, q, localMem)
+                setChatInFlight(false)
+                if (!npu.isNullOrBlank()) {
+                    addBubble(npu, mine = false)
+                    speakReplyIfEnabled(npu)
+                    triggerMemoryExtraction(q, npu)
+                } else {
+                    addBubble("NPU 没答出来：${NpuModel.lastError ?: "加载或生成失败"}", mine = false)
+                }
+                return@launch
+            }
             // 批十调配 + 第二梯队批六再调配：智能调配开时 ChatRouter 综合内容/网络/电量/
             // 隐私信号判定，不只是"问答云端、闲聊本地"（与语音同路）
             val localReady = JarvisPrefs.isLocalLlmEnabled(this@MainActivity) && LocalLlm.isReady(this@MainActivity)
@@ -4021,7 +4042,7 @@ class MainActivity : Activity() {
                 if (out.isNullOrBlank()) {
                     // 2026-11-28：原来只吐一句“加载或生成失败”，原因全看不见；
                     // 现在把真实报错写进状态行，截屏就能看到是哪一步、报什么。
-                    npuStatusView.text = "试答失败：${NpuModel.lastPingError ?: "未知错误"}"
+                    npuStatusView.text = "试答失败：${NpuModel.lastError ?: "未知错误"}"
                     toast("NPU 模型没答出来，原因写在上面状态行了")
                 } else {
                     toast("NPU 答：${out.take(120)}")

@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import java.io.File
@@ -48,11 +50,12 @@ object NpuModel {
     @Volatile
     private var downloading = false
 
-    /** 最近一次 ping 失败的原因（给设置页展示，排查用；成功时清掉）。
-     * 2026-11-28 教训：试答失败只吐一句“加载或生成失败”，引擎加载失败
-     * 还是生成失败、底层报什么全看不见，只能盲猜；以后报错必须留原文。 */
+    /** 最近一次 ping / 聊天失败的原因（给设置页展示、聊天里展示，排查用；
+     * 成功时清掉。2026-11-28 教训：试答失败只吐一句“加载或生成失败”，
+     * 引擎加载失败还是生成失败、底层报什么全看不见，只能盲猜；
+     * 以后报错必须留原文。 */
     @Volatile
-    var lastPingError: String? = null
+    var lastError: String? = null
         private set
 
     @Volatile
@@ -259,8 +262,88 @@ object NpuModel {
         return modelFile(ctx)?.delete() ?: true
     }
 
+    /** 聊天用系统提示（与 LocalLlm.buildPrompt 同一条线：短中文回答、不编实时信息）。 */
+    private const val CHAT_SYSTEM_PROMPT =
+        "你是 Jarvis，用户的个人助理。用中文简短回答，不要用列表、不要发表情。" +
+            "天气、气温、时间、新闻、价格这类实时信息你没有数据来源，查不到就明说查不到，绝对不要编造具体数值。"
+
+    /** 记忆片段字符上限（与 LocalLlm.MEMORY_CONTEXT_MAX_CHARS 同值）：调用方按
+     * topN 精简过的记忆，单条本身可能很长，这里再兜底截一刀，别把 4096 上下文吃掉。 */
+    private const val MEMORY_CONTEXT_MAX_CHARS = 150
+
+    /** 把异常拼成一句可读的原因（类名 + 消息 + 两层原因链，截 400 字）。
+     * 引擎加载失败会包一层中文，底层原因在 cause 里。 */
+    private fun formatError(t: Throwable): String {
+        val sb = StringBuilder("${t.javaClass.simpleName}: ${t.message ?: ""}")
+        var cause = t.cause
+        var depth = 0
+        while (cause != null && depth < 2) {
+            sb.append(" / 原因：${cause.javaClass.simpleName}: ${cause.message ?: ""}")
+            cause = cause.cause
+            depth++
+        }
+        return sb.toString().take(400)
+    }
+
+    /** 清洗模型输出（与 LocalLlm.cleanOutput 同一套阈值）：数字垃圾判失败、
+     * 同一片段连续重复 6 次以上在重复处截断。 */
+    private fun cleanOutput(raw: String): String? {
+        var s = raw.trim()
+        if (s.isBlank()) return null
+        val junkRatio = s.count { it.isDigit() || it == '-' || it == ' ' }.toDouble() / s.length
+        if (junkRatio > 0.6) return null
+        return cutRepetition(s).takeIf { it.isNotBlank() }
+    }
+
+    private fun cutRepetition(s: String): String {
+        if (s.length < 24) return s
+        for (unitLen in 4..12) {
+            var i = 0
+            while (i + unitLen * 6 <= s.length) {
+                val unit = s.substring(i, i + unitLen)
+                var count = 1
+                var j = i + unitLen
+                while (j + unitLen <= s.length && s.substring(j, j + unitLen) == unit) {
+                    count++
+                    j += unitLen
+                }
+                if (count >= 6) return s.substring(0, i + unitLen).trim()
+                i++
+            }
+        }
+        return s
+    }
+
+    /**
+     * 聊天：单句生成（用户 2026-11-28 定：NPU 档日常聊天、回答问题走 NPU）。
+     * 调用方已把精简记忆（Top-2）传进来；每句新建会话（带系统提示），与
+     * 任务脑的 NpuLlmClient 各走各的会话，互不干扰。失败返回 null，
+     * 原因记 lastError。
+     */
+    suspend fun generate(ctx: Context, prompt: String, memoryContext: String = ""): String? =
+        withContext(dispatcher) {
+            try {
+                val eng = ensureEngine(ctx)
+                val userText = if (memoryContext.isBlank()) prompt
+                else "【相关记忆】\n${memoryContext.trim().take(MEMORY_CONTEXT_MAX_CHARS)}\n\n$prompt"
+                val out = eng.createConversation(
+                    ConversationConfig(systemInstruction = Contents.of(CHAT_SYSTEM_PROMPT)),
+                ).use { conv ->
+                    conv.sendMessage(userText).contents.contents
+                        .filterIsInstance<Content.Text>()
+                        .joinToString("") { it.text }.trim()
+                        .let { cleanOutput(it) }
+                }
+                lastError = null
+                out
+            } catch (t: Throwable) {
+                lastError = formatError(t)
+                null
+            }
+        }
+
     /** 设置页试答：建个临时会话问一句。失败返回 null，并把原因记到
-     * lastPingError（设置页状态行展示，排查用）。
+     * lastError（设置页状态行展示，排查用）。
      * Message 没有 text 属性，正文在 contents 的 Content.Text 块里。 */
     suspend fun ping(ctx: Context, text: String): String? = withContext(dispatcher) {
         try {
@@ -271,19 +354,10 @@ object NpuModel {
                     .joinToString("") { it.text }.trim()
                     .takeIf { it.isNotBlank() }
             }
-            lastPingError = null
+            lastError = null
             out
         } catch (t: Throwable) {
-            // 原因链拼出来：引擎加载失败会包一层中文，底层原因在 cause 里。
-            val sb = StringBuilder("${t.javaClass.simpleName}: ${t.message ?: ""}")
-            var cause = t.cause
-            var depth = 0
-            while (cause != null && depth < 2) {
-                sb.append(" / 原因：${cause.javaClass.simpleName}: ${cause.message ?: ""}")
-                cause = cause.cause
-                depth++
-            }
-            lastPingError = sb.toString().take(400)
+            lastError = formatError(t)
             null
         }
     }
