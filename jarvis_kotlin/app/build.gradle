@@ -10,7 +10,11 @@ android {
 
     defaultConfig {
         applicationId "com.jarvis.app"
-        minSdk 24
+        // 第 95 批补丁（2026-11-28）：minSdk 24→26。litertlm-android 0.19.1 的
+        // 字节码用了 invoke-customs，D8 在 minSdk 24 下拒绝 dex（"Invoke-customs
+        // are only supported starting with Android O (--min-api 26)"，jk-v127 首建
+        // 失败原因）。用户手机是 Android 16（API 36），升到 26 对他没影响。
+        minSdk 26
         targetSdk 34
         versionCode 1
         versionName "0.1.0"
@@ -66,6 +70,26 @@ android {
     }
     kotlinOptions {
         jvmTarget = '17'
+    }
+}
+
+// NPU 档（第 95 批补丁，2026-11-28）：litertlm-android 0.19.1 拖进来 kotlin-stdlib /
+// kotlin-reflect 2.4.0 与 kotlinx-coroutines 1.11.0，Kotlin 1.9 编译器读不了 2.x 的
+// metadata（kspDebugKotlin 直接失败，jk-v127 首建失败原因之一）。本工程是 Kotlin
+// 1.9.22 + coroutines 1.7.3，这里把这组传递依赖钉回工程已用的版本；litertlm 用到
+// 的只是 Flow 与基础 stdlib，1.9.22/1.7.3 覆盖得了。升级 Kotlin 工具链是另外一
+// 件事，不在这里动。残留风险：litertlm 内部若调了 2.4 才有的 stdlib 函数，运行时
+// 才会在 NPU 初始化时报 NoSuchMethodError——真机上点设置里“试答”就能验出来。
+configurations.all {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.jetbrains.kotlin' &&
+            ['kotlin-stdlib', 'kotlin-stdlib-jdk7', 'kotlin-stdlib-jdk8', 'kotlin-reflect'].contains(details.requested.name)) {
+            details.useVersion('1.9.22')
+        }
+        if (details.requested.group == 'org.jetbrains.kotlinx' &&
+            ['kotlinx-coroutines-core', 'kotlinx-coroutines-core-jvm', 'kotlinx-coroutines-android'].contains(details.requested.name)) {
+            details.useVersion('1.7.3')
+        }
     }
 }
 
