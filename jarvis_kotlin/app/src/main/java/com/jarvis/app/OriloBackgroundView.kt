@@ -290,7 +290,6 @@ class OriloBackgroundView @JvmOverloads constructor(
      *  背景经过乳白相，不是一直浓到发艳）。 */
     data class FlowPhase(
         val ax: Float, val ay: Float, val bx: Float, val by: Float,
-        val ax2: Float, val bx2: Float,
         val hueShift: Float, val bloom: Float, val satScale: Float,
     )
 
@@ -337,10 +336,10 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  超出图里颜色了。改成 255°——加上收窄后的漂移（±14°）是 241°–269°，
          *  仍在图里 230°–267° 这一家子紫里。 */
         const val TUNE_BLOB_A_HUE = 255f
-        const val TUNE_BLOB_A_SAT = 0.55f
+        const val TUNE_BLOB_A_SAT = 0.45f
         const val TUNE_BLOB_A_VAL = 0.98f
         /** 光斑 B（右下附近）混合强度：0..1，同上是混合比例。 */
-        const val TUNE_BLOB_B_STRENGTH = 0.45f
+        const val TUNE_BLOB_B_STRENGTH = 0.80f
         /** 光斑 B 的影响半径，相对页面宽度的比例。 */
         const val TUNE_BLOB_B_RADIUS_FRAC = 0.6f
         /** 光斑 B 的颜色（HSV）：第 10 批从靛蓝紫 255 改成蓝色 220，跟光斑 A 的青色
@@ -350,7 +349,7 @@ class OriloBackgroundView @JvmOverloads constructor(
          *  色相 245°→230°（真蓝），饱和度 0.62→0.45（淡），亮度 0.85→0.95
          *  （亮）。它是全屏唯一的蓝色，漂移速度（19 秒一圈）不动，缓缓变化。 */
         const val TUNE_BLOB_B_HUE = 230f
-        const val TUNE_BLOB_B_SAT = 0.45f
+        const val TUNE_BLOB_B_SAT = 0.85f
         const val TUNE_BLOB_B_VAL = 0.95f
 
         // ====== 第 23 批：外面左下聚光（光透过水珠，照亮水珠外面左下一片）======
@@ -371,6 +370,13 @@ class OriloBackgroundView @JvmOverloads constructor(
 
         /** 唯一的相位公式来源：OriloDropletView 直接调用这个函数算"此刻背景长什么样"，
          *  不再各自抄一份 sin/cos——这样两个 View 永远用同一套数，不用互相持有引用。 */
+        /** 三角波 0→1→0：fract 取小数部分，负数先 +1 转正（Kotlin % 对负数给负余数）。 */
+        private fun tri(x: Double): Float {
+            val f = x % 1.0
+            val ff = if (f < 0) f + 1.0 else f
+            return (if (ff < 0.5) ff * 2.0 else 2.0 - ff * 2.0).toFloat()
+        }
+
         fun phaseAt(uptimeMs: Long): FlowPhase {
             // 第 87 批（用户令：主界面动态不流畅，参考云朵快速变化）：第 84 批
             // 的互质周期正弦还是原地来回摆（47–71 秒一圈），位置在原地摆、色相
@@ -385,6 +391,8 @@ class OriloBackgroundView @JvmOverloads constructor(
             // 光斑右缘刚贴左边界，画面上恒为 0，换头从来没人接棒。1.9/1.8 的来历：
             // 着色器里光斑半径是 0.45/0.40 屏宽，中心从 -0.45（完全出左屏）走到
             // 1.45（完全出右屏）正好 1.9 个屏宽，B 同理 1.8。
+            // 第 96 批（2026-11-28 用户令：参考是来回变换）：上面说的锯齿波 +
+            // 副本已改成三角波（往右扫到头再原路往左扫回来），见下面；副本删掉。
             // 第 31 批（用户令：背景要蓝、紫、青、乳白轮着变，颜色转化随机）：
             // 色相范围拉到 -45..+50（第 30 批是 0..50，只到蓝紫），青（约 190°）
             // 和紫（约 282°）都能走到。两组不成整数比的正弦叠加（53 秒和 79 秒），
@@ -396,30 +404,23 @@ class OriloBackgroundView @JvmOverloads constructor(
             // （约每 2–3 分钟一次、持续十来秒把背景褪成乳白）更是图里没有的颜色。
             // 漂移收窄到 ±14°，乳白相整段去掉（satScale 只剩 baseSat）。
             // 两组正弦周期（53/79 秒）不动，漂移仍不重复；最快漂移约 1.5°/秒。
+            // 第 96 批（2026-11-28 用户令：紫偏红、蓝太深——实测）：±14° 摆到顶
+            // 是 281°，已经进了品红（底色 267°+14°、光斑 B 230°+14°=244° 偏紫），
+            // 底色偏红、蓝变紫蓝的根子就是它。收窄到 ±5°：底色最高 272°、光斑 B
+            // 最高 235°，基本不出图里 230°–267° 这一家子；最快漂移约 0.5°/秒。
+            // 色相的快变化不靠全局漂移，靠光斑来回扫过（见下面的三角波）。
             val tSec = uptimeMs / 1000.0
-            val hueShift = (8.0 * sin(2.0 * Math.PI * tSec / 53.0) + 6.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
-            val baseSat = (1.0f - 0.30f * ((hueShift + 14f) / 28f)).coerceIn(0.70f, 1.0f)
+            val hueShift = (3.0 * sin(2.0 * Math.PI * tSec / 53.0) + 2.0 * sin(2.0 * Math.PI * tSec / 79.0)).toFloat()
+            val baseSat = (1.0f - 0.30f * ((hueShift + 5f) / 10f)).coerceIn(0.70f, 1.0f)
             val satScale = baseSat
-            val axDrift = (tSec / 15.0 % 1.0).toFloat()
-            val bxDrift = (tSec / 19.0 % 1.0).toFloat()
-            // 第 95 批：副本各有自己独立的锯齿波，错半个周期（A 7.5 秒、B 9.5 秒），
-            // 不是从已经 wrap 过的 ax/bx 减常数。Kotlin 的 % 对负数给负余数，
-            // tSec 小的时候 (tSec - 7.5) 是负的，手动 +1 转正。
-            val ax2DriftRaw = ((tSec - 7.5) / 15.0 % 1.0).toFloat()
-            val ax2Drift = if (ax2DriftRaw < 0) ax2DriftRaw + 1f else ax2DriftRaw
-            val bx2DriftRaw = ((tSec - 9.5) / 19.0 % 1.0).toFloat()
-            val bx2Drift = if (bx2DriftRaw < 0) bx2DriftRaw + 1f else bx2DriftRaw
-            val ax = -0.45f + 1.9f * axDrift
-            val bx = -0.40f + 1.8f * bxDrift
-            val ax2 = -0.45f + 1.9f * ax2Drift
-            val bx2 = -0.40f + 1.8f * bx2Drift
+            // 第 96 批：三角波来回扫（见上面第 96 批注释）。ax2/bx2 副本删掉。
+            val ax = -0.45f + 1.9f * tri(tSec / 22.0)
+            val bx = -0.40f + 1.8f * tri(tSec / 26.0)
             return FlowPhase(
                 ax = ax,
                 ay = 0.26f + 0.14f * cos(2.0 * Math.PI * tSec / 61.0).toFloat(),
                 bx = bx,
                 by = 0.70f + 0.15f * sin(2.0 * Math.PI * tSec / 71.0 + 2.1).toFloat(),
-                ax2 = ax2,
-                bx2 = bx2,
                 hueShift = hueShift,
                 satScale = satScale,
                 // 呼吸强度：0..1，比 ax/ay 这些位置项转得慢一点点（0.85x），

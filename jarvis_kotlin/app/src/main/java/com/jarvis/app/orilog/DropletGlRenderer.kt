@@ -95,8 +95,6 @@ class DropletGlRenderer(private val context: Context) {
         uniform float uAbsTime;
         uniform vec2 uBlobA;
         uniform vec2 uBlobB;
-        uniform vec2 uBlobA2;
-        uniform vec2 uBlobB2;
         uniform vec3 uBlobAColor;
         uniform vec3 uBlobBColor;
         uniform float uOrbMode;
@@ -146,11 +144,14 @@ class DropletGlRenderer(private val context: Context) {
             // 明度抬到 0.97）整段删掉——图里没有乳白色，乳白斑是画蛇添足。
             // uGradTop/Mid/Bot 不再用。
             float t = clamp(dot(wuv, vec2(0.25, 1.0)) / 1.0625, 0.0, 1.0);
-            float sat = mix(mix(0.50, 0.68, clamp(t / 0.55, 0.0, 1.0)),
-                            mix(0.68, 0.64, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
+            // 第 96 批（2026-11-28 用户令：紫偏红——实测）：参考场饱和只有 0.42、
+            // 明度约 1.0；咱们 0.50–0.68/0.91–0.95，同一个紫、饱和一高就往品红走。
+            // 饱和压到 0.40–0.46、明度抬到 0.94–0.99，底色回到参考的淡薰衣草紫。
+            float sat = mix(mix(0.40, 0.44, clamp(t / 0.55, 0.0, 1.0)),
+                            mix(0.44, 0.46, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
-            float val = mix(mix(0.95, 0.91, clamp(t / 0.55, 0.0, 1.0)),
-                            mix(0.91, 0.91, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
+            float val = mix(mix(0.99, 0.96, clamp(t / 0.55, 0.0, 1.0)),
+                            mix(0.96, 0.94, clamp((t - 0.55) / 0.45, 0.0, 1.0)),
                             step(0.55, t));
             float hueN = noise(wuv * 1.6 + vec2(uAbsTime * -0.12, uAbsTime * -0.02));
             // 第 89 批（用户令：背景以紫为主、淡蓝缓缓变化）：色相场 230°–267°
@@ -159,14 +160,11 @@ class DropletGlRenderer(private val context: Context) {
             vec3 base = hsv2rgb(vec3(hue / 360.0, sat, val));
             float fa = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA) / (uRes.x * 0.45), 0.0, 1.0));
             base = mix(base, uBlobAColor, fa * 0.55);
-            // 第 87 批：滞后一个周期的副本——光斑从右屏出去、从左屏进来时，
-            // 副本正好接上，没有跳变。平时副本在屏外，看不见。
-            float fa2 = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobA2) / (uRes.x * 0.45), 0.0, 1.0));
-            base = mix(base, uBlobAColor, fa2 * 0.55);
+            // 第 96 批：三角波没有跳变，fa2/fb2 换头副本删掉。光斑 B 强度 0.45→0.80：
+            // 旧值混进紫底色后实际是 248° 偏紫的蓝（参考角上是干净的 229°），
+            // 强度提到 0.80 后混出 233°/饱和 0.64，贴近参考蓝角 229°/0.66。
             float fb = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB) / (uRes.x * 0.40), 0.0, 1.0));
-            base = mix(base, uBlobBColor, fb * 0.45);
-            float fb2 = smoothstep(0.0, 1.0, clamp(1.0 - length(wuv * uRes - uBlobB2) / (uRes.x * 0.40), 0.0, 1.0));
-            base = mix(base, uBlobBColor, fb2 * 0.45);
+            base = mix(base, uBlobBColor, fb * 0.80);
             // 第 84 批（用户令：悬浮球紫色不好看，要淡紫+淡蓝互相流）：
             // 球在别的 App 上面，看不见底下真实背景，折射采到的还是 App 自己
             // 那套深紫背景（饱和 50–68%），球像颗实心紫球。悬浮球模式把折射源
@@ -348,8 +346,13 @@ class DropletGlRenderer(private val context: Context) {
                 // 贴着接触线最暗、向外单调变亮。高斯以接触线为峰向外衰减，
                 // 形状一次对上参考。接触阴影（下面那行）不动，仍是最暗那条线。
                 vec2 sOff = fragPx - c;
+                // 第 96 批（2026-11-28 用户令：影子形状——实测）：咱们接触线处是亮的
+                // （1.0R:140）、1.1R 才陡跌到 43、暗核宽平；参考最暗就在接触线
+                // （1.0R:64）后平滑变亮、1.6R 处还暗 26%。中心 1.05R→1.0R（贴住
+                // 接触线）、纵向 sigma 0.35R→0.45R（衰减放慢、影子伸得更远），
+                // 峰值 0.55 不动。
                 float shadow = 0.55 * exp(-pow(sOff.x / (R * 0.75), 2.0)
-                    - pow((sOff.y - R * 1.05) / (R * 0.35), 2.0));
+                    - pow((sOff.y - R * 1.00) / (R * 0.45), 2.0));
                 // 接触阴影：第 74 批。水滴与平面接触的那条线（约 1.0R、底部）
                 // 有一道极暗、极窄的接触阴影（最暗 <50），向外迅速变宽、变浅、
                 // 羽化。这是环境光遮蔽（AO），不是单纯挡光，极大增强“水滴附着
@@ -421,7 +424,9 @@ class DropletGlRenderer(private val context: Context) {
             // 第 89 批：笑脸原来是 edge（0.94R–R）的细环，真机上成了一条贴边
             // 硬亮线；参考是峰值在 0.94R 的宽缓光带。改成径向高斯：峰值
             // 0.92R、宽 0.05R，往里铺到 ~0.85R、往外收到边缘，柔、不成线。
-            float smileBright = exp(-pow((length(n2) - 0.92) / 0.05, 2.0)) * smileMask;
+            // 第 96 批（2026-11-28 用户令：左下光带太宽——实测）：参考峰值在
+            // 0.86–0.88R，咱们在 0.92R。峰值半径 0.92R→0.87R。
+            float smileBright = exp(-pow((length(n2) - 0.87) / 0.05, 2.0)) * smileMask;
             // 顶部暗带。第 45 批曾把它收窄成 0.94R–0.975R 的细环、强度 0.53——
             // 错了：jk-v117 真机量到顶部边缘 54，比里面暗一半，成了一处黑斑。
             // 第 81 批（补）：再看 4454——Orilo 顶部没有黑斑也没有黑线，顶部是
@@ -508,7 +513,11 @@ class DropletGlRenderer(private val context: Context) {
             // 第 91 批：rimDark 0.20→0.06 改回。jk-v125 真机 verdict：边缘成了一圈
             // 黑边（实测暗 -23%，原来 -8%~-17%），用户说“黑边太宽了，原来的就行”。
             // 深度还回去，宽缓坡不动。
-            float rimDark = smoothstep(R_eff * 0.85, R_eff, dist) * 0.06 * (1.0 - topDarkMask);
+            // 第 96 批（2026-11-28 用户令：顶部边缘——实测）：参考是利落的暗环
+            // （1.0R 跌 37、外弹回背景之上），咱们是浅散的一片（跌 21）。深度
+            // 0.06 是用户划的线、不动；把暗环带从 0.85R–R 收窄到 0.95R–R，
+            // 同样深度、环变细变利落，贴近参考的形状。
+            float rimDark = smoothstep(R_eff * 0.95, R_eff, dist) * 0.06 * (1.0 - topDarkMask);
             // 小高光：第 52 批移位。旧值（-0.45r/+0.42r）是第 41 批从旧版
             // 抄来的，从没实测过。2026-11-21 另一位审稿人把 210 帧全量完，
             // 指出小高光比代码写得更靠左、更不靠下（-0.6/0.25），但自己
@@ -519,9 +528,11 @@ class DropletGlRenderer(private val context: Context) {
             // 位置约 170°（屏幕角，近 9 点方向），半径 0.66R。
             // 4454 参考图也说左边缘约 9 点钟有小亮点，对得上。
             // 所以从（-0.45, +0.42）移到（-0.65, +0.12）。半径 0.14、峰值 0.70 不变。
+            // 第 96 批（2026-11-28 用户令：左亮点——实测）：咱们高出内腔 +104、
+            // 参考 +39，峰值 0.60→0.22，预期 +39，跟参考对上。位置不动。
             vec2 shC = vec2(-0.65, 0.12);
             vec2 shD = n2 - shC;
-            float smallHighlight = exp(-dot(shD, shD) / (0.14 * 0.14) * 1.5) * 0.60;
+            float smallHighlight = exp(-dot(shD, shD) / (0.14 * 0.14) * 1.5) * 0.22;
             // 右侧小亮点：第 68 批。参考 4454 左右边缘各有一个小亮点，
             // 左边的已有（-0.65, +0.12），右边的缺了。补一个镜像点
             // (+0.65, +0.12)，同半径、同峰值。
@@ -569,7 +580,9 @@ class DropletGlRenderer(private val context: Context) {
             // 参考 156，还差一档，小提。
             // 第 89 批：月牙 0.28→0.20。2026-11-27 实测：我们 +40° 处 +89 点、
             // 顶部 0° +6 点，参考 +9/-24——右瓣与高光尾巴叠亮了，顶部也偏亮。
-            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.20;
+            // 第 96 批（2026-11-28 用户令：月牙——实测）：咱们局部高出 +51、
+            // 参考 +12，系数 0.20→0.05，预期 +13，跟参考对上。
+            float crescent = smoothstep(0.75, 0.95, topDot) * exp(-pow((cresR - 0.70) / 0.02, 2.0)) * 0.05;
             // 光路散射：第 72 批。用户问：光在水滴里折射+散射，到左下是不是沿着
             // 水滴比其他部位稍微亮一点。实测 4454：是。沿高光→聚光这条线，
             // 亮度从 148 渐亮到 188；左下象限（181–185）比右上/右下象限
@@ -649,7 +662,10 @@ class DropletGlRenderer(private val context: Context) {
             // 第 81 批：笑脸 0.20→0.24。jk-v117 真机量到笑脸峰值 152（115°）
             // ～179（135°，含光桥叠加），参考 181–203，还差一档。方向不动
             // （115°；135° 的亮是光桥/光路叠的，不是笑脸偏了）。
-            float smileCoeff = 0.24 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
+            // 第 96 批（2026-11-28 用户令：左下光带太宽——实测）：笑脸峰值咱们
+            // +42、参考 +9–10，系数 0.24 约高四倍，光带才显宽。0.24→0.05，
+            // 预期 +9，跟参考对上。底色变淡后内腔会变亮，系数不降笑脸会爆掉。
+            float smileCoeff = 0.05 * (1.0 + 0.20 * vnoise(uTime * 0.5 + 31.0));
             // 第 67 批：球和背景太分明——用户指出水滴像个独立的球，跟背景
             // 是分开的。参考 4454 里水滴是透明的：背景透过水滴，带着渐变
             // 和折射，里面比背景略暗，水滴融在背景里。我的里面太均匀、太亮，
@@ -793,9 +809,6 @@ class DropletGlRenderer(private val context: Context) {
             val phase = com.jarvis.app.OriloBackgroundView.phaseAt(android.os.SystemClock.uptimeMillis())
             setVec2(bgProgram, "uBlobA", phase.ax * viewW, phase.ay * viewH)
             setVec2(bgProgram, "uBlobB", phase.bx * viewW, phase.by * viewH)
-            // 第 87 批：滞后一个周期的光斑副本（ax2/bx2），换头时接上领头光斑。
-            setVec2(bgProgram, "uBlobA2", phase.ax2 * viewW, phase.ay * viewH)
-            setVec2(bgProgram, "uBlobB2", phase.bx2 * viewW, phase.by * viewH)
             // 第 55 批（补）：底色色相改由着色器内噪声场直接定（hsv2rgb），
             // uGradTop/Mid/Bot 不再用，这里不再传。光斑颜色仍由 CPU 算。
             setColor3(bgProgram, "uBlobAColor", com.jarvis.app.OriloBackgroundView.hueColor(com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_HUE, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_SAT, com.jarvis.app.OriloBackgroundView.TUNE_BLOB_A_VAL, phase.hueShift, phase.satScale))
