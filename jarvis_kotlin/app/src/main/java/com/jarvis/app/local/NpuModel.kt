@@ -48,6 +48,13 @@ object NpuModel {
     @Volatile
     private var downloading = false
 
+    /** 最近一次 ping 失败的原因（给设置页展示，排查用；成功时清掉）。
+     * 2026-11-28 教训：试答失败只吐一句“加载或生成失败”，引擎加载失败
+     * 还是生成失败、底层报什么全看不见，只能盲猜；以后报错必须留原文。 */
+    @Volatile
+    var lastPingError: String? = null
+        private set
+
     @Volatile
     private var engine: Engine? = null
     private var loadedPath: String? = null
@@ -252,18 +259,31 @@ object NpuModel {
         return modelFile(ctx)?.delete() ?: true
     }
 
-    /** 设置页试答：建个临时会话问一句。失败返回 null。
+    /** 设置页试答：建个临时会话问一句。失败返回 null，并把原因记到
+     * lastPingError（设置页状态行展示，排查用）。
      * Message 没有 text 属性，正文在 contents 的 Content.Text 块里。 */
     suspend fun ping(ctx: Context, text: String): String? = withContext(dispatcher) {
         try {
             val eng = ensureEngine(ctx)
-            eng.createConversation().use { conv ->
+            val out = eng.createConversation().use { conv ->
                 conv.sendMessage(text).contents.contents
                     .filterIsInstance<Content.Text>()
                     .joinToString("") { it.text }.trim()
                     .takeIf { it.isNotBlank() }
             }
-        } catch (_: Throwable) {
+            lastPingError = null
+            out
+        } catch (t: Throwable) {
+            // 原因链拼出来：引擎加载失败会包一层中文，底层原因在 cause 里。
+            val sb = StringBuilder("${t.javaClass.simpleName}: ${t.message ?: ""}")
+            var cause = t.cause
+            var depth = 0
+            while (cause != null && depth < 2) {
+                sb.append(" / 原因：${cause.javaClass.simpleName}: ${cause.message ?: ""}")
+                cause = cause.cause
+                depth++
+            }
+            lastPingError = sb.toString().take(400)
             null
         }
     }

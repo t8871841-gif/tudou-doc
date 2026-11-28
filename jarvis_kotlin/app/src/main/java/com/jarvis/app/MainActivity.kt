@@ -4018,7 +4018,14 @@ class MainActivity : Activity() {
             toast("NPU 生成中，稍等…")
             uiScope.launch {
                 val out = NpuModel.ping(this@MainActivity, q)
-                toast(if (out.isNullOrBlank()) "NPU 模型没答出来（加载或生成失败）" else "NPU 答：${out.take(120)}")
+                if (out.isNullOrBlank()) {
+                    // 2026-11-28：原来只吐一句“加载或生成失败”，原因全看不见；
+                    // 现在把真实报错写进状态行，截屏就能看到是哪一步、报什么。
+                    npuStatusView.text = "试答失败：${NpuModel.lastPingError ?: "未知错误"}"
+                    toast("NPU 模型没答出来，原因写在上面状态行了")
+                } else {
+                    toast("NPU 答：${out.take(120)}")
+                }
             }
         })
         root.addView(btn("删除已导入的模型") {
