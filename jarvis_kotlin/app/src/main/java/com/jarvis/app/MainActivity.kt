@@ -61,6 +61,7 @@ import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
 import com.jarvis.app.asr.OfflineAsr
 import com.jarvis.app.asr.OfflineAsrSession
+import com.jarvis.app.brain.SpeechMood
 import com.jarvis.app.hud.GradientLayerView
 import com.jarvis.app.hud.HudPalette
 import com.jarvis.app.local.LocalLlm
@@ -2205,16 +2206,19 @@ class MainActivity : Activity() {
      * 气泡时 record=false，只渲染不重复记、不重复推字幕；重建时传 ts=存过的时间戳，
      * 气泡显示原来时间（否则重建会把全部气泡重标成当时时间），新消息不传 ts，取当前时间。 */
     private fun addBubble(text: String, mine: Boolean, record: Boolean = true, ts: Long = 0L) {
+        // 心情标记（如 [calm]）是模型按提示词加的语气标记：不显示、不朗读、不记历史。
+        // 只剥助手回复，用户原文不动；语音路已在 JarvisAgent 里剥过，这里再剥是空操作。
+        val cleanText = if (mine) text else SpeechMood.parse(text).text
         val color = HudPalette.colorFor(JarvisAgent.currentState())
         // Orilo 第 6 批：新消息同步到 Orilo 对话区（每条消息一个玻璃气泡；助手的新回复打字机打进气泡正文）。
         // 只跟新消息（record=true 且不在重建中）；重建气泡时对话区由 refreshOriloChat 全量重建。
         if (record && !rebuildingBubbles && ::oriloChatList.isInitialized && JarvisPrefs.isOriloStyle(this)) {
             if (mine) {
-                oriloChatList.addView(oriloChatBubble(text, true).first)
+                oriloChatList.addView(oriloChatBubble(cleanText, true).first)
                 if (oriloChatList.childCount > 100) oriloChatList.removeViewAt(0)
                 scrollOriloChatToBottom()
             } else {
-                typeOriloChat(text)
+                typeOriloChat(cleanText)
             }
         }
         // 重建气泡时调用方传存过的时间戳（ChatHistory.Entry.ts）；新消息不传，取当前时间。
@@ -2228,7 +2232,7 @@ class MainActivity : Activity() {
             setTextColor(0xB3FFFFFF.toInt())
         }
         val bodyView = TextView(this).apply {
-            this.text = text
+            this.text = cleanText
             textSize = 15.5f
             setLineSpacing(dp(2).toFloat(), 1f)
             setTextColor(HudPalette.ICE)
@@ -2316,9 +2320,9 @@ class MainActivity : Activity() {
         }
         if (!record) return
         // 第 2 步：气泡同时推给 HUD 字幕（见 onCreate 注释——这是两条路的唯一汇合点）。
-        pushHudSubtitle(if (mine) "you" else "jarvis", text)
+        pushHudSubtitle(if (mine) "you" else "jarvis", cleanText)
         // 第 3 步：对话记进 ChatHistory 单例（每次 add 后落盘，上限 80 条 / 4000 字）。
-        if (mine) ChatHistory.addUser(text) else ChatHistory.addAssistant(text)
+        if (mine) ChatHistory.addUser(cleanText) else ChatHistory.addAssistant(cleanText)
     }
 
     /** 设置里「清空对话」：只清对话框气泡，回到刚打开时的问候语；长期记忆库不受影响。 */
@@ -2564,7 +2568,8 @@ class MainActivity : Activity() {
     /** 批十：界面问答的朗读出口——主界面「朗读」开关开着（未静音）才出声；语音路径由 Agent 自己播，不走这里，防双播。 */
     private fun speakReplyIfEnabled(text: String) {
         if (!JarvisPrefs.isMuted(this)) {
-            com.jarvis.app.tts.TtsRouter.speak(this, text, onStart = {}, onDone = {})
+            // 同上：心情标记不朗读，Edge 之前会把 [calm] 当词读出来。
+            com.jarvis.app.tts.TtsRouter.speak(this, SpeechMood.parse(text).text, onStart = {}, onDone = {})
         }
     }
 
