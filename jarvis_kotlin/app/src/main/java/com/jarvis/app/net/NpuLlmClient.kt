@@ -9,7 +9,6 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.OpenApiTool
-import com.google.ai.edge.litertlm.Role
 import com.google.ai.edge.litertlm.ToolProvider
 import com.google.ai.edge.litertlm.tool
 import com.jarvis.app.local.NpuModel
@@ -46,7 +45,7 @@ Always reply in Chinese. Keep answers to one short sentence.
  * 2. **历史**：complete() 每次收到的是全量 history，而 LiteRT-LM 的
  *    Conversation 是有状态的。所以这里只在对话里留一份状态，按
  *    sentCount 差分喂新消息：user 文本直接发，tool 结果合成一条
- *    Message(Role.TOOL) 发，assistant 消息跳过（上一轮的输出已在对话状态里）。
+ *    Message.tool(...) 发，assistant 消息跳过（上一轮的输出已在对话状态里）。
  *    历史被改写（trim/fold）时能认出来——长度缩了，或上次消费的那条
  *    指纹变了——就关掉旧会话、按新历史重放一遍。
  * 3. **图片**：SM8550 的 NPU 模型只吃文本。history 里的 image_url 块
@@ -124,9 +123,10 @@ class NpuLlmClient(private val appContext: Context) : BrainLlmClient {
         }
         if (toolResponses.isNotEmpty()) {
             checkCancelled()
-            // Message.tool 是废弃工厂（0.19.1），直接用主构造；Contents
-            // 只有 of(String) 与 of(vararg Content) 两个工厂，列表走构造器。
-            response = conv.sendMessage(Message(Role.TOOL, Contents(toolResponses)))
+            // 官方手动工具调用写法（getting_started.md 的 Manual Tool Calling 一节）：
+            // Message.tool 是公开工厂（主构造是 internal 的，不能直接 new）；
+            // Contents.of 有 List 重载，直接吃 List<Content.ToolResponse>。
+            response = conv.sendMessage(Message.tool(Contents.of(toolResponses)))
         }
         sentCount = messages.size
         lastFingerprint = if (messages.isNotEmpty()) fingerprint(messages.last()) else 0
@@ -185,7 +185,7 @@ class NpuLlmClient(private val appContext: Context) : BrainLlmClient {
                         ?: JSONObject().put("type", "object").put("properties", JSONObject()),
                 )
             val json = fn.toString()
-            out += tool(object : OpenApiTool() {
+            out += tool(object : OpenApiTool {
                 override fun getToolDescriptionJsonString(): String = json
                 override fun execute(paramsJsonString: String): String =
                     """{"error":"manual tool calling is on; execute() must not be called"}"""
